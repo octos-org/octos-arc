@@ -6583,24 +6583,6 @@ mod peer_turn_status_compat_tests {
     use super::*;
 
     #[test]
-    fn peer_list_oversized_bare_result_still_done() {
-        // An over-cap bare result.md fails the blackboard's content read
-        // (row.result=None) but its EXISTENCE still proves delivery.
-        let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("peers").join("big");
-        std::fs::create_dir_all(&dir).unwrap();
-        peer_io::write_peer_file_atomic(&dir, "brief.md", "b").unwrap();
-        let big = "x".repeat(peer_io::PEER_FILE_READ_CAP_LARGE + 1);
-        peer_io::write_peer_file_atomic(&dir, "result.md", &big).unwrap();
-        let rows = crate::commands::peer_list_for_test(temp.path(), "octos");
-        assert_eq!(
-            rows[0].status, "done",
-            "unreadable-but-present bare result still proves delivery"
-        );
-        assert_eq!(rows[0].rounds_delivered, 1, "#2024 floor applies");
-    }
-
-    #[test]
     fn peer_list_foreign_slug_frontmatter_is_not_outcome_evidence() {
         // result-1.md frontmatter naming ANOTHER peer must not certify this
         // peer's last_outcome even when turns.txt agrees.

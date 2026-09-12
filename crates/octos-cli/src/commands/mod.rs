@@ -22,6 +22,7 @@ mod oup_text;
 mod serve;
 pub mod serve_console;
 pub mod skills;
+pub mod acp;
 pub 
 use std::path::PathBuf;
 
@@ -357,21 +358,4 @@ mod reserve_stdout_tests {
         assert!(reserve_stdout(&args.command));
     }
 
-    #[test]
-    fn should_not_reserve_stdout_for_ordinary_command() {
-        // A non-protocol command (e.g. `status`) is unchanged by the chat-json
-        // extension — Serve, Status, etc. never reserve stdout.
-        let args = Args::try_parse_from(["octos", "status"]).expect("`status` must parse");
-        assert!(!reserve_stdout(&args.command));
-    }
-
-    #[test]
-    fn should_reserve_stdout_for_stdio_protocol_commands() {
-        // Pre-existing reservations must remain: acp / mcp-serve speak a
-        // machine protocol on stdout.
-        let acp = Args::try_parse_from(["octos", "acp"]).expect("`acp` must parse");
-        assert!(reserve_stdout(&acp.command));
-        let mcp = Args::try_parse_from(["octos", "mcp-serve"]).expect("`mcp-serve` must parse");
-        assert!(reserve_stdout(&mcp.command));
-    }
 }

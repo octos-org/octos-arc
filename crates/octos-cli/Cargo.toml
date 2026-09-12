@@ -171,6 +171,9 @@ axum = { workspace = true }
 # Wave-4 B3.4 — enable `test-utils` for octos-llm so the gateway's
 # failover-surfacing tests can call `publish_failover_for_subscribers`.
 # Production builds don't see this; only `cargo test -p octos-cli`.
+# Wave-4 B3.4 — enable `test-utils` for octos-llm so the failover-surfacing
+# tests can call `publish_failover_for_subscribers`. Test-only.
+octos-llm = { workspace = true, features = ["test-utils"] }
 wiremock = { workspace = true }
 # #2055 round 3 — the goal-task-row contention tests hold a real SQLite
 # write transaction against the goal ledger while asserting the executor
