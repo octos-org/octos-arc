@@ -12,42 +12,9 @@ pub mod heartbeat;
 pub mod markdown_html;
 pub mod media;
 pub mod resume_policy;
+pub mod api_channel;
 pub mod session;
 
-#[cfg(feature = "api")]
-pub mod api_channel;
-#[cfg(feature = "dingtalk")]
-pub mod dingtalk_channel;
-#[cfg(feature = "discord")]
-pub mod discord_channel;
-#[cfg(feature = "email")]
-pub mod email_channel;
-#[cfg(feature = "feishu")]
-pub mod feishu_channel;
-#[cfg(feature = "line")]
-pub mod line_channel;
-#[cfg(feature = "matrix")]
-pub mod matrix_channel;
-#[cfg(feature = "matrix")]
-pub mod matrix_user_channel;
-#[cfg(feature = "qq-bot")]
-pub mod qq_bot_channel;
-#[cfg(feature = "slack")]
-pub mod slack_channel;
-#[cfg(feature = "telegram")]
-pub mod telegram_channel;
-#[cfg(feature = "twilio")]
-pub mod twilio_channel;
-#[cfg(feature = "wechat")]
-pub mod wechat_channel;
-#[cfg(feature = "wecom-bot")]
-pub mod wecom_bot_channel;
-#[cfg(feature = "wecom")]
-pub mod wecom_channel;
-#[cfg(feature = "wecom")]
-pub(crate) mod wecom_crypto;
-#[cfg(feature = "whatsapp")]
-pub mod whatsapp_channel;
 
 pub use bus::{AgentHandle, BusPublisher, create_bus};
 pub use channel::{Channel, ChannelHealth, ChannelManager};
