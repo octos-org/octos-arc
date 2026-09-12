@@ -26777,12 +26777,7 @@ async fn run_standalone_turn(
             octos_agent::MEMORY_SEGMENT_NAME,
             &stable_memory_policy,
         );
-    let system_prompt_base = match session_id.topic().and_then(|topic| {
-        crate::project_templates::read_session_prompt(&session_runtime.profile.data_dir, topic)
-    }) {
-        Some(session_prompt) => format!("{agent_snapshot}\n\n{session_prompt}"),
-        None => agent_snapshot,
-    };
+    let system_prompt_base = agent_snapshot;
 
     // Wave4-A: emit an initial `router/status` snapshot adjacent to
     // `turn/started` so clients can render the routing pill before the

@@ -17,7 +17,6 @@ octos-arc = { workspace = true }
 octos-memory = { workspace = true }
 octos-llm = { workspace = true }
 octos-bus = { workspace = true }
-octos-workflows = { workspace = true }
 octos-store = { workspace = true }
 octos-services = { workspace = true }
 octos-pipeline = { workspace = true }
@@ -188,7 +187,3 @@ wiremock = { workspace = true }
 # SQLite access stays behind octos-fleet.
 rusqlite = { workspace = true }
 
-[[test]]
-name = "build_output_dir_validation"
-path = "tests/build_output_dir_validation.rs"
-required-features = ["api"]

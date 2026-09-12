@@ -2197,21 +2197,6 @@ impl GatewayRuntime {
                 (None, None)
             };
 
-            // Check for session-specific prompt override (e.g. /new slides <name>)
-            let prompt_override = if let Some(topic) = session_key.topic() {
-                if let Some(session_prompt) =
-                    crate::project_templates::read_session_prompt(&self.data_dir, topic)
-                {
-                    match prompt_override {
-                        Some(base) => Some(format!("{base}\n\n{session_prompt}")),
-                        None => Some(session_prompt),
-                    }
-                } else {
-                    prompt_override
-                }
-            } else {
-                prompt_override
-            };
 
             // Dispatch to per-session actor (creates one if needed)
             tracing::debug!(

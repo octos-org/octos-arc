@@ -326,42 +326,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/api/upload",
             post(handlers::upload).layer(DefaultBodyLimit::max(100 * 1024 * 1024)),
         )
-        .route(
-            "/api/site-files/upload",
-            post(handlers::upload_site_files).layer(DefaultBodyLimit::max(100 * 1024 * 1024)),
-        )
-        .route(
-            "/api/site-preview/{session_id}/{site_slug}",
-            get(handlers::serve_site_preview_root),
-        )
-        .route(
-            "/api/site-preview/{session_id}/{site_slug}/",
-            get(handlers::serve_site_preview_root),
-        )
-        .route(
-            "/api/site-preview/{session_id}/{site_slug}/{*path}",
-            get(handlers::serve_site_preview_path),
-        )
-        // Issue #994 (P0 sev2 cross-tenant data read): these routes
-        // used to live on the unauthenticated `public` branch below
-        // and resolved profile + session purely from the URL tuple.
-        // They now require user auth and the handler asserts that
-        // the authenticated identity owns the route's `profile_id`
-        // AND the route's `session_id` resolves to a workspace under
-        // that profile's data directory — see
-        // [`handlers::serve_owned_site_preview_root`].
-        .route(
-            "/api/preview/{profile_id}/{session_id}/{site_slug}",
-            get(handlers::serve_owned_site_preview_root),
-        )
-        .route(
-            "/api/preview/{profile_id}/{session_id}/{site_slug}/",
-            get(handlers::serve_owned_site_preview_root),
-        )
-        .route(
-            "/api/preview/{profile_id}/{session_id}/{site_slug}/{*path}",
-            get(handlers::serve_owned_site_preview_path),
-        )
         .route("/api/files/list", get(handlers::list_content_files))
         .route("/api/files/{filename}", get(handlers::serve_file))
         .route("/api/files", get(handlers::serve_file_by_query))
@@ -528,15 +492,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/api/register/setup-script",
             get(admin::register_setup_script),
         )
-        // Issue #1001 follow-up: signed-preview minting. Sits on the
-        // authenticated `my_api` branch — the SPA dashboard already
-        // has the user's bearer when it renders the iframe, so we
-        // require auth at the mint step. The actual preview content
-        // is served via the PUBLIC `/api/preview-signed/{token}/...`
-        // route registered below (no auth middleware — the token IS
-        // the credential). See
-        // [`handlers::sign_preview`] for the auth/authorisation flow.
-        .route("/api/my/preview/sign", post(handlers::sign_preview));
+;
 
     // Admin API routes (admin auth only, 1MB body limit)
     let admin_api = Router::new()
@@ -897,18 +853,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/register/setup-script/{id}/{auth_token}",
             get(admin::register_setup_script_public),
-        )
-        .route(
-            "/api/preview-signed/{token}",
-            get(handlers::serve_signed_preview_root),
-        )
-        .route(
-            "/api/preview-signed/{token}/",
-            get(handlers::serve_signed_preview_root),
-        )
-        .route(
-            "/api/preview-signed/{token}/{*path}",
-            get(handlers::serve_signed_preview),
         )
         .route(
             "/v1/session_ingress/ws/{session_id}",

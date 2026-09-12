@@ -72,9 +72,7 @@ pub use router::{DEFAULT_BASE_DOMAIN, build_router, cors_allowlist_for_base_doma
 /// the handler-layer HTTP status mapping without spinning up the
 /// full Axum router. Codex round-2 follow-up to issue #996.
 #[doc(hidden)]
-pub mod testing {
-    pub use super::handlers::{SiteBuildError, preview_build_error_response};
-}
+
 
 // #995 follow-up round 3 — Integration tests in
 // `crates/octos-cli/tests/x_profile_id_strip.rs` need to drive

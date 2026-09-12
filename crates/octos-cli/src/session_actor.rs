@@ -76,7 +76,6 @@ impl octos_agent::tools::ToolOutputLedger for SessionToolOutputLedger {
     }
 }
 use crate::usage_ledger::{PersistentUsageLedger, UsageCostSource, UsageEvent};
-use crate::workflow_runtime::{WorkflowInstance, WorkflowKind};
 
 /// Parameters for dispatching an inbound message to a session actor.
 pub struct DispatchParams<'a> {
@@ -1149,40 +1148,12 @@ fn forced_workflow_detection_allowed(
     true
 }
 
-fn site_preview_url_for_session(session_key: &SessionKey, user_workspace: &Path) -> Option<String> {
-    let topic = session_key.topic()?;
-    let profile_id = session_key.profile_id().unwrap_or(MAIN_PROFILE_ID);
-    let expected = crate::project_templates::build_site_project_metadata(
-        profile_id,
-        crate::project_templates::preview_session_id(session_key),
-        topic,
-        user_workspace,
-    )?;
-    let project_dir = user_workspace.join(&expected.project_dir);
-    crate::project_templates::read_site_project_metadata(&project_dir)
-        .map(|metadata| metadata.preview_url)
-        .or(Some(expected.preview_url))
-        .filter(|value| !value.trim().is_empty())
-}
-
 fn finalize_assistant_content(
-    session_key: &SessionKey,
-    user_workspace: &Path,
+    _session_key: &SessionKey,
+    _user_workspace: &Path,
     content: &str,
 ) -> String {
-    let content = strip_invoke_tags(content).trim().to_string();
-    let is_site = session_key
-        .topic()
-        .is_some_and(|topic| topic == "site" || topic.starts_with("site "));
-    if !is_site || content.trim().is_empty() || content.contains("/api/preview/") {
-        return content;
-    }
-
-    let Some(preview_url) = site_preview_url_for_session(session_key, user_workspace) else {
-        return content;
-    };
-
-    format!("{content}\n\nPreview URL: {preview_url}")
+    strip_invoke_tags(content).trim().to_string()
 }
 
 async fn send_outbound_with_timeout(
@@ -3658,98 +3629,10 @@ impl ActorFactory {
         // RFC-0 (#1289): LRU tool deferral was removed — every enabled tool
         // is emitted every turn (full schema).
 
-        // For slides sessions use the primary model (bypasses adaptive
-        // router which may pick a weak model).
-        let is_slides = session_key.topic().is_some_and(|t| t.starts_with("slides"));
-        let is_site = session_key
-            .topic()
-            .is_some_and(|t| t == "site" || t.starts_with("site "));
-        if is_slides {
-            // Structural guardrail (fix/slides-session-tool-allowlist):
-            // hide every `mofa_*` plugin tool except `mofa_slides` so a
-            // weaker fallback model (e.g. kimi-k2.6 on mini1 dspfac,
-            // 2026-05-24) cannot misroute the slides workflow to
-            // `mofa_site` / `mofa_youtube` / etc. when the
-            // "ALWAYS use mofa_slides" rule buried in
-            // `prompts/slides_default.txt` is not strong enough on its
-            // own. The non-`mofa_*` tool surface (web_search, file
-            // tools, shell, send_file, contract / task checks)
-            // is unaffected — see
-            // `tools::policy::keep_tool_in_slides_session`.
-            tools.retain(octos_agent::keep_tool_in_slides_session);
-
-            // Scaffold slides project INTO the workspace so file tools
-            // (read_file, write_file, mofa_slides) all resolve the same paths.
-            // The earlier scaffold in gateway_dispatcher writes to data_dir
-            // which is unreachable from the sandboxed workspace.
-            let topic = session_key.topic().unwrap_or("slides");
-            let project_name = topic.strip_prefix("slides").unwrap_or("").trim();
-            let project_name = if project_name.is_empty() {
-                "untitled"
-            } else {
-                project_name
-            };
-            if let Err(error) =
-                crate::project_templates::scaffold_slides_project(&user_workspace, project_name)
-            {
-                warn!(session = %session_key, "slides scaffold failed in workspace: {error}");
-            }
-
-            // Copy built-in style templates into workspace/styles/ so the
-            // agent's glob("styles/*.toml") can discover them.
-            let builtin_styles = resolve_builtin_slides_styles_dir(&self.data_dir);
-            let ws_styles = user_workspace.join("styles");
-            if let Some(builtin_styles) = builtin_styles {
-                std::fs::create_dir_all(&ws_styles).ok();
-                if let Ok(entries) = std::fs::read_dir(&builtin_styles) {
-                    for entry in entries.flatten() {
-                        let src = entry.path();
-                        if src.extension().is_some_and(|e| e == "toml") {
-                            let dst = ws_styles.join(entry.file_name());
-                            // Don't overwrite custom styles the user created
-                            if !dst.exists() {
-                                std::fs::copy(&src, &dst).ok();
-                            }
-                        }
-                    }
-                }
-                let cyberpunk_alias = ws_styles.join("cyberpunk-neon.toml");
-                let blade_runner = ws_styles.join("nb-br.toml");
-                if !cyberpunk_alias.exists() && blade_runner.is_file() {
-                    std::fs::copy(&blade_runner, &cyberpunk_alias).ok();
-                }
-            } else {
-                warn!(
-                    session = %session_key,
-                    data_dir = %self.data_dir.display(),
-                    "builtin mofa-slides styles directory not found"
-                );
-            }
-        }
-        let slides_generation_available = !is_slides || tools.get("mofa_slides").is_some();
-
-        if is_site {
-            let topic = session_key.topic().unwrap_or("site");
-            let profile_id = session_key.profile_id().unwrap_or(MAIN_PROFILE_ID);
-            if let Err(error) = crate::project_templates::scaffold_site_project(
-                &user_workspace,
-                profile_id,
-                crate::project_templates::preview_session_id(&session_key),
-                topic,
-                &self.data_dir,
-            ) {
-                warn!(session = %session_key, "site scaffold failed in workspace: {error}");
-            }
-        }
-
         // Slides sessions use the strong-only provider chain — failover
         // between kimi/deepseek/minimax only, excluding weak providers that
         // hang on 30+ tools. Normal sessions use the full adaptive router.
-        let session_llm = if is_slides {
-            self.llm_strong.clone()
-        } else {
-            self.llm.clone()
-        };
+        let session_llm = self.llm.clone();
         let agent_id = AgentId::new(format!("session-{session_key}"));
         // Pre/post-memory split: the memory segment must keep its
         // pre-refactor slot (after bootstrap/soul, BEFORE skills/tool
@@ -3776,14 +3659,6 @@ impl ActorFactory {
         {
             system_prompt.push_str("\n\n## Soul\n\n");
             system_prompt.push_str(&user_soul);
-        }
-        if is_slides && !slides_generation_available {
-            post_memory_tail.push_str(
-                "\n\n## Slides Generation Availability\n\n\
-                 `mofa_slides` is not available on this host. You may still design and edit slide projects, \
-                 but you must tell the user that PPTX/image generation is unavailable here. \
-                 Do NOT retry generation via shell, run_pipeline, or alternative binaries.",
-            );
         }
         // RFC-0 (#1289): tool deferral + the `activate_tools` meta-tool were
         // removed, so there is no deferred-tools teaching block to append.
@@ -6563,250 +6438,6 @@ impl SessionActor {
         }
     }
 
-    fn forced_background_workflow_for_turn(
-        &self,
-        inbound: &InboundMessage,
-        image_media: &[String],
-        attachment_media: &[String],
-    ) -> Option<WorkflowInstance> {
-        if !forced_workflow_detection_allowed(inbound, &self.channel, image_media, attachment_media)
-        {
-            return None;
-        }
-        WorkflowKind::detect_forced_background(&inbound.content).map(WorkflowKind::build)
-    }
-
-    async fn maybe_start_forced_background_workflow(
-        &self,
-        inbound: &InboundMessage,
-        image_media: &[String],
-        attachment_media: &[String],
-        attachment_prompt: Option<&str>,
-        persisted_user_content: &str,
-        reply_to: Option<String>,
-    ) -> bool {
-        let Some(workflow) =
-            self.forced_background_workflow_for_turn(inbound, image_media, attachment_media)
-        else {
-            return false;
-        };
-
-        let mut task = inbound.content.clone();
-        if let Some(prompt) = attachment_prompt.filter(|value| !value.trim().is_empty()) {
-            task.push_str("\n\nAttachment context:\n");
-            task.push_str(prompt);
-        }
-
-        let workflow_label = workflow.label.clone();
-        let workflow_ack = workflow.ack_message.clone();
-        let args = serde_json::json!({
-            "task": task,
-            "label": workflow_label,
-            "mode": "background",
-            "allowed_tools": workflow.allowed_tools.clone(),
-            "additional_instructions": workflow.additional_instructions.clone(),
-            "workflow": workflow.clone(),
-        });
-
-        let tool_registry = self.agent.tool_registry();
-        let spawn_result = match tool_registry.execute("spawn", &args).await {
-            Ok(result) if result.success => result,
-            Ok(result) => {
-                warn!(
-                    session = %self.session_key,
-                    workflow = %workflow.label,
-                    error = %result.output,
-                    "forced background spawn returned failure"
-                );
-                return false;
-            }
-            Err(error) => {
-                warn!(
-                    session = %self.session_key,
-                    workflow = %workflow.label,
-                    error = %error,
-                    "forced background spawn failed"
-                );
-                return false;
-            }
-        };
-
-        let client_message_id = inbound_client_message_id(inbound);
-        // PR A: when the inbound carries a cmid, build the user message via
-        // the typed constructor — `user_with_cmid` requires the
-        // `ClientMessageId` argument so the cmid cannot be silently dropped.
-        // `thread_id` stays `None` here because `add_message_with_seq` runs
-        // its own derivation; PR-F will migrate that derivation onto the
-        // typed setters.
-        let user_msg = match client_message_id.as_deref() {
-            Some(cmid) if !cmid.is_empty() => Message::user_with_cmid(
-                persisted_user_content.to_string(),
-                octos_core::ClientMessageId::new(cmid),
-            ),
-            _ => Message::user(persisted_user_content.to_string()),
-        };
-        let user_msg_timestamp = user_msg.timestamp;
-        let user_seq = {
-            let mut handle = self.session_handle.lock().await;
-            let session = handle.get_or_create();
-            if session.summary.is_none() && !persisted_user_content.trim().is_empty() {
-                session.summary = Some(persisted_user_content.chars().take(100).collect());
-            }
-            match handle.add_message_with_seq(user_msg.clone()).await {
-                Ok(seq) => {
-                    let committed = committed_message_or_fallback(&handle, seq, &user_msg);
-                    record_context_manager_message(
-                        &self.context_manager,
-                        &self.session_key,
-                        &self.data_dir,
-                        &committed,
-                        seq,
-                    );
-                    Some(seq)
-                }
-                Err(error) => {
-                    warn!(session = %self.session_key, error = %error, "failed to persist user message for forced background workflow");
-                    None
-                }
-            }
-        };
-
-        // Restore the forced-background user-message session_result emission
-        // dropped by 14ac3f3a. Same reasoning as the overflow path: the web
-        // client needs a routing signal so the workflow's spawn_only progress
-        // events bind to this user message's bubble, not a stale primary.
-        // See #616.
-        if let Some(seq) = user_seq {
-            let mut session_result = serde_json::json!({
-                "seq": seq,
-                "role": "user",
-                "content": persisted_user_content.to_string(),
-                "timestamp": user_msg_timestamp.to_rfc3339(),
-                "media": Vec::<String>::new(),
-            });
-            if let Some(cmid) = client_message_id.as_deref() {
-                session_result.as_object_mut().expect("json object").insert(
-                    "client_message_id".to_string(),
-                    serde_json::Value::String(cmid.to_string()),
-                );
-            }
-            let mut metadata_obj = serde_json::Map::new();
-            if let Some(topic) = self.session_key.topic() {
-                metadata_obj.insert(
-                    "topic".to_string(),
-                    serde_json::Value::String(topic.to_string()),
-                );
-            }
-            metadata_obj.insert(
-                "_history_persisted".to_string(),
-                serde_json::Value::Bool(true),
-            );
-            metadata_obj.insert("_session_result".to_string(), session_result);
-            // M8.10 PR #2: tag the user-message session_result emission with
-            // thread_id so the API channel can stamp it on subsequent
-            // wire events for this turn.
-            if let Some(cmid) = client_message_id.as_deref() {
-                metadata_obj.insert(
-                    "thread_id".to_string(),
-                    serde_json::Value::String(cmid.to_string()),
-                );
-            }
-
-            let _ = send_outbound_with_timeout(
-                &self.session_key,
-                &self.out_tx,
-                OutboundMessage {
-                    channel: self.channel.clone(),
-                    chat_id: self.chat_id.clone(),
-                    content: String::new(),
-                    reply_to: None,
-                    media: vec![],
-                    metadata: serde_json::Value::Object(metadata_obj),
-                },
-                "user_message_session_result_forced_background",
-            )
-            .await;
-        }
-        let ack_content = workflow_ack;
-        let persisted = persist_assistant_message(
-            &self.session_handle,
-            Some(&self.context_manager),
-            &self.session_key,
-            &self.data_dir,
-            ack_content.clone(),
-            vec![],
-            client_message_id.clone(),
-        )
-        .await;
-
-        // M8.10 PR #2: tag the forced-background ack and the trailing
-        // _completion with the user's cmid so the SSE events the API
-        // channel emits carry thread_id back to the web client. Same
-        // events as the speculative path — just a different thread.
-        let mut ack_metadata = serde_json::json!({
-            "_history_persisted": persisted,
-            "spawn_output": spawn_result.output,
-        });
-        if let Some(ref tid) = client_message_id {
-            if let Some(map) = ack_metadata.as_object_mut() {
-                map.insert(
-                    "thread_id".to_string(),
-                    serde_json::Value::String(tid.clone()),
-                );
-            }
-        }
-        let _ = self
-            .out_tx
-            .send(OutboundMessage {
-                channel: self.channel.clone(),
-                chat_id: self.chat_id.clone(),
-                content: ack_content,
-                reply_to,
-                media: vec![],
-                metadata: ack_metadata,
-            })
-            .await;
-
-        if self.channel == "api" {
-            let bg_tasks = tool_registry
-                .supervisor()
-                .get_tasks_for_session(&self.session_key.to_string())
-                .into_iter()
-                .filter(|task| task.status.is_active())
-                .map(|task| sanitize_task_for_response(&self.data_dir, &task))
-                .collect::<Vec<_>>();
-
-            let mut completion_metadata = serde_json::json!({
-                "_completion": true,
-                "has_bg_tasks": !bg_tasks.is_empty(),
-                "bg_tasks": bg_tasks,
-            });
-            if let Some(ref tid) = client_message_id {
-                if let Some(map) = completion_metadata.as_object_mut() {
-                    map.insert(
-                        "thread_id".to_string(),
-                        serde_json::Value::String(tid.clone()),
-                    );
-                }
-            }
-            let _ = self
-                .out_tx
-                .send(OutboundMessage {
-                    channel: self.channel.clone(),
-                    chat_id: self.chat_id.clone(),
-                    content: String::new(),
-                    reply_to: None,
-                    media: vec![],
-                    metadata: completion_metadata,
-                })
-                .await;
-        }
-
-        self.emit_turn_end_hook(persisted_user_content).await;
-
-        true
-    }
-
     /// Speculative processing: runs the LLM call but monitors the inbox.
     /// If the call exceeds 2× responsiveness baseline and a new user message
     /// arrives, the new message gets a quick LLM response via the adaptive
@@ -6854,20 +6485,6 @@ impl SessionActor {
             Err(_) => return,
         };
 
-        if self
-            .maybe_start_forced_background_workflow(
-                &inbound,
-                &image_media,
-                &attachment_media,
-                attachment_prompt.as_deref(),
-                &persisted_user_content,
-                inbound_message_id.clone(),
-            )
-            .await
-        {
-            self.cancelled.store(false, Ordering::Release);
-            return;
-        }
 
         // M16-D2: capture ContextManager-derived prompt history before
         // persisting this turn's user message, because the agent appends the
@@ -8715,20 +8332,6 @@ impl SessionActor {
         let persisted_user_content =
             Self::persisted_user_content(&inbound, &image_media, &attachment_media);
 
-        if self
-            .maybe_start_forced_background_workflow(
-                &inbound,
-                &image_media,
-                &attachment_media,
-                attachment_prompt.as_deref(),
-                &persisted_user_content,
-                inbound_message_id.clone(),
-            )
-            .await
-        {
-            self.cancelled.store(false, Ordering::Release);
-            return;
-        }
 
         // M16-D2: the production pre-turn prompt history comes from the
         // ContextManager. If the active context is over threshold this installs

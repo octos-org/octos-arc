@@ -232,58 +232,7 @@ async fn handle_new(ctx: &SlashCommandContext, name_arg: &str) -> String {
     };
     let topic: &str = normalized_topic.as_ref();
 
-    if topic == "slides" || topic.starts_with("slides ") {
-        match crate::project_templates::try_activate_slides_template(&ctx.data_dir, topic) {
-            Some(template_reply) => {
-                let project_name = topic.strip_prefix("slides").unwrap_or("").trim();
-                let project_name = if project_name.is_empty() {
-                    "untitled"
-                } else {
-                    project_name
-                };
-                match crate::project_templates::scaffold_slides_project(
-                    &workspace_root,
-                    project_name,
-                ) {
-                    Ok(_) => template_reply,
-                    Err(error) => {
-                        tracing::warn!(
-                            topic = topic,
-                            error = %error,
-                            "ws slash: slides scaffold failed"
-                        );
-                        format!("{template_reply}\n\nSlides git/bootstrap failed: {error}")
-                    }
-                }
-            }
-            None => format!("Switched to session: {name_arg}"),
-        }
-    } else if topic == "site" || topic.starts_with("site ") {
-        let _ = crate::project_templates::try_activate_site_template(&ctx.data_dir, topic);
-        let profile_id = ctx
-            .profile_id
-            .clone()
-            .unwrap_or_else(|| octos_core::MAIN_PROFILE_ID.to_string());
-        match crate::project_templates::scaffold_site_project(
-            &workspace_root,
-            &profile_id,
-            crate::project_templates::preview_session_id(&ctx.session_id),
-            topic,
-            &ctx.data_dir,
-        ) {
-            Ok(metadata) => crate::project_templates::site_creation_reply(&metadata),
-            Err(error) => {
-                tracing::warn!(
-                    topic = topic,
-                    error = %error,
-                    "ws slash: site scaffold failed"
-                );
-                format!("Site scaffold failed: {error}")
-            }
-        }
-    } else {
-        format!("Switched to session: {name_arg}")
-    }
+    format!("Switched to session: {name_arg}")
 }
 
 /// Default workspace root layout when the caller did not thread a
@@ -363,30 +312,6 @@ mod tests {
         let mut mgr = ctx.sessions.lock().await;
         let history = mgr.get_or_create(&key).await.get_history(50);
         assert!(history.is_empty());
-    }
-
-    #[tokio::test]
-    async fn should_scaffold_slides_under_user_workspace() {
-        let (ctx, tmp, key) = setup().await;
-        let reply = try_dispatch_slash_command("/new slides demo", &ctx)
-            .await
-            .unwrap();
-        assert!(reply.contains("demo"));
-
-        let encoded = octos_bus::session::encode_path_component(key.base_key());
-        let project = tmp
-            .path()
-            .join("users")
-            .join(&encoded)
-            .join("workspace")
-            .join("slides")
-            .join("demo");
-        assert!(
-            project.is_dir(),
-            "expected scaffold at {}",
-            project.display()
-        );
-        assert!(project.join("script.js").is_file());
     }
 
     #[tokio::test]

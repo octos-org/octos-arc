@@ -81,7 +81,6 @@ pub use octos_services::persona_service;
 pub mod process_manager;
 pub mod profile_qr;
 pub mod profiles;
-pub mod project_templates;
 mod qos_catalog;
 pub mod runtime;
 pub mod session_actor;
@@ -99,5 +98,3 @@ pub use octos_services::updater;
 pub use octos_store::usage_ledger;
 #[cfg(feature = "api")]
 pub use octos_store::user_store;
-pub use octos_workflows::workflow_runtime;
-pub use octos_workflows::workflows;
