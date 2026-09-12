@@ -1,18 +1,19 @@
 //! Profile-scoping + authorization primitives shared by the stdio OUP
 //! transport and the local-trust HTTP surface. The OTP/user-account login
 //! machinery was removed with the multi-tenant dashboard; authorization is
-//! now local-trust (all local callers are admin-equivalent).
+//! local-trust (all local callers are admin-equivalent).
 
+use axum::extract::{Path, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::Extension;
+use axum::Json;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::http::HeaderMap;
-
-use axum::http::StatusCode;
-use axum::Extension;
-
-use super::AppState;
+use super::handlers::response_path_for_profile_file;
 use super::router::AuthIdentity;
+use super::AppState;
 
 pub const ADMIN_PROFILE_ID: &str = "admin";
 
@@ -25,6 +26,8 @@ pub(crate) fn is_top_level_profile_id(state: &AppState, profile_id: &str) -> boo
         .unwrap_or(false)
 }
 
+
+
 pub(crate) fn scoped_host_allows_profile_id(
     _state: &AppState,
     scoped_profile_id: &str,
@@ -32,6 +35,8 @@ pub(crate) fn scoped_host_allows_profile_id(
 ) -> bool {
     scoped_profile_id == candidate_profile_id
 }
+
+
 
 fn request_host(headers: &HeaderMap) -> Option<String> {
     let raw = headers
@@ -48,6 +53,8 @@ fn request_host(headers: &HeaderMap) -> Option<String> {
     }
     Some(strip_port_from_host(&raw).to_string())
 }
+
+
 
 /// The endpoint URL a scanning client should dial: original authority
 /// (host AND port — `request_host` strips the port, which would send
@@ -83,6 +90,8 @@ fn request_endpoint(headers: &HeaderMap) -> Option<String> {
     Some(format!("{scheme}://{authority}"))
 }
 
+
+
 fn strip_port_from_host(host: &str) -> &str {
     if let Some(stripped) = host.strip_prefix('[') {
         return stripped.split(']').next().unwrap_or(host);
@@ -95,9 +104,13 @@ fn strip_port_from_host(host: &str) -> &str {
     host
 }
 
+
+
 fn is_local_request_host(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
+
+
 
 fn resolve_routed_profile_id_candidate(state: &AppState, candidate: &str) -> Option<String> {
     let candidate = candidate.trim();
@@ -116,6 +129,8 @@ fn resolve_routed_profile_id_candidate(state: &AppState, candidate: &str) -> Opt
         .and_then(|store| store.resolve_routable_profile_id(candidate).ok().flatten())
 }
 
+
+
 fn resolve_trusted_local_profile_id_candidate(state: &AppState, candidate: &str) -> Option<String> {
     let candidate = candidate.trim();
     if candidate.is_empty() {
@@ -131,6 +146,8 @@ fn resolve_trusted_local_profile_id_candidate(state: &AppState, candidate: &str)
     })
 }
 
+
+
 fn host_scoped_profile_id(state: &AppState, headers: &HeaderMap) -> Option<String> {
     let host = request_host(headers)?;
     if is_local_request_host(&host) {
@@ -140,6 +157,8 @@ fn host_scoped_profile_id(state: &AppState, headers: &HeaderMap) -> Option<Strin
     let candidate = host.split('.').next()?;
     resolve_routed_profile_id_candidate(state, candidate)
 }
+
+
 
 fn trusted_auth_scope_profile_id(state: &AppState, headers: &HeaderMap) -> Option<String> {
     if let Some(profile_id) = host_scoped_profile_id(state, headers) {
@@ -159,11 +178,14 @@ fn trusted_auth_scope_profile_id(state: &AppState, headers: &HeaderMap) -> Optio
         .and_then(|candidate| resolve_trusted_local_profile_id_candidate(state, candidate))
 }
 
+
+
 /// Return `true` iff the authenticated identity is allowed to act as the
 /// given profile id for `/api/my/*` endpoints.
 ///
 /// Authorization rules:
 /// - Admin token can act as any profile.
+/// - A user session with `UserRole::Admin` can act as any profile
 ///   (matches the rest of the router which treats admin email sessions
 ///   as full admins for `/api/admin/*`). Without this carve-out, an
 ///   admin who logs in via OTP would 403 on tenant subdomains while
@@ -178,6 +200,7 @@ pub(crate) fn is_authorized_for_profile(
 ) -> bool {
     match identity {
         AuthIdentity::Admin => true,
+
         AuthIdentity::User { id } => {
             if id == profile_id {
                 return true;
@@ -193,6 +216,47 @@ pub(crate) fn is_authorized_for_profile(
         }
     }
 }
+
+
+
+/// Resolve the full profile for "my" endpoints.
+fn resolve_my_profile(
+    identity: &AuthIdentity,
+    ps: &crate::profiles::ProfileStore,
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<crate::profiles::UserProfile, StatusCode> {
+    let id = resolve_my_profile_id(identity, ps, state, headers)?;
+    ps.get(&id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
+
+
+/// Ensure an admin profile exists in the store, creating one if needed.
+fn ensure_admin_profile(ps: &crate::profiles::ProfileStore) -> Result<(), StatusCode> {
+    if let Ok(Some(_)) = ps.get(ADMIN_PROFILE_ID) {
+        return Ok(());
+    }
+    let profile = crate::profiles::UserProfile {
+        id: ADMIN_PROFILE_ID.into(),
+        name: "Admin".into(),
+        public_subdomain: None,
+        enabled: false,
+        data_dir: None,
+        parent_id: None,
+        config: crate::profiles::ProfileConfig::default(),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    ps.save(&profile).map_err(|e| {
+        tracing::error!(error = %e, "failed to auto-create admin profile");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })
+}
+
+
 
 /// Resolve the profile ID for "my" endpoints.
 ///
@@ -235,6 +299,8 @@ pub(crate) fn resolve_my_profile_id(
         AuthIdentity::User { id, .. } => Ok(id.clone()),
     }
 }
+
+
 
 // Helper for `ui_protocol_transport::handle_content_list` (M12 Phase D-5).
 // The REST route `GET /api/my/content` was retired in this milestone; the
@@ -316,6 +382,8 @@ pub(super) async fn my_content(
     }))
 }
 
+
+
 // Helper for `ui_protocol_transport::handle_content_delete` (M12 Phase D-5).
 // The REST route `DELETE /api/my/content/{id}` was retired in this
 // milestone; the function survives as a private helper backing the
@@ -357,6 +425,8 @@ pub(super) async fn delete_my_content(
     }))
 }
 
+
+
 // Helper for `ui_protocol_transport::handle_content_bulk_delete` (M12 Phase D-5).
 // The REST route `POST /api/my/content/bulk-delete` was retired in this
 // milestone; the function survives as a private helper backing the
@@ -394,7 +464,56 @@ pub(super) async fn bulk_delete_my_content(
     }))
 }
 
+
+
 #[derive(Deserialize)]
 pub(super) struct BulkDeleteRequest {
     pub ids: Vec<String>,
+}
+
+
+
+#[derive(Serialize)]
+pub struct ActionResponse {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+
+
+/// Truncate a string to `max_len` chars (used by panel surfaces).
+pub(crate) fn truncate_str(s: &str, max_len: usize) -> String {
+    if s.chars().count() <= max_len {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(max_len).collect();
+        format!("{truncated}...")
+    }
+}
+
+pub(crate) fn relocate_secret_to_keychain(
+    env_vars: &mut HashMap<String, String>,
+    key: &str,
+    profile_id: &str,
+    store_available: bool,
+    set_secret: impl Fn(&str, &str) -> eyre::Result<()>,
+) -> Result<(), String> {
+    let Some(value) = env_vars.get(key) else {
+        return Ok(());
+    };
+    let value = value.trim().to_string();
+    // Markers / masked / empty values mean "leave as configured".
+    if !value.starts_with('{') {
+        return Ok(());
+    }
+    if !store_available {
+        return Err(format!(
+            "{key}: keychain-backed credential storage is unavailable on this host (no secret store backend)"
+        ));
+    }
+    let account = crate::auth::keychain::scoped_account(key, profile_id);
+    set_secret(&account, &value).map_err(|e| format!("failed to store {key} in keychain: {e}"))?;
+    env_vars.insert(key.to_string(), crate::auth::keychain::marker_for(&account));
+    Ok(())
 }

@@ -610,7 +610,6 @@ impl PreviewTokens {
             let token = format!("filltoken-{i:06}");
             let identity = AuthIdentity::User {
                 id: format!("filler-{i}"),
-                role: crate::user_store::UserRole::User,
             };
             let grant = Grant {
                 issuer_bearer: format!("BEARER-FILL-{i}"),
@@ -648,13 +647,11 @@ fn hex_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::user_store::UserRole;
 
     fn make_identity() -> AuthIdentity {
         AuthIdentity::User {
             id: "tenant-a".into(),
-            role: UserRole::User,
-        }
+            }
     }
 
     #[tokio::test]
@@ -1023,8 +1020,7 @@ mod tests {
                 let bearer = format!("BEARER-FILL-{i}");
                 let identity = AuthIdentity::User {
                     id: format!("filler-{i}"),
-                    role: UserRole::User,
-                };
+                    };
                 let token = format!("filltoken-{i:05}");
                 // Spread expiries so a buggy "evict earliest"
                 // implementation would have an obvious target — and we
@@ -1062,8 +1058,7 @@ mod tests {
         // `GlobalLimitReached`, NOT evict somebody else's preview.
         let new_identity = AuthIdentity::User {
             id: "tenant-new".into(),
-            role: UserRole::User,
-        };
+            };
         let err = cache
             .issue(
                 "BEARER-NEW".into(),
@@ -1120,8 +1115,7 @@ mod tests {
                         issuer_bearer: format!("BEARER-FILL-{i}"),
                         identity_snapshot: AuthIdentity::User {
                             id: format!("filler-{i}"),
-                            role: UserRole::User,
-                        },
+                            },
                         profile_id: "tenant-a".into(),
                         session_id: "session-1".into(),
                         site_slug: "site-a".into(),
@@ -1134,8 +1128,7 @@ mod tests {
 
         let new_identity = AuthIdentity::User {
             id: "tenant-new".into(),
-            role: UserRole::User,
-        };
+            };
         cache
             .issue(
                 "BEARER-NEW".into(),

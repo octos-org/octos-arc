@@ -12,7 +12,6 @@ pub(crate) mod coding_tool_contract;
 mod cron_panel;
 mod events;
 mod events_harness;
-mod frps_plugin;
 mod handlers;
 mod memory_panel;
 pub mod metrics;
@@ -102,6 +101,7 @@ use std::time::Instant;
 use crate::content_catalog::ContentCatalogManager;
 use crate::process_manager::ProcessManager;
 use crate::profiles::ProfileStore;
+use crate::user_store::UserStore;
 use crate::runtime::{ProfileRuntime, SessionRuntimeCache};
 
 /// Serializes skill filesystem mutation and runtime publication per profile.
@@ -245,7 +245,6 @@ pub struct AppState {
     /// Process manager for gateway lifecycle.
     pub process_manager: Option<Arc<ProcessManager>>,
     /// Allowlist for pre-authorized email-based signup.
-    pub allowlist_store: Option<Arc<LoginAllowlistStore>>,
     /// Auth manager for email OTP and sessions.
     /// Shared HTTP client for webhook proxying.
     pub http_client: reqwest::Client,
@@ -259,7 +258,6 @@ pub struct AppState {
     pub sysinfo: tokio::sync::Mutex<sysinfo::System>,
     /// Tenant store for tunnel management.
     /// Cache of frps run_id → tenant_id from Login verification.
-    pub run_id_cache: Arc<RunIdCache>,
     /// Tunnel domain (e.g. "octos-cloud.org").
     pub tunnel_domain: Option<String>,
     /// Public-facing base domain each mini serves profiles under
@@ -317,6 +315,9 @@ pub struct AppState {
     /// refresh (DEFAULT-ON) also binds profiles created after startup.
     pub host_memory: Option<crate::config::MemoryConfig>,
     /// Whether the admin shell endpoint is enabled (default: false).
+    /// Solo-profile id/email ledger (multi-user accounts were removed with
+    /// the dashboard; the store remains for `profile/local/create`).
+    pub user_store: Option<Arc<crate::user_store::UserStore>>,
     pub allow_admin_shell: bool,
     /// Content catalog manager for per-profile file indexing.
     pub content_catalog_mgr: Option<Arc<ContentCatalogManager>>,
@@ -418,21 +419,14 @@ impl AppState {
             broadcaster: Arc::new(EventBroadcaster::new(16)),
             started_at: chrono::Utc::now(),
             auth_token: None,
-            admin_token_store: Arc::new(AdminTokenStore::new(data_dir)),
-            setup_state_store: Arc::new(SetupStateStore::new(data_dir)),
             metrics_handle: None,
             profile_store: None,
             process_manager: None,
-            user_store: None,
-            allowlist_store: None,
-            admin_audit_store: None,
             http_client: reqwest::Client::new(),
             config_path: None,
             watchdog_enabled: None,
             alerts_enabled: None,
             sysinfo: tokio::sync::Mutex::new(crate::sysinfo_budget::new_metrics_system()),
-            tenant_store: None,
-            run_id_cache: Arc::new(RunIdCache::new()),
             tunnel_domain: None,
             base_domain: None,
             appui_allowed_origins: Vec::new(),
@@ -444,6 +438,7 @@ impl AppState {
             default_network_denied: false,
             llm_compaction: false,
             host_memory: None,
+            user_store: None,
             allow_admin_shell: false,
             content_catalog_mgr: None,
             harness_event_sink_path: None,

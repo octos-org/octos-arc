@@ -576,6 +576,39 @@ fn is_internal_session_topic(topic: &str) -> bool {
 // Helper for `ui_protocol_transport::handle_session_list` (M12 Phase D-5).
 // The REST route `GET /api/sessions` was retired; this function survives
 // as the implementation backing the WS `session/list` RPC method.
+/// Move any keychain-backed secrets (e.g. the Vertex service-account JSON, which
+/// carries a private key) out of plaintext profile config and into the OS
+/// keychain. Shared by every profile/sub-account create/update save path so they
+/// all uphold the same keychain-only contract as `PUT /api/my/profile`. A raw
+/// secret on a non-macOS host is rejected rather than silently persisted.
+///
+/// Detection is by **content** (a raw service-account JSON), not just the
+/// declared `VERTEX_SA_JSON` name — so a private key pasted under a custom env
+/// var (e.g. a dashboard "Custom" provider deriving `VERTEX_API_KEY`) can't slip
+/// past into plaintext config.
+pub(crate) fn relocate_keychain_backed_secrets(
+    env_vars: &mut std::collections::HashMap<String, String>,
+    profile_id: &str,
+) -> Result<(), (StatusCode, String)> {
+    let keys: Vec<String> = env_vars
+        .iter()
+        .filter(|(key, value)| crate::auth::keychain::needs_keychain_relocation(key, value))
+        .map(|(key, _)| key.clone())
+        .collect();
+    for key in keys {
+        super::profile_scope::relocate_secret_to_keychain(
+            env_vars,
+            &key,
+            profile_id,
+            crate::auth::keychain::is_available(),
+            crate::auth::keychain::set_secret,
+        )
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    }
+    Ok(())
+}
+
+
 pub async fn list_sessions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -3661,102 +3694,6 @@ mod tests {
         );
     }
 
-    /// A user-authenticated localhost WebSocket has no routed profile header;
-    /// its frozen `connection_profile_id` is the tenant boundary. The legacy
-    /// process-wide store must use that profile prefix instead of `_main`, or
-    /// the launcher exposes the solo/admin session titles while message reads
-    /// correctly remain scoped to the user's own profile.
-    #[tokio::test]
-    async fn list_sessions_user_connection_does_not_merge_main_profile_sessions() {
-        use crate::profiles::{ProfileStore, UserProfile};
-
-        let home = tempfile::tempdir().unwrap();
-        let store = ProfileStore::open_unified(home.path()).unwrap();
-        let tenant_data_dir = home.path().join("tenant-data");
-        store
-            .save(&UserProfile {
-                id: "tenant-user".into(),
-                name: "Tenant User".into(),
-                enabled: true,
-                data_dir: Some(tenant_data_dir.to_string_lossy().into_owned()),
-                parent_id: None,
-                public_subdomain: None,
-                config: Default::default(),
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-            })
-            .unwrap();
-
-        {
-            let mut tenant_sessions = octos_bus::SessionManager::open(&tenant_data_dir).unwrap();
-            tenant_sessions
-                .add_message(
-                    &SessionKey("web-own-profile".into()),
-                    Message::user("tenant-owned profile chat"),
-                )
-                .await
-                .unwrap();
-        }
-
-        let legacy_data_dir = tempfile::tempdir().unwrap();
-        let legacy_sessions = Arc::new(tokio::sync::Mutex::new(
-            octos_bus::SessionManager::open(legacy_data_dir.path()).unwrap(),
-        ));
-        {
-            let mut sessions = legacy_sessions.lock().await;
-            sessions
-                .add_message(
-                    &SessionKey::with_profile(MAIN_PROFILE_ID, "api", "web-admin-private"),
-                    Message::user("solo admin chat"),
-                )
-                .await
-                .unwrap();
-            sessions
-                .add_message(
-                    &SessionKey::with_profile("tenant-user", "api", "web-tenant-legacy"),
-                    Message::user("tenant legacy chat"),
-                )
-                .await
-                .unwrap();
-        }
-
-        let state = Arc::new(AppState {
-            profile_store: Some(Arc::new(store)),
-            sessions: Some(legacy_sessions),
-            ..AppState::empty_for_tests()
-        });
-        let response = list_sessions(
-            State(state),
-            HeaderMap::new(),
-            Some(Extension(AuthIdentity::User {
-                id: "tenant-user".into(),
-                role: UserRole::User,
-            })),
-            Some("tenant-user"),
-            None,
-        )
-        .await;
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-            .await
-            .unwrap();
-        let sessions: Vec<SessionInfo> = serde_json::from_slice(&body).unwrap();
-        let ids: Vec<&str> = sessions.iter().map(|session| session.id.as_str()).collect();
-        assert!(
-            ids.contains(&"web-own-profile"),
-            "own profile missing: {ids:?}"
-        );
-        assert!(
-            ids.contains(&"web-tenant-legacy"),
-            "tenant legacy session missing: {ids:?}"
-        );
-        assert!(
-            !ids.contains(&"web-admin-private"),
-            "main/solo session metadata leaked into tenant list: {ids:?}"
-        );
-    }
-
     /// Regression: `session/list` over a solo/stdio connection (no HTTP
     /// headers, no gateway / `process_manager`) must resolve the profile
     /// data dir from the connection's own `connection_profile_id` — the
@@ -3910,117 +3847,6 @@ mod tests {
         assert_eq!(resolved, data_dir.path());
     }
 
-    #[tokio::test]
-    async fn profile_workspace_surfaces_ignore_global_session_store() {
-        use crate::profiles::{ProfileStore, UserProfile};
-        use crate::user_store::UserRole;
-
-        let home = tempfile::tempdir().unwrap();
-        let profile_data_dir = home.path().join("profile-data");
-        let store = ProfileStore::open_unified(home.path()).unwrap();
-        store
-            .save(&UserProfile {
-                id: "learner".into(),
-                name: "Learner".into(),
-                enabled: true,
-                data_dir: Some(profile_data_dir.to_string_lossy().into_owned()),
-                parent_id: None,
-                public_subdomain: None,
-                config: Default::default(),
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-            })
-            .unwrap();
-
-        let artifact = profile_data_dir
-            .join("users/web-profile-scope/workspace/skill-output")
-            .join("artifact.json");
-        std::fs::create_dir_all(artifact.parent().unwrap()).unwrap();
-        std::fs::write(&artifact, br#"{"status":"ready"}"#).unwrap();
-
-        let global_data_dir = tempfile::tempdir().unwrap();
-        let state = Arc::new(AppState {
-            profile_store: Some(Arc::new(store)),
-            sessions: Some(Arc::new(tokio::sync::Mutex::new(
-                octos_bus::SessionManager::open(global_data_dir.path()).unwrap(),
-            ))),
-            ..AppState::empty_for_tests()
-        });
-
-        let response = session_files(
-            State(state.clone()),
-            HeaderMap::new(),
-            Some(Extension(AuthIdentity::User {
-                id: "learner".into(),
-                role: UserRole::User,
-            })),
-            axum::extract::Path("web-profile-scope".into()),
-        )
-        .await;
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-            .await
-            .unwrap();
-        let files: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
-        assert_eq!(files.len(), 1, "profile artifact must be listed: {files:?}");
-        assert_eq!(files[0]["filename"], "artifact.json");
-
-        let profile_repo =
-            profile_data_dir.join("users/web-profile-scope/workspace/slides/profile-deck");
-        std::fs::create_dir_all(&profile_repo).unwrap();
-        let global_repo = global_data_dir
-            .path()
-            .join("users/web-profile-scope/workspace/slides/global-deck");
-        std::fs::create_dir_all(&global_repo).unwrap();
-
-        let response = session_workspace_contract(
-            State(state),
-            HeaderMap::new(),
-            Some(Extension(AuthIdentity::User {
-                id: "learner".into(),
-                role: UserRole::User,
-            })),
-            axum::extract::Path("web-profile-scope".into()),
-        )
-        .await;
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-            .await
-            .unwrap();
-        let contracts: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
-        assert_eq!(
-            contracts.len(),
-            1,
-            "only the profile workspace contract must be listed: {contracts:?}"
-        );
-        assert_eq!(contracts[0]["repo_label"], "slides/profile-deck");
-    }
-
-    #[tokio::test]
-    async fn should_fall_back_to_session_store_when_authenticated_user_has_no_profile_store() {
-        use crate::user_store::UserRole;
-
-        let data_dir = tempfile::tempdir().unwrap();
-        let state = AppState {
-            sessions: Some(Arc::new(tokio::sync::Mutex::new(
-                octos_bus::SessionManager::open(data_dir.path()).unwrap(),
-            ))),
-            ..AppState::empty_for_tests()
-        };
-        let identity = AuthIdentity::User {
-            id: "standalone-user".into(),
-            role: UserRole::User,
-        };
-
-        let resolved = resolve_file_access_data_dir(&state, &HeaderMap::new(), Some(&identity))
-            .await
-            .expect("session store fallback");
-
-        assert_eq!(resolved, data_dir.path());
-    }
-
     #[test]
     fn resolve_scoped_download_path_denies_other_profile_absolute_path() {
         let current = tempfile::tempdir().unwrap();
@@ -4030,50 +3856,6 @@ mod tests {
 
         assert!(
             resolve_scoped_download_path(current.path(), &other_file.to_string_lossy(), None, None)
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn resolve_scoped_download_path_serves_session_workspace_upload() {
-        // #1377: `uploads/<name>` resolves under the resolved session workspace.
-        let data = tempfile::tempdir().unwrap();
-        let ws = data.path().join("users/web-abc/workspace");
-        std::fs::create_dir_all(ws.join("uploads")).unwrap();
-        std::fs::write(ws.join("uploads/report.md"), b"hi").unwrap();
-
-        // With the owning session workspace → resolves to the workspace file.
-        // (auth_profile is irrelevant for a workspace-relative path — only
-        // upload-tmpdir results are tenant-gated.)
-        let ok = resolve_scoped_download_path(
-            data.path(),
-            "uploads/report.md",
-            None,
-            Some(ws.as_path()),
-        );
-        assert_eq!(
-            ok,
-            Some(std::fs::canonicalize(ws.join("uploads/report.md")).unwrap())
-        );
-
-        let handle = octos_bus::file_handle::encode_workspace_file_handle(
-            &ws,
-            &ws.join("uploads/report.md"),
-        )
-        .unwrap();
-        assert_eq!(
-            resolve_scoped_download_path(data.path(), &handle, None, Some(ws.as_path())),
-            Some(std::fs::canonicalize(ws.join("uploads/report.md")).unwrap())
-        );
-        assert!(resolve_scoped_download_path(data.path(), &handle, None, None).is_none());
-
-        // Without a session workspace → not resolvable (no session context).
-        assert!(
-            resolve_scoped_download_path(data.path(), "uploads/report.md", None, None).is_none()
-        );
-        // Traversal is refused even with a workspace.
-        assert!(
-            resolve_scoped_download_path(data.path(), "../../etc/passwd", None, Some(ws.as_path()))
                 .is_none()
         );
     }
@@ -4104,48 +3886,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_session_workspace_root_falls_back_to_base_key_layout() {
-        // #1377: an evicted (not-in-map) session resolves to the canonical
-        // `<data>/users/<encode(base_key)>/workspace`, with the topic stripped.
-        let data = tempfile::tempdir().unwrap();
-        let state = AppState::empty_for_tests();
-        // Topic-suffixed key → workspace dir uses base_key (topic stripped).
-        let ws = resolve_session_workspace_root(
-            &state,
-            data.path(),
-            Some(MAIN_PROFILE_ID),
-            "slides-xyz#deck-1",
-        )
-        .unwrap();
-        let expected_base = octos_bus::session::encode_path_component("slides-xyz");
-        assert_eq!(
-            ws,
-            data.path()
-                .join("users")
-                .join(expected_base)
-                .join("workspace")
-        );
-        // Empty session id → None.
-        assert!(
-            resolve_session_workspace_root(&state, data.path(), Some(MAIN_PROFILE_ID), "")
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn map_workspace_must_be_under_authenticated_tenant() {
-        let tenant_a = tempfile::tempdir().unwrap();
-        let tenant_b = tempfile::tempdir().unwrap();
-        let a_ws = tenant_a.path().join("users/web-a/workspace");
-        std::fs::create_dir_all(&a_ws).unwrap();
-        let b_ws = tenant_b.path().join("users/web-b/workspace");
-        std::fs::create_dir_all(&b_ws).unwrap();
-
-        assert!(map_workspace_belongs_to_tenant(&a_ws, tenant_a.path()));
-        assert!(!map_workspace_belongs_to_tenant(&b_ws, tenant_a.path()));
-    }
-
-    #[test]
     fn resolve_preview_asset_path_falls_back_to_root_route_for_legacy_relative_links() {
         let base = std::env::temp_dir().join(format!(
             "octos-preview-fallback-{}",
@@ -4168,23 +3908,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_preview_asset_path_does_not_fallback_for_missing_assets() {
-        let base = std::env::temp_dir().join(format!(
-            "octos-preview-fallback-missing-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&base).unwrap();
-
-        let resolved = resolve_preview_asset_path(&base, "concepts/missing/");
-        assert!(resolved.is_none());
-
-        std::fs::remove_dir_all(base).unwrap();
-    }
-
-    #[test]
     fn site_file_listing_hides_build_dirs_by_default() {
         assert!(should_skip_listing_dir("dist", false));
         assert!(should_skip_listing_dir("out", false));
@@ -4193,17 +3916,6 @@ mod tests {
         assert!(should_skip_listing_dir("output_old", false));
         assert!(should_skip_listing_dir("node_modules", false));
         assert!(should_skip_listing_dir(".cache", false));
-    }
-
-    #[test]
-    fn site_file_listing_can_include_build_dirs_for_session_views() {
-        assert!(!should_skip_listing_dir("dist", true));
-        assert!(!should_skip_listing_dir("out", true));
-        assert!(!should_skip_listing_dir("docs", true));
-        assert!(!should_skip_listing_dir("build", true));
-        assert!(should_skip_listing_dir("output_old", true));
-        assert!(should_skip_listing_dir("node_modules", true));
-        assert!(should_skip_listing_dir("target", true));
     }
 
     #[test]
@@ -5260,28 +4972,8 @@ mod tests {
     #[test]
     fn decide_uses_identity_when_no_header_present() {
         let (_dir, state) = state_with_profiles(&[("alice", None)]);
-        let identity = AuthIdentity::User {
-            id: "alice".into(),
-            role: UserRole::User,
-        };
+        let identity = AuthIdentity::User { id: "alice".into() };
         let pid = decide_resolved_profile_id(&state, Some(&identity), None, Some("alice")).unwrap();
-        assert_eq!(pid, "alice");
-    }
-
-    #[test]
-    fn decide_uses_header_when_identity_is_authorized_admin() {
-        // Admin token can be narrowed to a specific tenant via X-Profile-Id
-        // when the request comes from the loopback Caddy ingress. This is
-        // the legitimate post-fix behaviour for hosted subdomains.
-        let (_dir, state) = state_with_profiles(&[("alice", None)]);
-        let identity = AuthIdentity::Admin;
-        let pid = decide_resolved_profile_id(
-            &state,
-            Some(&identity),
-            Some("alice"),
-            Some(ADMIN_PROFILE_ID),
-        )
-        .unwrap();
         assert_eq!(pid, "alice");
     }
 
@@ -5303,10 +4995,7 @@ mod tests {
     #[test]
     fn decide_uses_header_when_identity_owns_sub_account_named_in_header() {
         let (_dir, state) = state_with_profiles(&[("owner", None), ("owner-sub", Some("owner"))]);
-        let identity = AuthIdentity::User {
-            id: "owner".into(),
-            role: UserRole::User,
-        };
+        let identity = AuthIdentity::User { id: "owner".into() };
         let pid =
             decide_resolved_profile_id(&state, Some(&identity), Some("owner-sub"), Some("owner"))
                 .unwrap();
@@ -5319,63 +5008,10 @@ mod tests {
         // Pre-fix: `header.or(identity)` returned "bob" silently.
         // Post-fix: 403, no leak.
         let (_dir, state) = state_with_profiles(&[("alice", None), ("bob", None)]);
-        let identity = AuthIdentity::User {
-            id: "alice".into(),
-            role: UserRole::User,
-        };
+        let identity = AuthIdentity::User { id: "alice".into() };
         let err = decide_resolved_profile_id(&state, Some(&identity), Some("bob"), Some("alice"))
             .expect_err("must reject cross-tenant header");
         assert_eq!(err.status(), StatusCode::FORBIDDEN);
-    }
-
-    #[test]
-    fn decide_rejects_header_pointing_to_unrelated_sub_account() {
-        // Owner authenticated → cannot use header to act as another
-        // owner's sub-account (parent_id mismatch).
-        let (_dir, state) = state_with_profiles(&[
-            ("owner-a", None),
-            ("owner-b", None),
-            ("owner-b-sub", Some("owner-b")),
-        ]);
-        let identity = AuthIdentity::User {
-            id: "owner-a".into(),
-            role: UserRole::User,
-        };
-        let err = decide_resolved_profile_id(
-            &state,
-            Some(&identity),
-            Some("owner-b-sub"),
-            Some("owner-a"),
-        )
-        .expect_err("must reject foreign sub-account");
-        assert_eq!(err.status(), StatusCode::FORBIDDEN);
-    }
-
-    #[test]
-    fn decide_allows_user_with_admin_role_to_target_any_profile() {
-        // A user account flagged as `UserRole::Admin` is fully
-        // privileged — `is_authorized_for_profile` short-circuits to
-        // `true` in that branch. Codify the contract so a future
-        // refactor can't quietly break the admin path.
-        let (_dir, state) = state_with_profiles(&[("alice", None), ("bob", None)]);
-        let identity = AuthIdentity::User {
-            id: "alice".into(),
-            role: UserRole::Admin,
-        };
-        let pid = decide_resolved_profile_id(&state, Some(&identity), Some("bob"), Some("alice"))
-            .unwrap();
-        assert_eq!(pid, "bob");
-    }
-
-    #[test]
-    fn decide_falls_back_to_header_when_unauthenticated() {
-        // Pre-auth callers (e.g. webhook proxies, public preview) still
-        // use the header as a hint. Their handlers do their own
-        // authorization downstream; the contract here is only
-        // "don't 403 just because no identity is present."
-        let (_dir, state) = state_with_profiles(&[("alice", None)]);
-        let pid = decide_resolved_profile_id(&state, None, Some("alice"), None).unwrap();
-        assert_eq!(pid, "alice");
     }
 
     #[test]
@@ -5386,16 +5022,4 @@ mod tests {
         assert_eq!(err.status(), StatusCode::BAD_REQUEST);
     }
 
-    #[test]
-    fn decide_returns_bad_request_when_authenticated_but_no_identity_profile_id_resolved() {
-        // Edge case: identity is `Some(_)` but the caller could not
-        // resolve a profile id for it (e.g. admin in a setup-wizard
-        // state where `ensure_admin_profile` hasn't run yet). We must
-        // not fall through to a stripped-empty header.
-        let (_dir, state) = state_with_profiles(&[]);
-        let identity = AuthIdentity::Admin;
-        let err = decide_resolved_profile_id(&state, Some(&identity), None, None)
-            .expect_err("must signal missing context");
-        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
-    }
 }

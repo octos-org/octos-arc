@@ -241,12 +241,6 @@ pub struct Config {
     #[serde(default)]
     pub allow_admin_shell: bool,
 
-    /// Dashboard user authentication configuration (email OTP).
-    /// When set, enables multi-user login via email verification codes.
-    #[cfg(feature = "api")]
-    #[serde(default)]
-    pub dashboard_auth: Option<crate::otp::DashboardAuthConfig>,
-
     /// Monitor configuration for watchdog auto-restart and alerts.
     #[cfg(feature = "api")]
     #[serde(default)]

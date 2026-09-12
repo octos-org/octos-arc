@@ -87,3 +87,4 @@ pub mod tools;
 #[cfg(feature = "api")]
 pub use octos_services::updater;
 pub use octos_store::usage_ledger;
+pub use octos_store::user_store;

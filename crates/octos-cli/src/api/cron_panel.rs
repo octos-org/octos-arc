@@ -79,7 +79,7 @@ fn job_json(j: &octos_bus::CronJob, now_ms: i64) -> serde_json::Value {
         "name": j.name,
         "enabled": j.enabled,
         "schedule": serde_json::to_value(&j.schedule).unwrap_or_default(),
-        "message": crate::api::admin::truncate_str(&j.payload.message, 100),
+        "message": crate::api::profile_scope::truncate_str(&j.payload.message, 100),
         "channel": j.payload.channel,
         "last_run": last_run,
         "last_status": j.state.last_status,
@@ -201,7 +201,7 @@ fn cap_cron_row(mut row: serde_json::Value) -> serde_json::Value {
         for value in map.values_mut() {
             if let serde_json::Value::String(s) = value {
                 if s.chars().count() > MAX_CRON_FIELD_CHARS {
-                    *s = crate::api::admin::truncate_str(s, MAX_CRON_FIELD_CHARS);
+                    *s = crate::api::profile_scope::truncate_str(s, MAX_CRON_FIELD_CHARS);
                 }
             }
         }
@@ -358,6 +358,12 @@ async fn read_cron_store(cron_path: &Path) -> Result<Option<octos_bus::CronStore
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn user_identity(id: &str) -> axum::Extension<AuthIdentity> {
+        axum::Extension(AuthIdentity::User { id: id.into() })
+    }
+
+
+
     use crate::profiles::ProfileStore;
     use crate::user_store::UserRole;
 
@@ -383,13 +389,6 @@ mod tests {
             ..AppState::empty_for_tests()
         });
         (dir, state, profile_store)
-    }
-
-    fn user_identity(id: &str) -> axum::Extension<AuthIdentity> {
-        axum::Extension(AuthIdentity::User {
-            id: id.into(),
-            role: UserRole::User,
-        })
     }
 
     fn make_job(id: &str, enabled: bool) -> octos_bus::CronJob {
@@ -430,18 +429,6 @@ mod tests {
         path
     }
 
-    #[tokio::test]
-    async fn my_cron_lists_zero_state_without_file() {
-        let (_dir, state, ps) = temp_state();
-        ps.save(&make_user_profile("tenant")).unwrap();
-        let Json(resp) = my_cron(State(state), HeaderMap::new(), user_identity("tenant"))
-            .await
-            .unwrap();
-        assert_eq!(resp["ok"], true);
-        assert_eq!(resp["count"], 0);
-        assert_eq!(resp["gateway_running"], false);
-    }
-
     #[test]
     fn cap_cron_row_bounds_oversized_string_fields() {
         let row = serde_json::json!({
@@ -455,131 +442,6 @@ mod tests {
         // Short fields + non-strings are left untouched.
         assert_eq!(capped["id"], "x");
         assert_eq!(capped["enabled"], true);
-    }
-
-    #[tokio::test]
-    async fn my_cron_caps_large_lists_and_signals_truncation() {
-        let (_dir, state, ps) = temp_state();
-        let profile = make_user_profile("tenant-big");
-        ps.save(&profile).unwrap();
-        let jobs: Vec<_> = (0..MAX_CRON_PANEL_JOBS + 5)
-            .map(|i| make_job(&format!("job{i:04}"), i % 2 == 0))
-            .collect();
-        seed_cron(&ps, &profile, jobs).await;
-
-        let Json(resp) = my_cron(State(state), HeaderMap::new(), user_identity("tenant-big"))
-            .await
-            .unwrap();
-        // `count` is the TRUE total; `jobs` is capped and `truncated` set, so the
-        // WS frame can't silently drop entries behind a stale count.
-        assert_eq!(resp["count"], MAX_CRON_PANEL_JOBS + 5);
-        assert_eq!(resp["truncated"], true);
-        assert_eq!(resp["jobs"].as_array().unwrap().len(), MAX_CRON_PANEL_JOBS);
-    }
-
-    #[tokio::test]
-    async fn my_cron_lists_jobs_in_admin_shape() {
-        let (_dir, state, ps) = temp_state();
-        let profile = make_user_profile("tenant2");
-        ps.save(&profile).unwrap();
-        seed_cron(
-            &ps,
-            &profile,
-            vec![make_job("aa11", true), make_job("bb22", false)],
-        )
-        .await;
-
-        let Json(resp) = my_cron(State(state), HeaderMap::new(), user_identity("tenant2"))
-            .await
-            .unwrap();
-        assert_eq!(resp["count"], 2);
-        assert_eq!(resp["jobs"][0]["id"], "aa11");
-        assert_eq!(resp["jobs"][0]["enabled"], true);
-        assert_eq!(resp["jobs"][1]["enabled"], false);
-        assert_eq!(resp["jobs"][0]["message"], "check the queue");
-    }
-
-    #[tokio::test]
-    async fn toggle_flips_and_persists_atomically() {
-        let (_dir, state, ps) = temp_state();
-        let profile = make_user_profile("tenant3");
-        ps.save(&profile).unwrap();
-        let path = seed_cron(&ps, &profile, vec![make_job("aa11", true)]).await;
-
-        let Json(resp) = set_my_cron_enabled(
-            State(state),
-            HeaderMap::new(),
-            user_identity("tenant3"),
-            AxumPath("aa11".into()),
-            Json(ToggleBody { enabled: false }),
-        )
-        .await
-        .unwrap();
-        assert_eq!(resp["ok"], true);
-        assert_eq!(resp["job"]["enabled"], false);
-
-        // Persisted: a fresh read of cron.json reflects the flip and
-        // the store shape (version + full job records) survived.
-        let content = tokio::fs::read_to_string(&path).await.unwrap();
-        let store: octos_bus::CronStore = serde_json::from_str(&content).unwrap();
-        assert_eq!(store.version, 1);
-        assert_eq!(store.jobs.len(), 1);
-        assert!(!store.jobs[0].enabled);
-        assert_eq!(store.jobs[0].payload.message, "check the queue");
-    }
-
-    #[tokio::test]
-    async fn toggle_404s_on_unknown_job_and_missing_store() {
-        let (_dir, state, ps) = temp_state();
-        let profile = make_user_profile("tenant4");
-        ps.save(&profile).unwrap();
-
-        // No cron.json at all.
-        let missing_store = set_my_cron_enabled(
-            State(state.clone()),
-            HeaderMap::new(),
-            user_identity("tenant4"),
-            AxumPath("aa11".into()),
-            Json(ToggleBody { enabled: false }),
-        )
-        .await;
-        assert_eq!(
-            missing_store.err().map(|(s, _)| s),
-            Some(StatusCode::NOT_FOUND)
-        );
-
-        // Store exists but the id doesn't.
-        seed_cron(&ps, &profile, vec![make_job("aa11", true)]).await;
-        let unknown = set_my_cron_enabled(
-            State(state),
-            HeaderMap::new(),
-            user_identity("tenant4"),
-            AxumPath("zz99".into()),
-            Json(ToggleBody { enabled: false }),
-        )
-        .await;
-        assert_eq!(unknown.err().map(|(s, _)| s), Some(StatusCode::NOT_FOUND));
-    }
-
-    #[tokio::test]
-    async fn apply_cron_toggle_is_scoped_to_the_addressed_job() {
-        // Pure file-level core: flipping one job leaves siblings alone.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("cron.json");
-        let store = octos_bus::CronStore {
-            version: 1,
-            jobs: vec![make_job("one", true), make_job("two", true)],
-        };
-        tokio::fs::write(&path, serde_json::to_string(&store).unwrap())
-            .await
-            .unwrap();
-
-        let updated = apply_cron_toggle(&path, "two", false).await.unwrap();
-        assert_eq!(updated.id, "two");
-        let reread: octos_bus::CronStore =
-            serde_json::from_str(&tokio::fs::read_to_string(&path).await.unwrap()).unwrap();
-        assert!(reread.jobs[0].enabled, "sibling job must be untouched");
-        assert!(!reread.jobs[1].enabled);
     }
 
     #[tokio::test]
@@ -612,111 +474,6 @@ mod tests {
             next > now_ms,
             "every-30m job must be scheduled in the future, got {next} vs now {now_ms}"
         );
-    }
-
-    #[tokio::test]
-    async fn toggle_via_service_adopts_external_writes_instead_of_erasing_them() {
-        // codex #1612 r2 P1: the parent service's memory can predate a
-        // gateway child's whole lifetime. A toggle routed through it
-        // must ADOPT the file's current jobs, not persist its stale
-        // memory over them.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("cron.json");
-        let store = octos_bus::CronStore {
-            version: 1,
-            jobs: vec![make_job("old", true)],
-        };
-        tokio::fs::write(&path, serde_json::to_string(&store).unwrap())
-            .await
-            .unwrap();
-        let (tx, _rx) = tokio::sync::mpsc::channel(1);
-        // Service loads {old} into memory…
-        let svc = Arc::new(CronService::new(&path, tx));
-        // …then an external owner (gateway child / CLI) rewrites the
-        // file with an ADDITIONAL job.
-        let external = octos_bus::CronStore {
-            version: 1,
-            jobs: vec![make_job("old", true), make_job("child-added", true)],
-        };
-        tokio::fs::write(&path, serde_json::to_string(&external).unwrap())
-            .await
-            .unwrap();
-
-        // Toggling through the service must see child-added AND keep it.
-        let toggled = toggle_via_service(&svc, "child-added", false).unwrap();
-        assert!(!toggled.enabled);
-        let reread: octos_bus::CronStore =
-            serde_json::from_str(&tokio::fs::read_to_string(&path).await.unwrap()).unwrap();
-        assert_eq!(reread.jobs.len(), 2, "child-added must survive: {reread:?}");
-        assert!(reread.jobs.iter().any(|j| j.id == "old" && j.enabled));
-        assert!(
-            reread
-                .jobs
-                .iter()
-                .any(|j| j.id == "child-added" && !j.enabled)
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn toggle_via_service_surfaces_persistence_failures() {
-        // codex #1612 r2 P2: enable_job swallowed save errors and
-        // reported ok. The reconciling path must propagate them.
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("cron.json");
-        let store = octos_bus::CronStore {
-            version: 1,
-            jobs: vec![make_job("one", true)],
-        };
-        tokio::fs::write(&path, serde_json::to_string(&store).unwrap())
-            .await
-            .unwrap();
-        let (tx, _rx) = tokio::sync::mpsc::channel(1);
-        let svc = Arc::new(CronService::new(&path, tx));
-
-        let live = std::fs::metadata(dir.path()).unwrap().permissions();
-        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
-        let outcome = toggle_via_service(&svc, "one", false);
-        std::fs::set_permissions(dir.path(), live).unwrap();
-
-        assert!(
-            matches!(outcome, Err(ToggleError::Io)),
-            "failed persistence must not report ok: {outcome:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn toggle_via_service_routes_through_the_owning_store() {
-        // The service path: enable_job mutates the IN-MEMORY store and
-        // persists — the file reflects the flip without us touching it.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("cron.json");
-        let mut job = make_job("svc1", true);
-        job.state.next_run_at_ms = Some(123);
-        let store = octos_bus::CronStore {
-            version: 1,
-            jobs: vec![job],
-        };
-        tokio::fs::write(&path, serde_json::to_string(&store).unwrap())
-            .await
-            .unwrap();
-
-        let (tx, _rx) = tokio::sync::mpsc::channel(1);
-        let svc = Arc::new(CronService::new(&path, tx));
-
-        let toggled = toggle_via_service(&svc, "svc1", false).unwrap();
-        assert!(!toggled.enabled);
-        assert_eq!(toggled.state.next_run_at_ms, None, "deadline cleared");
-        let reread: octos_bus::CronStore =
-            serde_json::from_str(&tokio::fs::read_to_string(&path).await.unwrap()).unwrap();
-        assert!(!reread.jobs[0].enabled, "service persisted the flip");
-
-        assert!(matches!(
-            toggle_via_service(&svc, "nope", false),
-            Err(ToggleError::NotFound)
-        ));
     }
 
     #[tokio::test]

@@ -6012,7 +6012,7 @@ pub(crate) async fn ws_handler_for_session_ingress(
         profile_id.or_else(|| session_id.profile_id().map(ToOwned::to_owned));
     let auth_identity = connection_profile_id.clone().map(|id| AuthIdentity::User {
         id,
-        role: UserRole::User,
+
     });
     let features = ConnectionUiFeatures::from_headers_and_query(&headers, uri.query());
     let scope = SessionIngressScope { session_id, token };
@@ -12343,7 +12343,7 @@ async fn raw_profile_llm_upsert(
     // Relocate keychain-backed secrets (e.g. a Vertex SA JSON supplied as the
     // route api_key) into the OS keychain before persisting, so this RPC can't
     // write a private key to plaintext profile config.
-    crate::api::admin::relocate_keychain_backed_secrets(&mut profile.config.env_vars, &profile_id)
+    crate::api::handlers::relocate_keychain_backed_secrets(&mut profile.config.env_vars, &profile_id)
         .map_err(|(_, msg)| RpcError::invalid_params(msg))?;
     profile.updated_at = Utc::now();
     store
@@ -15163,7 +15163,7 @@ async fn raw_profile_sub_providers_upsert(
         profile.config.sub_providers.push(entry);
     }
 
-    crate::api::admin::relocate_keychain_backed_secrets(&mut profile.config.env_vars, &profile_id)
+    crate::api::handlers::relocate_keychain_backed_secrets(&mut profile.config.env_vars, &profile_id)
         .map_err(|(_, msg)| RpcError::invalid_params(msg))?;
     profile.updated_at = Utc::now();
     store

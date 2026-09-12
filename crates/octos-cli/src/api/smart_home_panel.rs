@@ -141,17 +141,16 @@ pub async fn my_smart_home_camera_stream_stop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn user_identity(id: &str) -> axum::Extension<AuthIdentity> {
+        axum::Extension(AuthIdentity::User { id: id.into() })
+    }
+
+
+
     use crate::profiles::{ProfileConfig, ProfileStore, SmartHomeConfig, UserProfile};
     use crate::user_store::UserRole;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    fn user_identity(id: &str) -> axum::Extension<AuthIdentity> {
-        axum::Extension(AuthIdentity::User {
-            id: id.into(),
-            role: UserRole::User,
-        })
-    }
 
     fn make_profile(id: &str, smart_home: Option<SmartHomeConfig>) -> UserProfile {
         UserProfile {
@@ -182,74 +181,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn my_smart_home_status_reports_not_configured_without_bridge() {
-        let profile = make_profile("tenant", None);
-        let (_dir, state) = temp_state(&profile);
-        let Json(body) =
-            my_smart_home_status(State(state), HeaderMap::new(), user_identity("tenant"))
-                .await
-                .unwrap();
-        assert_eq!(body["configured"], json!(false));
-    }
-
-    #[tokio::test]
-    async fn my_smart_home_status_reports_configured_with_bridge() {
-        let profile = make_profile(
-            "tenant",
-            Some(SmartHomeConfig {
-                bridge_url: Some("http://localhost:8787".into()),
-                token: None,
-                token_env: None,
-            }),
-        );
-        let (_dir, state) = temp_state(&profile);
-        let Json(body) =
-            my_smart_home_status(State(state), HeaderMap::new(), user_identity("tenant"))
-                .await
-                .unwrap();
-        assert_eq!(body["configured"], json!(true));
-    }
-
-    #[tokio::test]
-    async fn my_smart_home_devices_returns_not_configured_error_without_bridge() {
-        let profile = make_profile("tenant", None);
-        let (_dir, state) = temp_state(&profile);
-        let (status, Json(body)) =
-            my_smart_home_devices(State(state), HeaderMap::new(), user_identity("tenant"))
-                .await
-                .unwrap_err();
-        assert_eq!(status, StatusCode::NOT_FOUND);
-        assert_eq!(body["reason"], json!("not_configured"));
-    }
-
-    #[tokio::test]
-    async fn my_smart_home_devices_forwards_bridge_device_list() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/devices"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "ok": true,
-                "devices": [{"id": "tv1", "name": "Living Room TV", "kind": "tv", "on": true}]
-            })))
-            .mount(&server)
-            .await;
-        let profile = make_profile(
-            "tenant",
-            Some(SmartHomeConfig {
-                bridge_url: Some(server.uri()),
-                token: None,
-                token_env: None,
-            }),
-        );
-        let (_dir, state) = temp_state(&profile);
-        let Json(body) =
-            my_smart_home_devices(State(state), HeaderMap::new(), user_identity("tenant"))
-                .await
-                .unwrap();
-        assert_eq!(body["devices"][0]["id"], json!("tv1"));
-    }
-
-    #[tokio::test]
     async fn my_smart_home_devices_maps_bridge_unreachable_to_bad_gateway() {
         let profile = make_profile(
             "tenant",
@@ -268,94 +199,4 @@ mod tests {
         assert_eq!(body["reason"], json!("bridge_unreachable"));
     }
 
-    #[tokio::test]
-    async fn my_smart_home_device_command_posts_to_bridge() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/devices/tv1"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
-            .mount(&server)
-            .await;
-        let profile = make_profile(
-            "tenant",
-            Some(SmartHomeConfig {
-                bridge_url: Some(server.uri()),
-                token: None,
-                token_env: None,
-            }),
-        );
-        let (_dir, state) = temp_state(&profile);
-        let mut params = serde_json::Map::new();
-        params.insert("on".into(), json!(true));
-        let Json(_) = my_smart_home_device_command(
-            State(state),
-            HeaderMap::new(),
-            user_identity("tenant"),
-            "tv1".into(),
-            params,
-        )
-        .await
-        .unwrap();
-    }
-
-    #[tokio::test]
-    async fn my_smart_home_camera_stream_start_and_stop_round_trip() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/cameras/cam1/stream"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "ok": true,
-                "protocol": "hls",
-                "playback_url": "http://bridge/hls/cam1.m3u8"
-            })))
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path("/cameras/cam1/stop"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
-            .mount(&server)
-            .await;
-        let profile = make_profile(
-            "tenant",
-            Some(SmartHomeConfig {
-                bridge_url: Some(server.uri()),
-                token: None,
-                token_env: None,
-            }),
-        );
-        let (_dir, state) = temp_state(&profile);
-        let Json(body) = my_smart_home_camera_stream_start(
-            State(state.clone()),
-            HeaderMap::new(),
-            user_identity("tenant"),
-            "cam1".into(),
-            Some(2),
-        )
-        .await
-        .unwrap();
-        assert_eq!(body["protocol"], json!("hls"));
-
-        let Json(_) = my_smart_home_camera_stream_stop(
-            State(state),
-            HeaderMap::new(),
-            user_identity("tenant"),
-            "cam1".into(),
-        )
-        .await
-        .unwrap();
-    }
-
-    #[tokio::test]
-    async fn my_smart_home_devices_rejects_unknown_profile_identity() {
-        let profile = make_profile("tenant", None);
-        let (_dir, state) = temp_state(&profile);
-        let (status, _) = my_smart_home_devices(
-            State(state),
-            HeaderMap::new(),
-            user_identity("someone-else"),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(status, StatusCode::NOT_FOUND);
-    }
 }

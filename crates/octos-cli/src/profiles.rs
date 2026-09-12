@@ -2898,7 +2898,6 @@ pub(crate) fn config_from_profile(
         frps_server: None,
         allow_admin_shell: false,
         #[cfg(feature = "api")]
-        dashboard_auth: None,
         #[cfg(feature = "api")]
         monitor: None,
         // F-005: credential pool + content routing are per-profile

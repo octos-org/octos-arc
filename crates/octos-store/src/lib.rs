@@ -10,3 +10,4 @@
 
 pub mod approvals_audit;
 pub mod usage_ledger;
+pub mod user_store;

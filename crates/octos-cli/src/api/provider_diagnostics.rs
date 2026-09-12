@@ -68,6 +68,14 @@ pub struct TestSearchResponse {
 }
 
 
+fn resolve_profile_secret(env_name: &str, stored_value: Option<&str>) -> Option<String> {
+    resolve_profile_secret_with_keychain(env_name, stored_value, |name| {
+        crate::auth::keychain::get_secret(name).ok().flatten()
+    })
+}
+
+
+
 fn resolve_saved_key(
     state: &AppState,
     identity: &Option<axum::Extension<super::router::AuthIdentity>>,
@@ -95,7 +103,7 @@ fn resolve_saved_key(
         match identity {
             Some(axum::Extension(super::router::AuthIdentity::User { id, .. })) => id.clone(),
             Some(axum::Extension(super::router::AuthIdentity::Admin)) => {
-                super::auth_handlers::ADMIN_PROFILE_ID.into()
+                super::profile_scope::ADMIN_PROFILE_ID.into()
             }
             None => {
                 return Err((StatusCode::UNAUTHORIZED, "not authenticated".into()));
@@ -156,6 +164,73 @@ fn resolve_saved_search_key(
 
     let stored = profile.config.env_vars.get(env_name).map(String::as_str);
     Ok(resolve_profile_secret(env_name, stored).unwrap_or_default())
+}
+
+
+
+fn default_search_api_env(provider: &str) -> Option<&'static str> {
+    match provider {
+        "tavily" => Some("TAVILY_API_KEY"),
+        "perplexity" => Some("PERPLEXITY_API_KEY"),
+        "brave" => Some("BRAVE_API_KEY"),
+        "you" => Some("YDC_API_KEY"),
+        "serper" => Some("SERPER_API_KEY"),
+        _ => None,
+    }
+}
+
+
+
+fn resolve_test_search_profile_id(
+    identity: &Option<axum::Extension<super::router::AuthIdentity>>,
+    requested_profile_id: Option<&str>,
+) -> Result<String, (StatusCode, String)> {
+    let requested_profile_id = requested_profile_id
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+
+    match identity {
+        Some(axum::Extension(super::router::AuthIdentity::Admin)) => Ok(requested_profile_id
+            .unwrap_or(super::profile_scope::ADMIN_PROFILE_ID)
+            .to_string()),
+        Some(axum::Extension(super::router::AuthIdentity::User { id, .. })) => {
+            let Some(requested) = requested_profile_id else {
+                return Ok(id.clone());
+            };
+            let child_prefix = format!("{id}--");
+            if requested == id || requested.starts_with(&child_prefix) {
+                Ok(requested.to_string())
+            } else {
+                Err((
+                    StatusCode::FORBIDDEN,
+                    "cannot test search keys for another profile".into(),
+                ))
+            }
+        }
+        None => Err((StatusCode::UNAUTHORIZED, "not authenticated".into())),
+    }
+}
+
+
+
+fn resolve_profile_secret_with_keychain<F>(
+    env_name: &str,
+    stored_value: Option<&str>,
+    mut keychain_lookup: F,
+) -> Option<String>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let secret = match stored_value {
+        Some(value) if value == crate::auth::KEYCHAIN_MARKER => keychain_lookup(env_name),
+        Some(value) if !value.trim().is_empty() => Some(value.to_string()),
+        _ => None,
+    };
+
+    secret
+        .or_else(|| std::env::var(env_name).ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 

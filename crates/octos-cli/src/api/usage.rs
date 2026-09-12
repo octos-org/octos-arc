@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use super::AppState;
-use super::auth_handlers;
+use super::profile_scope;
 use super::router::AuthIdentity;
 use crate::profiles::ProfileStore;
 use crate::usage_ledger::{PersistentUsageLedger, UsageAnalytics, UsageQuery};
@@ -147,7 +147,7 @@ fn resolve_my_usage_profile(
         .profile_store
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let profile_id = auth_handlers::resolve_my_profile_id(identity, store, state, headers)?;
+    let profile_id = profile_scope::resolve_my_profile_id(identity, store, state, headers)?;
     let data_dir = resolve_profile_data_dir(store, &profile_id)?;
     Ok((profile_id, data_dir))
 }
