@@ -41,6 +41,7 @@ pub use init::InitCommand;
 #[cfg_attr(not(test), allow(unused_imports))]
 #[cfg(feature = "api")]
 pub use serve::ServeCommand;
+pub use skills::SkillsCommand;
 
 /// octos: Rust-native coding agent orchestration.
 #[derive(Debug, Parser)]
@@ -95,6 +96,8 @@ pub enum Command {
     Clean(CleanCommand),
     /// Generate shell completions.
     Completions(CompletionsCommand),
+    /// Manage agent skills (list, install, remove).
+    Skills(SkillsCommand),
 }
 
 /// Whether stdout is reserved for protocol or assistant output, so tracing
@@ -301,6 +304,7 @@ impl Executable for Command {
     fn execute(self) -> Result<()> {
         match self {
             Self::Auth(cmd) => cmd.execute(),
+            Self::Skills(cmd) => cmd.execute(),
             Self::Chat(cmd) => cmd.execute(),
             Self::Arc(cmd) => {
                 eyre::ensure!(
