@@ -5931,7 +5931,7 @@ pub async fn ws_handler(
     if let (Some(Extension(identity_inner)), Some(profile_id)) =
         (identity.as_ref(), routed_profile_id.as_ref())
     {
-        if !super::auth_handlers::is_authorized_for_profile(&state, identity_inner, profile_id) {
+        if !super::profile_scope::is_authorized_for_profile(&state, identity_inner, profile_id) {
             tracing::warn!(
                 target: "octos::ui_protocol::ws",
                 identity = ?identity_inner,
@@ -23609,7 +23609,7 @@ async fn handle_content_list(
             return;
         }
     };
-    let result = super::auth_handlers::my_content(
+    let result = super::profile_scope::my_content(
         State(state.clone()),
         headers.clone(),
         Extension(identity),
@@ -23680,7 +23680,7 @@ async fn handle_content_delete(
         return;
     };
     let content_id = params.id.clone();
-    let result = super::auth_handlers::delete_my_content(
+    let result = super::profile_scope::delete_my_content(
         State(state.clone()),
         headers.clone(),
         Extension(identity),
@@ -23755,11 +23755,11 @@ async fn handle_content_bulk_delete(
         );
         return;
     }
-    let result = super::auth_handlers::bulk_delete_my_content(
+    let result = super::profile_scope::bulk_delete_my_content(
         State(state.clone()),
         headers.clone(),
         Extension(identity),
-        axum::Json(super::auth_handlers::BulkDeleteRequest { ids: params.ids }),
+        axum::Json(super::profile_scope::BulkDeleteRequest { ids: params.ids }),
     )
     .await;
     match result {

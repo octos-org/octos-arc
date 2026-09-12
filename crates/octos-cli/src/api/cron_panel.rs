@@ -52,7 +52,7 @@ use serde::Deserialize;
 
 use super::AppState;
 use super::router::AuthIdentity;
-use crate::api::auth_handlers::resolve_my_profile_id;
+use crate::api::profile_scope::resolve_my_profile_id;
 
 /// Render one job in the same shape the admin list uses, so the SPA
 /// can share a row component between the two surfaces.

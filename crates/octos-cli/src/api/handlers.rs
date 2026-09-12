@@ -21,7 +21,7 @@ use octos_core::{MAIN_PROFILE_ID, SessionKey};
 use serde::{Deserialize, Serialize};
 
 use super::AppState;
-use super::auth_handlers::{ADMIN_PROFILE_ID, is_authorized_for_profile};
+use super::profile_scope::{ADMIN_PROFILE_ID, is_authorized_for_profile};
 use super::router::AuthIdentity;
 
 /// Legacy `POST /api/chat` retired.
@@ -292,7 +292,7 @@ pub(crate) fn routed_profile_id_from_headers(
 /// authorized for the target profile. Admin tokens (`AuthIdentity::Admin`)
 /// and admin-role user sessions short-circuit to `Ok`; owner→sub-account
 /// is also permitted via the parent_id check in
-/// [`super::auth_handlers::is_authorized_for_profile`]. Mismatch is a
+/// [`super::profile_scope::is_authorized_for_profile`]. Mismatch is a
 /// hard `403`.
 ///
 /// Unauthenticated requests pass through unchanged — the call site is
@@ -308,7 +308,7 @@ pub(crate) fn authorized_routed_profile_id_from_headers(
         return Ok(None);
     };
     if let Some(identity) = identity {
-        if !super::auth_handlers::is_authorized_for_profile(state, identity, &profile_id) {
+        if !super::profile_scope::is_authorized_for_profile(state, identity, &profile_id) {
             tracing::warn!(
                 target: "octos::api::auth",
                 identity = ?identity,
@@ -2192,7 +2192,7 @@ pub(crate) fn decide_resolved_profile_id(
 ) -> Result<String, Response> {
     match (identity, header_profile_id) {
         (Some(identity), Some(pid)) => {
-            if super::auth_handlers::is_authorized_for_profile(state, identity, pid) {
+            if super::profile_scope::is_authorized_for_profile(state, identity, pid) {
                 return Ok(pid.to_string());
             }
             tracing::warn!(
@@ -5224,7 +5224,7 @@ mod tests {
     // middleware ran) it must name a profile the identity is authorized
     // for — otherwise we return `403`, never silently override.
 
-    use crate::api::auth_handlers::ADMIN_PROFILE_ID;
+    use crate::api::profile_scope::ADMIN_PROFILE_ID;
     use crate::profiles::{ProfileStore, UserProfile};
     use crate::user_store::UserRole;
 

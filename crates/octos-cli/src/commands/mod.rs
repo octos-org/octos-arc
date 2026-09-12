@@ -2,7 +2,6 @@
 
 mod account;
 pub mod acp;
-mod admin;
 mod auth;
 mod cache;
 mod channels;
@@ -52,7 +51,6 @@ pub use octos_arc::ArcCommand;
 #[doc(hidden)]
 #[cfg(feature = "api")]
 pub use acp::{OctosAcpAgentTransport, TestAgentFactory};
-pub use admin::AdminCommand;
 pub use auth::AuthCommand;
 pub use cache::CacheCommand;
 pub use channels::ChannelsCommand;
@@ -118,8 +116,6 @@ pub enum Command {
     Account(AccountCommand),
     /// Run as an Agent Client Protocol (ACP) agent over stdio (Zed, etc.).
     Acp(AcpCommand),
-    /// Admin commands for tenant and tunnel management.
-    Admin(AdminCommand),
     /// Manage authentication for LLM providers.
     Auth(AuthCommand),
     /// Manage messaging channels.
@@ -373,7 +369,6 @@ impl Executable for Command {
         match self {
             Self::Account(cmd) => cmd.execute(),
             Self::Acp(cmd) => cmd.execute(),
-            Self::Admin(cmd) => cmd.execute(),
             Self::Auth(cmd) => cmd.execute(),
             Self::Channels(cmd) => cmd.execute(),
             Self::Chat(cmd) => cmd.execute(),

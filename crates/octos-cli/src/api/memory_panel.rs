@@ -41,7 +41,7 @@ use serde::Serialize;
 
 use super::AppState;
 use super::router::AuthIdentity;
-use crate::api::auth_handlers::resolve_my_profile_id;
+use crate::api::profile_scope::resolve_my_profile_id;
 
 /// One recent daily-note file (`memory/YYYY-MM-DD.md`).
 #[derive(Debug, Serialize)]

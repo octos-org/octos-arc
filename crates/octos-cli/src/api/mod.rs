@@ -7,10 +7,6 @@
 //! exclusively. The harness/admin and swarm event surfaces still use a
 //! process-wide [`EventBroadcaster`] over SSE (admin-only).
 
-pub mod admin;
-pub mod admin_audit;
-pub mod admin_setup;
-pub mod auth_handlers;
 mod bilibili;
 pub(crate) mod coding_tool_contract;
 mod cron_panel;
@@ -23,14 +19,14 @@ pub mod metrics;
 pub(crate) mod ominix_runtime;
 pub mod preview;
 pub mod preview_tokens;
+pub mod profile_scope;
+pub mod provider_diagnostics;
 mod private_asr;
-pub mod purge;
 mod router;
 pub(crate) mod session_ingress;
 pub(crate) mod skill_action_jobs;
 mod smart_home_bridge;
 mod smart_home_panel;
-pub(crate) mod solo_auth;
 mod ui_protocol_alpha2_bridge;
 mod ui_protocol_alpha9_bridge;
 // Relocated to crate::contracts (Phase 3 of goal-in-chat) so `octos chat
@@ -50,7 +46,6 @@ pub(crate) use crate::contracts::sanitize as ui_protocol_sanitize;
 pub(crate) use crate::contracts::scope as ui_protocol_scope;
 mod ui_protocol_task_output;
 pub mod usage;
-pub mod user_admin;
 pub(crate) mod voice_turn;
 pub mod voices;
 pub(crate) mod volcano_ws;
@@ -104,17 +99,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
-use crate::admin_audit_store::AdminAuditStore;
-use crate::admin_token_store::AdminTokenStore;
 use crate::content_catalog::ContentCatalogManager;
-use crate::login_allowlist::LoginAllowlistStore;
-use crate::otp::AuthManager;
 use crate::process_manager::ProcessManager;
 use crate::profiles::ProfileStore;
 use crate::runtime::{ProfileRuntime, SessionRuntimeCache};
-use crate::setup_state_store::SetupStateStore;
-use crate::tenant::TenantStore;
-use crate::user_store::UserStore;
 
 /// Serializes skill filesystem mutation and runtime publication per profile.
 ///
@@ -192,50 +180,14 @@ impl Drop for ProfileSkillMutationGuard {
     }
 }
 
-/// Cached mapping from frps `run_id` to the authenticated tenant ID.
-///
-/// Populated during Login verification and consulted during NewProxy to
-/// ensure a client can only claim resources belonging to the tenant that
-/// authenticated.
-#[derive(Default)]
-pub struct RunIdCache {
-    entries: RwLock<HashMap<String, RunIdEntry>>,
-}
+
 
 struct RunIdEntry {
     tenant_id: String,
     expires_at: Instant,
 }
 
-impl RunIdCache {
-    pub fn new() -> Self {
-        Self {
-            entries: RwLock::new(HashMap::new()),
-        }
-    }
 
-    pub fn insert(&self, run_id: String, tenant_id: String, ttl: std::time::Duration) {
-        let mut map = self.entries.write().unwrap();
-        map.insert(
-            run_id,
-            RunIdEntry {
-                tenant_id,
-                expires_at: Instant::now() + ttl,
-            },
-        );
-    }
-
-    pub fn get_tenant(&self, run_id: &str) -> Option<String> {
-        let map = self.entries.read().unwrap();
-        map.get(run_id).and_then(|entry| {
-            if Instant::now() < entry.expires_at {
-                Some(entry.tenant_id.clone())
-            } else {
-                None
-            }
-        })
-    }
-}
 
 /// Opaque, per-application OUP persistence resources. Connections share them;
 /// independent in-process applications do not.
@@ -286,28 +238,15 @@ pub struct AppState {
     /// Bootstrap admin auth token from config/env (used only until the
     /// hashed admin-token file is created via dashboard rotation).
     pub auth_token: Option<String>,
-    /// Hashed admin token store at `{data_dir}/admin_token.json`.
-    /// When present, authoritative for admin auth — the bootstrap token is
-    /// ignored until the file is cleared via `octos admin reset-token`.
-    pub admin_token_store: Arc<AdminTokenStore>,
-    /// Setup-wizard state store at `{data_dir}/setup_state.json`.
-    /// Tracks wizard completion, skip status, and last step reached so the
-    /// dashboard can gate and resume the first-run flow.
-    pub setup_state_store: Arc<SetupStateStore>,
     /// Prometheus metrics handle.
     pub metrics_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
     /// Profile store for admin dashboard.
     pub profile_store: Option<Arc<ProfileStore>>,
     /// Process manager for gateway lifecycle.
     pub process_manager: Option<Arc<ProcessManager>>,
-    /// User store for multi-user management.
-    pub user_store: Option<Arc<UserStore>>,
     /// Allowlist for pre-authorized email-based signup.
     pub allowlist_store: Option<Arc<LoginAllowlistStore>>,
-    /// Persistent audit log for state-changing admin actions.
-    pub admin_audit_store: Option<Arc<AdminAuditStore>>,
     /// Auth manager for email OTP and sessions.
-    pub auth_manager: Option<Arc<AuthManager>>,
     /// Shared HTTP client for webhook proxying.
     pub http_client: reqwest::Client,
     /// Path to the global config.json file (for admin bot config editing).
@@ -319,7 +258,6 @@ pub struct AppState {
     /// Persistent sysinfo instance for accurate CPU metrics across polls.
     pub sysinfo: tokio::sync::Mutex<sysinfo::System>,
     /// Tenant store for tunnel management.
-    pub tenant_store: Option<Arc<TenantStore>>,
     /// Cache of frps run_id → tenant_id from Login verification.
     pub run_id_cache: Arc<RunIdCache>,
     /// Tunnel domain (e.g. "octos-cloud.org").
@@ -488,7 +426,6 @@ impl AppState {
             user_store: None,
             allowlist_store: None,
             admin_audit_store: None,
-            auth_manager: None,
             http_client: reqwest::Client::new(),
             config_path: None,
             watchdog_enabled: None,

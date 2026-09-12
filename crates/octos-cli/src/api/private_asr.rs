@@ -303,7 +303,7 @@ pub(crate) async fn browser_grant(
         .as_ref()
         .ok_or_else(|| PrivateAsrError::Unconfigured.response())?;
     let profile_id =
-        super::auth_handlers::resolve_my_profile_id(&identity, profile_store, &state, &headers)
+        super::profile_scope::resolve_my_profile_id(&identity, profile_store, &state, &headers)
             .map_err(|status| {
                 if status == StatusCode::FORBIDDEN {
                     PrivateAsrError::Forbidden.response()

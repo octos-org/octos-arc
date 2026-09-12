@@ -35,10 +35,11 @@ use crate::user_store::UserRole;
 /// Authentication identity extracted by the auth middleware.
 #[derive(Clone, Debug)]
 pub enum AuthIdentity {
-    /// Admin token — full access to all endpoints.
+    /// Local-trust callers are admin-equivalent (the multi-tenant user
+    /// account system was removed with the dashboard).
     Admin,
-    /// Authenticated user session.
-    User { id: String, role: UserRole },
+    /// A scoped user identity (kept for sub-account profile authorization).
+    User { id: String },
 }
 
 /// Backward-compatible default when the operator has not configured a
@@ -267,12 +268,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     // — and fail closed inside the handlers (`solo_auth::solo_login_allowed`)
     // unless the host is Local-solo AND the peer is loopback.
     let auth_api = Router::new()
-        .route("/api/auth/status", get(auth_handlers::auth_status))
-        .route("/api/auth/send-code", post(auth_handlers::send_code))
-        .route("/api/auth/verify", post(auth_handlers::verify))
+        .route("/api/auth/status", get(profile_scope::auth_status))
+        .route("/api/auth/send-code", post(profile_scope::send_code))
+        .route("/api/auth/verify", post(profile_scope::verify))
         .route("/api/auth/solo", post(solo_auth::solo_login))
         .route("/api/auth/solo/create", post(solo_auth::solo_create))
-        .route("/api/auth/logout", post(auth_handlers::logout));
+        .route("/api/auth/logout", post(profile_scope::logout));
 
     // Chat + status API (existing)
     //
@@ -341,21 +342,21 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
     // User self-service endpoints (user or admin auth)
     let my_api = Router::new()
-        .route("/api/my/profile", get(auth_handlers::my_profile))
-        .route("/api/my/profile", put(auth_handlers::update_my_profile))
-        .route("/api/my/profile/qr", get(auth_handlers::my_profile_qr))
+        .route("/api/my/profile", get(profile_scope::my_profile))
+        .route("/api/my/profile", put(profile_scope::update_my_profile))
+        .route("/api/my/profile/qr", get(profile_scope::my_profile_qr))
         // Reply-voice selection: list synthesizable voices + set this user's
         // sticky default. Both need the caller's identity, so they live in the
         // authenticated `my_api` group.
-        .route("/api/voices", get(auth_handlers::list_voices))
-        .route("/api/my/voice", put(auth_handlers::set_my_voice))
+        .route("/api/voices", get(profile_scope::list_voices))
+        .route("/api/my/voice", put(profile_scope::set_my_voice))
         // Per-tenant voice-assistant pre-flight: ASR + LLM + (route-aware) TTS.
-        .route("/api/voice/readiness", get(auth_handlers::voice_readiness))
+        .route("/api/voice/readiness", get(profile_scope::voice_readiness))
         .route("/api/private-asr/grant", post(private_asr::browser_grant))
         // Generic profile-scoped text-to-speech synthesis.
         .route(
             "/api/voice/synthesize",
-            post(auth_handlers::synthesize_speech),
+            post(profile_scope::synthesize_speech),
         )
         // Memory + Cron panel REST routes retired in favor of the UI Protocol
         // methods (`memory/overview`, `memory/entity`, `cron/list`,
@@ -366,9 +367,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // safe as the sole transport. Mirrors the earlier `/api/my/content` →
         // `content/*` retirement (M12 Phase D-5): one implementation, one
         // transport.
-        .route("/api/my/soul", get(auth_handlers::my_soul))
-        .route("/api/my/soul", put(auth_handlers::update_my_soul))
-        .route("/api/my/soul", delete(auth_handlers::delete_my_soul))
+        .route("/api/my/soul", get(profile_scope::my_soul))
+        .route("/api/my/soul", put(profile_scope::update_my_soul))
+        .route("/api/my/soul", delete(profile_scope::delete_my_soul))
         // M12 Phase D-5: `/api/my/content` (list), `/api/my/content/{id}`
         // (delete), and `/api/my/content/bulk-delete` retired in favor of
         // WS RPC methods `content/list`, `content/delete`, and
@@ -376,61 +377,61 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // endpoints (`/{id}/thumbnail`, `/{id}/body`) remain REST per ADR.
         .route(
             "/api/my/content/{id}/thumbnail",
-            get(auth_handlers::my_content_thumbnail),
+            get(profile_scope::my_content_thumbnail),
         )
         .route(
             "/api/my/content/{id}/body",
-            get(auth_handlers::my_content_body),
+            get(profile_scope::my_content_body),
         )
         .route(
             "/api/my/profile/start",
-            post(auth_handlers::start_my_gateway),
+            post(profile_scope::start_my_gateway),
         )
-        .route("/api/my/profile/stop", post(auth_handlers::stop_my_gateway))
+        .route("/api/my/profile/stop", post(profile_scope::stop_my_gateway))
         .route(
             "/api/my/profile/restart",
-            post(auth_handlers::restart_my_gateway),
+            post(profile_scope::restart_my_gateway),
         )
         .route(
             "/api/my/profile/status",
-            get(auth_handlers::my_gateway_status),
+            get(profile_scope::my_gateway_status),
         )
         .route(
             "/api/my/profile/matrix/invites",
-            get(auth_handlers::my_matrix_invites),
+            get(profile_scope::my_matrix_invites),
         )
         .route(
             "/api/my/profile/matrix/test",
-            post(auth_handlers::test_my_matrix_connection),
+            post(profile_scope::test_my_matrix_connection),
         )
         .route(
             "/api/my/profile/matrix/invites/{room_id}/accept",
-            post(auth_handlers::accept_my_matrix_invite),
+            post(profile_scope::accept_my_matrix_invite),
         )
         .route(
             "/api/my/profile/matrix/invites/{room_id}/reject",
-            post(auth_handlers::reject_my_matrix_invite),
+            post(profile_scope::reject_my_matrix_invite),
         )
         .route(
             "/api/my/profile/matrix/invites/{room_id}/dismiss",
-            post(auth_handlers::dismiss_my_matrix_invite),
+            post(profile_scope::dismiss_my_matrix_invite),
         )
-        .route("/api/my/profile/logs", get(auth_handlers::my_gateway_logs))
+        .route("/api/my/profile/logs", get(profile_scope::my_gateway_logs))
         .route(
             "/api/my/profile/whatsapp/qr",
-            get(auth_handlers::my_whatsapp_qr),
+            get(profile_scope::my_whatsapp_qr),
         )
         .route(
             "/api/my/profile/wechat/qr-start",
-            get(auth_handlers::my_wechat_qr_start),
+            get(profile_scope::my_wechat_qr_start),
         )
         .route(
             "/api/my/profile/wechat/qr-poll",
-            post(auth_handlers::my_wechat_qr_poll),
+            post(profile_scope::my_wechat_qr_poll),
         )
         .route(
             "/api/my/profile/metrics",
-            get(auth_handlers::my_provider_metrics),
+            get(profile_scope::my_provider_metrics),
         )
         .route("/api/my/usage", get(usage::my_usage))
         .route(
@@ -439,21 +440,21 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         .route(
             "/api/my/profile/skills",
-            get(auth_handlers::my_profile_skills),
+            get(profile_scope::my_profile_skills),
         )
         .route(
             "/api/my/profile/skills/registry",
-            get(auth_handlers::my_profile_skill_registry),
+            get(profile_scope::my_profile_skill_registry),
         )
         .route(
             "/api/my/profile/skills",
-            post(auth_handlers::install_my_profile_skill),
+            post(profile_scope::install_my_profile_skill),
         )
         .route(
             "/api/my/profile/skills/{name}",
-            delete(auth_handlers::remove_my_profile_skill),
+            delete(profile_scope::remove_my_profile_skill),
         )
-        .route("/api/auth/me", get(auth_handlers::me))
+        .route("/api/auth/me", get(profile_scope::me))
         // Admin/config plane (kept REST): consumed by the admin dashboard SPA
         // (dashboard/src/api.ts), not the AppUI WS client. These functionally
         // overlap `profile/llm/*` but serve the REST-based admin surface, which
@@ -464,27 +465,27 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/my/model-limits", get(admin::model_limits))
         .route(
             "/api/my/profile/accounts",
-            get(auth_handlers::my_sub_accounts),
+            get(profile_scope::my_sub_accounts),
         )
         .route(
             "/api/my/profile/accounts",
-            post(auth_handlers::create_my_sub_account),
+            post(profile_scope::create_my_sub_account),
         )
         .route(
             "/api/my/profile/accounts/{id}",
-            get(auth_handlers::my_sub_account),
+            get(profile_scope::my_sub_account),
         )
         .route(
             "/api/my/profile/accounts/{id}",
-            put(auth_handlers::update_my_sub_account),
+            put(profile_scope::update_my_sub_account),
         )
         .route(
             "/api/my/profile/accounts/{id}/start",
-            post(auth_handlers::start_my_sub_gateway),
+            post(profile_scope::start_my_sub_gateway),
         )
         .route(
             "/api/my/profile/accounts/{id}/stop",
-            post(auth_handlers::stop_my_sub_gateway),
+            post(profile_scope::stop_my_sub_gateway),
         )
         // Self-service tenant registration (user-auth level)
         .route("/api/register", post(admin::register_tenant))

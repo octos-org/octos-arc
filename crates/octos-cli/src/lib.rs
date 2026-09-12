@@ -6,10 +6,7 @@
 //! narrow — only items that integration tests or sibling crates consume.
 
 #[cfg(feature = "api")]
-pub use octos_store::admin_audit_store;
-// Extracted to the `octos-store` crate; re-exported so `crate::admin_token_store::…`
 // keeps resolving unchanged.
-pub use octos_store::admin_token_store;
 #[cfg(feature = "api")]
 pub mod api;
 pub use octos_store::approvals_audit;
@@ -62,8 +59,6 @@ pub(crate) mod conversation_outcome;
 pub(crate) mod contracts;
 pub mod cron_tool;
 pub mod gateway_dispatcher;
-#[cfg(feature = "api")]
-pub use octos_store::login_allowlist;
 pub mod memory_consolidate;
 pub mod memory_refresh;
 #[cfg(feature = "api")]
@@ -71,7 +66,6 @@ pub mod monitor;
 #[cfg_attr(not(feature = "api"), allow(dead_code))]
 pub(crate) mod obs_events;
 #[cfg(feature = "api")]
-pub mod otp;
 // Peer recovery is also used by gateway actors without `api`. The remaining
 // staging and OUP transport helpers are intentionally dormant in that build.
 #[cfg_attr(not(feature = "api"), allow(dead_code))]
@@ -84,17 +78,12 @@ pub mod profiles;
 mod qos_catalog;
 pub mod runtime;
 pub mod session_actor;
-pub use octos_store::setup_state_store;
 pub mod skills_scope;
 pub use octos_services::soul_service;
-pub use octos_store::smtp_secret_store;
 pub mod status_indicator;
 pub mod status_layers;
 pub mod stream_reporter;
-pub use octos_services::tenant;
 pub mod tools;
 #[cfg(feature = "api")]
 pub use octos_services::updater;
 pub use octos_store::usage_ledger;
-#[cfg(feature = "api")]
-pub use octos_store::user_store;

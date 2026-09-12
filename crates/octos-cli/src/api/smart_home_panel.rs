@@ -21,7 +21,7 @@ use serde_json::{Value, json};
 use super::AppState;
 use super::router::AuthIdentity;
 use super::smart_home_bridge::{self, BridgeConfig, BridgeError};
-use crate::api::auth_handlers::resolve_my_profile_id;
+use crate::api::profile_scope::resolve_my_profile_id;
 
 type PanelError = (StatusCode, Json<Value>);
 
