@@ -139,8 +139,7 @@ use crate::autonomy::master_continuation_scheduler::{
 };
 use crate::autonomy::specialist_runner::{
     AppUiSupervisorEventSink, SpecialistArtifactSpec, SupervisedCliSpecialist,
-    SupervisedMcpSpecialist, SupervisedSpecialistSpec, run_supervised_cli_specialist,
-    run_supervised_mcp_specialist,
+    SupervisedSpecialistSpec, run_supervised_cli_specialist,
 };
 use crate::context_manager::{
     CompactContextPolicy, ContextCompactionBudgetOutcome, ContextCompactionRecord,
@@ -21742,7 +21741,7 @@ async fn handle_review_start(
             }
         };
     let accepted_agent_count =
-        expected_review_agent_count_for_profile(state, Some(review_profile_runtime.as_ref()));
+        expected_review_agent_count_for_profile(Some(review_profile_runtime.as_ref()));
 
     let turn_id = params.turn_id.clone().unwrap_or_default();
     let session_id = params.session_id.clone();
@@ -30445,12 +30444,9 @@ fn normalize_review_text(
 }
 
 fn expected_review_agent_count_for_profile(
-    state: &AppState,
     profile_runtime: Option<&crate::runtime::ProfileRuntime>,
 ) -> usize {
-    native_code_review_specs(profile_runtime).len()
-        + usize::from(review_cli_argv().is_some())
-        + usize::from(state.swarm_state.is_some())
+    native_code_review_specs(profile_runtime).len() + usize::from(review_cli_argv().is_some())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -30764,18 +30760,6 @@ async fn run_native_code_review_turn(
         &target,
         &turn_id,
         review_dispatch_policy.clone(),
-    );
-    maybe_spawn_mcp_review_specialist(
-        &mut joins,
-        &state,
-        &ws,
-        &ledger,
-        &session_id,
-        &profile_id,
-        &workspace_root,
-        &objective,
-        &target,
-        &turn_id,
     );
     let expected_results = joins.len();
 
@@ -31110,88 +31094,6 @@ fn maybe_spawn_cli_review_specialist(
     });
 }
 
-#[allow(clippy::too_many_arguments)]
-fn maybe_spawn_mcp_review_specialist(
-    joins: &mut tokio::task::JoinSet<NativeCodeReviewResult>,
-    state: &AppState,
-    ws: &WsConnection,
-    ledger: &Arc<UiProtocolLedger>,
-    session_id: &SessionKey,
-    profile_id: &str,
-    workspace_root: &Path,
-    objective: &str,
-    target: &str,
-    turn_id: &TurnId,
-) {
-    let Some(swarm_state) = state.swarm_state.as_ref() else {
-        return;
-    };
-    let agent_id = format!("reviewer-mcp-{}", short_turn_suffix(turn_id));
-    let artifact_path = workspace_root.join(format!(".octos-review-{agent_id}.md"));
-    let spec = SupervisedSpecialistSpec {
-        agent_id: agent_id.clone(),
-        parent_agent_id: Some("master".to_owned()),
-        session_id: session_id.clone(),
-        task_id: None,
-        path: format!("master/{agent_id}"),
-        role: "mcp_agent_review".to_owned(),
-        nickname: "Marie Curie".to_owned(),
-        backend_kind: "mcp_agent".to_owned(),
-        task: Some("Running MCP specialist review".to_owned()),
-        cwd: Some(workspace_root.to_path_buf()),
-        profile_id: profile_id.to_owned(),
-        artifacts: vec![SpecialistArtifactSpec {
-            id: "mcp-review-notes".to_owned(),
-            title: "MCP specialist review notes".to_owned(),
-            kind: "markdown".to_owned(),
-            path: artifact_path.clone(),
-        }],
-    };
-    let tool_name =
-        std::env::var("OCTOS_REVIEW_MCP_TOOL_NAME").unwrap_or_else(|_| "run_task".to_owned());
-    let task = json!({
-        "objective": objective,
-        "target": target,
-        "agent_id": agent_id,
-        "artifact_path": artifact_path.to_string_lossy().into_owned(),
-        "instructions": "Run a focused code review specialist task and return concise findings first.",
-    });
-    let sink = WsSupervisorEventSink {
-        ws: ws.clone(),
-        ledger: ledger.clone(),
-    };
-    let backend = swarm_state.swarm.backend();
-    let dispatch_policy = swarm_state.swarm.dispatch_policy();
-    let timeout = review_mcp_timeout();
-    joins.spawn(async move {
-        match run_supervised_mcp_specialist(
-            default_agent_orchestrator(),
-            &sink,
-            SupervisedMcpSpecialist::new(spec, backend, tool_name, task)
-                .with_dispatch_policy(dispatch_policy)
-                .timeout(timeout)
-                .heartbeat_interval(std::time::Duration::from_secs(2)),
-        )
-        .await
-        {
-            Ok(summary) => NativeCodeReviewResult {
-                agent_id: summary.agent_id,
-                nickname: "Marie Curie".to_owned(),
-                backend_kind: "mcp_agent".to_owned(),
-                status: summary.status,
-                summary: summary.output,
-            },
-            Err(error) => NativeCodeReviewResult {
-                agent_id,
-                nickname: "Marie Curie".to_owned(),
-                backend_kind: "mcp_agent".to_owned(),
-                status: "failed".to_owned(),
-                summary: error,
-            },
-        }
-    });
-}
-
 fn review_cli_argv() -> Option<Vec<String>> {
     let raw = std::env::var("OCTOS_REVIEW_CLI_SPECIALIST_ARGV_JSON").ok()?;
     let argv = serde_json::from_str::<Vec<String>>(&raw).ok()?;
@@ -31201,15 +31103,6 @@ fn review_cli_argv() -> Option<Vec<String>> {
         .filter(|arg| !arg.is_empty())
         .collect::<Vec<_>>();
     (!argv.is_empty()).then_some(argv)
-}
-
-fn review_mcp_timeout() -> std::time::Duration {
-    std::env::var("OCTOS_REVIEW_MCP_TIMEOUT_SECS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .map(std::time::Duration::from_secs)
-        .unwrap_or(std::time::Duration::from_secs(120))
 }
 
 async fn model_join_review_summary(

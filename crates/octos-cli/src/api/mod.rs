@@ -32,7 +32,6 @@ mod smart_home_bridge;
 mod smart_home_panel;
 pub(crate) mod solo_auth;
 mod static_files;
-pub mod swarm;
 mod ui_protocol_alpha2_bridge;
 mod ui_protocol_alpha9_bridge;
 // Relocated to crate::contracts (Phase 3 of goal-in-chat) so `octos chat
@@ -102,13 +101,6 @@ pub use handlers::{
 };
 #[doc(hidden)]
 pub use router::AuthIdentity as TestAuthIdentity;
-pub use swarm::{
-    BroadcasterSwarmEventSink, CostAttributionView, CostAttributionsResponse, DispatchIndexRow,
-    SubtaskView, SwarmBudgetSpec, SwarmContextSpec, SwarmDispatchDetail, SwarmDispatchRequest,
-    SwarmDispatchResponse, SwarmDispatchesResponse, SwarmReviewRequest, SwarmReviewResponse,
-    SwarmState, TestStubBackend, ValidatorView, build_swarm_state, build_test_swarm_state,
-    build_test_swarm_state_with_broadcaster, parallel_topology,
-};
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -393,10 +385,6 @@ pub struct AppState {
     pub allow_admin_shell: bool,
     /// Content catalog manager for per-profile file indexing.
     pub content_catalog_mgr: Option<Arc<ContentCatalogManager>>,
-    /// Shared swarm state for the M7.6 contract-authoring dashboard.
-    /// `None` when swarm wiring is not configured — handlers return
-    /// `503 Service Unavailable` in that case.
-    pub swarm_state: Option<Arc<swarm::SwarmState>>,
     /// Optional path to the JSONL harness-event sink. When `Some`,
     /// typed harness events (e.g. `SwarmReviewDecision`) are appended
     /// to the file in addition to being broadcast live to harness
@@ -524,7 +512,6 @@ impl AppState {
             host_memory: None,
             allow_admin_shell: false,
             content_catalog_mgr: None,
-            swarm_state: None,
             harness_event_sink_path: None,
             credential_pool: None,
             content_classifier: None,

@@ -4172,7 +4172,6 @@ dependencies = [
  "octos-plugin",
  "octos-services",
  "octos-store",
- "octos-swarm",
  "octos-workflows",
  "open",
  "percent-encoding",
@@ -4384,26 +4383,6 @@ dependencies = [
  "sha2",
  "tempfile",
  "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "octos-swarm"
-version = "2.0.3-rc.11"
-dependencies = [
- "async-trait",
- "chrono",
- "eyre",
- "metrics",
- "octos-agent",
- "redb",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
- "tokio-test",
  "tracing",
  "uuid",
 ]

@@ -27,7 +27,6 @@ use super::purge;
 use super::session_ingress;
 use super::solo_auth;
 use super::static_files;
-use super::swarm as swarm_api;
 use super::ui_protocol_transport;
 use super::usage;
 use super::user_admin;
@@ -806,21 +805,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/admin/tenants/{id}/setup-script",
             get(admin::tenant_setup_script),
-        )
-        // M7.6 — contract-authoring + swarm dispatch dashboard
-        .route("/api/swarm/dispatch", post(swarm_api::dispatch_swarm))
-        .route("/api/swarm/dispatches", get(swarm_api::list_dispatches))
-        .route(
-            "/api/swarm/dispatches/{id}",
-            get(swarm_api::dispatch_detail),
-        )
-        .route(
-            "/api/swarm/dispatches/{id}/review",
-            post(swarm_api::submit_review),
-        )
-        .route(
-            "/api/cost/attributions/{dispatch_id}",
-            get(swarm_api::cost_attributions),
         );
 
     // Conditionally enable admin shell endpoint (disabled by default).

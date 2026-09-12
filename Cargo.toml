@@ -13,7 +13,6 @@ members = [
     "crates/octos-arc",
     "crates/octos-pipeline",
     "crates/octos-plugin",
-    "crates/octos-swarm",
     "crates/octos-fleet",
     "crates/octos-fleet-worker",
 ]
@@ -41,7 +40,6 @@ octos-store = { path = "crates/octos-store" }
 octos-services = { path = "crates/octos-services" }
 octos-pipeline = { path = "crates/octos-pipeline" }
 octos-plugin = { path = "crates/octos-plugin" }
-octos-swarm = { path = "crates/octos-swarm" }
 octos-fleet = { path = "crates/octos-fleet" }
 octos-fleet-worker = { path = "crates/octos-fleet-worker" }
 # codex-rs crates (reused)
