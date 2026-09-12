@@ -177,12 +177,6 @@ pub(crate) fn load_skill_action_jobs(
     session_id: &SessionKey,
 ) -> std::io::Result<Vec<SkillActionJobRecord>> {
     let supervisor = TaskSupervisor::new();
-    crate::autonomy::agent_orchestrator::install_goal_task_row_observers_resolving_at_callback(
-        &supervisor,
-        session_id,
-        profile_id,
-        data_dir,
-    );
     crate::peers::enable_peer_task_persistence(
         &supervisor,
         task_state_path(data_dir, session_id),

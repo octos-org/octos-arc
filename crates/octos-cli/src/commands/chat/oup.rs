@@ -182,12 +182,8 @@ impl ChatCommand {
             Err(_) if stored_profile.is_some() => resolve_profile(&None)?.0,
             Err(error) => return Err(error),
         };
-        if self.goals {
-            let mut wanted = CHAT_GOAL_TOOLS.to_vec();
-            if self.peers {
-                wanted.extend_from_slice(CHAT_PEER_TOOLS);
-            }
-            widen_allow_list(&mut tool_profile.tools, &wanted);
+        if self.peers {
+            widen_allow_list(&mut tool_profile.tools, CHAT_PEER_TOOLS);
         }
         let permissions = resolve_chat_permissions(
             self.dangerously_bypass_approvals_and_sandbox,
@@ -239,21 +235,11 @@ impl ChatCommand {
         if !self.json {
             eprintln!("Model: {model}");
         }
-        if self.goals {
-            let orchestrator = crate::autonomy::agent_orchestrator::default_agent_orchestrator();
-            orchestrator
-                .configure_goal_scopes_sidecar(runtime.data_dir.join("goal-scopes.json"))?;
-            orchestrator.configure_supervisor_store(runtime.data_dir.join("supervisor"))?;
-        }
-        let session_key = if self.goals {
-            octos_core::SessionKey(chat_goal_session_key(&profile_id))
-        } else {
-            octos_core::SessionKey::with_profile(
-                &profile_id,
-                "cli",
-                &uuid::Uuid::now_v7().to_string(),
-            )
-        };
+        let session_key = octos_core::SessionKey::with_profile(
+            &profile_id,
+            "cli",
+            &uuid::Uuid::now_v7().to_string(),
+        );
         let session = OupSession::open(state.clone(), session_key, &cwd, permissions).await?;
         let frontend = TerminalFrontend {
             json: self.json,

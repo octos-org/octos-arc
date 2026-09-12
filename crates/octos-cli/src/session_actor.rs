@@ -51,10 +51,6 @@ use tokio::sync::{Mutex, RwLock, Semaphore, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-use crate::autonomy::agent_orchestrator::{InProcessAgentOrchestrator, default_agent_orchestrator};
-use crate::autonomy::master_continuation_scheduler::{
-    MasterContinuationReason, MasterContinuationRuntimeState, QueuedMasterContinuation,
-};
 use crate::config::QueueMode;
 use crate::context_manager::{
     CompactContextPolicy, ContextManager, ForkPolicy, PromptBuildPolicy,
@@ -203,28 +199,6 @@ const DEFAULT_CONTEXT_COMPACT_RATIO_NUMERATOR: usize = 7;
 const DEFAULT_CONTEXT_COMPACT_RATIO_DENOMINATOR: usize = 10;
 const DEFAULT_CONTEXT_COMPACT_KEEP_ITEMS: usize = 16;
 
-/// Maximum number of CONSECUTIVE auto-recovery turns the session actor will
-/// dispatch in response to spawn_only post-spawn failures before bailing
-/// out. The dedup-on-task-id (`recovered_tasks` HashSet) caps repeated
-/// signals from the SAME task at 1; this is a separate cap on the chain of
-/// distinct task failures (LLM retries the same broken approach with new
-/// tool_call_ids and they all fail). Reset to 0 on a user-initiated turn.
-///
-/// #2020: both caps are applied by
-/// [`SessionActor::admit_spawn_only_failure_recovery`] on the continuation
-/// queue drain — the single re-entry path — rather than by the retired
-/// `ActorMessage::RecoveryHint` handler.
-///
-/// Default 2 = the LLM gets up to two corrective rounds before the actor
-/// gives up and emits a final UI banner ("Background failure could not be
-/// recovered after N attempts"). Higher values risk runaway loops on
-/// pathological inputs; lower values short-circuit legitimate two-step
-/// recoveries (e.g. "pick a valid voice → MiniMax rate-limit on retry").
-///
-/// Configurable at runtime via `OCTOS_MAX_CONSECUTIVE_RECOVERY_TURNS`. Clamped
-/// to `[1, 10]` so a misconfigured env var cannot disable the cap or
-/// runaway the loop.
-const MAX_CONSECUTIVE_RECOVERY_TURNS: u32 = 2;
 
 #[derive(Debug, Clone, serde::Serialize)]
 struct PersistedSessionMessage {
@@ -1002,10 +976,6 @@ fn inbound_client_message_id(inbound: &InboundMessage) -> Option<String> {
         .map(str::to_string)
 }
 
-fn inbound_is_master_continuation(inbound: &InboundMessage) -> bool {
-    inbound_bool_metadata(inbound, "_master_continuation")
-}
-
 fn inbound_is_approval_continuation(inbound: &InboundMessage) -> bool {
     inbound_bool_metadata(inbound, "_approval_continuation")
 }
@@ -1016,13 +986,6 @@ fn inbound_bool_metadata(inbound: &InboundMessage, key: &str) -> bool {
         .get(key)
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false)
-}
-
-/// #2020 — a drained `External("spawn_only_failure")` continuation is
-/// stamped `_recovery_turn` by
-/// [`SessionActor::synthetic_master_continuation_inbound`].
-fn inbound_is_recovery_turn(inbound: &InboundMessage) -> bool {
-    inbound_bool_metadata(inbound, "_recovery_turn")
 }
 
 /// Inbounds the runtime synthesised for itself, whose prompt is a directive
@@ -1040,10 +1003,7 @@ fn inbound_is_recovery_turn(inbound: &InboundMessage) -> bool {
 /// run, but the transcript would show an assistant reply with no visible
 /// cause and the next turn would lose the failure context entirely.
 fn runtime_internal_inbound(inbound: &InboundMessage) -> bool {
-    if inbound_is_recovery_turn(inbound) {
-        return false;
-    }
-    inbound_is_master_continuation(inbound) || inbound_is_approval_continuation(inbound)
+    inbound_is_approval_continuation(inbound)
 }
 
 fn approval_path_summary(path: Option<&Path>) -> String {
@@ -1778,18 +1738,9 @@ fn sanitize_task_for_response(
 }
 
 // Install the actual gateway change/terminal sinks before persistence restore.
-fn install_gateway_task_status_sinks(
-    supervisor: &TaskSupervisor,
-    tx: mpsc::Sender<ActorMessage>,
-    data_dir: PathBuf,
-    orchestrator: InProcessAgentOrchestrator,
-) {
-    let change_runtime = orchestrator.clone();
+fn install_gateway_task_status_sinks(supervisor: &TaskSupervisor, tx: mpsc::Sender<ActorMessage>, data_dir: PathBuf) {
     supervisor.set_on_change(move |task| {
-        forward_task_status_to_actor_inbox(&change_runtime, &tx, &data_dir, task);
-    });
-    supervisor.set_on_terminal(move |event| {
-        orchestrator.route_terminal_event_to_continuation_queue(event, None);
+        forward_task_status_to_actor_inbox(&tx, &data_dir, task);
     });
 }
 
@@ -1807,23 +1758,10 @@ fn install_gateway_task_status_sinks(
 /// **Non-terminal updates** are coalesce-friendly (the next update
 /// overwrites) and stay on the non-blocking `try_send` fast-path.
 fn forward_task_status_to_actor_inbox(
-    orchestrator: &InProcessAgentOrchestrator,
     tx: &tokio::sync::mpsc::Sender<ActorMessage>,
     data_dir: &Path,
     task: &octos_agent::BackgroundTask,
 ) {
-    // Channel/gateway SessionActor keys carry the profile
-    // (`profile:channel:chat`), so the key-derived fallback inside
-    // `upsert_background_task_agent` resolves the right profile here; the
-    // AppUI/serve bare-key path threads its runtime profile explicitly
-    // (see `forward_task_progress_to_channel`).
-    if let Err(error) = orchestrator.upsert_background_task_agent(task, None) {
-        // This observer mirrors an existing source task. Report failure while
-        // still forwarding that task's truthful status to its owning actor.
-        tracing::warn!(task_id = %task.id, error = %error.message,
-            "background task mirror admission failed");
-    }
-
     let task_json = sanitize_task_for_response(data_dir, task);
     let Ok(json) = serde_json::to_string(&task_json) else {
         return;
@@ -3409,84 +3347,13 @@ impl ActorFactory {
             .profile_id()
             .unwrap_or(MAIN_PROFILE_ID)
             .to_owned();
-        supervisor.set_on_failure_signal(move |signal| {
-            let outcome = crate::autonomy::agent_orchestrator::default_agent_orchestrator()
-                .enqueue_spawn_only_failure_continuation(
-                    &failure_session_key,
-                    &failure_profile_id,
-                    signal,
-                );
-            if outcome.is_duplicate() {
-                debug!(
-                    session = %failure_session_key,
-                    task_id = %signal.task_id,
-                    tool = %signal.tool_name,
-                    "spawn_only failure recovery continuation suppressed (duplicate dedupe key)"
-                );
-            } else {
-                info!(
-                    session = %failure_session_key,
-                    task_id = %signal.task_id,
-                    tool = %signal.tool_name,
-                    "spawn_only failure recovery continuation queued (gateway path)"
-                );
-            }
-        });
         // Wire supervisor on_change callback to push task status via SSE,
         // ALSO before `enable_persistence` (see the combined ordering note
         // above). M9-06: terminal lifecycle states (Completed/Failed/
         // Cancelled) MUST NOT be silently dropped under inbox backpressure
         // (32 slots), or the UI / SSE consumers stay stuck on `running`.
         // See [`forward_task_status_to_actor_inbox`].
-        install_gateway_task_status_sinks(
-            &supervisor,
-            tx.clone(),
-            self.data_dir.clone(),
-            default_agent_orchestrator().clone(),
-        );
-        // #2055 — create the goal-ledger task row at registration time,
-        // wired next to the unified terminal sink above (whose settle half,
-        // #2054, flips the row at terminal). The gateway actor wires its
-        // callbacks ONCE at init while goals come and go over the session's
-        // life, so the goal binding resolves at CALLBACK time via
-        // `active_goal_id` — the same resolver the #1935 interactive
-        // binding snapshot uses on the WS path. No active goal ⇒ no row;
-        // that is correct behavior, not an error. The recorder swallows
-        // every ledger error (registration must never fail, block, or panic
-        // on ledger I/O). `self.data_dir` is the profile data dir this path
-        // already hands to the goal-ledger sync (see
-        // `maybe_advance_goal_runtime_after_turn`).
-        // Round 3 — the SHARED installer wires both halves (recorder +
-        // change-feed settle listener), so this site cannot drift from the
-        // WS / cached-supervisor wiring or from the effect tests. The settle
-        // rides the change feed as a NAMED listener (not the `on_terminal`
-        // sink below): `cancel` emits only `notify_change`, and the sink's
-        // once-per-task dedupe would swallow the owner's failed→complete
-        // correction. Inherited by nested child supervisors.
-        // #8 — the COMPOSED restore observer: the gateway supervisor is the
-        // one peer tasks register against (`bind_peer_supervised_task`), so
-        // its restore must also adopt parked `peer_handoff` orphans whose
-        // `result.md` already sits on the blackboard. Same goal resolvers,
-        // one shared `on_restore` callback.
-        // #15 RA-1 — this path INTENTIONALLY stays on the UNSTAMPED
-        // `bind_peer_supervised_task` (no `_with_workspace`): the actor's
-        // `ActorFactory` carries `self.data_dir` (the profile data dir), NOT
-        // the session's workspace root — that value only exists per-turn on
-        // the WS `emit_staged` registration site (`ui_protocol_transport`),
-        // which DOES stamp it. Gateway-registered peer tasks therefore keep
-        // the pre-#13r2 `output_files`-derived cwd, and the /stop purge
-        // matches them only under a `workspace: None` scope — see the
-        // unstamped-registration comment in
-        // `clear_pending_terminal_continuations_for_session`.
-        crate::autonomy::agent_orchestrator::install_peer_restore_observers_resolving_at_callback(
-            &supervisor,
-            &session_key,
-            session_key.profile_id().unwrap_or(MAIN_PROFILE_ID),
-            &self.data_dir,
-        );
-        // Both task-status sinks are installed above, before the composed
-        // restore observer: installing that observer may synchronously adopt
-        // a task from a restore that already happened.
+        install_gateway_task_status_sinks(&supervisor, tx.clone(), self.data_dir.clone());
         if let Err(error) = crate::peers::enable_peer_task_persistence(
             &supervisor,
             &task_state_path,
@@ -4134,11 +4001,7 @@ impl ActorFactory {
             persistent_retry_state,
             context_manager,
             retry_state_path: Some(retry_state_path),
-            recovered_tasks: Arc::new(StdMutex::new(std::collections::HashSet::new())),
-            consecutive_recovery_turns: Arc::new(StdMutex::new(0)),
             current_command_cmid: None,
-            last_turn_total_tokens: 0,
-            goal_verifier_llm: self.goal_verifier_llm.clone(),
         };
 
         // Spawn the outbound forwarding task — buffers messages from inactive sessions
@@ -4489,33 +4352,6 @@ pub(crate) fn format_failover_push(event: &FailoverEvent) -> String {
     )
 }
 
-fn master_continuation_reason_name(reason: &MasterContinuationReason) -> &str {
-    match reason {
-        MasterContinuationReason::ChildCompleted => "child_completed",
-        MasterContinuationReason::ScatterJoinComplete => "scatter_join_complete",
-        MasterContinuationReason::LoopFire => "loop_fire",
-        MasterContinuationReason::GoalContinue => "goal_continue",
-        MasterContinuationReason::GoalWrapUp => "goal_wrap_up",
-        MasterContinuationReason::External(_) => "external",
-    }
-}
-
-/// Canonicalized (codex HIGH): delegate to the single renderer in
-/// [`crate::autonomy::agent_orchestrator::master_continuation_prompt`] so both
-/// continuation-render paths — the AppUI / WS path and this SessionActor
-/// gateway path — emit byte-identical prompts.
-///
-/// This SessionActor copy had drifted from the canonical renderer: its
-/// `GoalContinue` arm lacked the richer goal steering (Fidelity / Completion
-/// audit / tangent-pollution guard) AND rendered the raw, unescaped objective
-/// through the generic metadata list — an objective-injection gap the
-/// canonical renderer closes by escaping and fencing the objective and
-/// dropping it from the raw metadata. Forwarding eliminates the drift and
-/// prevents it from recurring (the two renderers can no longer diverge).
-fn master_continuation_prompt(continuation: &QueuedMasterContinuation) -> String {
-    crate::autonomy::agent_orchestrator::master_continuation_prompt(continuation)
-}
-
 // ── SessionActor ────────────────────────────────────────────────────────────
 
 /// Long-lived task that processes all messages for one session.
@@ -4624,20 +4460,6 @@ struct SessionActor {
     /// the in-memory state still accumulates within this actor's lifetime
     /// but is not durable across process restarts.
     retry_state_path: Option<std::path::PathBuf>,
-    /// Set of `task_id`s that have already triggered an automatic recovery
-    /// turn (M8.9). Caps recovery at one attempt per task so a recovery
-    /// turn that itself fails cannot ignite a runaway loop.
-    recovered_tasks: Arc<StdMutex<std::collections::HashSet<String>>>,
-    /// Counter of CONSECUTIVE recovery turns the actor has dispatched in
-    /// response to spawn_only post-spawn failures (PR
-    /// feat/spawn-only-failure-feedback-loop). Reset to 0 on a
-    /// user-initiated turn; incremented every time a drained
-    /// `External("spawn_only_failure")` continuation drives an inbound (see
-    /// [`Self::admit_spawn_only_failure_recovery`]). When the counter reaches
-    /// [`MAX_CONSECUTIVE_RECOVERY_TURNS`] the actor emits a final UI
-    /// banner instead of dispatching another recovery so the loop cannot
-    /// run away on pathological LLM retries with new tool_call_ids.
-    consecutive_recovery_turns: Arc<StdMutex<u32>>,
     /// Codex pre-merge review of #748 P1.2: cmid of the inbound currently
     /// being handled by `try_handle_command`. `send_reply` reads this so
     /// slash-command replies + `_completion` events stamp `thread_id` from
@@ -4648,19 +4470,7 @@ struct SessionActor {
     /// then falls back to legacy behavior (stamping no thread_id).
     current_command_cmid: Option<String>,
 
-    /// Total tokens (input + output) attributed to the MOST RECENT turn run
-    /// by `process_inbound`. Set on every LLM turn; read by
-    /// `maybe_advance_goal_runtime_after_turn` so a goal continuation's token
-    /// budget is charged the turn's real usage instead of a hardcoded 0
-    /// (which let a goal recur past its token budget). Reset to 0 at the top
-    /// of each turn so a failed/no-response turn charges nothing.
-    last_turn_total_tokens: u64,
 
-    /// #1935 — the INDEPENDENT goal-completion verifier lane, threaded from
-    /// [`ActorFactory::goal_verifier_llm`]. Read by the goal accountant
-    /// (`maybe_advance_goal_runtime_after_turn`), which — like the rest of
-    /// the goal machinery in [`crate::autonomy`] — compiles unconditionally.
-    goal_verifier_llm: Option<Arc<dyn LlmProvider>>,
 }
 
 impl SessionActor {
@@ -4853,134 +4663,6 @@ impl SessionActor {
         my_topic == active_topic
     }
 
-    /// Reserve a recovery slot for a task. Returns `true` if this is the
-    /// first recovery for the given task ID and the caller should proceed,
-    /// `false` if a recovery has already been triggered (and the second
-    /// signal should be dropped). Cap is one recovery attempt per task —
-    /// see M8.9.
-    fn claim_recovery_slot(&self, task_id: &str) -> bool {
-        let mut guard = self
-            .recovered_tasks
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        guard.insert(task_id.to_string())
-    }
-
-    /// Effective ceiling on consecutive recovery turns, env-overridable via
-    /// `OCTOS_MAX_CONSECUTIVE_RECOVERY_TURNS`. Clamped to `[1, 10]` so a
-    /// misconfigured value cannot disable the cap entirely.
-    fn max_consecutive_recovery_turns(&self) -> u32 {
-        if let Ok(raw) = std::env::var("OCTOS_MAX_CONSECUTIVE_RECOVERY_TURNS") {
-            if let Ok(value) = raw.parse::<u32>() {
-                return value.clamp(1, 10);
-            }
-        }
-        MAX_CONSECUTIVE_RECOVERY_TURNS
-    }
-
-    /// Try to begin a recovery turn. Increments the consecutive-recovery
-    /// counter and returns `true` if the new count is `<= max`. Returns
-    /// `false` once the cap is exceeded so the caller can emit a final
-    /// banner instead of dispatching another LLM turn.
-    ///
-    /// Companion to [`Self::claim_recovery_slot`]: the per-task slot
-    /// dedupes repeated signals from the same task, while this counter
-    /// caps the chain of *distinct* failed tasks (LLM retries the same
-    /// broken approach with new tool_call_ids and they keep failing).
-    fn try_begin_recovery_turn(&self) -> bool {
-        let mut guard = self
-            .consecutive_recovery_turns
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let max = self.max_consecutive_recovery_turns();
-        if *guard >= max {
-            return false;
-        }
-        *guard += 1;
-        true
-    }
-
-    /// #2020 — the runaway-recovery gate, applied to a drained continuation
-    /// before it is dispatched as a turn.
-    ///
-    /// This is the policy the retired `ActorMessage::RecoveryHint` handler
-    /// owned, moved onto the queue drain so it guards the SINGLE re-entry
-    /// path instead of one of two. Returns `true` when the continuation may
-    /// proceed. Non-recovery continuations (goal, loop, child, peer …) are
-    /// always admitted — the gate is scoped to
-    /// `External("spawn_only_failure")`.
-    ///
-    /// Three rejections, all preserved verbatim from the inbox handler:
-    ///
-    /// 1. **Per-task claim** — one recovery per task id, so a recovery turn
-    ///    that itself fails cannot ignite a runaway loop. The queue's
-    ///    task-scoped dedupe key collapses repeated `mark_failed` calls while
-    ///    a continuation is still pending, but says nothing once it has been
-    ///    drained; this claim is what survives the drain.
-    /// 2. **Consecutive-recovery cap** — bounds the chain of DISTINCT failing
-    ///    tasks (the LLM retrying its broken approach under new
-    ///    tool_call_ids), which no per-task key can catch. Reset on a
-    ///    user-initiated turn by `process_inbound`.
-    /// 3. **Exhaustion banner** — when the cap trips the user is TOLD. A
-    ///    silent stop is indistinguishable from the task having succeeded.
-    async fn admit_spawn_only_failure_recovery(
-        &mut self,
-        continuation: &QueuedMasterContinuation,
-    ) -> bool {
-        let Some(fields) =
-            crate::autonomy::agent_orchestrator::spawn_only_failure_recovery_fields(continuation)
-        else {
-            return true;
-        };
-        let task_id = fields.task_id.to_owned();
-        let tool_name = fields.tool_name.to_owned();
-        if !self.claim_recovery_slot(&task_id) {
-            debug!(
-                session = %self.session_key,
-                task_id,
-                tool_name,
-                "skipping duplicate spawn_only failure recovery continuation"
-            );
-            return false;
-        }
-        if !self.try_begin_recovery_turn() {
-            let max = self.max_consecutive_recovery_turns();
-            warn!(
-                session = %self.session_key,
-                task_id,
-                tool_name,
-                max,
-                "consecutive recovery cap exceeded — emitting final banner instead of dispatching another LLM turn"
-            );
-            let banner = format!(
-                "Background failure could not be recovered after {max} attempts. The last failure was on `{tool_name}`. Please review the error and try a different approach.",
-            );
-            self.deliver_background_notification(banner, Vec::new(), None)
-                .await;
-            return false;
-        }
-        debug!(
-            session = %self.session_key,
-            task_id,
-            tool_name,
-            originating_client_message_id =
-                fields.originating_client_message_id.unwrap_or("<none>"),
-            "dispatching synthetic recovery turn from the continuation queue"
-        );
-        true
-    }
-
-    /// Reset the consecutive-recovery counter to 0. Called when a
-    /// user-initiated inbound is about to be processed — once the user
-    /// re-engages we no longer count the prior chain as "consecutive".
-    fn reset_consecutive_recovery_turns(&self) {
-        let mut guard = self
-            .consecutive_recovery_turns
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        *guard = 0;
-    }
-
     fn context_compact_threshold_tokens(&self) -> usize {
         if let Ok(raw) = std::env::var("OCTOS_CONTEXT_COMPACT_THRESHOLD_TOKENS") {
             if let Ok(value) = raw.parse::<usize>() {
@@ -5099,401 +4781,6 @@ impl SessionActor {
             origin: octos_core::MessageOrigin::Synthetic,
         }
     }
-
-    fn synthetic_master_continuation_inbound(
-        &self,
-        continuation: &QueuedMasterContinuation,
-    ) -> InboundMessage {
-        let mut metadata = serde_json::Map::new();
-        metadata.insert("_master_continuation".to_string(), serde_json::json!(true));
-        metadata.insert(
-            "continuation_id".to_string(),
-            serde_json::json!(continuation.id.as_u64()),
-        );
-        metadata.insert(
-            "continuation_reason".to_string(),
-            serde_json::json!(master_continuation_reason_name(&continuation.reason)),
-        );
-        // #2020 — a spawn_only failure recovery continuation IS the recovery
-        // turn that `ActorMessage::RecoveryHint` used to build, so it must
-        // carry the same two markers the retired inbox stamped:
-        //
-        //  * `_recovery_turn` — load-bearing in TWO places. It tells
-        //    `process_inbound` not to reset the consecutive-recovery counter
-        //    (which `_master_continuation` would also do), and it tells
-        //    `runtime_internal_inbound` this prompt IS durable user history —
-        //    which `_master_continuation` alone would suppress, silently
-        //    dropping the recovery prompt from the transcript.
-        //  * `client_message_id` (#738) — the originating user turn's cmid,
-        //    threaded through the continuation's metadata by
-        //    `enqueue_spawn_only_failure_continuation`. Without it
-        //    `process_inbound` mints a fresh server UUIDv7 and the eventual
-        //    successful retry's deliverables land under an orphan thread_id
-        //    with no DOM bubble in the SPA.
-        if let Some(fields) =
-            crate::autonomy::agent_orchestrator::spawn_only_failure_recovery_fields(continuation)
-        {
-            metadata.insert("_recovery_turn".to_string(), serde_json::json!(true));
-            if let Some(cmid) = fields.originating_client_message_id {
-                metadata.insert(
-                    "client_message_id".to_string(),
-                    serde_json::Value::String(cmid.to_owned()),
-                );
-            }
-        }
-
-        InboundMessage {
-            channel: self.channel.clone(),
-            sender_id: "octos-runtime".to_string(),
-            chat_id: self.chat_id.clone(),
-            content: master_continuation_prompt(continuation),
-            timestamp: chrono::Utc::now(),
-            media: vec![],
-            metadata: serde_json::Value::Object(metadata),
-            message_id: None,
-            origin: octos_core::MessageOrigin::Synthetic,
-        }
-    }
-
-    async fn drain_master_continuations(&mut self) -> bool {
-        let runtime_state = if self.active_overflow_tasks.load(Ordering::Acquire) > 0 {
-            MasterContinuationRuntimeState::busy()
-        } else {
-            MasterContinuationRuntimeState::idle()
-        }
-        .with_user_input_pending(!self.inbox.is_empty());
-        let profile_id = self
-            .session_key
-            .profile_id()
-            .unwrap_or(MAIN_PROFILE_ID)
-            .to_owned();
-        // Cross-subsystem occupancy (#1529): drain AND claim the in-flight
-        // marker under a SINGLE state lock (see
-        // `drain_and_claim_ready_continuation_for_session`). This is the only
-        // race-free ordering — setting the marker before the drain
-        // self-suppresses the actor's own due-goal enqueue; setting it after
-        // the drain opens a window for a concurrent AppUI tick to re-enqueue
-        // and spawn a duplicate turn (both caught by codex re-review). A
-        // session already in-flight (an AppUI goal turn running) drains
-        // nothing and yields no guard, so the actor defers. The guard is held
-        // across the whole turn and clears the marker on ANY exit at the end
-        // of the loop iteration, suppressing the AppUI due-scan/drain until
-        // the turn completes.
-        let (continuations, _in_flight_guard) = default_agent_orchestrator()
-            .drain_and_claim_ready_continuation_for_session(
-                &self.session_key,
-                &profile_id,
-                runtime_state,
-                1,
-            );
-        let drained = !continuations.is_empty();
-        for continuation in continuations {
-            info!(
-                session = %self.session_key,
-                continuation_id = continuation.id.as_u64(),
-                reason = master_continuation_reason_name(&continuation.reason),
-                "draining queued master continuation into session actor"
-            );
-            // #2020 — runaway-recovery policy, applied on the ONE re-entry
-            // path. A rejected continuation is marked completed (not
-            // re-queued) so the queue does not redeliver it forever.
-            // Deliberately NO matching `mark_continuation_started`: no turn
-            // ran, so the ledger records a resolution with an explicit
-            // suppression reason rather than a phantom start.
-            if !self.admit_spawn_only_failure_recovery(&continuation).await {
-                default_agent_orchestrator().mark_continuation_completed(
-                    &continuation,
-                    Some("suppressed_by_recovery_policy".to_owned()),
-                );
-                continue;
-            }
-            // #1131 — `GoalWrapUp` is the final goal turn under
-            // budget exhaustion. Treat it as a goal turn for runtime
-            // accounting so per-turn elapsed time is still recorded;
-            // `record_goal_turn_internal` is idempotent against the
-            // already-set `wrap_up_emitted` flag and will NOT
-            // re-enqueue a second wrap-up.
-            let is_goal_turn = matches!(
-                continuation.reason,
-                MasterContinuationReason::GoalContinue | MasterContinuationReason::GoalWrapUp,
-            );
-            let goal_turn_start = Instant::now();
-            default_agent_orchestrator().mark_continuation_started(&continuation);
-            // #977 bullet 4 — capture the loop id (if any) BEFORE we
-            // consume `continuation` into `synthetic_master_continuation_inbound`,
-            // so we can re-schedule the loop's next fire from the
-            // model's `<<loop-next-in: …>>` reply hint. We only snapshot
-            // assistant-reply count for LoopFire continuations to keep
-            // the non-loop fast-path unchanged.
-            let loop_id_for_self_paced = match continuation.reason {
-                MasterContinuationReason::LoopFire => continuation
-                    .loop_id
-                    .as_ref()
-                    .map(|id| id.as_str().to_owned()),
-                _ => None,
-            };
-            let pre_assistant_count = if loop_id_for_self_paced.is_some() {
-                let handle = self.session_handle.lock().await;
-                Some(
-                    handle
-                        .get_history(usize::MAX)
-                        .iter()
-                        .filter(|message| matches!(message.role, MessageRole::Assistant))
-                        .count(),
-                )
-            } else {
-                None
-            };
-            // Stamp the loop onto anything the cron tool creates during this
-            // turn, so deleting the loop can find those jobs again. Set right
-            // before the turn and cleared right after: a stale value would tag a
-            // user's own job with a loop it has nothing to do with, and the reap
-            // would then delete a schedule the user asked for.
-            if let Some(ref cron) = self.cron_tool {
-                cron.set_origin(octos_bus::CronOrigin {
-                    session_id: Some(self.session_key.to_string()),
-                    loop_id: loop_id_for_self_paced.clone(),
-                    // The actor carries no profile id; `loop_id` is the key the
-                    // reap matches on, so this stays None rather than guessing.
-                    profile_id: None,
-                });
-            }
-            let synthetic = self.synthetic_master_continuation_inbound(&continuation);
-            self.process_inbound(synthetic, Vec::new(), Vec::new(), None)
-                .await;
-            if let Some(ref cron) = self.cron_tool {
-                cron.set_origin(octos_bus::CronOrigin::default());
-            }
-            // If this fire was a self-paced or maintenance loop, peek at
-            // the model's reply and re-schedule via the orchestrator.
-            // `apply_self_paced_response` no-ops for fixed_interval mode,
-            // so this is safe to call for every LoopFire continuation.
-            if let (Some(loop_id), Some(pre)) = (loop_id_for_self_paced, pre_assistant_count) {
-                // #1128 codex P2 follow-up: the prior shape used
-                // `.nth(pre)` to find the new assistant reply, but
-                // `process_inbound` persists assistant tool-call stubs
-                // BEFORE the final text reply. For loop turns that
-                // used tools, `.nth(pre)` selected the first new
-                // assistant tool-call message and missed the
-                // `<<loop-next-in: ...>>` hint that lives in the
-                // final text reply. Walk from the back instead and
-                // pick the LAST assistant message with non-empty
-                // content, which is the actual final reply.
-                let assistant_reply: Option<String> = {
-                    let handle = self.session_handle.lock().await;
-                    handle
-                        .get_history(usize::MAX)
-                        .iter()
-                        .filter(|message| matches!(message.role, MessageRole::Assistant))
-                        .enumerate()
-                        .filter(|(idx, _)| *idx >= pre)
-                        .filter(|(_, message)| !message.content.is_empty())
-                        .last()
-                        .map(|(_, message)| message.content.clone())
-                };
-                // A reply-less fire (interrupt / agent error / empty content)
-                // still reschedules: the empty reply carries no
-                // `<<loop-next-in: …>>` sentinel, so the orchestrator applies
-                // the DEFAULT self-paced delay. Skipping here parked the loop
-                // at `next_run_at_ms: None`, which the due-scan never visits
-                // again — one failed turn silently killed the loop.
-                //
-                // Deliberate divergence from the AppUI path (codex round-1):
-                // AppUI captures the EndTurn payload and can distinguish a
-                // DELIBERATE blank reply (skip, #1134 contract) from a true
-                // no-reply (reschedule). This path has no capture —
-                // `process_inbound` doesn't persist empty assistant content
-                // and the history scan filters empties — so blank and error
-                // are indistinguishable here, and liveness wins: a blank
-                // loop turn retries at the default delay instead of dying.
-                // An explicit model stop should be a sentinel (follow-up),
-                // not an unpersistable blank.
-                let reply = assistant_reply.unwrap_or_default();
-                if let Err(err) = default_agent_orchestrator().apply_self_paced_response(
-                    &loop_id,
-                    &profile_id,
-                    &reply,
-                ) {
-                    info!(
-                        session = %self.session_key,
-                        loop_id = %loop_id,
-                        error = %err.message,
-                        "apply_self_paced_response skipped"
-                    );
-                }
-            }
-            default_agent_orchestrator().mark_continuation_completed(
-                &continuation,
-                Some("processed_by_session_actor".to_owned()),
-            );
-            if is_goal_turn {
-                // #2066 round 2 (codex R1c) — thread the continuation's bound
-                // goal identity into the accountant so a post-clear charge is
-                // goal-id-bound (settles the cleared goal's tombstone, never a
-                // replacement goal).
-                self.maybe_advance_goal_runtime_after_turn(
-                    &profile_id,
-                    continuation
-                        .goal_id
-                        .as_ref()
-                        .map(|goal_id| goal_id.as_str()),
-                    goal_turn_start,
-                )
-                .await;
-            }
-        }
-        drained
-    }
-
-    /// #979 / M15-C2 — after a goal-driven continuation turn finishes,
-    /// (1) record the turn against the goal's `continuations_used` and
-    /// `time_used_seconds` counters so future fires see the updated
-    /// rate-limit + budget state, (2) detect the model's completion
-    /// sentinel and stop re-queueing if matched, (3) re-queue another
-    /// continuation only when the runtime stays idle AND the per-goal
-    /// policy still allows another fire.
-    ///
-    /// The goal record's `tokens_used` is charged this turn's real token
-    /// usage (`last_turn_total_tokens`, set by `process_inbound` from the LLM
-    /// response's input+output tokens — the same per-turn total the AppUI
-    /// dispatch path attributes). Passing 0 here previously let the token
-    /// budget gate never trip, so a goal recurred past its token budget.
-    async fn maybe_advance_goal_runtime_after_turn(
-        &mut self,
-        profile_id: &str,
-        bound_goal_id: Option<&str>,
-        goal_turn_start: Instant,
-    ) {
-        let elapsed_seconds = goal_turn_start.elapsed().as_secs();
-        let tokens_consumed = self.last_turn_total_tokens;
-        let orchestrator = default_agent_orchestrator();
-        if let Some(snapshot) = orchestrator.record_goal_turn(
-            &self.session_key,
-            profile_id,
-            bound_goal_id,
-            tokens_consumed,
-            elapsed_seconds,
-        ) {
-            // #1982 — reconcile the durable ledger after a mid-turn completion so
-            // its `tokens_used` reflects the goal's true final cost.
-            orchestrator.reconcile_terminal_goal_ledger(
-                &self.session_key,
-                &snapshot,
-                &self.data_dir,
-            );
-        }
-        // Capture the most recent assistant turn's text content to feed
-        // the completion-sentinel detector. Reading from the durable
-        // session handle keeps the wiring narrow — `process_inbound`
-        // already persisted the assistant rows before returning.
-        let assistant_tail = {
-            let handle = self.session_handle.lock().await;
-            handle
-                .session()
-                .messages
-                .iter()
-                .rev()
-                .find(|msg| msg.role == octos_core::MessageRole::Assistant)
-                .map(|msg| msg.content.clone())
-                .unwrap_or_default()
-        };
-        // Loop-engineering completion gate: only spend the INDEPENDENT
-        // verifier LLM call when the agent actually CLAIMS completion — and
-        // only when a goal snapshot exists to verify against.
-        //
-        // #1935 codex round 3 (TOCTOU): the goal_id and the objective are
-        // captured together under ONE state lock
-        // (`goal_verification_snapshot`), so a clear/recreate between two
-        // separate reads can no longer pair the OLD objective with the NEW
-        // goal_id (or a same-objective recreate slip both checks).
-        // `maybe_complete_goal_from_model` re-checks BOTH snapshot fields
-        // after the verifier await. No goal / wrong profile ⇒ no snapshot ⇒
-        // no verifier spend and nothing to complete.
-        let verification = if orchestrator.goal_completion_claimed(&assistant_tail) {
-            orchestrator.goal_verification_snapshot(&self.session_key, profile_id)
-        } else {
-            None
-        };
-        if let Some(snapshot) = verification {
-            // #1935 — grade on the INDEPENDENT verifier lane when the profile
-            // configures one (`sub_providers` key `goal_verifier`); otherwise
-            // the session's own provider, unchanged.
-            let verifier_provider = self
-                .goal_verifier_llm
-                .clone()
-                .unwrap_or_else(|| self.agent.llm_provider());
-            // #1958 (codex #3) — restore originating-session attribution around
-            // the sentinel verifier (it runs outside the turn's routing scopes),
-            // so a failover attributes to this session instead of publishing
-            // unattributed. Autonomous turns are Normal policy → router only.
-            // evo-goal-verifier: the wrapper owns gate/charge/retry/ledger;
-            // per-attempt usage is charged inside it, so nothing is charged
-            // here anymore.
-            let outcome = octos_llm::with_router_context(
-                octos_llm::RouterContext {
-                    session_id: Some(self.session_key.to_string()),
-                    ..Default::default()
-                },
-                orchestrator.verify_goal_completion_bounded(
-                    &self.session_key,
-                    profile_id,
-                    &snapshot,
-                    verifier_provider,
-                    &assistant_tail,
-                    Some(self.data_dir.as_path()),
-                ),
-            )
-            .await;
-            if orchestrator.maybe_complete_goal_from_model(
-                &self.session_key,
-                profile_id,
-                &assistant_tail,
-                &outcome.verdict,
-                &snapshot,
-                // #1957 (codex #1) — this interactive-chat goal path carries the
-                // profile data dir, so a sentinel completion syncs to the ledger.
-                Some(self.data_dir.as_path()),
-            ) {
-                return;
-            }
-            // evo-goal-verifier M1 (cross A1): a claimed-but-UNVERIFIED
-            // completion must surface the structured failure kind on the
-            // sentinel path too — session_actor previously dropped
-            // `outcome.kind` entirely. The canonical Display line keeps the
-            // format identical to goal_update's ToolResult output.
-            if !outcome.is_done() {
-                tracing::warn!(
-                    session_id = %self.session_key,
-                    goal_id = %snapshot.goal_id,
-                    "sentinel goal completion not verified: {outcome}"
-                );
-                let note = format!("goal completion not verified — {outcome}");
-                {
-                    let mut handle = self.session_handle.lock().await;
-                    handle.push_message_in_memory(octos_core::Message::system(note.clone()));
-                }
-                // Canonical durable append (per-key lock → fresh open →
-                // seq'd write), mirroring `persist_assistant_message`.
-                let _ = octos_bus::session::persist_message_through_canonical_path(
-                    &self.data_dir,
-                    &self.session_key,
-                    octos_core::Message::system(note),
-                )
-                .await;
-            }
-        }
-        // Re-queue another continuation only if we are still idle AND
-        // policy allows. The idle gate matches `drain_master_continuations`'s
-        // entry idle gate so a goal turn that filled the inbox does not
-        // immediately enqueue another goal turn ahead of pending user
-        // input.
-        let idle_state = crate::autonomy::goal_loop_runtime::RuntimeIdleState::idle()
-            .with_user_input_pending(!self.inbox.is_empty());
-        let _ =
-            orchestrator.maybe_enqueue_goal_after_turn(&self.session_key, profile_id, idle_state);
-    }
-
-    // ── Phase 4: human-approval bridge (docs/ROBRIX-PHASE4-APPROVAL-FLOW-ADR.md)
 
     fn approval_request_message_content(request: &ApprovalRequestEnvelope) -> String {
         format!(
@@ -5887,8 +5174,6 @@ impl SessionActor {
         });
         let idle_sleep = tokio::time::sleep(self.idle_timeout);
         tokio::pin!(idle_sleep);
-        let mut continuation_tick = tokio::time::interval(Duration::from_secs(2));
-        continuation_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 msg = self.inbox.recv() => {
@@ -6013,7 +5298,6 @@ impl SessionActor {
                                 )
                                 .await;
                             }
-                            let _ = self.drain_master_continuations().await;
                         }
                         Some(ActorMessage::BackgroundResult {
                             task_label,
@@ -6081,7 +5365,6 @@ impl SessionActor {
                             if persisted
                                 && is_success_completion
                                 && auto_review_background_completions_enabled()
-                                && self.try_begin_recovery_turn()
                             {
                                 debug!(
                                     session = %self.session_key,
@@ -6104,7 +5387,6 @@ impl SessionActor {
                                 self.process_inbound(synthetic, Vec::new(), Vec::new(), None)
                                     .await;
                             }
-                            let _ = self.drain_master_continuations().await;
                         }
                         Some(ActorMessage::ApprovalExpired { request_id }) => {
                             idle_sleep.as_mut().reset(tokio::time::Instant::now() + self.idle_timeout);
@@ -6134,11 +5416,6 @@ impl SessionActor {
                             // All senders dropped
                             break;
                         }
-                    }
-                }
-                _ = continuation_tick.tick() => {
-                    if self.drain_master_continuations().await {
-                        idle_sleep.as_mut().reset(tokio::time::Instant::now() + self.idle_timeout);
                     }
                 }
                 _ = &mut idle_sleep => {
@@ -7563,9 +6840,9 @@ impl SessionActor {
 
         let persisted_user_content =
             Self::persisted_user_content(&inbound, &image_media, &attachment_media);
-        let is_master_continuation = inbound_is_master_continuation(&inbound);
-        let status_prompt = if is_master_continuation {
-            "supervised agent continuation"
+        let is_approval_continuation = inbound_is_approval_continuation(&inbound);
+        let status_prompt = if is_approval_continuation {
+            "approved tool continuation"
         } else {
             inbound.content.as_str()
         };
@@ -7612,13 +6889,7 @@ impl SessionActor {
         let persisted_user_content_for_event = persisted_user_content.clone();
         let user_media_for_event = image_media.clone();
         let mut user_msg_timestamp = None;
-        let user_seq = if is_master_continuation {
-            debug!(
-                session = %self.session_key,
-                "skipping durable user-row persist for internal master continuation"
-            );
-            None
-        } else {
+        let user_seq = {
             // PR A: typed constructor for the cmid-bearing path; legacy
             // `Message::user` for the rare cmid-less path. See sibling site
             // around line 3961 for the rationale.
@@ -9385,39 +8656,6 @@ impl SessionActor {
         attachment_media: Vec<String>,
         attachment_prompt: Option<String>,
     ) {
-        // Reset per-turn token accounting so a turn that fails / produces no
-        // response charges 0 to the goal budget (set to the real usage below
-        // once the LLM response is in hand).
-        self.last_turn_total_tokens = 0;
-        // Consecutive-recovery cap reset
-        // (feat/spawn-only-failure-feedback-loop): user-initiated turns
-        // break the "recovery chain" — once the user re-engages we no
-        // longer count the prior auto-recoveries against the cap. Master
-        // continuations are server-driven and don't represent user
-        // re-engagement, so they're excluded too. The recovery path stamps
-        // `_recovery_turn = true` in metadata via
-        // `synthetic_master_continuation_inbound`; any inbound without that
-        // flag counts as user-initiated for this reset.
-        let is_recovery_turn = inbound_is_recovery_turn(&inbound);
-        // A completion-review turn (event-driven background acknowledgment) is
-        // server-driven too — it must NOT reset the consecutive-auto-turn cap,
-        // otherwise a review that spawns more background work could review its
-        // own follow-ups without bound.
-        let is_completion_review = inbound
-            .metadata
-            .get("_completion_review")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let is_master_continuation_inbound = inbound_is_master_continuation(&inbound);
-        let is_approval_continuation = inbound_is_approval_continuation(&inbound);
-        if !is_recovery_turn
-            && !is_completion_review
-            && !is_master_continuation_inbound
-            && !is_approval_continuation
-        {
-            self.reset_consecutive_recovery_turns();
-        }
-
         // Capture the platform message ID for reply threading
         let inbound_message_id = inbound.message_id.clone();
         // M8.10 PR #2: capture the user's client_message_id so every
@@ -9425,10 +8663,8 @@ impl SessionActor {
         // carries `thread_id` metadata. The API channel reads it back to
         // tag SSE payloads with the right per-cmid thread.
         let client_message_id = inbound_client_message_id(&inbound);
-        let is_master_continuation = inbound_is_master_continuation(&inbound);
-        let status_prompt = if is_master_continuation {
-            "supervised agent continuation"
-        } else if is_approval_continuation {
+        let is_approval_continuation = inbound_is_approval_continuation(&inbound);
+        let status_prompt = if is_approval_continuation {
             "approved tool continuation"
         } else {
             inbound.content.as_str()
@@ -9653,7 +8889,6 @@ impl SessionActor {
                         + u64::from(tracker.output_tokens.load(AtomicOrdering::Relaxed));
                     if seen > last {
                         last = seen;
-                        default_agent_orchestrator().touch_goal_dispatch_in_flight(&session_key);
                     }
                 }
             })
@@ -9795,10 +9030,6 @@ impl SessionActor {
             // goal its TRUE cost, matching the AppUI `run_standalone_turn`
             // sum. Without this, cache-heavy goal turns on this path
             // undercount `tokens_used` and can slip past `token_budget`.
-            self.last_turn_total_tokens = u64::from(cr.token_usage.input_tokens)
-                .saturating_add(u64::from(cr.token_usage.output_tokens))
-                .saturating_add(u64::from(cr.token_usage.cache_read_tokens))
-                .saturating_add(u64::from(cr.token_usage.cache_write_tokens));
         }
 
         match result {
@@ -9857,7 +9088,6 @@ impl SessionActor {
                             debug!(
                                 session = %self.session_key,
                                 approval_continuation = is_approval_continuation,
-                                master_continuation = is_master_continuation,
                                 "skipping durable user-row persist for internal continuation"
                             );
                             continue;
@@ -10268,78 +9498,4 @@ fn format_thinking_prefix(reasoning: Option<&str>) -> String {
 #[path = "session_actor_tests.rs"]
 mod tests;
 
-/// evo-goal-verifier GAP-6/7 test hook: construct a SessionActor directly
-/// with the pieces the goal-accountant path reads (session_handle, verifier
-/// lane, data_dir) so the REAL `maybe_advance_goal_runtime_after_turn` can
-/// be driven end-to-end without a full registry bootstrap.
-#[cfg(test)]
-#[allow(clippy::too_many_arguments, private_interfaces)]
-pub(crate) fn session_actor_for_goal_test(
-    session_key: SessionKey,
-    agent: Arc<Agent>,
-    session_handle: Arc<Mutex<SessionHandle>>,
-    out_tx: mpsc::Sender<OutboundMessage>,
-    inbox: mpsc::Receiver<ActorMessage>,
-    self_tx: mpsc::Sender<ActorMessage>,
-    data_dir: std::path::PathBuf,
-    goal_verifier_llm: Option<Arc<dyn LlmProvider>>,
-) -> SessionActor {
-    let (dummy_spawn_tx, _dummy_spawn_rx): (
-        mpsc::Sender<ActorMessage>,
-        mpsc::Receiver<ActorMessage>,
-    ) = mpsc::channel(1);
-    let actor = SessionActor {
-        session_key,
-        channel: "api".to_owned(),
-        chat_id: String::new(),
-        tenant_id: None,
-        inbox,
-        agent,
-        hooks: None,
-        hook_context: None,
-        session_handle,
-        out_tx,
-        status_indicator: None,
-        sender_user_id: None,
-        user_status_config: UserStatusConfig::default(),
-        data_dir: data_dir.clone(),
-        usage_ledger: None,
-        session_usage: octos_agent::SharedSessionUsage::default(),
-        max_history: Arc::new(std::sync::atomic::AtomicUsize::new(50)),
-        idle_timeout: Duration::from_secs(60),
-        session_timeout: Duration::from_secs(120),
-        semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
-        global_shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        queue_mode: QueueMode::Followup,
-        responsiveness: ResponsivenessObserver::new(),
-        adaptive_router: None,
-        lane_routing: None,
-        memory_store: None,
-        usage_profile_id: "gap67-prof".to_owned(),
-        active_overflow_tasks: Arc::new(std::sync::atomic::AtomicU32::new(0)),
-        overflow_cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        active_sessions: Arc::new(RwLock::new(
-            ActiveSessionStore::open(std::path::Path::new("/tmp/octos-gap67-active-sessions"))
-                .expect("active session store"),
-        )),
-        user_workspace: data_dir.clone(),
-        cron_tool: None,
-        self_tx,
-        pending_approvals: HumanPendingApprovalStore::default(),
-        approvals_audit: Arc::new(crate::approvals_audit::ApprovalsAuditLog::new(
-            &data_dir,
-            crate::approvals_audit::ApprovalsAuditConfig::from_env(),
-        )),
-        persistent_retry_state: Arc::new(std::sync::Mutex::new(LoopRetryState::default())),
-        context_manager: Arc::new(std::sync::Mutex::new(ContextManager::new("gap67", None))),
-        retry_state_path: Some(data_dir.clone().join("retry_state.json")),
-        recovered_tasks: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
-        consecutive_recovery_turns: Arc::new(std::sync::Mutex::new(0)),
-        current_command_cmid: None,
-        last_turn_total_tokens: 0,
-        goal_verifier_llm,
-    };
-    let _ = dummy_spawn_tx;
-    actor
-}
+

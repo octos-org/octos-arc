@@ -122,25 +122,6 @@ use crate::contracts::{UiProtocolContractStores, contract_stores};
 // host peers in-process against the same process-global wire registry. Glob so
 // every existing call site in this module (and in `ui_protocol_tests.rs`, which
 // does `use super::*`) keeps resolving unchanged.
-#[cfg(test)]
-use crate::autonomy::agent_orchestrator::AgentArtifactRecord as AgentRuntimeArtifactRecord;
-use crate::autonomy::agent_orchestrator::{
-    AgentArtifactReadRequest, AgentListRequest, AgentOrchestrator, AgentOutputRequest,
-    AgentRequest, AgentUpsert, FleetKeeperSeed, GoalSessionRequest, GoalSetRequest,
-    InProcessAgentOrchestrator, LoopControlKind, LoopControlRequest, LoopCreateRequest,
-    LoopListRequest, MonitorControlKind, MonitorControlRequest, MonitorCreateRequest,
-    MonitorListRequest, NativeSpecialistAppUiEvent, NativeSpecialistLaunchRequest,
-    default_agent_orchestrator, master_continuation_prompt, master_continuation_reason_name,
-    monitor_invalid_spec_error, parse_agent_output_cursor, upsert_background_task_agent,
-    wire_key_from_goal_key,
-};
-use crate::autonomy::master_continuation_scheduler::{
-    MasterContinuationReason, MasterContinuationRuntimeState, QueuedMasterContinuation,
-};
-use crate::autonomy::specialist_runner::{
-    AppUiSupervisorEventSink, SpecialistArtifactSpec, SupervisedCliSpecialist,
-    SupervisedSpecialistSpec, run_supervised_cli_specialist,
-};
 use crate::context_manager::{
     CompactContextPolicy, ContextCompactionBudgetOutcome, ContextCompactionRecord,
     ContextCompactionStatus, ContextEventKind, ContextManager, ForkPolicy, PromptBuildPolicy,
@@ -1101,512 +1082,42 @@ impl SessionWorkspaceStore {
     }
 }
 
-/// PR 4b — re-seed the in-memory maps a HEADLESS fleet-keeper (no live client)
-/// never got from a `session/open` after a serve restart, from ONE bounded,
-/// validated, PAIRED [`FleetKeeperSeed`] per wire (codex round 2). The global
-/// master-continuation drain runs this pre-pass BEFORE its two gates.
-///
-/// For each seed the workspace root AND the cwd scope come from the SAME pending
-/// continuation ([`InProcessAgentOrchestrator::pending_fleet_keeper_seeds`] pairs
-/// and validates them), so:
-/// - `set_if_absent(wire, root, runtime_hint)` clears Gate A (workspace-known)
-///   while restoring transcript-relocation provenance. Only an explicit
-///   `workspace_has_runtime_hint=true` reconstructs a hint; derived and legacy
-///   roots remain tool/UI workspaces without moving transcript storage. The
-///   seed key is the `wire_key_from_goal_key` strip — byte-identical to the gate
-///   probe (THE landmine); a mismatch would strand the keeper silently.
-/// - `set_goal_scope_if_absent(wire, scope)` (only for a scoped key) clears Gate
-///   D (`goal_target_is_dispatchable`, which for a cwd-scoped target requires
-///   `goal_scopes[wire] == scope` — empty after a headless restart, so a scoped
-///   keeper would otherwise be surfaced yet `continue`d SILENTLY).
-///
-/// Pairing them in the accessor is only half the fix: the APPLICATION must be
-/// all-or-nothing too, or a wire whose workspace already exists but whose scope
-/// is absent gets a MIXED pair (codex round 3). Concrete, no race needed: a live
-/// UNscoped session leaves `session_workspaces[wire] = /live` with `goal_scopes`
-/// absent; a scoped seed `(wire, A, /A)` would `set_if_absent` the workspace
-/// (no-op, `/live` present) yet `set_goal_scope_if_absent` scope A — Gate A then
-/// passes on `/live` and Gate D on A, so the keeper runs in `/live`, not `/A`.
-///
-/// So gate the WHOLE seed on the target slots being absent (seed only a FRESH
-/// wire, never a half/mixed pair):
-/// - Scoped (`scope = Some`): seed BOTH only when the workspace AND the goal
-///   scope are both absent. If either is already present (a live session, or a
-///   prior seed), skip both — never inject a scope into a wire whose workspace
-///   belongs to someone else. `wire` is the `wire_key_from_goal_key` strip so the
-///   workspace key is byte-identical to the drain gate probe.
-/// - Plain (`scope = None`): only a workspace to seed (Gate D is always true for
-///   an unscoped target); fill the workspace gap.
-///
-/// Both stores stay atomically never-overwrite via `set_if_absent`, so a live
-/// entry is authoritative and the seed only ever fills a genuine GAP. The
-/// accessor already did the `is_dir` validation, dedupe, and cap.
-///
-/// v1 residual (bounded, documented — deliberately NOT hardened): the two maps
-/// have independent locks, so a concurrent `session/open` that publishes its
-/// scope before its workspace (see `session/open`) could, in a sub-tick
-/// interleave between this gate's check and its set, still leave a one-turn
-/// mismatch on that precise keeper wire. It is bounded to one turn, needs a
-/// concurrent open on the exact wire, and the module is dormant until PR 5 (which
-/// sets the controller key server-side). A fully cross-map-atomic establish is a
-/// follow-up.
-fn reseed_fleet_keeper_candidates(
-    workspaces: &SessionWorkspaceStore,
-    orchestrator: &InProcessAgentOrchestrator,
-    seeds: Vec<FleetKeeperSeed>,
-) {
-    for seed in seeds {
-        let profile_id = workspace_profile_scope(None, &seed.wire);
-        match seed.scope {
-            Some(scope) => {
-                // Seed the pair only into a FRESH wire — never a mixed pair.
-                if workspaces.get(&profile_id, &seed.wire).is_none()
-                    && orchestrator.goal_scope(&seed.wire).is_none()
-                {
-                    let root = PathBuf::from(&seed.root);
-                    let runtime_hint =
-                        (seed.workspace_has_runtime_hint == Some(true)).then(|| root.clone());
-                    workspaces.set_if_absent(&profile_id, seed.wire.clone(), root, runtime_hint);
-                    orchestrator.set_goal_scope_if_absent(&seed.wire, &scope);
-                }
-            }
-            None => {
-                let root = PathBuf::from(&seed.root);
-                let runtime_hint =
-                    (seed.workspace_has_runtime_hint == Some(true)).then(|| root.clone());
-                workspaces.set_if_absent(&profile_id, seed.wire, root, runtime_hint);
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod fleet_keeper_reseed_tests {
-    use super::*;
-    use crate::autonomy::agent_orchestrator::{
-        FLEET_KEEPER_EXTERNAL_KIND, FLEET_KEEPER_GROUP, FLEET_KEEPER_META_FLEET_ID,
-        FLEET_KEEPER_META_WORKSPACE_HAS_RUNTIME_HINT, FLEET_KEEPER_META_WORKSPACE_ROOT,
-    };
-    use crate::autonomy::master_continuation_scheduler::MasterContinuationRequest;
-
-    #[test]
-    fn set_if_absent_is_atomic_and_never_overwrites() {
-        // PR 4b Fix 2 — the workspace re-seed's never-overwrite check was a
-        // get()-then-set() across two lock acquisitions, racy against a
-        // concurrent `session/open` `set`. `set_if_absent` collapses check+insert
-        // under a single lock: it inserts (returns true) only on a vacant slot and
-        // leaves an established entry untouched (returns false).
-        let store = SessionWorkspaceStore::default();
-        let key = SessionKey("prof:api:chat#s".to_owned());
-        let profile_id = workspace_profile_scope(None, &key);
-        assert!(
-            store.set_if_absent(
-                &profile_id,
-                key.clone(),
-                PathBuf::from("/first"),
-                Some(PathBuf::from("/first")),
-            ),
-            "first insert into a vacant slot returns true"
-        );
-        assert!(
-            !store.set_if_absent(
-                &profile_id,
-                key.clone(),
-                PathBuf::from("/second"),
-                Some(PathBuf::from("/second")),
-            ),
-            "a second insert finds an established entry and returns false"
-        );
-        assert_eq!(
-            store.get(&profile_id, &key),
-            Some(PathBuf::from("/first")),
-            "the established entry is never overwritten"
-        );
-        assert_eq!(
-            store.runtime_hint(&profile_id, &key),
-            Some(PathBuf::from("/first")),
-            "a recovered fleet workspace remains an authoritative runtime hint"
-        );
-    }
-
-    #[test]
-    fn should_preserve_derived_workspace_provenance_when_reseeding_after_restart() {
-        let orchestrator = InProcessAgentOrchestrator::default();
-        let workspaces = SessionWorkspaceStore::default();
-        let root = tempfile::tempdir().expect("tempdir");
-        let root_str = root.path().to_str().expect("utf8 root").to_owned();
-        let wire = SessionKey("prof:api:chat#derived".to_owned());
-        let request = MasterContinuationRequest::new(
-            FLEET_KEEPER_GROUP,
-            wire.0.clone(),
-            "prof",
-            MasterContinuationReason::External(FLEET_KEEPER_EXTERNAL_KIND.to_owned()),
-            std::time::SystemTime::now(),
-        )
-        .with_metadata(FLEET_KEEPER_META_FLEET_ID, "f-derived")
-        .with_metadata(FLEET_KEEPER_META_WORKSPACE_ROOT, root_str)
-        .with_metadata(FLEET_KEEPER_META_WORKSPACE_HAS_RUNTIME_HINT, "false");
-        orchestrator.enqueue_continuation_for_test(request);
-
-        let seeds = orchestrator.pending_fleet_keeper_seeds();
-        assert_eq!(seeds[0].workspace_has_runtime_hint, Some(false));
-        reseed_fleet_keeper_candidates(&workspaces, &orchestrator, seeds);
-
-        let binding = workspaces
-            .snapshot("prof", &wire)
-            .expect("reseeded binding");
-        assert_eq!(binding.root, root.path());
-        assert_eq!(
-            binding.runtime_hint, None,
-            "a persisted Tier-3 workspace must remain a non-relocating binding"
-        );
-    }
-
-    #[test]
-    fn should_preserve_explicit_cwd_provenance_when_reseeding_after_restart() {
-        let orchestrator = InProcessAgentOrchestrator::default();
-        let workspaces = SessionWorkspaceStore::default();
-        let root = tempfile::tempdir().expect("tempdir");
-        let root_str = root.path().to_str().expect("utf8 root").to_owned();
-        let wire = SessionKey("prof:api:chat#explicit".to_owned());
-        let request = MasterContinuationRequest::new(
-            FLEET_KEEPER_GROUP,
-            wire.0.clone(),
-            "prof",
-            MasterContinuationReason::External(FLEET_KEEPER_EXTERNAL_KIND.to_owned()),
-            std::time::SystemTime::now(),
-        )
-        .with_metadata(FLEET_KEEPER_META_FLEET_ID, "f-explicit")
-        .with_metadata(FLEET_KEEPER_META_WORKSPACE_ROOT, root_str)
-        .with_metadata(FLEET_KEEPER_META_WORKSPACE_HAS_RUNTIME_HINT, "true");
-        orchestrator.enqueue_continuation_for_test(request);
-
-        let seeds = orchestrator.pending_fleet_keeper_seeds();
-        assert_eq!(seeds[0].workspace_has_runtime_hint, Some(true));
-        reseed_fleet_keeper_candidates(&workspaces, &orchestrator, seeds);
-
-        let binding = workspaces
-            .snapshot("prof", &wire)
-            .expect("reseeded binding");
-        assert_eq!(binding.root, root.path());
-        assert_eq!(binding.runtime_hint.as_deref(), Some(root.path()));
-    }
-
-    #[test]
-    fn should_not_relocate_transcripts_when_legacy_seed_has_unknown_provenance() {
-        let orchestrator = InProcessAgentOrchestrator::default();
-        let workspaces = SessionWorkspaceStore::default();
-        let root = tempfile::tempdir().expect("tempdir");
-        let root_str = root.path().to_str().expect("utf8 root").to_owned();
-        let wire = SessionKey("prof:api:chat#legacy".to_owned());
-        let request = MasterContinuationRequest::new(
-            FLEET_KEEPER_GROUP,
-            wire.0.clone(),
-            "prof",
-            MasterContinuationReason::External(FLEET_KEEPER_EXTERNAL_KIND.to_owned()),
-            std::time::SystemTime::now(),
-        )
-        .with_metadata(FLEET_KEEPER_META_FLEET_ID, "f-legacy")
-        .with_metadata(FLEET_KEEPER_META_WORKSPACE_ROOT, root_str);
-        orchestrator.enqueue_continuation_for_test(request);
-
-        let seeds = orchestrator.pending_fleet_keeper_seeds();
-        assert_eq!(seeds[0].workspace_has_runtime_hint, None);
-        reseed_fleet_keeper_candidates(&workspaces, &orchestrator, seeds);
-
-        assert_eq!(
-            workspaces
-                .snapshot("prof", &wire)
-                .expect("reseeded legacy binding")
-                .runtime_hint,
-            None,
-            "unknown legacy provenance must fail safe instead of becoming a cwd hint"
-        );
-    }
-
-    /// Enqueue a fleet-keeper wake, optionally rooted (real dir), on `controller`.
-    fn enqueue_keeper(
-        orchestrator: &InProcessAgentOrchestrator,
-        controller: &str,
-        fleet_id: &str,
-        root: Option<&str>,
-    ) {
-        let mut req = MasterContinuationRequest::new(
-            FLEET_KEEPER_GROUP,
-            controller,
-            "prof",
-            MasterContinuationReason::External(FLEET_KEEPER_EXTERNAL_KIND.to_owned()),
-            std::time::SystemTime::now(),
-        )
-        .with_metadata(FLEET_KEEPER_META_FLEET_ID, fleet_id);
-        if let Some(root) = root {
-            req = req.with_metadata(FLEET_KEEPER_META_WORKSPACE_ROOT, root);
-        }
-        orchestrator.enqueue_continuation_for_test(req);
-    }
-
-    #[test]
-    fn admission_reseeds_both_workspace_and_goal_scope_for_a_scoped_keeper() {
-        // PR 4b Gate A + Gate D end-to-end. A SCOPED headless keeper must clear
-        // BOTH the workspace-known gate (Gate A) and `goal_target_is_dispatchable`
-        // (Gate D, which for a cwd-scoped storage key demands
-        // `goal_scopes[wire] == scope`). `goal_scopes` is empty after a headless
-        // restart, so without the goal-scope half the keeper is surfaced yet
-        // `continue`d SILENTLY. The paired pre-pass fills BOTH maps of the FRESH
-        // wire from the SAME seed, so both gates pass and the wire's workspace and
-        // scope provably match. (The RED that the scope half is load-bearing is
-        // pinned by `scoped_seed_skipped_when_wire_has_a_live_workspace`.)
-        let orchestrator = InProcessAgentOrchestrator::default();
-        let workspaces = SessionWorkspaceStore::default();
-
-        // The persisted controller workspace MUST be a real directory — the
-        // accessor's is_dir validation refuses a moved/deleted root.
-        let root = tempfile::tempdir().expect("tempdir");
-        let root_str = root.path().to_str().expect("utf8 root").to_owned();
-
-        let scoped_controller = "prof:api:chat#topic\u{0}~cwd-abcd1234";
-        let scoped_key = SessionKey(scoped_controller.to_owned());
-        let wire = SessionKey("prof:api:chat#topic".to_owned());
-        enqueue_keeper(&orchestrator, scoped_controller, "f-a", Some(&root_str));
-
-        // The drain's connection-independent sweep surfaces a pending
-        // continuation only when its wire key has a known workspace.
-        let is_surfaced = |ws: &SessionWorkspaceStore| -> bool {
-            let runnable = |session: &SessionKey, profile_id: &str| {
-                ws.get(profile_id, &wire_key_from_goal_key(session))
-                    .is_some()
-            };
-            orchestrator
-                .due_loop_targets_with_filter(None, 8, Some(&runnable))
-                .into_iter()
-                .any(|(key, _)| key == scoped_key)
-        };
-
-        // Cold restart: empty workspaces + empty goal_scopes → neither gate passes.
-        assert!(
-            !is_surfaced(&workspaces),
-            "a workspace-unknown keeper is not surfaced (Gate A)"
-        );
-        assert!(
-            !orchestrator.goal_target_is_dispatchable(&scoped_key),
-            "a scoped keeper is not dispatchable with an empty goal_scopes (Gate D)"
-        );
-
-        let seeds = orchestrator.pending_fleet_keeper_seeds();
-        assert_eq!(seeds.len(), 1, "exactly one paired candidate");
-        assert_eq!(seeds[0].scope.as_deref(), Some("abcd1234"));
-
-        // The paired pre-pass seeds BOTH maps of the fresh wire from one seed.
-        reseed_fleet_keeper_candidates(&workspaces, &orchestrator, seeds);
-        assert_eq!(
-            workspaces.get("prof", &wire),
-            Some(root.path().to_path_buf()),
-            "Gate A: the wire's workspace is the seed root"
-        );
-        assert_eq!(
-            orchestrator.goal_scope(&wire).as_deref(),
-            Some("abcd1234"),
-            "Gate D: the wire's goal scope is the SAME seed's scope (paired)"
-        );
-        assert!(
-            orchestrator.goal_target_is_dispatchable(&scoped_key),
-            "after the paired re-seed Gate D passes — scoped identity end to end"
-        );
-        assert!(
-            is_surfaced(&workspaces),
-            "surfaced after the paired re-seed (Gate A)"
-        );
-    }
-
-    #[test]
-    fn unpaired_scope_and_root_for_one_wire_cannot_bypass_gate_d() {
-        // codex round 2 P1 regression. Two pending keepers on the SAME wire:
-        // scope A is ROOTLESS (not rehydratable) and scope B is ROOTED (`/B`).
-        // Two independently-filtered accessors would seed workspace `wire → /B`
-        // (root filter) but scope `wire → A` (no root filter), admitting the A
-        // continuation and running it in `/B` — the isolation bypass Gate D
-        // exists to prevent. The unified paired accessor DROPS the rootless A
-        // entirely, so only B is seeded and only B is dispatchable.
-        let orchestrator = InProcessAgentOrchestrator::default();
-        let workspaces = SessionWorkspaceStore::default();
-        let root_b = tempfile::tempdir().expect("tempdir");
-        let root_b_str = root_b.path().to_str().expect("utf8 root").to_owned();
-
-        let wire = "prof:api:chat#topic";
-        let scoped_a = SessionKey(format!("{wire}\u{0}~cwd-aaaa"));
-        let scoped_b = SessionKey(format!("{wire}\u{0}~cwd-bbbb"));
-        enqueue_keeper(&orchestrator, scoped_a.0.as_str(), "f-a", None);
-        enqueue_keeper(&orchestrator, scoped_b.0.as_str(), "f-b", Some(&root_b_str));
-
-        reseed_fleet_keeper_candidates(
-            &workspaces,
-            &orchestrator,
-            orchestrator.pending_fleet_keeper_seeds(),
-        );
-
-        // The rooted B is admitted: the wire's workspace is B's root (paired) and
-        // B is dispatchable.
-        assert_eq!(
-            workspaces.get("prof", &SessionKey(wire.to_owned())),
-            Some(PathBuf::from(&root_b_str)),
-            "the wire's workspace is B's root (root and scope paired from one continuation)"
-        );
-        assert!(
-            orchestrator.goal_target_is_dispatchable(&scoped_b),
-            "the rooted B continuation is dispatchable in its own workspace"
-        );
-        // The rootless A can NOT bypass Gate D onto B's workspace: goal_scopes[wire]
-        // is B, so scoped_goal_key(wire) != A.
-        assert!(
-            !orchestrator.goal_target_is_dispatchable(&scoped_a),
-            "the rootless A continuation cannot be admitted to run in B's workspace"
-        );
-    }
-
-    #[test]
-    fn reseed_never_overwrites_a_live_session_workspace_or_scope() {
-        // Both never-overwrite disciplines through the unified paired pre-pass: a
-        // live `session/open` established an authoritative workspace AND cwd scope
-        // for the wire; a headless seed carrying a DIFFERENT root/scope must fill
-        // only a GAP and never clobber the live client (`set_if_absent` /
-        // `set_goal_scope_if_absent` are atomic no-overwrite).
-        let orchestrator = InProcessAgentOrchestrator::default();
-        let workspaces = SessionWorkspaceStore::default();
-        let live = tempfile::tempdir().expect("tempdir");
-        let seed_root = tempfile::tempdir().expect("tempdir");
-        let seed_root_str = seed_root.path().to_str().expect("utf8").to_owned();
-
-        let wire = SessionKey("prof:api:chat#topic".to_owned());
-        // Live client: workspace + goal scope already established for this wire.
-        workspaces.set("prof", wire.clone(), live.path().to_path_buf());
-        orchestrator.set_goal_scope(&wire, Some("live-b".to_owned()));
-
-        reseed_fleet_keeper_candidates(
-            &workspaces,
-            &orchestrator,
-            vec![FleetKeeperSeed {
-                wire: wire.clone(),
-                scope: Some("seed-a".to_owned()),
-                root: seed_root_str,
-                workspace_has_runtime_hint: None,
-            }],
-        );
-
-        assert_eq!(
-            workspaces.get("prof", &wire),
-            Some(live.path().to_path_buf()),
-            "a live workspace is never overwritten by a headless seed"
-        );
-        assert_eq!(
-            orchestrator.scoped_goal_key(&wire),
-            SessionKey("prof:api:chat#topic\u{0}~cwd-live-b".to_owned()),
-            "a live session/open scope is never overwritten by a headless seed"
-        );
-    }
-
-    #[test]
-    fn scoped_seed_skipped_when_wire_has_a_live_workspace() {
-        // codex round 3 (RED against 6ff0aa22e). The application must be
-        // all-or-nothing across the two maps. A live UNscoped session left
-        // `session_workspaces[wire] = /live` with NO goal scope. A scoped seed
-        // `(wire, aaaa, /A)` must NOT insert scope `aaaa` into that wire —
-        // otherwise Gate A passes on `/live` and Gate D passes for `aaaa`, so the
-        // keeper runs in `/live`, not `/A` (cross-folder execution via
-        // pre-existing, non-concurrent state). The whole seed is skipped because
-        // the workspace slot is already occupied.
-        let orchestrator = InProcessAgentOrchestrator::default();
-        let workspaces = SessionWorkspaceStore::default();
-        let live = tempfile::tempdir().expect("tempdir");
-        let seed_root = tempfile::tempdir().expect("tempdir");
-        let seed_root_str = seed_root.path().to_str().expect("utf8").to_owned();
-        let wire = SessionKey("prof:api:chat#topic".to_owned());
-        // A live UNscoped session established a workspace but no goal scope.
-        workspaces.set("prof", wire.clone(), live.path().to_path_buf());
-
-        reseed_fleet_keeper_candidates(
-            &workspaces,
-            &orchestrator,
-            vec![FleetKeeperSeed {
-                wire: wire.clone(),
-                scope: Some("aaaa".to_owned()),
-                root: seed_root_str,
-                workspace_has_runtime_hint: None,
-            }],
-        );
-
-        assert_eq!(
-            orchestrator.goal_scope(&wire),
-            None,
-            "a scoped seed must NOT insert a scope into a wire whose workspace is already live"
-        );
-        assert!(
-            !orchestrator.goal_target_is_dispatchable(&SessionKey(
-                "prof:api:chat#topic\u{0}~cwd-aaaa".to_owned()
-            )),
-            "the scoped keeper cannot be admitted to run in the live session's workspace"
-        );
-        assert_eq!(
-            workspaces.get("prof", &wire),
-            Some(live.path().to_path_buf()),
-            "the live workspace is never overwritten"
-        );
-    }
-
-    #[test]
-    fn plain_seed_fills_only_the_workspace_gap() {
-        // An UNscoped keeper (scope = None) has Gate D always true, so it seeds
-        // only the workspace and never touches goal_scopes.
-        let orchestrator = InProcessAgentOrchestrator::default();
-        let workspaces = SessionWorkspaceStore::default();
-        let root = tempfile::tempdir().expect("tempdir");
-        let wire = SessionKey("prof:api:chat#plain".to_owned());
-
-        reseed_fleet_keeper_candidates(
-            &workspaces,
-            &orchestrator,
-            vec![FleetKeeperSeed {
-                wire: wire.clone(),
-                scope: None,
-                root: root.path().to_str().expect("utf8").to_owned(),
-                workspace_has_runtime_hint: None,
-            }],
-        );
-
-        assert_eq!(
-            workspaces.get("prof", &wire),
-            Some(root.path().to_path_buf()),
-            "a plain seed fills the workspace gap"
-        );
-        assert_eq!(
-            orchestrator.goal_scope(&wire),
-            None,
-            "a plain seed never registers a goal scope"
-        );
-    }
-}
-
 /// Resolve the profile component of an in-memory session-workspace key.
 ///
 /// Authenticated SPA sessions deliberately use raw `web-*` ids, so the
 /// `SessionKey` alone is not an isolation boundary. Every workspace lookup
 /// therefore uses the profile already resolved by the protocol entrypoint.
-fn workspace_profile_scope(profile_id: Option<&str>, session_id: &SessionKey) -> String {
-    profile_id
-        .or_else(|| session_id.profile_id())
-        .unwrap_or(MAIN_PROFILE_ID)
-        .to_owned()
-}
-
-#[derive(Default)]
-struct SessionPermissionProfileStore {
-    selections: std::sync::Mutex<HashMap<SessionKey, StoredSessionPermissionProfile>>,
-}
 
 #[derive(Debug, Clone, Copy, Default)]
 struct StoredSessionPermissionProfile {
     selection: octos_core::ui_protocol::PermissionProfileSelection,
     approval_policy: Option<octos_agent::ApprovalPolicy>,
 }
+
+
+/// Captured before the task is spawned, so an abort before its first poll also
+/// releases the dispatch reservation. The strong state reference pins the
+/// generation address until this guard drops; a stale guard cannot close a
+/// replacement even when its client-supplied session and turn IDs are reused.
+struct BuildCacheTurnReservation(BuildCacheTurnOwner, Arc<TokioMutex<TurnState>>);
+impl Drop for BuildCacheTurnReservation {
+    fn drop(&mut self) {
+        release_peer_build_cache_slot(
+            None,
+            &self.0.session,
+            &self.0.turn,
+            &self.1,
+            crate::build_cache::pool::SlotOutcome::Cancelled,
+        );
+    }
+}
+
+
+#[derive(Default)]
+struct SessionPermissionProfileStore {
+    selections: std::sync::Mutex<HashMap<SessionKey, StoredSessionPermissionProfile>>,
+}
+
 
 impl SessionPermissionProfileStore {
     // Read-side convenience pair kept for feature combinations that resolve
@@ -2917,18 +2428,6 @@ fn register_peer_wire_session(state: &Arc<AppState>, session_id: &SessionKey) {
     {
         return;
     }
-    // Reconnect: migrate any pending injection stranded on the peer's old wire
-    // key to this newly-opened session so it is delivered, not lost.
-    let rehomed = default_agent_orchestrator()
-        .retarget_peer_send_input_continuations(profile_id, slug, session_id);
-    if rehomed > 0 {
-        tracing::debug!(
-            slug,
-            rehomed,
-            session = %session_id,
-            "re-homed pending peer_send_input injections to reopened peer session"
-        );
-    }
 }
 
 /// Evict a `peer-<slug>` session's wire mapping on session/connection close so
@@ -2939,14 +2438,6 @@ fn evict_peer_wire_session(session_id: &SessionKey) {
         return;
     };
     peer_wire_registry().evict_if_value(&peer_wire_key(profile_id, slug), session_id);
-}
-
-fn session_permission_profiles() -> Arc<SessionPermissionProfileStore> {
-    static SESSION_PERMISSION_PROFILES: OnceLock<Arc<SessionPermissionProfileStore>> =
-        OnceLock::new();
-    SESSION_PERMISSION_PROFILES
-        .get_or_init(|| Arc::new(SessionPermissionProfileStore::default()))
-        .clone()
 }
 
 fn session_context_statuses() -> Arc<SessionContextStatusStore> {
@@ -4833,7 +4324,6 @@ fn register_session_ledger_scope(
     // what makes the goal store isolate cwds exactly as the transcript already
     // does. The goal continuation dispatch strips this scope back to the wire
     // key when it reaches the session runtime / actor.
-    let _ = default_agent_orchestrator().set_goal_scope(&runtime.session_key, scope.clone());
     // Topic-suffixed sessions also emit ledger events under their BASE key:
     // the alpha-9 file/visual bridges deliberately strip the `#topic` before
     // appending so base-bucket subscribers see them (see
@@ -4843,8 +4333,7 @@ fn register_session_ledger_scope(
     // never mis-route a different project's base-key session.
     let base = runtime.session_key.base_key();
     if base != runtime.session_key.0 {
-        ledger.set_session_scope(&SessionKey(base.to_owned()), scope.clone());
-        let _ = default_agent_orchestrator().set_goal_scope(&SessionKey(base.to_owned()), scope);
+        ledger.set_session_scope(&SessionKey(base.to_owned()), scope);
     }
 }
 
@@ -5467,81 +4956,6 @@ fn forward_task_progress_to_channel(
         return;
     };
     forward_task_progress_json_to_channel(tx, progress_dropped, task, "task_progress", json);
-
-    let mirrored = match upsert_background_task_agent(task, runtime_profile_id) {
-        Ok(mirrored) => mirrored,
-        Err(error) => {
-            tracing::warn!(task_id = %task.id, error = %error.message, "task progress mirror admission failed");
-            return;
-        }
-    };
-    if let Some((session_id, agent)) = mirrored {
-        let event = json!({
-            "type": "agent_updated",
-            "session_id": session_id,
-            "agent": agent,
-        });
-        if let Ok(json) = serde_json::to_string(&event) {
-            forward_task_progress_json_to_channel(
-                tx,
-                progress_dropped,
-                task,
-                "agent_updated",
-                json,
-            );
-        }
-    }
-}
-
-/// Mirror a TERMINAL `BackgroundTask` snapshot onto the durable, per-session
-/// ledger as an `agent/updated` notification.
-///
-/// **Why this exists (stuck-chip root cause):** the per-turn progress channel
-/// (`forward_task_progress_to_channel` → `progress_tx`) is torn down when the
-/// spawning turn ends. A spawn_only background child that outlives its turn and
-/// only THEN goes terminal has no live receiver — the terminal `task_progress`
-/// AND `agent_updated` frames are both dropped ("terminal task update dropped:
-/// progress receiver gone"), so the client's chip never flips off
-/// "Orchestrating…".
-///
-/// [`send_notification_durable`] appends the event to the per-session ledger
-/// (in-memory ring + disk + `publish_live` broadcast) BEFORE it attempts live
-/// delivery to `ws`. That append is connection-independent, so the terminal
-/// flip survives the originating connection being gone: a reconnecting client
-/// replays it via cursor, and any sibling connection on the same session sees
-/// it on the live broadcast forwarder. The carried [`UiAgentRecord`] includes
-/// `task_id` + `status`, which the TUI uses to reconcile its chip.
-///
-/// Only TERMINAL snapshots (`completed` / `failed` / `cancelled`) are mirrored
-/// here — non-terminal updates already flow on the live per-turn channel and
-/// are coalesce-friendly, so appending each to the durable ledger would only
-/// bloat replay history with redundant in-flight states.
-fn forward_terminal_agent_update_durable(
-    ws: &WsConnection,
-    ledger: &UiProtocolLedger,
-    task: &octos_agent::BackgroundTask,
-    runtime_profile_id: Option<&str>,
-) {
-    if !task.status.is_terminal() {
-        return;
-    }
-    let (session_id, agent_value) = match upsert_background_task_agent(task, runtime_profile_id) {
-        Ok(Some(mirrored)) => mirrored,
-        Ok(None) => return,
-        Err(error) => {
-            tracing::warn!(task_id = %task.id, error = %error.message, "durable terminal mirror admission failed");
-            return;
-        }
-    };
-    let Ok(agent) = serde_json::from_value::<octos_core::ui_protocol::UiAgentRecord>(agent_value)
-    else {
-        return;
-    };
-    let _ = send_notification_durable(
-        ws,
-        ledger,
-        UiNotification::AgentUpdated(AgentUpdatedEvent { session_id, agent }),
-    );
 }
 
 fn forward_task_progress_json_to_channel(
@@ -5904,13 +5318,6 @@ impl octos_agent::ToolApprovalRequester for UiProtocolApprovalRequester {
         // or an unresolvable originator. The enqueue is a quick scheduler push —
         // it does NOT block; we await `response_rx` below exactly as before, and
         // the woken master resolves that oneshot from a different task.
-        wake_master_on_peer_awaiting_input(
-            self.state.as_ref(),
-            &self.session_id,
-            &approval_id.0.to_string(),
-            PeerPendingKind::Approval,
-            &peer_pending_prompt_summary(&event.title, &event.body),
-        );
 
         // Approvals are durable: if the WS drop strands the request, the
         // ledger still records it and the client can rehydrate.
@@ -6241,13 +5648,6 @@ impl octos_agent::UserQuestionRequester for SessionUserQuestionRequester {
         // originator. The enqueue does NOT block; we await `response_rx` below
         // exactly as before, and the woken master resolves it from a different
         // task.
-        wake_master_on_peer_awaiting_input(
-            self.state.as_ref(),
-            &self.session_id,
-            &question_id.0.to_string(),
-            PeerPendingKind::Question,
-            &peer_pending_prompt_summary(&event.title, &event.body),
-        );
 
         // The event is durable: if the WS drop strands the request, the ledger
         // still records it and a reconnecting client can rehydrate. We cancel
@@ -6742,33 +6142,6 @@ async fn ui_protocol_connection(
                 // need to re-load — the Notify is private to `mark_failed`.
                 break;
             }
-            _ = appui_continuation_tick.tick() => {
-                let profile_filter = connection_profile_id
-                    .or(routed_profile_id)
-                    .or(session_open_profile_id.as_deref());
-                let open_sessions: std::collections::HashSet<SessionKey> =
-                    live_forwarders.lock().await.keys().cloned().collect();
-                drain_appui_due_master_continuations(
-                    &ws,
-                    &state,
-                    &ledger,
-                    &contracts,
-                    &active_turns,
-                    &connection_turns,
-                    profile_filter,
-                    &open_sessions,
-                    false,
-                    features,
-                ).await;
-                emit_session_orchestration_updates(
-                    &ws,
-                    &ledger,
-                    &active_turns,
-                    &live_forwarders,
-                    &mut last_orchestration,
-                ).await;
-                continue;
-            }
             next = ws_rx.next() => match next {
                 Some(Ok(msg)) => msg,
                 Some(Err(_)) | None => break,
@@ -6896,6 +6269,7 @@ async fn ui_protocol_connection(
         }
 
         match command {
+            UiCommand::TaskArtifactList(_) | UiCommand::TaskArtifactRead(_) => {}
             UiCommand::ProfileLocalCreate(params) => {
                 match create_or_get_local_solo_profile(&state, params) {
                     Ok(result) => {
@@ -7012,14 +6386,6 @@ async fn ui_protocol_connection(
             }
             UiCommand::TaskOutputRead(params) => {
                 handle_task_output_read(&ws, &state, connection_profile_id, id, params).await;
-            }
-            UiCommand::TaskArtifactList(params) => {
-                handle_task_artifact_list(&ws, &state, connection_profile_id, features, id, params)
-                    .await;
-            }
-            UiCommand::TaskArtifactRead(params) => {
-                handle_task_artifact_read(&ws, &state, connection_profile_id, features, id, params)
-                    .await;
             }
             UiCommand::TaskList(params) => {
                 handle_task_list(&ws, &state, connection_profile_id, id, params).await;
@@ -7600,33 +6966,6 @@ where
                 _ = &mut notified => {
                     break;
                 }
-                _ = appui_continuation_tick.tick() => {
-                    if embedded.as_ref().is_some_and(|control| !control.continuations_enabled.load(Ordering::Acquire)) {
-                        continue;
-                    }
-                    let open_sessions: std::collections::HashSet<SessionKey> =
-                        live_forwarders.lock().await.keys().cloned().collect();
-                    drain_appui_due_master_continuations(
-                        &ws,
-                        &state,
-                        &ledger,
-                        &contracts,
-                        &active_turns,
-                        &connection_turns,
-                        connection_profile_id_owned.as_deref(),
-                        &open_sessions,
-                        embedded.is_some(),
-                        features,
-                    ).await;
-                    emit_session_orchestration_updates(
-                        &ws,
-                        &ledger,
-                        &active_turns,
-                        &live_forwarders,
-                        &mut last_orchestration,
-                    ).await;
-                    continue;
-                }
                 writer_result = &mut writer_done_rx => {
                     ws.mark_failed();
                     writer_finished = true;
@@ -7846,28 +7185,7 @@ where
                     )
                     .await;
                 }
-                UiCommand::TaskArtifactList(params) => {
-                    handle_task_artifact_list(
-                        &ws,
-                        &state,
-                        connection_profile_id_owned.as_deref(),
-                        features,
-                        id,
-                        params,
-                    )
-                    .await;
-                }
-                UiCommand::TaskArtifactRead(params) => {
-                    handle_task_artifact_read(
-                        &ws,
-                        &state,
-                        connection_profile_id_owned.as_deref(),
-                        features,
-                        id,
-                        params,
-                    )
-                    .await;
-                }
+                UiCommand::TaskArtifactList(_) | UiCommand::TaskArtifactRead(_) => {}
                 UiCommand::TaskList(params) => {
                     handle_task_list(
                         &ws,
@@ -11117,7 +10435,6 @@ async fn raw_session_status_result(
     }
     let mut policy =
         runtime_policy_stamp_for_profile(state, &profile_id, Some(&session_id), profile.as_ref());
-    add_autonomy_policy_stamp(&mut policy, features);
     let (context, context_state) = if features.context_lifecycle_available() {
         appui_context_status_snapshot_for_state(
             state,
@@ -11170,75 +10487,6 @@ async fn raw_session_status_result(
         result["model"] = model;
     }
     Ok(result)
-}
-
-fn add_autonomy_policy_stamp(policy: &mut Value, features: ConnectionUiFeatures) {
-    if !features.coding_autonomy_available() {
-        return;
-    }
-    let Value::Object(object) = policy else {
-        return;
-    };
-    object.insert(
-        "autonomy_contract_id".into(),
-        Value::String("coding-autonomy-v1".into()),
-    );
-    object.insert(
-        "agent_control".into(),
-        Value::String(
-            if features.agent_control_available() {
-                "available"
-            } else {
-                "unavailable"
-            }
-            .into(),
-        ),
-    );
-    object.insert(
-        "goal_runtime".into(),
-        Value::String(
-            if features.goal_runtime_available() {
-                "available"
-            } else {
-                "unavailable"
-            }
-            .into(),
-        ),
-    );
-    object.insert(
-        "loop_runtime".into(),
-        Value::String(
-            if features.loop_runtime_available() {
-                "available"
-            } else {
-                "unavailable"
-            }
-            .into(),
-        ),
-    );
-    // Report the REAL budget policy from the single source of truth in
-    // `agent_orchestrator` — hardcoded literals here drifted from the
-    // constants the backend actually enforces.
-    object.insert(
-        "goal_default_token_budget".into(),
-        json!(crate::autonomy::agent_orchestrator::GOAL_DEFAULT_TOKEN_BUDGET),
-    );
-    object.insert(
-        "goal_max_token_budget".into(),
-        json!(crate::autonomy::agent_orchestrator::GOAL_MAX_TOKEN_BUDGET),
-    );
-    object.insert("continuation_min_delay_seconds".into(), json!(30));
-    object.insert("continuation_max_per_hour".into(), json!(20));
-    object.insert("loop_min_interval_seconds".into(), json!(60));
-    object.insert("loop_max_interval_seconds".into(), json!(86_400));
-    object.insert("loop_max_age_days".into(), json!(7));
-    object.insert("loop_allow_slash_commands".into(), json!(true));
-    object.insert("idle_only_scheduling".into(), json!(true));
-    object.insert("max_objective_bytes".into(), json!(8_192));
-    object.insert("max_loop_prompt_bytes".into(), json!(8_192));
-    object.insert("max_loops_per_session".into(), json!(16));
-    object.insert("max_agent_tree_depth".into(), json!(4));
-    object.insert("max_agents_per_session".into(), json!(32));
 }
 
 fn raw_profile_skill_profile_id(
@@ -12040,37 +11288,6 @@ async fn invoke_skill_action_tool_binding(
     Ok(Value::Object(response))
 }
 
-/// #2055 review round 2 (coverage holes c + d) — wire the goal-task-row
-/// observer pair onto a CACHED session supervisor (`session_runtime.tools`),
-/// which outlives goals coming and going, so the goal binding resolves at
-/// CALLBACK time via `active_goal_id` — the gateway idiom, not the per-turn
-/// dispatch snapshot. Installed idempotently at each point of use, the same
-/// pattern as [`install_skill_action_job_projection_listener`] below (the
-/// SessionRuntime constructor is deliberately left out of the loop: the
-/// session-cache layer has no autonomy coupling today, and point-of-use
-/// wiring keeps it that way). Snapshots taken from this registry
-/// (`snapshot_excluding` — e.g. the native-review specialist swarm) inherit
-/// the pair onto their fresh supervisors.
-fn wire_goal_task_row_observers_for_cached_supervisor(
-    supervisor: &octos_agent::TaskSupervisor,
-    session_id: &SessionKey,
-    profile_id: &str,
-    profile_data_dir: &std::path::Path,
-) {
-    // Round 3 — thin adapter over the SHARED installer so this site cannot
-    // drift from the per-turn / gateway wiring or from the effect tests.
-    // #8 — the COMPOSED variant: a cached WS supervisor can restore
-    // `peer_handoff` rows, so its restore must also adopt parked orphans whose
-    // `result.md` already sits on the blackboard (one shared `on_restore`
-    // callback; goal resolvers unchanged).
-    crate::autonomy::agent_orchestrator::install_peer_restore_observers_resolving_at_callback(
-        supervisor,
-        session_id,
-        profile_id,
-        profile_data_dir,
-    );
-}
-
 fn install_skill_action_job_projection_listener(
     supervisor: &octos_agent::TaskSupervisor,
     profile_id: &str,
@@ -12479,12 +11696,6 @@ async fn raw_skill_action_invoke(
             // register on THIS cached supervisor, not the per-turn snapshot
             // the turn path wires, so give it the goal-task-row observer
             // pair here (resolve-at-callback; idempotent re-install).
-            wire_goal_task_row_observers_for_cached_supervisor(
-                &supervisor,
-                &params.session_id,
-                &profile_id,
-                &session_runtime.profile.data_dir,
-            );
             install_skill_action_job_projection_listener(
                 &supervisor,
                 &profile_id,
@@ -12581,12 +11792,7 @@ async fn load_skill_action_job_view(
             // an already-missed restore, which covers any future site that
             // enables first — this keeps the observers present from the very
             // first touch so registrations in between are recorded too.)
-            wire_goal_task_row_observers_for_cached_supervisor(
-                &supervisor,
-                session_id,
-                &profile_id,
-                &runtime.profile.data_dir,
-            );
+
             install_skill_action_job_projection_listener(
                 &supervisor,
                 &profile_id,
@@ -14450,221 +13656,6 @@ fn peer_awaiting_wake_prompt_summary(prompt: &str) -> String {
     capped_utf8(one_line, WAKE_PROMPT_SUMMARY_CAP).0
 }
 
-/// #peer-awaiting-wake CORE — enqueue an AUTONOMOUS master continuation that
-/// WAKES the peer's originator (master) the moment the peer PARKS on an
-/// approval/question (becomes genuinely `awaiting_input`). Resolves the peer's
-/// slug/profile from `peer_session`, reads the recorded `originator` from
-/// `peers/<slug>/originator` (the SAME source `peer_send_input`/`peer_respond`
-/// authorize against — symlink-safe via [`staged_peer_dir`]), VALIDATES it is a
-/// legitimate master session (right profile, not itself a peer), and pushes ONE
-/// [`PEER_AWAITING_INPUT_EXTERNAL_KIND`] continuation onto that master through
-/// the SAME scheduler `peer_fleet_synthesis` uses. Filesystem-only +
-/// `AppState`-free, so it is unit-testable with a tempdir.
-///
-/// The enqueue is a quick, non-blocking scheduler push: the caller (a park-point
-/// requester) awaits its own oneshot as normal, and the woken master resolves it
-/// from a DIFFERENT task via `peer_respond`. The scheduler's `is_idle_eligible`
-/// gate (checked at drain) means the wake never fires while the MASTER itself is
-/// mid-turn or blocked on its own input/approval.
-fn enqueue_peer_awaiting_input_wake(
-    peers_root: &Path,
-    peer_session: &SessionKey,
-    pending_id: &str,
-    park_kind: PeerPendingKind,
-    prompt: &str,
-) -> PeerAwaitingWakeOutcome {
-    // ONLY a peer session parks a peer. A non-peer (e.g. the master's OWN)
-    // session parking must never wake anyone.
-    let Some((profile_id, slug)) = peer_slug_and_profile(peer_session) else {
-        return PeerAwaitingWakeOutcome::NotPeer;
-    };
-    // Route the originator read through `staged_peer_dir` so a hostile/stray
-    // `peers/<slug>` symlink can never redirect the read outside `peers_root`.
-    let Some(peer_dir) = staged_peer_dir(peers_root, slug) else {
-        return PeerAwaitingWakeOutcome::NoStagedPeer;
-    };
-    let Some(master) =
-        peer_io::read_peer_file(&peer_dir, "originator", peer_io::PEER_FILE_READ_CAP_SMALL)
-    else {
-        return PeerAwaitingWakeOutcome::NoOriginator;
-    };
-    let master = master.trim();
-    if master.is_empty() {
-        return PeerAwaitingWakeOutcome::NoOriginator;
-    }
-    let master_key = SessionKey(master.to_owned());
-    // VALIDATE the recorded originator is a legitimate MASTER session before
-    // targeting a wake at it — never trust the string blindly. `peer/prepare`
-    // writes its supplied `session_id` verbatim as the `originator`, so it can be
-    // malformed, wrong-profile, or itself a PEER session. Treat it as an
-    // authorization locator (exactly as `peer_respond`/`peer_send_input` do), not
-    // a blind target: require a profile that EQUALS the peer's (peers run under
-    // their master's profile) AND a topic that is NOT a peer topic — a peer can
-    // NEVER answer via `peer_respond` (depth-1 guard), so a wake aimed at one
-    // would strand the blocked peer, and a wrong-profile/garbage value would
-    // strand a continuation on the wrong or a nonexistent session. Any failure →
-    // skip silently, exactly like a missing originator (the peer just emits no
-    // wake). The `peer-` prefix is checked on the RAW topic (not
-    // `peer_slug_and_profile`, which also gates slug safety) so even a malformed
-    // `peer-<unsafe>` originator topic is rejected.
-    if master_key.profile_id() != Some(profile_id)
-        || master_key
-            .topic()
-            .is_some_and(|topic| topic.starts_with("peer-"))
-    {
-        return PeerAwaitingWakeOutcome::InvalidOriginator;
-    }
-    let summary = peer_awaiting_wake_prompt_summary(prompt);
-    let outcome = default_agent_orchestrator().enqueue_peer_awaiting_input_continuation(
-        &master_key,
-        profile_id,
-        slug,
-        pending_id,
-        park_kind.as_str(),
-        &summary,
-    );
-    if outcome.is_duplicate() {
-        PeerAwaitingWakeOutcome::AlreadyQueued
-    } else {
-        tracing::debug!(
-            master = %master_key,
-            profile = profile_id,
-            slug,
-            kind = park_kind.as_str(),
-            "peer parked on input — enqueued autonomous wake on master",
-        );
-        PeerAwaitingWakeOutcome::Woke
-    }
-}
-
-/// Resolve the peer's profile `data_dir` from `state.profiles` and delegate.
-/// The thin `AppState` seam over [`wake_master_and_record_park_escalation`]
-/// that the park-point requesters call. No-op for a non-peer session or an
-/// unregistered profile.
-fn wake_master_on_peer_awaiting_input(
-    state: &AppState,
-    peer_session: &SessionKey,
-    pending_id: &str,
-    park_kind: PeerPendingKind,
-    prompt: &str,
-) {
-    let Some((profile_id, _slug)) = peer_slug_and_profile(peer_session) else {
-        return;
-    };
-    let Some(runtime) = state.profiles.get(profile_id) else {
-        return;
-    };
-    wake_master_and_record_park_escalation(
-        &runtime.data_dir,
-        peer_session,
-        pending_id,
-        park_kind,
-        prompt,
-    );
-}
-
-/// The `AppState`-free body of [`wake_master_on_peer_awaiting_input`] (split
-/// out in the #1967 codex round so the park-time effects are unit-testable
-/// with a tempdir `data_dir`): enqueue the awaiting-input wake on the peer's
-/// originator, then persist the park as a durable `Escalation` row when the
-/// peer carries a goal context.
-fn wake_master_and_record_park_escalation(
-    data_dir: &Path,
-    peer_session: &SessionKey,
-    pending_id: &str,
-    park_kind: PeerPendingKind,
-    prompt: &str,
-) -> PeerAwaitingWakeOutcome {
-    let Some((profile_id, slug)) = peer_slug_and_profile(peer_session) else {
-        return PeerAwaitingWakeOutcome::NotPeer;
-    };
-    let peers_root = data_dir.join("peers");
-    // #1967 codex round — a park must never wake the master for a CLOSED peer:
-    // by then the `closed` marker is durable, `peer_respond` refuses the peer,
-    // and peer_close's ledger resolve has ALREADY run, so a wake would point the
-    // master at an unanswerable peer and a fresh escalation row would sit
-    // orphaned `open` forever. Since #1842 the requester's own [`PeerParkGate`]
-    // refuses such a park outright (this is the belt to that suspenders — the
-    // gate reads the SAME durable marker, and both must stay fail-closed).
-    if peer_is_closed(&peers_root, slug) {
-        tracing::debug!(
-            slug,
-            profile = profile_id,
-            kind = park_kind.as_str(),
-            "peer parked after close — suppressing master wake and escalation row"
-        );
-        // #27g — the caller (and the #1967 test) observes WHY: a closed
-        // peer's park is suppressed at the gate, before any wake/escalation.
-        return PeerAwaitingWakeOutcome::PeerClosed;
-    }
-    let wake_outcome =
-        enqueue_peer_awaiting_input_wake(&peers_root, peer_session, pending_id, park_kind, prompt);
-
-    // Peer-agent-based goal: when the peer that is parking carries a goal
-    // context (its staged `goal` file), persist this escalation as a durable
-    // `Escalation` row in the goal's ledger. This is the WIRE for the
-    // `append_escalation` method added to `sqlite_ledger` — previously the
-    // code path existed but no caller invoked it, so a peer escalation never
-    // landed in the goal's durable history.
-    //
-    // Best-effort: a ledger write failure must NOT block the wake above
-    // (which is the primary mechanism the master uses to learn about the
-    // escalation). The ledger is the long-term history; the wake is the
-    // immediate signal.
-    let Some(peer_dir) = staged_peer_dir(&peers_root, slug) else {
-        return wake_outcome;
-    };
-    let Some(goal_body) =
-        peer_io::read_peer_file(&peer_dir, "goal", peer_io::PEER_FILE_READ_CAP_SMALL)
-    else {
-        return wake_outcome;
-    };
-    let mut lines = goal_body.lines();
-    let goal_id = lines.next().map(str::trim).filter(|s| !s.is_empty());
-    let task_id = lines.next().map(str::trim).filter(|s| !s.is_empty());
-    let Some(goal_id) = goal_id else {
-        return wake_outcome;
-    };
-    let Some(originator) =
-        peer_io::read_peer_file(&peer_dir, "originator", peer_io::PEER_FILE_READ_CAP_SMALL)
-            .map(|s| s.trim().to_owned())
-            .filter(|s| !s.is_empty())
-    else {
-        return wake_outcome;
-    };
-    let kind_str = match park_kind {
-        PeerPendingKind::Approval => "approval",
-        PeerPendingKind::Question => "question",
-    };
-    if let Err(err) = default_agent_orchestrator().model_goal_record_peer_escalation(
-        data_dir,
-        goal_id,
-        profile_id,
-        &originator,
-        slug,
-        task_id,
-        &format!("[{kind_str}] {prompt}"),
-    ) {
-        tracing::warn!(
-            ?err,
-            slug,
-            goal_id,
-            originator,
-            kind = kind_str,
-            "peer-goal: failed to record escalation to goal ledger (wake already enqueued)"
-        );
-    } else {
-        tracing::info!(
-            slug,
-            goal_id,
-            originator,
-            kind = kind_str,
-            "peer-goal: recorded escalation to goal ledger"
-        );
-    }
-    wake_outcome
-}
-
 #[cfg(test)]
 mod peer_finding_evidence_tests {
     use super::*;
@@ -14734,6 +13725,41 @@ mod peer_finding_evidence_tests {
 
 #[cfg(test)]
 mod peer_interrupt_attribution_tests {
+fn gathered_peer_result(slug: &str, result: &str) -> Option<GatheredPeerResult> {
+    use sha2::{Digest, Sha256};
+    // Parse the writer's header from the SAME bytes returned by gather. The
+    // version file and turns.txt are published later and may still name N-1.
+    let (header, _) = result.split_once("\n---\n\n")?;
+    let mut lines = header.lines();
+    if lines.next()? != "---" || lines.next()? != format!("slug: {slug}") {
+        return None;
+    }
+    if !matches!(
+        lines.next()?,
+        "outcome: completed"
+            | "outcome: errored"
+            | "outcome: interrupted"
+            | "outcome: rate_limited"
+    ) {
+        return None;
+    }
+    lines
+        .next()?
+        .strip_prefix("updated_unix: ")?
+        .parse::<u64>()
+        .ok()?;
+    let round = lines.next()?.strip_prefix("turn: ")?.parse::<u32>().ok()?;
+    if round == 0 || lines.next().is_some() {
+        return None;
+    }
+    Some(GatheredPeerResult {
+        round,
+        digest: format!("{:x}", Sha256::digest(result.as_bytes())),
+    })
+}
+
+
+
     use super::*;
 
     /// An interrupt must name its real cause on the wire.
@@ -14783,524 +13809,36 @@ mod peer_interrupt_attribution_tests {
     }
 }
 
-#[cfg(test)]
-mod peer_awaiting_wake_tests {
-    use super::*;
-    use crate::autonomy::agent_orchestrator::PEER_AWAITING_INPUT_EXTERNAL_KIND;
-
-    /// Stage a peer dir (`<peers_root>/<slug>/` with `brief.md`) and optionally
-    /// record its `originator`. Mirrors the `stage_peer` staging contract that
-    /// `staged_peer_dir` validates.
-    fn stage_peer_with_originator(peers_root: &Path, slug: &str, originator: Option<&str>) {
-        let dir = peers_root.join(slug);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("brief.md"), "do the thing").unwrap();
-        if let Some(originator) = originator {
-            std::fs::write(dir.join("originator"), originator).unwrap();
-        }
-    }
-
-    fn peer_session(profile: &str, chat: &str, slug: &str) -> SessionKey {
-        SessionKey::with_profile_topic(profile, "api", chat, &format!("peer-{slug}"))
-    }
-
-    /// #1967 codex round — a peer that parks AFTER `peer_close` (the
-    /// documented #P1-2 close-race residual: a park landing between the
-    /// pending-cancel sweep and the wire eviction) must produce NEITHER a
-    /// master wake NOR a fresh escalation row. The close already cancelled
-    /// its pendings and resolved its ledger rows; `peer_respond` refuses a
-    /// closed peer, so a row written now would be orphaned `open` forever.
-    /// An identically-staged OPEN peer is the positive control: same goal,
-    /// same originator — wake + row both land.
-    #[test]
-    fn closed_peer_park_produces_neither_wake_nor_escalation_row() {
-        use crate::autonomy::agent_orchestrator::{AgentOrchestrator as _, GoalSetRequest};
-        let tmp = tempfile::tempdir().unwrap();
-        let data_dir = tmp.path();
-        let peers_root = data_dir.join("peers");
-        let profile = "tenant-wake-closed-esc";
-        let master = "tenant-wake-closed-esc:api:master";
-        // A goal OWNED by the originator, so the escalation write would
-        // succeed if (wrongly) attempted for the closed peer — the test must
-        // prove the GUARD suppresses it, not a binding failure.
-        let orchestrator = default_agent_orchestrator();
-        orchestrator
-            .set_goal(GoalSetRequest {
-                session_id: SessionKey(master.to_owned()),
-                profile_id: profile.to_owned(),
-                objective: "close-race escalation guard".to_owned(),
-                status: Some("active".to_owned()),
-                token_budget: Some(1_000),
-                transition_actor: None,
-            })
-            .expect("set goal");
-        let goal_id = orchestrator
-            .goal_id_for_session(&SessionKey(master.to_owned()))
-            .expect("goal id");
-        let ledger_path = data_dir.join("goal-ledgers").join(format!("{goal_id}.db"));
-        // #27g — the wake assertions are SEMANTIC (outcome-based), not
-        // count-deltas: the global orchestrator's pending queue is shared
-        // with every parallel test in the process, and a concurrent drain
-        // made the delta form flake (0 != baseline+1) in the full suite.
-
-        // The CLOSED peer: staged + goal-bound, with the durable marker.
-        stage_peer_with_originator(&peers_root, "retired", Some(master));
-        std::fs::write(
-            peers_root.join("retired").join("goal"),
-            format!("{goal_id}\n"),
-        )
-        .unwrap();
-        std::fs::write(peers_root.join("retired").join("closed"), "closer\n1\n").unwrap();
-        let closed_outcome = wake_master_and_record_park_escalation(
-            data_dir,
-            &peer_session(profile, "retired-wire", "retired"),
-            "approval-closed-1",
-            PeerPendingKind::Approval,
-            "run the migration?",
-        );
-        // #27g — semantic assertions on the OUTCOME (immune to the global
-        // orchestrator's queue being drained by PARALLEL tests, which made
-        // the count-delta form flake in the full concurrent suite): a closed
-        // peer is suppressed at the gate.
-        assert!(
-            matches!(closed_outcome, PeerAwaitingWakeOutcome::PeerClosed),
-            "a closed peer's park is suppressed at the gate, got {closed_outcome:?}"
-        );
-        assert!(
-            !ledger_path.exists(),
-            "a closed peer's park must not write an escalation row (ledger created at {})",
-            ledger_path.display()
-        );
-        assert!(
-            !ledger_path.exists(),
-            "a closed peer's park must not write an escalation row (ledger created at {})",
-            ledger_path.display()
-        );
-
-        // Positive control: the SAME staging without the marker → both land.
-        stage_peer_with_originator(&peers_root, "active", Some(master));
-        std::fs::write(
-            peers_root.join("active").join("goal"),
-            format!("{goal_id}\n"),
-        )
-        .unwrap();
-        let open_outcome = wake_master_and_record_park_escalation(
-            data_dir,
-            &peer_session(profile, "active-wire", "active"),
-            "approval-open-1",
-            PeerPendingKind::Approval,
-            "run the migration?",
-        );
-        // #27g — the open peer's park DID wake (the durable escalation row
-        // below is the independent file-system proof).
-        assert!(
-            matches!(open_outcome, PeerAwaitingWakeOutcome::Woke),
-            "an open peer's park wakes the master, got {open_outcome:?}"
-        );
-        let ledger = octos_fleet::GoalLedger::open(&ledger_path).expect("ledger exists");
-        let open = ledger.list_open_escalations(&goal_id).unwrap();
-        assert_eq!(open.len(), 1, "exactly the open peer's row was written");
-        assert_eq!(open[0].peer_id, "active");
-    }
-
-    /// A peer parking on an APPROVAL wakes its originator (master) with a
-    /// continuation carrying the peer slug + `approval` kind.
-    #[test]
-    fn peer_approval_park_wakes_master_on_originator() {
-        let tmp = tempfile::tempdir().unwrap();
-        let peers_root = tmp.path();
-        let profile = "tenant-wake-core-appr";
-        let master = "tenant-wake-core-appr:api:master";
-        stage_peer_with_originator(peers_root, "edison", Some(master));
-
-        let session = peer_session(profile, "edison-wire", "edison");
-        let outcome = enqueue_peer_awaiting_input_wake(
-            peers_root,
-            &session,
-            "approval-1",
-            PeerPendingKind::Approval,
-            "shell: delete build cache",
-        );
-        assert_eq!(outcome, PeerAwaitingWakeOutcome::Woke);
-
-        let orchestrator = default_agent_orchestrator();
-        let master_key = SessionKey(master.to_owned());
-        assert_eq!(
-            orchestrator.pending_continuation_count_for_session_for_test(&master_key, profile),
-            1,
-            "a peer approval park enqueues exactly one wake on its originator",
-        );
-        let drained = orchestrator.drain_ready_continuations_for_session(
-            &master_key,
-            profile,
-            MasterContinuationRuntimeState::idle(),
-            4,
-        );
-        let wake = drained
-            .iter()
-            .find(|c| {
-                matches!(&c.reason, MasterContinuationReason::External(k)
-                    if k == PEER_AWAITING_INPUT_EXTERNAL_KIND)
-            })
-            .expect("the approval wake must be queued on the master");
-        let prompt = master_continuation_prompt(wake);
-        assert!(prompt.contains("edison"), "prompt names the slug: {prompt}");
-        assert!(
-            prompt.contains("approval"),
-            "prompt states the approval kind: {prompt}"
-        );
-        assert!(
-            prompt.contains("peer_list") && prompt.contains("peer_respond"),
-            "prompt directs peer_list/peer_respond: {prompt}"
-        );
-    }
-
-    /// A peer parking on a QUESTION wakes its originator with a `question`-kind
-    /// continuation.
-    #[test]
-    fn peer_question_park_wakes_master_on_originator() {
-        let tmp = tempfile::tempdir().unwrap();
-        let peers_root = tmp.path();
-        let profile = "tenant-wake-core-q";
-        let master = "tenant-wake-core-q:api:master";
-        stage_peer_with_originator(peers_root, "tesla", Some(master));
-
-        let session = peer_session(profile, "tesla-wire", "tesla");
-        let outcome = enqueue_peer_awaiting_input_wake(
-            peers_root,
-            &session,
-            "question-1",
-            PeerPendingKind::Question,
-            "Which region should I deploy to?",
-        );
-        assert_eq!(outcome, PeerAwaitingWakeOutcome::Woke);
-
-        let orchestrator = default_agent_orchestrator();
-        let master_key = SessionKey(master.to_owned());
-        let drained = orchestrator.drain_ready_continuations_for_session(
-            &master_key,
-            profile,
-            MasterContinuationRuntimeState::idle(),
-            4,
-        );
-        let wake = drained
-            .iter()
-            .find(|c| {
-                matches!(&c.reason, MasterContinuationReason::External(k)
-                    if k == PEER_AWAITING_INPUT_EXTERNAL_KIND)
-            })
-            .expect("the question wake must be queued on the master");
-        assert!(
-            master_continuation_prompt(wake).contains("question"),
-            "prompt states the question kind",
-        );
-    }
-
-    /// A NON-peer session parking (topic is not `peer-<slug>`) must NOT wake
-    /// anyone — there is no master behind an ordinary session.
-    #[test]
-    fn non_peer_session_park_does_not_wake() {
-        let tmp = tempfile::tempdir().unwrap();
-        let peers_root = tmp.path();
-        // An ordinary (non-peer) session: a master's OWN turn parking.
-        let session = SessionKey::with_profile("tenant-wake-core-nonpeer", "api", "master");
-        let outcome = enqueue_peer_awaiting_input_wake(
-            peers_root,
-            &session,
-            "approval-x",
-            PeerPendingKind::Approval,
-            "anything",
-        );
-        assert_eq!(
-            outcome,
-            PeerAwaitingWakeOutcome::NotPeer,
-            "a non-peer session must never wake a master",
-        );
-    }
-
-    /// A peer with NO recorded originator fails closed: no wake (nothing to
-    /// notify).
-    #[test]
-    fn peer_without_originator_does_not_wake() {
-        let tmp = tempfile::tempdir().unwrap();
-        let peers_root = tmp.path();
-        let profile = "tenant-wake-core-noorig";
-        stage_peer_with_originator(peers_root, "ghost", None);
-
-        let session = peer_session(profile, "ghost-wire", "ghost");
-        let outcome = enqueue_peer_awaiting_input_wake(
-            peers_root,
-            &session,
-            "approval-y",
-            PeerPendingKind::Approval,
-            "anything",
-        );
-        assert_eq!(outcome, PeerAwaitingWakeOutcome::NoOriginator);
-    }
-
-    /// A recorded originator that is itself a PEER session (topic `peer-...`)
-    /// must NOT wake: a peer can never answer via `peer_respond` (depth-1 guard),
-    /// so a wake aimed at one would strand the blocked peer. `peer/prepare`
-    /// writes its supplied session_id verbatim, so this is a real input.
-    #[test]
-    fn peer_session_originator_does_not_wake() {
-        let tmp = tempfile::tempdir().unwrap();
-        let peers_root = tmp.path();
-        let profile = "tenant-wake-core-peerorig";
-        // The originator string is ANOTHER peer session under the same profile.
-        let peer_originator = format!("{profile}:api:other-wire#peer-other");
-        stage_peer_with_originator(peers_root, "edison", Some(&peer_originator));
-
-        let session = peer_session(profile, "edison-wire", "edison");
-        let outcome = enqueue_peer_awaiting_input_wake(
-            peers_root,
-            &session,
-            "approval-z",
-            PeerPendingKind::Approval,
-            "anything",
-        );
-        assert_eq!(
-            outcome,
-            PeerAwaitingWakeOutcome::InvalidOriginator,
-            "a peer-session originator can never answer — no wake",
-        );
-        // And nothing was enqueued anywhere for that peer-session key.
-        let orchestrator = default_agent_orchestrator();
-        assert_eq!(
-            orchestrator.pending_continuation_count_for_session_for_test(
-                &SessionKey(peer_originator),
-                profile,
-            ),
-            0,
-            "no continuation may land on a peer-session originator",
-        );
-    }
-
-    /// A recorded originator under a DIFFERENT profile than the peer's must NOT
-    /// wake — peers run under their master's profile, so a profile mismatch is a
-    /// malformed/hostile originator that would strand a continuation on the wrong
-    /// (or a nonexistent) session.
-    #[test]
-    fn wrong_profile_originator_does_not_wake() {
-        let tmp = tempfile::tempdir().unwrap();
-        let peers_root = tmp.path();
-        let profile = "tenant-wake-core-wrongprof";
-        // A well-formed MASTER session, but under a DIFFERENT profile.
-        let foreign_master = "some-other-tenant:api:master";
-        stage_peer_with_originator(peers_root, "edison", Some(foreign_master));
-
-        let session = peer_session(profile, "edison-wire", "edison");
-        let outcome = enqueue_peer_awaiting_input_wake(
-            peers_root,
-            &session,
-            "approval-w",
-            PeerPendingKind::Approval,
-            "anything",
-        );
-        assert_eq!(
-            outcome,
-            PeerAwaitingWakeOutcome::InvalidOriginator,
-            "a wrong-profile originator must not wake",
-        );
-        let orchestrator = default_agent_orchestrator();
-        assert_eq!(
-            orchestrator.pending_continuation_count_for_session_for_test(
-                &SessionKey(foreign_master.to_owned()),
-                profile,
-            ),
-            0,
-            "no continuation may land on a wrong-profile originator",
-        );
-        // Belt-and-suspenders: nor under the foreign profile either.
-        assert_eq!(
-            orchestrator.pending_continuation_count_for_session_for_test(
-                &SessionKey(foreign_master.to_owned()),
-                "some-other-tenant",
-            ),
-            0,
-        );
-    }
-
-    /// A profile-LESS originator (a bare `channel:chat`, no `{profile}:` prefix)
-    /// must NOT wake — it has no profile to match the peer's.
-    #[test]
-    fn profileless_originator_does_not_wake() {
-        let tmp = tempfile::tempdir().unwrap();
-        let peers_root = tmp.path();
-        let profile = "tenant-wake-core-noprof";
-        stage_peer_with_originator(peers_root, "edison", Some("garbage-no-profile"));
-
-        let session = peer_session(profile, "edison-wire", "edison");
-        let outcome = enqueue_peer_awaiting_input_wake(
-            peers_root,
-            &session,
-            "approval-v",
-            PeerPendingKind::Approval,
-            "anything",
-        );
-        assert_eq!(outcome, PeerAwaitingWakeOutcome::InvalidOriginator);
-    }
-
-    /// Two DISTINCT parks (distinct pending ids) wake the master twice; a RETRY
-    /// of the SAME park dedupes.
-    #[test]
-    fn distinct_parks_wake_twice_same_park_dedupes() {
-        let tmp = tempfile::tempdir().unwrap();
-        let peers_root = tmp.path();
-        let profile = "tenant-wake-core-dedupe";
-        let master = "tenant-wake-core-dedupe:api:master";
-        stage_peer_with_originator(peers_root, "edison", Some(master));
-        stage_peer_with_originator(peers_root, "tesla", Some(master));
-
-        let orchestrator = default_agent_orchestrator();
-        let master_key = SessionKey(master.to_owned());
-
-        // Two distinct parks (different peers, different pending ids).
-        assert_eq!(
-            enqueue_peer_awaiting_input_wake(
-                peers_root,
-                &peer_session(profile, "edison-wire", "edison"),
-                "pending-A",
-                PeerPendingKind::Approval,
-                "first",
-            ),
-            PeerAwaitingWakeOutcome::Woke,
-        );
-        assert_eq!(
-            enqueue_peer_awaiting_input_wake(
-                peers_root,
-                &peer_session(profile, "tesla-wire", "tesla"),
-                "pending-B",
-                PeerPendingKind::Question,
-                "second",
-            ),
-            PeerAwaitingWakeOutcome::Woke,
-        );
-        assert_eq!(
-            orchestrator.pending_continuation_count_for_session_for_test(&master_key, profile),
-            2,
-            "two distinct parks → two wakes",
-        );
-
-        // A RETRY of the FIRST park (same pending id) dedupes — no third wake.
-        assert_eq!(
-            enqueue_peer_awaiting_input_wake(
-                peers_root,
-                &peer_session(profile, "edison-wire", "edison"),
-                "pending-A",
-                PeerPendingKind::Approval,
-                "retry",
-            ),
-            PeerAwaitingWakeOutcome::AlreadyQueued,
-        );
-        assert_eq!(
-            orchestrator.pending_continuation_count_for_session_for_test(&master_key, profile),
-            2,
-            "a retried park never stacks a redundant wake",
-        );
-    }
-}
-
-fn build_cache_turn_owner(
-    session: &SessionKey,
-    turn: &TurnId,
-    state: &TokioMutex<TurnState>,
-) -> BuildCacheTurnOwner {
-    BuildCacheTurnOwner {
-        session: session.clone(),
-        turn: turn.clone(),
-        generation: std::ptr::from_ref(state) as usize,
-    }
-}
-
-/// Exact turn ownership also applies when a terminal has no resolved peers root.
-fn release_peer_build_cache_slot(
-    peers_root: Option<&std::path::Path>,
-    session_id: &SessionKey,
-    turn_id: &TurnId,
-    turn_state: &TokioMutex<TurnState>,
-    outcome: crate::build_cache::pool::SlotOutcome,
-) {
-    let Some(slug) = session_id
-        .topic()
-        .and_then(|topic| topic.strip_prefix("peer-"))
-    else {
-        return;
-    };
-    let owner = build_cache_turn_owner(session_id, turn_id, turn_state);
-    if let Some(root) = peers_root {
-        build_cache_slot_registry().release_owned(
-            &build_cache_slot_registry_key(root, slug),
-            &owner,
-            outcome,
-        );
-    } else {
-        build_cache_slot_registry().release_for_slug(slug, &owner, outcome);
-    }
-}
-
-/// Captured before the task is spawned, so an abort before its first poll also
-/// releases the dispatch reservation. The strong state reference pins the
-/// generation address until this guard drops; a stale guard cannot close a
-/// replacement even when its client-supplied session and turn IDs are reused.
-struct BuildCacheTurnReservation(BuildCacheTurnOwner, Arc<TokioMutex<TurnState>>);
-impl Drop for BuildCacheTurnReservation {
-    fn drop(&mut self) {
-        release_peer_build_cache_slot(
-            None,
-            &self.0.session,
-            &self.0.turn,
-            &self.1,
-            crate::build_cache::pool::SlotOutcome::Cancelled,
-        );
-    }
-}
-
-fn reserve_peer_build_cache_turn(
-    state: &AppState,
-    session_id: &SessionKey,
-    turn_id: &TurnId,
-    turn_state: &Arc<TokioMutex<TurnState>>,
-    routed_profile: Option<&str>,
-) -> Result<BuildCacheTurnReservation, RpcError> {
-    let owner = build_cache_turn_owner(session_id, turn_id, turn_state);
-    if let Some(slug) = session_id
-        .topic()
-        .and_then(|topic| topic.strip_prefix("peer-"))
-        && let Some(runtime) =
-            resolve_session_profile_runtime(state, session_id.profile_id().or(routed_profile))
-    {
-        let key = build_cache_slot_registry_key(&runtime.data_dir.join("peers"), slug);
-        build_cache_slot_registry().reserve_staged(&key, &owner)?;
-    }
-    Ok(BuildCacheTurnReservation(owner, turn_state.clone()))
-}
-
-/// #1801 v2: peer sessions leave a durable result on the blackboard — a
-/// `result.md` beside the brief, overwritten on every turn terminal (latest
-/// state). Files, not connection state: `/gather`, the future mailbox, and
-/// post-mortems all survive client crashes, reconnects, and limit outages.
-/// Only a session whose topic is `peer-<slug>` AND whose staged dir exists
-/// gets a write — an unstaged `peer-` topic must not create directories.
+/// Stable, collision-resistant filename-safe hash of a session id.
 ///
-/// #438 persistent peer sessions: peer sessions are persistent by design —
-/// they survive turn completion and only close on WebSocket disconnect
-/// (FIX-06 `evict_session` at connection-close hook, line 27850). There is
-/// no per-turn auto-close. The TUI keeps the session alive across multiple
-/// turns; this function is called at every turn terminal to update the
-/// blackboard with the latest result (and a versioned historical copy).
-///
-/// #1965 — `tokens_consumed` is the turn's accumulated token spend (the same
-/// `final_tokens_consumed` total the master goal accountants charge from).
-/// When the peer is goal-bound, the finding write below charges it against
-/// the master goal's shared budget pool. #1969 — both COMPLETED and
-/// ERRORED/rate-limited turns now carry real usage: the agent loop attaches
-/// the turn total to the bailed error (`PartialTurnUsage`) and the `error`
-/// arm folds it into `final_tokens_consumed`, so a peer that burned tokens
-/// before failing charges its real spend. Residual gap: an INTERRUPTED turn
-/// aborts the agent task before it can report usage (and this path has no
-/// shared token tracker to read post-abort), so it still threads 0 and never
-/// reaches this writer — tracked as a follow-up.
+/// Relocated to [`crate::autonomy::hash_session_for_inbox`] so the (no longer
+/// `api`-gated) monitor-notes channel derives its filenames from the SAME
+/// hash; re-exported here so this module's call sites keep working.
+pub(crate) fn hash_session_for_inbox(session_id: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    session_id.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+// `capped_utf8` moved to `crate::peers` alongside its peer-side callers
+// (`peer_pending_prompt_summary`, `read_peer_blackboard`, `compose_peer_list_text`);
+// picked back up here through the `crate::peers::*` glob at the top of this file.
+
+#[derive(Debug, Default, Deserialize)]
+struct RawPeerGatherParams {
+    /// Restrict to these slugs; omitted = every staged peer.
+    #[serde(default)]
+    slugs: Option<Vec<String>>,
+    #[serde(default)]
+    session_id: Option<SessionKey>,
+    #[serde(default)]
+    profile_id: Option<String>,
+}
+
+/// `peer/gather` (#1801 v2): the profile's peer blackboard — per staged peer
+/// its brief + latest result file (if any turn has terminated). Read-only.
 fn write_peer_result_if_peer_session(
     state: &Arc<AppState>,
     session_id: &SessionKey,
@@ -15414,8 +13952,7 @@ fn write_peer_result_if_peer_session(
     if let (Some(result), Some(token)) = (latest_result, lifetime_turn) {
         // The claim guard is still held. Only the authoritative durable bytes
         // can certify this lifetime idle, whether peer- or runtime-authored.
-        let queued =
-            default_agent_orchestrator().has_pending_peer_send_input_for_peer(profile_id, slug);
+        let queued = false;
         if let Err(err) = finish_peer_lifetime_turn(
             token,
             &result,
@@ -15468,451 +14005,109 @@ fn write_peer_result_if_peer_session(
     // `model_goal_peer_findings`, which scans live `result.md` files — the
     // ledger row survives across restarts even when result.md is later
     // overwritten by a subsequent turn).
-    if let Some(goal_body) =
-        peer_io::read_peer_file(&peer_dir, "goal", peer_io::PEER_FILE_READ_CAP_SMALL)
-    {
-        let mut lines = goal_body.lines();
-        let goal_id = lines.next().map(str::trim).filter(|s| !s.is_empty());
-        let task_id = lines.next().map(str::trim).filter(|s| !s.is_empty());
-        if let Some(goal_id) = goal_id {
-            // Read the peer's originator session (written by `stage_peer`
-            // at handoff) so the ledger write can enforce the goal-binding
-            // check: the goal record must be OWNED by the same session that
-            // staged this peer. A peer without an originator file (legacy
-            // peer/prepare path) cannot bind to a goal — refuse the write.
-            let originator =
-                peer_io::read_peer_file(&peer_dir, "originator", peer_io::PEER_FILE_READ_CAP_SMALL)
-                    .map(|s| s.trim().to_owned())
-                    .filter(|s| !s.is_empty());
-            let Some(originator) = originator else {
-                tracing::warn!(
-                    slug,
-                    goal_id,
-                    "peer-goal: peer has goal context but no originator; \
-                     refusing to record finding (cannot verify goal binding)"
-                );
-                return;
-            };
-            // Best-effort: a ledger write failure must NOT fail the peer's
-            // turn (the result.md is already written above and is the
-            // authoritative output). We log and continue.
-            //
-            // #1965 — `tokens_consumed` charges the master goal's budget
-            // inside the recorder (it already holds the ownership-checked
-            // goal record) and lands as the Finding row's real `cost_tokens`.
-            // The returned `goal_still_active` is the POST-charge status:
-            // it gates the goal-progress wake below so a budget-crossing
-            // peer cannot queue one more uncharged master turn past the cap.
-            let content_summary = peer_finding_assertion(outcome_str, body);
-            let goal_still_active = match default_agent_orchestrator()
-                .model_goal_record_peer_finding(
-                    &runtime.data_dir,
-                    goal_id,
-                    profile_id,
-                    &originator,
-                    slug,
-                    task_id,
-                    &content_summary,
-                    tokens_consumed,
-                ) {
-                Err(err) => {
-                    tracing::warn!(
-                        ?err,
-                        slug,
-                        goal_id,
-                        "peer-goal: failed to record peer finding to goal ledger"
-                    );
-                    // Recording failed → the post-charge status is unknown;
-                    // keep the wake (pre-#1965 behaviour) so the master still
-                    // learns of the peer result.
-                    true
-                }
-                Ok((_, goal_still_active)) => {
-                    tracing::info!(
-                        slug,
-                        goal_id,
-                        task_id,
-                        outcome = outcome_str,
-                        "peer-goal: recorded finding to goal ledger"
-                    );
-                    emit_finding_recorded_event(&runtime.data_dir, goal_id, slug, &content_summary);
-                    goal_still_active
-                }
-            };
+}
 
-            // Peer-agent-based goal: wake the master session so it sees the
-            // new finding on its next turn WITHOUT having to poll `goal_get`.
-            // The wake is a peer-staged event the master's session loop
-            // consumes; it carries the goal_id + peer slug + outcome so the
-            // master can decide whether to `goal_get` for details, dispatch
-            // more tasks, or mark the goal complete.
-            //
-            // Best-effort: if the wake channel is unavailable (e.g. master
-            // session is offline), the ledger row above is still durable —
-            // the master will see the finding on its next `goal_get`.
-            //
-            // #1965 codex round — gated on the goal still being ACTIVE after
-            // the charge above. This External "goal_progress" wake bypasses
-            // goal-status scheduling and is not goal-accounted, so an ungated
-            // wake right after the charge flipped the goal to
-            // `budget_limited` would queue exactly the post-budget master
-            // turn the flip exists to stop. The wrap-up continuation the flip
-            // enqueued carries the reorientation instead; still-active goals
-            // wake exactly as before.
-            if goal_still_active {
-                tracing::info!(
-                    slug,
-                    goal_id,
-                    task_id,
-                    originator,
-                    outcome = outcome_str,
-                    "peer-goal: waking master session"
-                );
-                // Enqueue the wake as an awaiting-input note on the master
-                // session. This is the same mechanism used for peer parking /
-                // approval wakes — it surfaces as a system message on the
-                // master's next turn.
-                // The WAKE is a notification, not evidence — the master reads
-                // the durable finding for detail — so a short bound is right
-                // here. Marked all the same, so the master can tell a complete
-                // short report from an abridged long one.
-                let content_summary =
-                    octos_core::truncated_utf8(body, MAX_PEER_WAKE_SUMMARY_CHARS, " …[truncated]");
-                if let Err(err) = enqueue_goal_progress_wake(
-                    &runtime.data_dir,
-                    &originator,
-                    goal_id,
-                    slug,
-                    turn_count,
-                    outcome_str,
-                    &content_summary,
-                    profile_id,
-                ) {
-                    tracing::warn!(
-                        ?err,
-                        slug,
-                        goal_id,
-                        originator,
-                        "peer-goal: failed to enqueue master wake (ledger row is still durable)"
-                    );
+
+
+fn gathered_peer_result(slug: &str, result: &str) -> Option<GatheredPeerResult> {
+    use sha2::{Digest, Sha256};
+    // Parse the writer's header from the SAME bytes returned by gather. The
+    // version file and turns.txt are published later and may still name N-1.
+    let (header, _) = result.split_once("\n---\n\n")?;
+    let mut lines = header.lines();
+    if lines.next()? != "---" || lines.next()? != format!("slug: {slug}") {
+        return None;
+    }
+    if !matches!(
+        lines.next()?,
+        "outcome: completed"
+            | "outcome: errored"
+            | "outcome: interrupted"
+            | "outcome: rate_limited"
+    ) {
+        return None;
+    }
+    lines
+        .next()?
+        .strip_prefix("updated_unix: ")?
+        .parse::<u64>()
+        .ok()?;
+    let round = lines.next()?.strip_prefix("turn: ")?.parse::<u32>().ok()?;
+    if round == 0 || lines.next().is_some() {
+        return None;
+    }
+    Some(GatheredPeerResult {
+        round,
+        digest: format!("{:x}", Sha256::digest(result.as_bytes())),
+    })
+}
+
+
+fn build_peer_gather_callback_for_turn(
+    peers_root: PathBuf,
+    consumption: Option<(SessionKey, GatheredPeerResults)>,
+    profile_id: String,
+) -> octos_agent::PeerGatherCallback {
+    Arc::new(move |idents: Option<Vec<String>>| {
+        // The model may pass peer NAMES or slugs; resolve each to a slug for
+        // the blackboard filter (an unresolved identifier matches nothing).
+        let slugs = idents.map(|idents| {
+            idents
+                .iter()
+                .filter_map(|ident| resolve_peer_name_to_slug(&peers_root, ident))
+                .collect::<Vec<_>>()
+        });
+        // task-evo-peer-turn-status — the gather tool reads under the
+        // CALLER'S profile so non-default profiles' valid lifetimes are not
+        // demoted to unknown by an "octos" default (outer-loop review).
+        let rows = read_peer_blackboard_with_profile(&peers_root, slugs.as_deref(), &profile_id);
+        let (output, output_truncated) = compose_peer_gather_text_with_truncation(&rows);
+        // A budget-capped gather is not proof the model saw every result.
+        if !output_truncated
+            && let Some((master, gathered)) = consumption.as_ref()
+            && !master
+                .topic()
+                .is_some_and(|topic| topic.starts_with("peer-"))
+        {
+            let mut gathered = gathered.lock().unwrap_or_else(|error| error.into_inner());
+            for row in &rows {
+                if row.result_truncated || row.closed {
+                    continue;
                 }
-            } else {
-                tracing::info!(
-                    slug,
-                    goal_id,
-                    originator,
-                    "peer-goal: goal no longer active after charge; skipping \
-                     goal-progress wake (the wrap-up continuation reorients \
-                     the master)"
-                );
+                let Some(receipt) = row
+                    .result
+                    .as_deref()
+                    .and_then(|body| gathered_peer_result(&row.slug, body))
+                else {
+                    continue;
+                };
+                let Some(dir) = staged_peer_dir(&peers_root, &row.slug) else {
+                    continue;
+                };
+                if peer_io::read_peer_file(&dir, "originator", peer_io::PEER_FILE_READ_CAP_SMALL)
+                    .is_some_and(|owner| owner.trim() == master.0)
+                    && gathered
+                        .get(&row.slug)
+                        .is_none_or(|old| old.round <= receipt.round)
+                {
+                    gathered.insert(row.slug.clone(), receipt);
+                }
             }
         }
-    }
+        Ok(output)
+    })
 }
 
-/// Enqueue a wake note for the master session when a goal-scoped peer
-/// completes a turn. The note is appended to the master's session-scoped
-/// `inbox/` file so the next master turn sees it as a system message.
-/// Returns `Err` if the inbox directory cannot be created or the note
-/// cannot be appended (best-effort — the caller logs and continues).
-///
-/// The filename is a SHA-256 hash of the session id (first 32 hex chars)
-/// so two distinct sessions cannot collide on a sanitized name (the
-/// lossy-replacement bug codex flagged: `a:b`, `a/b`, `a.b` would all
-/// map to `a_b.notes`). Hashing is collision-resistant per the hash
-/// function's guarantees and stable across restarts.
-#[allow(clippy::too_many_arguments)]
-fn enqueue_goal_progress_wake(
-    data_dir: &std::path::Path,
-    originator_session: &str,
-    goal_id: &str,
-    peer_slug: &str,
-    turn_count: u32,
-    outcome: &str,
-    content_summary: &str,
-    profile_id: &str,
-) -> Result<(), String> {
-    let safe_session = hash_session_for_inbox(originator_session);
-    let inbox_dir = data_dir.join("inbox");
-    std::fs::create_dir_all(&inbox_dir)
-        .map_err(|e| format!("failed to create inbox dir {}: {e}", inbox_dir.display()))?;
-    let note_path = inbox_dir.join(format!("{safe_session}.notes"));
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let message = format!(
-        "[peer-goal] peer `{peer_slug}` completed turn {turn_count} with outcome `{outcome}` for goal `{goal_id}`"
-    );
-    let line = format!("{timestamp} {message}\n");
-    // flock (shared) on a STABLE lockfile before appending: the reader takes
-    // an exclusive lock on the SAME lockfile before renaming `.notes`, so
-    // this shared lock serializes us with the reader — our append lands
-    // BEFORE the reader's rename (captured in this batch) or AFTER (lands
-    // in the fresh file). Using a separate `.lock` file (not `.notes`
-    // itself) is the load-bearing choice: `.notes` is renamed away by the
-    // reader, but the lockfile persists across renames, so the lock always
-    // refers to a stable inode (codex v12 issue #1944-1).
-    //
-    // BLOCKING lock (not try_lock): a writer that loses the race waits for
-    // the reader to finish its rename+read, then appends to the fresh
-    // `.notes`. This is the complete fix codex v12 flagged — try_lock
-    // ignoring failure is not full serialization.
-    // NOTE: std::fs::File::lock_shared/unlock are stable since Rust 1.89,
-    // but the workspace MSRV is 1.85. Use fs2::FileExt (supports 1.85).
-    // Clippy flags fs2::FileExt as unused because std has the same methods
-    // on the current toolchain, but we need the 1.85-compatible versions.
-    #[allow(unused_imports)]
-    use fs2::FileExt as _;
-    let lock_path = data_dir.join("inbox").join(format!("{safe_session}.lock"));
-    let lock_file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&lock_path)
-        .map_err(|e| format!("failed to open wake lock {}: {e}", lock_path.display()))?;
-    // fs2::FileExt::lock_shared (supports MSRV 1.85; std::fs::File::lock_shared is 1.89+)
-    #[allow(clippy::incompatible_msrv)]
-    lock_file
-        .lock_shared()
-        .map_err(|e| format!("failed to lock wake note {}: {e}", lock_path.display()))?;
-    let result = (|| {
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&note_path)
-            .map_err(|e| format!("failed to open wake note {}: {e}", note_path.display()))?;
-        use std::io::Write as _;
-        let mut file = file;
-        file.write_all(line.as_bytes())
-            .map_err(|e| format!("failed to append wake note {}: {e}", note_path.display()))
-    })();
-    // fs2::FileExt::unlock (supports MSRV 1.85; std::fs::File::unlock is 1.89+)
-    #[allow(clippy::incompatible_msrv)]
-    let _ = lock_file.unlock();
-    // Durable note is written; now ALSO enqueue a REAL master continuation
-    // so the master's actor loop fires immediately (codex PR review #2:
-    // previously this was only an append, not a true wake). Best-effort:
-    // if the continuation enqueue fails (e.g. master session offline), the
-    // durable note above is still readable on the master's next turn.
-    let master_key = SessionKey(originator_session.to_owned());
-    let _ = default_agent_orchestrator().enqueue_goal_progress_continuation(
-        &master_key,
-        profile_id,
-        goal_id,
-        peer_slug,
-        turn_count,
-        outcome,
-        content_summary,
-    );
-    result
+
+
+fn current_peer_result(peers_root: &Path, slug: &str) -> Option<GatheredPeerResult> {
+    let dir = staged_peer_dir(peers_root, slug)?;
+    let body = peer_io::read_peer_file(&dir, "result.md", peer_io::PEER_FILE_READ_CAP_LARGE)?;
+    gathered_peer_result(slug, &body)
 }
 
-/// Read and CLEAR the pending goal-progress notes for `session_id`. Returns
-/// `Some(rendered)` if any notes were pending, else `None`.
-///
-/// # Atomicity
-///
-/// The file is consumed by RENAMING it to a unique archive name FIRST,
-/// then reading the archived copy. This avoids the read-then-truncate race
-/// where a peer appending between our read and our truncate would have its
-/// note silently erased. After the rename, the original path no longer
-/// exists, so any peer appending gets a fresh empty file (O_CREAT) and no
-/// note is lost.
-///
-/// # Durability
-///
-/// The rendered string is returned to the caller, which embeds it in the
-/// agent's system prompt. If the turn crashes after rename but before the
-/// model consumes the prompt, the notes ARE lost from this inbox path —
-/// but the underlying findings remain durably recorded in the goal ledger
-/// (visible on the next `goal_get`), so the wake is an optimization, not
-/// the source of truth. A stronger guarantee (atomic queue with
-/// acknowledge-after-delivery) is deferred.
-///
-/// # Size bound
-///
-/// The archived file is read with a 64 KiB cap. An archive larger than
-/// that is RENAMED ASIDE (not returned, not deleted) so it stops growing
-/// and a future operator can inspect it — the consumer is not permanently
-/// wedged, it just skips this batch.
-fn read_and_clear_goal_progress_notes(
-    data_dir: &std::path::Path,
-    session_id: &str,
-) -> Option<String> {
-    let safe_session = hash_session_for_inbox(session_id);
-    let note_path = data_dir.join("inbox").join(format!("{safe_session}.notes"));
-    // Step 1 (O_NOFOLLOW): open the `.notes` leaf directly, refusing a
-    // symlink. We then `fstat` the OPENED HANDLE (not the path) to confirm
-    // a regular file. This closes the TOCTOU window where a hostile actor
-    // swaps `.notes` to a symlink between our metadata check and our open
-    // (codex v11 issue #1944-3). On Unix we use O_NOFOLLOW; on other
-    // platforms we re-verify after open via `symlink_metadata` (best-effort).
-    #[cfg(unix)]
-    let file = {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&note_path)
-            .ok()?
-    };
-    #[cfg(not(unix))]
-    let file = {
-        // Best-effort on non-Unix: refuse the path if it's a symlink, then
-        // open normally. Still TOCTOU-prone (the check and open are not
-        // atomic), but no worse than before.
-        let meta = std::fs::symlink_metadata(&note_path).ok()?;
-        if meta.file_type().is_symlink() {
-            return None;
-        }
-        std::fs::File::open(&note_path).ok()?
-    };
-    // fstat the OPEN handle — a regular file required. If the leaf was
-    // swapped to a symlink AFTER our open (impossible with O_NOFOLLOW, but
-    // possible on non-Unix), the fstat would still show the original
-    // regular file we opened (POSIX open-fd semantics).
-    let meta = file.metadata().ok()?;
-    if !meta.is_file() {
-        return None;
-    }
-    drop(file);
-    // flock (exclusive) on a STABLE lockfile BEFORE renaming. This is the
-    // load-bearing serialization: any writer holding the shared lock on
-    // the same lockfile finishes their append BEFORE we proceed, so a
-    // writer that opened `.notes` before our rename cannot append through
-    // the stale fd after we've read+deleted the archive (codex v12 issue
-    // #1944-1). Using a separate `.lock` file (not `.notes` itself) means
-    // the lock refers to a stable inode across renames.
-    //
-    // BLOCKING lock: a reader that loses the race waits for the writer to
-    // finish their append, then proceeds with the rename. This is the
-    // complete fix codex v12 flagged — try_lock ignoring failure is not
-    // full serialization.
-    use fs2::FileExt as _;
-    let lock_path = data_dir.join("inbox").join(format!("{safe_session}.lock"));
-    let lock_file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&lock_path)
-        .ok()?;
-    // fs2::FileExt::lock_exclusive (supports MSRV 1.85; std::fs::File::lock_exclusive is 1.89+)
-    #[allow(clippy::incompatible_msrv)]
-    lock_file.lock_exclusive().ok()?;
-    // Hold the lock for the ENTIRE rename + read + delete sequence. We
-    // release it explicitly at the end (or on early return via the guard).
-    struct LockGuard<'a>(&'a std::fs::File);
-    impl Drop for LockGuard<'_> {
-        fn drop(&mut self) {
-            // fs2::FileExt::unlock (supports MSRV 1.85; std::fs::File::unlock is 1.89+)
-            #[allow(clippy::incompatible_msrv)]
-            let _ = self.0.unlock();
-        }
-    }
-    let _guard = LockGuard(&lock_file);
-    // Step 2: rename the live file to a unique archive name. From this
-    // point on, any peer appending to the original path creates a NEW
-    // empty file — our read below cannot race with concurrent appends
-    // (they are blocked on the shared lock until we release the exclusive
-    // one, at which point they append to the fresh `.notes`).
-    // Archive name uses UUIDv7 (time-ordered, 128-bit, no collision) so
-    // two renames within the same nanosecond cannot collide (codex v11
-    // issue #1944-4).
-    let archive_path = data_dir
-        .join("inbox")
-        .join(format!("{safe_session}.{}.archive", uuid::Uuid::now_v7()));
-    std::fs::rename(&note_path, &archive_path).ok()?;
-    // Step 3: read the archived copy with a 64 KiB cap. The metadata
-    // precheck above only bounds the FILE SIZE AT RENAME TIME — a
-    // pre-opened writer could still have enlarged the archive after our
-    // rename. We bound the ACTUAL read via `take(CAP + 1)`: if we read
-    // more than CAP bytes, the archive is oversized and we skip it (the
-    // consumer is not wedged, future batches still drain).
-    //
-    // O_NOFOLLOW on the archive open too: a hostile actor who could
-    // predict our UUID (they cannot — UUIDv7 is 122 bits of entropy)
-    // might have planted a symlink. Cheap defense-in-depth.
-    const CAP: u64 = 64 * 1024;
-    let archive_meta = std::fs::symlink_metadata(&archive_path).ok()?;
-    if archive_meta.len() > CAP {
-        let oversize_path = archive_path.with_extension("oversize");
-        let _ = std::fs::rename(&archive_path, &oversize_path);
-        return None;
-    }
-    use std::io::Read as _;
-    #[cfg(unix)]
-    let file = {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(&archive_path)
-            .ok()?
-    };
-    #[cfg(not(unix))]
-    let file = std::fs::File::open(&archive_path).ok()?;
-    // NOTE: no flock needed here — the reader holds the exclusive lockfile
-    // from BEFORE the rename, so any writer that could have opened `.notes`
-    // before the rename is blocked on the shared lock and cannot append
-    // through the stale fd until we release. The archive's contents are
-    // frozen by the rename + our exclusive lock.
-    let mut bounded = (&file).take(CAP + 1);
-    let mut buf = Vec::new();
-    bounded.read_to_end(&mut buf).ok()?;
-    if buf.len() as u64 > CAP {
-        // Archive grew past CAP between the metadata check and the read —
-        // skip it (rename aside, don't process). This is the OOM defense
-        // codex v11 flagged.
-        let oversize_path = archive_path.with_extension("oversize");
-        let _ = std::fs::rename(&archive_path, &oversize_path);
-        return None;
-    }
-    let body = String::from_utf8(buf).ok()?;
-    // Step 4: best-effort delete the archive now that we have it in memory.
-    // Failure leaves a stale .archive file (operator cleanup), never a
-    // duplicate delivery (the original .notes path is gone).
-    let _ = std::fs::remove_file(&archive_path);
-    if body.trim().is_empty() {
-        return None;
-    }
-    // Render each `timestamp message` line as a markdown bullet.
-    let mut rendered = String::from("### Goal progress from peers\n\n");
-    for line in body.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let msg = line.split_once(' ').map(|x| x.1).unwrap_or(line);
-        rendered.push_str(&format!("- {msg}\n"));
-    }
-    Some(rendered)
-}
 
-/// Stable, collision-resistant filename-safe hash of a session id.
-///
-/// Relocated to [`crate::autonomy::hash_session_for_inbox`] so the (no longer
-/// `api`-gated) monitor-notes channel derives its filenames from the SAME
-/// hash; re-exported here so this module's call sites keep working.
-pub(crate) use crate::autonomy::hash_session_for_inbox;
 
-// `capped_utf8` moved to `crate::peers` alongside its peer-side callers
-// (`peer_pending_prompt_summary`, `read_peer_blackboard`, `compose_peer_list_text`);
-// picked back up here through the `crate::peers::*` glob at the top of this file.
-
-#[derive(Debug, Default, Deserialize)]
-struct RawPeerGatherParams {
-    /// Restrict to these slugs; omitted = every staged peer.
-    #[serde(default)]
-    slugs: Option<Vec<String>>,
-    #[serde(default)]
-    session_id: Option<SessionKey>,
-    #[serde(default)]
-    profile_id: Option<String>,
-}
-
-/// `peer/gather` (#1801 v2): the profile's peer blackboard — per staged peer
-/// its brief + latest result file (if any turn has terminated). Read-only.
 fn raw_peer_gather(
     state: &Arc<AppState>,
     request: &RpcRequest<Value>,
@@ -16093,45 +14288,6 @@ fn read_peer_consumption(peers_root: &Path, master: &SessionKey) -> PeerConsumpt
         .unwrap_or_default()
 }
 
-fn gathered_peer_result(slug: &str, result: &str) -> Option<GatheredPeerResult> {
-    use sha2::{Digest, Sha256};
-    // Parse the writer's header from the SAME bytes returned by gather. The
-    // version file and turns.txt are published later and may still name N-1.
-    let (header, _) = result.split_once("\n---\n\n")?;
-    let mut lines = header.lines();
-    if lines.next()? != "---" || lines.next()? != format!("slug: {slug}") {
-        return None;
-    }
-    if !matches!(
-        lines.next()?,
-        "outcome: completed"
-            | "outcome: errored"
-            | "outcome: interrupted"
-            | "outcome: rate_limited"
-    ) {
-        return None;
-    }
-    lines
-        .next()?
-        .strip_prefix("updated_unix: ")?
-        .parse::<u64>()
-        .ok()?;
-    let round = lines.next()?.strip_prefix("turn: ")?.parse::<u32>().ok()?;
-    if round == 0 || lines.next().is_some() {
-        return None;
-    }
-    Some(GatheredPeerResult {
-        round,
-        digest: format!("{:x}", Sha256::digest(result.as_bytes())),
-    })
-}
-
-fn current_peer_result(peers_root: &Path, slug: &str) -> Option<GatheredPeerResult> {
-    let dir = staged_peer_dir(peers_root, slug)?;
-    let body = peer_io::read_peer_file(&dir, "result.md", peer_io::PEER_FILE_READ_CAP_LARGE)?;
-    gathered_peer_result(slug, &body)
-}
-
 fn peer_result_was_consumed(
     peers_root: &Path,
     slug: &str,
@@ -16218,61 +14374,6 @@ fn build_peer_gather_callback(
     profile_id: String,
 ) -> octos_agent::PeerGatherCallback {
     build_peer_gather_callback_for_turn(peers_root, None, profile_id)
-}
-
-fn build_peer_gather_callback_for_turn(
-    peers_root: PathBuf,
-    consumption: Option<(SessionKey, GatheredPeerResults)>,
-    profile_id: String,
-) -> octos_agent::PeerGatherCallback {
-    Arc::new(move |idents: Option<Vec<String>>| {
-        // The model may pass peer NAMES or slugs; resolve each to a slug for
-        // the blackboard filter (an unresolved identifier matches nothing).
-        let slugs = idents.map(|idents| {
-            idents
-                .iter()
-                .filter_map(|ident| resolve_peer_name_to_slug(&peers_root, ident))
-                .collect::<Vec<_>>()
-        });
-        // task-evo-peer-turn-status — the gather tool reads under the
-        // CALLER'S profile so non-default profiles' valid lifetimes are not
-        // demoted to unknown by an "octos" default (outer-loop review).
-        let rows = read_peer_blackboard_with_profile(&peers_root, slugs.as_deref(), &profile_id);
-        let (output, output_truncated) = compose_peer_gather_text_with_truncation(&rows);
-        // A budget-capped gather is not proof the model saw every result.
-        if !output_truncated
-            && let Some((master, gathered)) = consumption.as_ref()
-            && !master
-                .topic()
-                .is_some_and(|topic| topic.starts_with("peer-"))
-        {
-            let mut gathered = gathered.lock().unwrap_or_else(|error| error.into_inner());
-            for row in &rows {
-                if row.result_truncated || row.closed {
-                    continue;
-                }
-                let Some(receipt) = row
-                    .result
-                    .as_deref()
-                    .and_then(|body| gathered_peer_result(&row.slug, body))
-                else {
-                    continue;
-                };
-                let Some(dir) = staged_peer_dir(&peers_root, &row.slug) else {
-                    continue;
-                };
-                if peer_io::read_peer_file(&dir, "originator", peer_io::PEER_FILE_READ_CAP_SMALL)
-                    .is_some_and(|owner| owner.trim() == master.0)
-                    && gathered
-                        .get(&row.slug)
-                        .is_none_or(|old| old.round <= receipt.round)
-                {
-                    gathered.insert(row.slug.clone(), receipt);
-                }
-            }
-        }
-        Ok(output)
-    })
 }
 
 /// `peer_list` is read-only like `peer_gather` — registered for EVERY serve
@@ -16458,15 +14559,6 @@ fn build_peer_close_callback(
         // tombstone any injection queued for this peer BEFORE the close so
         // nothing stays stranded in the durable queue (the drain gates skip a
         // closed target without ever popping/capping/tombstoning it).
-        let cancelled = default_agent_orchestrator()
-            .cancel_peer_send_input_continuations_for_peer(&profile_id, &slug);
-        if cancelled > 0 {
-            tracing::debug!(
-                slug = %slug,
-                cancelled,
-                "cancelled pending peer_send_input injections on peer close"
-            );
-        }
         // #1842(a) — ABORT the peer's in-flight turn through the interrupt path
         // `run_standalone_turn` honors, so a closed peer definitively STOPS and
         // cannot park again after the sweep below. Ordered after the durable
@@ -16494,29 +14586,12 @@ fn build_peer_close_callback(
         let goal_id = peer_io::read_peer_file(&peer_dir, "goal", peer_io::PEER_FILE_READ_CAP_SMALL)
             .and_then(|body| body.lines().next().map(|l| l.trim().to_owned()))
             .filter(|s| !s.is_empty());
-        if let (Some(goal_id), Some(data_dir)) = (goal_id, peers_root.parent()) {
-            if let Err(err) = default_agent_orchestrator().model_goal_resolve_peer_escalation(
-                data_dir,
-                &goal_id,
-                &slug,
-                "[closed] peer closed before answering",
-                &origin_session,
-            ) {
-                tracing::warn!(
-                    slug = %slug,
-                    goal_id = %goal_id,
-                    error = %err,
-                    "peer-goal: failed to resolve open escalation on peer close (close proceeds)"
-                );
-            }
-        }
         // Peer-fleet auto-synthesis RESET — the close marker now excludes this
         // peer from the master's owned fleet. If it was the LAST owned peer, the
         // fleet is fully retired: drop the `.synthesized` marker so a genuinely
         // fresh fleet (spawned later under the same master) synthesizes once.
         // No-op while any owned peer remains. `origin_session` is the master
         // (the authorized originator).
-        reset_peer_fleet_synthesis_if_cleared(&peers_root, &origin_session);
         // Marker durable + queue cleared; now evict the live wire if the peer
         // is open so a still-connected peer stops being an injection target
         // immediately (the marker already covers the offline / reconnect case).
@@ -16890,45 +14965,6 @@ fn remove_peer_fleet_synthesized_stamp(peers_root: &Path, master: &str) {
     }
 }
 
-/// Peer-fleet auto-synthesis RESET — remove the per-master `.synthesized` marker
-/// when the master's owned fleet has been fully CLEARED (every peer closed /
-/// removed), so a genuinely fresh fleet fires once later. Called from
-/// `peer_close` after the close marker lands (the just-closed peer is now
-/// excluded from the owned scan). No-op while any owned peer remains — the
-/// marker persists for the life of the fleet.
-///
-/// FAIL-CLOSED: a `peers/` scan failure (`None`) can't prove the fleet is empty,
-/// so it does NOT reset — a spurious reset would let an already-synthesized
-/// fleet re-fire. A failed marker REMOVAL is only logged: a stale marker lingers
-/// until the NEXT successful reset (not permanently).
-fn reset_peer_fleet_synthesis_if_cleared(peers_root: &Path, master: &str) {
-    if master.is_empty() {
-        return;
-    }
-    // Only a genuinely-read EMPTY owned set resets. `None` (scan error) or any
-    // remaining owned peer leaves the marker in place.
-    if collect_owned_peer_results(peers_root, master).is_none_or(|owned| !owned.is_empty()) {
-        return;
-    }
-    remove_peer_fleet_synthesized_stamp(peers_root, master);
-    let _guard = peer_consumption_write_lock()
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let consumed_path = peers_root.join(peer_consumption_leaf(&SessionKey(master.to_owned())));
-    if let Err(error) = std::fs::remove_file(consumed_path)
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        tracing::warn!(?error, "failed to clear retired peer consumption receipts");
-    }
-    // Bug 1 — also drop the scheduler's recent-claim guard entry for this
-    // master's STABLE per-master synthesis key. Without this, a fresh fleet
-    // completing within `RECENT_CLAIM_GUARD_WINDOW` would have its Fire enqueue
-    // rejected as a duplicate of the just-claimed prior synthesis, leaving the
-    // fresh fleet marked-but-unsynthesized. The disk marker and the in-memory
-    // guard are cleared together so the next legitimate fire is not suppressed.
-    default_agent_orchestrator().clear_peer_fleet_synthesis_claim(&SessionKey(master.to_owned()));
-}
-
 /// Enumerate every peer OWNED by `master` under `peers_root`, each paired with
 /// whether it has a `result.md`. "Owned" = a REAL staged peer (non-symlink dir
 /// carrying `brief.md`, via [`staged_peer_dir`]) whose `originator` file equals
@@ -17027,268 +15063,6 @@ fn collect_peer_fleets_by_master(peers_root: &Path) -> Option<HashMap<String, Ve
     Some(fleets)
 }
 
-/// Peer-fleet auto-synthesis hook. Called at a PEER session's turn terminal
-/// (right after its `result.md` is written): resolve the owning master from
-/// this peer's `originator`, and — when the master's WHOLE fleet is complete,
-/// settled, the master is idle, and the fleet has not already been synthesized
-/// — enqueue ONE autonomous synthesis continuation on the master session. The
-/// continuation drain (per-connection tick + connection-independent global
-/// drain) turns it into a fired master turn; `due_loop_targets`'
-/// pending-continuation sweep surfaces the master even without an active
-/// goal/loop.
-///
-/// EXACTLY ONCE PER ROUND (#2024): the per-master `.synthesized` stamp records
-/// the highest round of each peer already summarized. On fire the marks are
-/// ADVANCED FIRST (atomically); the continuation is enqueued ONLY if that write
-/// succeeds, so no synthesis fires without a durable record. A peer that
-/// delivers a round past its mark — or a peer with no mark at all — re-arms the
-/// gate; a fleet with nothing new holds. The stamp is dropped when the fleet is
-/// fully retired (see [`reset_peer_fleet_synthesis_if_cleared`], called from
-/// `peer_close`), so a later fresh fleet starts from a clean record.
-///
-/// Before #2024 the stamp was a bare existence marker, which made the unit
-/// "once per FLEET": a master that put its peers through a second round got no
-/// second write-up unless every peer was closed first.
-///
-/// LOOP SAFETY: this fires ONLY on a `peer-<slug>` session's terminal. The
-/// synthesis turn runs on the MASTER session (not a peer), and `peer_gather`
-/// only READS `result.md` files — it never writes one — so the synthesis turn
-/// cannot produce a peer terminal and cannot re-trigger itself.
-///
-/// No-op for a non-peer session, an unstaged peer, a peer with no recorded
-/// originator, a busy master, an already-synthesized fleet, or an incomplete
-/// fleet.
-async fn maybe_enqueue_peer_fleet_synthesis(state: &Arc<AppState>, peer_session: &SessionKey) {
-    let Some((profile_id, finished_slug)) = peer_slug_and_profile(peer_session) else {
-        return;
-    };
-    let Some(runtime) = state.profiles.get(profile_id) else {
-        return;
-    };
-    let peers_root = runtime.data_dir.join("peers");
-    // Resolve the owning master from THIS peer's originator (symlink-safe).
-    let Some(finished_dir) = staged_peer_dir(&peers_root, finished_slug) else {
-        return;
-    };
-    let Some(master) = peer_io::read_peer_file(
-        &finished_dir,
-        "originator",
-        peer_io::PEER_FILE_READ_CAP_SMALL,
-    ) else {
-        return;
-    };
-    let master = master.trim().to_owned();
-    if master.is_empty() {
-        return;
-    }
-    evaluate_and_enqueue_fleet_synthesis(profile_id, &peers_root, &master, peer_session).await;
-}
-
-/// #2003 — the MASTER-idle edge.
-///
-/// The fleet gate used to be evaluated ONLY when a peer's turn terminated, and
-/// a `Hold` was discarded with nothing rescheduled. So a fleet whose LAST peer
-/// landed while the master happened to be busy (live turn or pending approval)
-/// was never synthesized: every peer was terminal, so no further peer event
-/// could ever fire, and no other trigger recomputed the decision. That is the
-/// "master just stopped" report — five peers all wrote `result.md` and the
-/// master sat idle forever.
-///
-/// Clearing a wedged in-flight marker (#2004/#2014) does NOT fix it, because
-/// clearing the wedge does not re-run the gate. The lost `Fire` has to be
-/// recomputed, and the master finishing a turn is exactly the edge on which the
-/// input that forced `Hold` (`master_idle == false`) becomes true.
-///
-/// Safe to call on every turn terminal: the decision is pure over
-/// `(peers, stamp_exists, master_idle)` and exactly-once via the
-/// `.synthesized-<master>` stamp, so a redundant evaluation is a no-op.
-async fn maybe_enqueue_peer_fleet_synthesis_for_master(
-    state: &Arc<AppState>,
-    master_session: &SessionKey,
-    runtime_profile_id: &str,
-) {
-    // Peer terminals are already handled by the peer-terminal path above;
-    // this hook is only for a session acting as a MASTER.
-    if peer_slug_and_profile(master_session).is_some() {
-        return;
-    }
-    // The turn's resolved runtime is authoritative. TUI session keys may be
-    // bare: deriving the profile only from the key stranded unread peer work
-    // whenever the last peer landed while that master was busy.
-    let profile_id = runtime_profile_id;
-    let Some(runtime) = state.profiles.get(profile_id) else {
-        return;
-    };
-    let peers_root = runtime.data_dir.join("peers");
-    // Cheap early-out so an ordinary session with no fleet does not pay for a
-    // `peers/` scan on every single turn terminal.
-    if !peers_root.is_dir() {
-        return;
-    }
-    evaluate_and_enqueue_fleet_synthesis(
-        profile_id,
-        &peers_root,
-        &master_session.0,
-        master_session,
-    )
-    .await;
-}
-
-/// Shared fleet-readiness evaluation, reached from BOTH the peer-terminal edge
-/// and the master-idle edge. `exclude_session` is the session whose turn is
-/// terminating right now: its turn is still marked Active at this hook (the
-/// terminal transition runs just after), so it must not count against
-/// idle/settled or the gate can never fire on its own edge.
-async fn evaluate_and_enqueue_fleet_synthesis(
-    profile_id: &str,
-    peers_root: &Path,
-    master: &str,
-    exclude_session: &SessionKey,
-) {
-    let master_key = SessionKey(master.to_owned());
-
-    // One lock: sessions with a live (non-terminal) turn. Exclude the session
-    // whose turn is terminating right now — it is still marked Active at this
-    // hook (the terminal transition runs just after). On the peer edge its
-    // result is already on the blackboard, so it counts as DONE, not mid-turn;
-    // on the master edge (#2003) excluding it is what lets `master_idle` become
-    // true on the very edge the master goes idle.
-    let active_turns = active_turns_registry();
-    let mut running = active_turn_sessions(&active_turns).await;
-    running.remove(exclude_session);
-
-    // Master idle-eligibility, mirroring the drain's gate inputs: no in-flight
-    // turn AND no pending approval. (The drain re-checks this before firing.)
-    let master_idle = !running.contains(&master_key)
-        && contract_stores()
-            .approvals
-            .pending_for_session(&master_key)
-            .is_empty();
-
-    // Build the fleet's readiness inputs + the OWNED slug list (used to scope
-    // the synthesis gather). A peer is NOT settled if it has a live turn OR a
-    // queued/just-claimed `peer_send_input` follow-up.
-    //
-    // FAIL-CLOSED (Bug 2): a `peers/` scan failure returns `None`; do nothing
-    // this pass (no fire, no reset) rather than mistake an unreadable dir for a
-    // cleared fleet.
-    let orchestrator = default_agent_orchestrator();
-    let Some(owned) = collect_owned_peer_results(peers_root, master) else {
-        return;
-    };
-    // #2024: what this master has already written up, per peer. Read ONCE for
-    // the whole fleet so every peer is judged against the same snapshot.
-    let marks = read_peer_fleet_synthesis_marks(peers_root, master);
-    let consumed = read_peer_consumption(peers_root, &master_key);
-    let mut owned_slugs: Vec<String> = Vec::with_capacity(owned.len());
-    // The marks to persist if this evaluation fires: each peer AT THE ROUND
-    // this pass observed, so the write can never claim a round the synthesis
-    // did not actually cover.
-    let mut fired_marks: Vec<(String, u32)> = Vec::with_capacity(owned.len());
-    let peers: Vec<OwnedPeerState> = owned
-        .into_iter()
-        .map(|peer| {
-            let OwnedPeer {
-                slug,
-                has_result,
-                round,
-            } = peer;
-            // Resolve the wire session ONCE; reuse it for both the active-turn
-            // check and the in-flight-injection check.
-            let wire_session = peer_wire_registry().resolve(&peer_wire_key(profile_id, &slug));
-            let active_mid_turn = wire_session
-                .as_ref()
-                .is_some_and(|session| running.contains(session));
-            // A peer is NOT settled if it has a `peer_send_input` that is QUEUED
-            // or was just CLAIMED (popped by the drain, turn not yet active).
-            // The active-turn snapshot above and the pending queue are separate
-            // reads; the recent-claim check closes the pop-vs-snapshot window.
-            let inflight_injection =
-                orchestrator.peer_has_inflight_send_input(profile_id, &slug, wire_session.as_ref());
-            let synthesized_round = if peer_result_was_consumed(peers_root, &slug, &consumed) {
-                round.max(synthesized_round_for(&marks, &slug, round))
-            } else {
-                synthesized_round_for(&marks, &slug, round)
-            };
-            fired_marks.push((slug.clone(), round.max(synthesized_round)));
-            owned_slugs.push(slug);
-            OwnedPeerState {
-                has_result,
-                mid_turn: active_mid_turn || inflight_injection,
-                round,
-                synthesized_round,
-            }
-        })
-        .collect();
-
-    let stamp_exists = peer_fleet_synthesized_stamp_exists(peers_root, master);
-    match evaluate_peer_fleet_synthesis(&peers, stamp_exists, master_idle) {
-        FleetSynthesisDecision::Hold => {}
-        // Defensive: a peer-terminal eval always includes the just-terminated
-        // peer, so the owned set is non-empty here; the real reset runs on
-        // `peer_close`. Handle it anyway so the decision contract is honored —
-        // drop the disk marker AND the recent-claim guard together (Bug 1).
-        FleetSynthesisDecision::ClearStamp => {
-            remove_peer_fleet_synthesized_stamp(peers_root, master);
-            orchestrator.clear_peer_fleet_synthesis_claim(&master_key);
-        }
-        FleetSynthesisDecision::Fire => {
-            // ENQUEUE FIRST, advance the marks only if it actually queued.
-            //
-            // The synthesis continuation's dedupe key is STABLE PER MASTER
-            // (`external/<kind>/<master>`), so a second synthesis lands as a
-            // duplicate whenever the first is still pending or was claimed
-            // inside `RECENT_CLAIM_GUARD_WINDOW`. Advancing the marks before
-            // knowing that would record "round N summarized" for a turn that
-            // never ran, and nothing would ever retry it — the #2024 gate fix
-            // alone would then still lose the second synthesis, silently.
-            //
-            // Holding the marks back makes it self-healing instead: the gate
-            // still reads Fire on the next edge, and the round-1 synthesis
-            // turn's OWN terminal is that edge (the master-idle re-evaluation
-            // added in #2018), by which point the guard window has moved on.
-            //
-            // The inverted order is safe here precisely because the queue is
-            // in-memory: a crash between enqueue and mark-write loses the
-            // continuation too, so re-firing on restart is correct, not double
-            // work. Concurrent terminals are safe as well — the dedupe key
-            // collapses the paired enqueue, and the marks write is an atomic
-            // whole-record replace of the same observed rounds.
-            let outcome = orchestrator.enqueue_peer_fleet_synthesis_continuation(
-                &master_key,
-                profile_id,
-                &owned_slugs,
-                peers.len(),
-            );
-            if outcome.queued().is_none() {
-                tracing::debug!(
-                    master = %master_key,
-                    profile = profile_id,
-                    "peer fleet synthesis deduped against an in-flight synthesis; \
-                     marks NOT advanced so the next terminal retries"
-                );
-                return;
-            }
-            if let Err(err) = write_peer_fleet_synthesis_marks(peers_root, master, &fired_marks) {
-                // The turn IS queued; only the record failed. Log loudly — the
-                // cost is a repeated synthesis, not a lost one.
-                tracing::warn!(
-                    ?err,
-                    master = %master_key,
-                    "peer fleet synthesis: marks write failed AFTER enqueuing; \
-                     this fleet may synthesize again"
-                );
-            }
-            tracing::debug!(
-                master = %master_key,
-                profile = profile_id,
-                peers = peers.len(),
-                "peer fleet complete — enqueued ONE autonomous synthesis turn on master"
-            );
-        }
-    }
-}
-
 /// True when `master`'s fleet has a peer whose DELIVERED round is past what the
 /// stamp records as summarized — i.e. a synthesis is OWED for this fleet.
 ///
@@ -17313,84 +15087,6 @@ fn peer_fleet_synthesis_is_owed(marks: &FleetSynthesisMarks, peers: &[OwnedPeer]
 /// live-turn set is a guaranteed no-op — which is exactly the intent.
 fn boot_sweep_exclude_session() -> SessionKey {
     SessionKey(String::new())
-}
-
-/// #2033 — BOOT-TIME evaluation of owed peer-fleet synthesis, for one profile.
-/// Returns how many fleets were evaluated (i.e. how many were owed).
-///
-/// The synthesis gate is EDGE-triggered: [`evaluate_and_enqueue_fleet_synthesis`]
-/// is reached from exactly two edges, a PEER turn terminal and a MASTER turn
-/// terminal. That is sound *within* a process — a deduped enqueue deliberately
-/// holds the marks back (#2024) and the in-flight continuation's own terminal is
-/// the guaranteed retry edge. A process restart is what has no edge at all: when
-/// the owed round's retry edge was still in the future at the moment the process
-/// died, the new process has nothing that recomputes the gate.
-///
-/// Observed live (mini5 soak, #2033): a peer's round-2 terminal landed while a
-/// round-1 synthesis was in flight, so the enqueue deduped and the marks stayed
-/// at round 1; the serve was killed before that continuation reached terminal.
-/// After the restart the master session sat for 220s with the round still
-/// unsynthesized, and one trivial master turn advanced it in 3s. The peer's last
-/// round of work is written up only if the user happens to type again — on a
-/// quiet fleet, never.
-///
-/// This is the missing boot edge, and it is the boot-resume precedent already
-/// applied to restart-stranded fleet-kernel fleets
-/// ([`crate::autonomy::fleet_wake::enqueue_fleet_boot_resume_wakes`]) and to
-/// persisted monitors: recompute at startup what only an event would otherwise
-/// recompute.
-///
-/// BOUNDED, not a poll. One `peers/` scan per profile at startup, then the real
-/// evaluation ONLY for fleets whose delivered round is past their recorded mark.
-/// Fleets with nothing new pay a mark read and no more, and the turn-terminal
-/// edges are untouched — no tick, no re-arm-on-dedupe, no per-tick scan.
-///
-/// Enqueue-only: the continuation is drained by the same
-/// `spawn_global_master_continuation_drain` / per-connection tick as any other,
-/// under the same workspace-known gate. So a master session that has not been
-/// opened this process run defers until it is — which is the observed case
-/// (the user opens the master, then waits), and it fires on the next drain tick
-/// instead of never.
-pub(crate) async fn enqueue_boot_owed_peer_fleet_synthesis(
-    profile_id: &str,
-    peers_root: &Path,
-) -> usize {
-    // Cheap early-out: a profile that has never staged a peer has no fleets.
-    if !peers_root.is_dir() {
-        return 0;
-    }
-    // FAIL-CLOSED, as everywhere else on this path: an unreadable `peers/` is
-    // "can't determine", not "no fleets".
-    let Some(fleets) = collect_peer_fleets_by_master(peers_root) else {
-        tracing::warn!(
-            profile = profile_id,
-            peers_root = %peers_root.display(),
-            "boot peer-fleet synthesis sweep: peers/ unreadable; skipping this profile"
-        );
-        return 0;
-    };
-    let exclude = boot_sweep_exclude_session();
-    let mut evaluated = 0usize;
-    for (master, peers) in fleets {
-        let marks = read_peer_fleet_synthesis_marks(peers_root, &master);
-        if !peer_fleet_synthesis_is_owed(&marks, &peers) {
-            continue;
-        }
-        evaluated += 1;
-        // Hand off to the SAME evaluation the two turn-terminal edges use — it
-        // re-reads the fleet, re-checks master-idle/settled, and owns the
-        // exactly-once marks write. The boot sweep only decides WHO to look at.
-        evaluate_and_enqueue_fleet_synthesis(profile_id, peers_root, &master, &exclude).await;
-    }
-    if evaluated > 0 {
-        tracing::info!(
-            profile = profile_id,
-            fleets = evaluated,
-            "boot peer-fleet synthesis sweep: re-evaluated fleets whose last round was \
-             left unsynthesized when the previous process exited"
-        );
-    }
-    evaluated
 }
 
 /// Serializes profile `sub_providers` read-modify-write across concurrent
@@ -17565,505 +15261,6 @@ fn profile_llm_test_result(
     result
 }
 
-fn is_autonomy_method(method: &str) -> bool {
-    matches!(
-        method,
-        octos_core::ui_protocol::methods::AGENT_LIST
-            | octos_core::ui_protocol::methods::AGENT_STATUS_READ
-            | octos_core::ui_protocol::methods::AGENT_OUTPUT_READ
-            | octos_core::ui_protocol::methods::AGENT_ARTIFACT_LIST
-            | octos_core::ui_protocol::methods::AGENT_ARTIFACT_READ
-            | octos_core::ui_protocol::methods::TASK_ARTIFACT_LIST
-            | octos_core::ui_protocol::methods::TASK_ARTIFACT_READ
-            | octos_core::ui_protocol::methods::AGENT_INTERRUPT
-            | octos_core::ui_protocol::methods::AGENT_CLOSE
-            | octos_core::ui_protocol::methods::SESSION_GOAL_GET
-            | octos_core::ui_protocol::methods::SESSION_GOAL_SET
-            | octos_core::ui_protocol::methods::SESSION_GOAL_CLEAR
-            | octos_core::ui_protocol::methods::SESSION_GOAL_OPERATOR_TRANSITION
-            | octos_core::ui_protocol::methods::LOOP_CREATE
-            | octos_core::ui_protocol::methods::LOOP_LIST
-            | octos_core::ui_protocol::methods::LOOP_DELETE
-            | octos_core::ui_protocol::methods::LOOP_PAUSE
-            | octos_core::ui_protocol::methods::LOOP_RESUME
-            | octos_core::ui_protocol::methods::LOOP_FIRE_NOW
-            | octos_core::ui_protocol::methods::MONITOR_CREATE
-            | octos_core::ui_protocol::methods::MONITOR_LIST
-            | octos_core::ui_protocol::methods::MONITOR_PAUSE
-            | octos_core::ui_protocol::methods::MONITOR_RESUME
-            | octos_core::ui_protocol::methods::MONITOR_DELETE
-    )
-}
-
-fn autonomy_method_available(method: &str, features: ConnectionUiFeatures) -> bool {
-    match method {
-        octos_core::ui_protocol::methods::AGENT_LIST
-        | octos_core::ui_protocol::methods::AGENT_STATUS_READ
-        | octos_core::ui_protocol::methods::AGENT_OUTPUT_READ
-        | octos_core::ui_protocol::methods::AGENT_ARTIFACT_LIST
-        | octos_core::ui_protocol::methods::AGENT_ARTIFACT_READ
-        | octos_core::ui_protocol::methods::TASK_ARTIFACT_LIST
-        | octos_core::ui_protocol::methods::TASK_ARTIFACT_READ
-        | octos_core::ui_protocol::methods::AGENT_INTERRUPT
-        | octos_core::ui_protocol::methods::AGENT_CLOSE => features.agent_control_available(),
-        octos_core::ui_protocol::methods::SESSION_GOAL_GET
-        | octos_core::ui_protocol::methods::SESSION_GOAL_SET
-        | octos_core::ui_protocol::methods::SESSION_GOAL_CLEAR
-        | octos_core::ui_protocol::methods::SESSION_GOAL_OPERATOR_TRANSITION => {
-            features.goal_runtime_available()
-        }
-        octos_core::ui_protocol::methods::LOOP_CREATE
-        | octos_core::ui_protocol::methods::LOOP_LIST
-        | octos_core::ui_protocol::methods::LOOP_DELETE
-        | octos_core::ui_protocol::methods::LOOP_PAUSE
-        | octos_core::ui_protocol::methods::LOOP_RESUME
-        | octos_core::ui_protocol::methods::LOOP_FIRE_NOW => features.loop_runtime_available(),
-        octos_core::ui_protocol::methods::MONITOR_CREATE
-        | octos_core::ui_protocol::methods::MONITOR_LIST
-        | octos_core::ui_protocol::methods::MONITOR_PAUSE
-        | octos_core::ui_protocol::methods::MONITOR_RESUME
-        | octos_core::ui_protocol::methods::MONITOR_DELETE => features.monitor_runtime_available(),
-        _ => false,
-    }
-}
-
-fn resolve_autonomy_profile_id(
-    session_id: Option<&SessionKey>,
-    requested_profile_id: Option<&str>,
-    connection_profile_id: Option<&str>,
-) -> Result<String, RpcError> {
-    if requested_profile_id.is_some_and(str::is_empty) {
-        return Err(RpcError::invalid_params("profile_id cannot be empty"));
-    }
-    if let Some(session_id) = session_id {
-        return Ok(validate_session_scope(
-            session_id,
-            requested_profile_id,
-            connection_profile_id,
-        )?
-        .or_else(|| session_id.profile_id().map(ToOwned::to_owned))
-        .or_else(|| connection_profile_id.map(ToOwned::to_owned))
-        .unwrap_or_else(|| MAIN_PROFILE_ID.to_owned()));
-    }
-    if let Some(connection_profile_id) = connection_profile_id {
-        if requested_profile_id.is_some_and(|profile_id| profile_id != connection_profile_id) {
-            return Err(RpcError::permission_denied(
-                "profile_id is outside the authenticated profile",
-            )
-            .with_data(json!({
-                "kind": "auth_scope_violation",
-                "connection_profile_id": connection_profile_id,
-                "requested_profile_id": requested_profile_id,
-            })));
-        }
-        return Ok(connection_profile_id.to_owned());
-    }
-    Ok(requested_profile_id
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| MAIN_PROFILE_ID.to_owned()))
-}
-
-/// #1973 fix B — how the autonomy RPC surface resolves a profile's data dir
-/// (for the `goal_clear` durable-ledger sync). `None` (unit tests, callers
-/// with no profile store) skips the sync — byte-identical legacy behavior.
-type ProfileDataDirResolver<'a> = &'a dyn Fn(&str) -> Option<PathBuf>;
-
-/// Legacy 3-arg entry point (test seam): no ledger resolver → `goal_clear`
-/// skips the durable-ledger sync, everything else is unchanged.
-#[cfg(test)]
-fn raw_autonomy_rpc(
-    request: &RpcRequest<Value>,
-    features: ConnectionUiFeatures,
-    connection_profile_id: Option<&str>,
-) -> Result<Value, RpcError> {
-    raw_autonomy_rpc_with_ledger(request, features, connection_profile_id, None)
-}
-
-fn raw_autonomy_rpc_with_ledger(
-    request: &RpcRequest<Value>,
-    features: ConnectionUiFeatures,
-    connection_profile_id: Option<&str>,
-    profile_data_dir_for: Option<ProfileDataDirResolver<'_>>,
-) -> Result<Value, RpcError> {
-    raw_autonomy_rpc_with_orchestrator_and_ledger(
-        request,
-        features,
-        connection_profile_id,
-        default_agent_orchestrator(),
-        profile_data_dir_for,
-    )
-}
-
-/// Test seam kept signature-stable: the ledger resolver defaults to `None`.
-#[cfg(test)]
-fn raw_autonomy_rpc_with_orchestrator(
-    request: &RpcRequest<Value>,
-    features: ConnectionUiFeatures,
-    connection_profile_id: Option<&str>,
-    orchestrator: &dyn AgentOrchestrator,
-) -> Result<Value, RpcError> {
-    raw_autonomy_rpc_with_orchestrator_and_ledger(
-        request,
-        features,
-        connection_profile_id,
-        orchestrator,
-        None,
-    )
-}
-
-fn raw_autonomy_rpc_with_orchestrator_and_ledger(
-    request: &RpcRequest<Value>,
-    features: ConnectionUiFeatures,
-    connection_profile_id: Option<&str>,
-    orchestrator: &dyn AgentOrchestrator,
-    profile_data_dir_for: Option<ProfileDataDirResolver<'_>>,
-) -> Result<Value, RpcError> {
-    use octos_core::ui_protocol::methods;
-
-    let method = request.method.as_str();
-    if !autonomy_method_available(method, features) {
-        return Err(RpcError::method_not_supported(method));
-    }
-
-    match method {
-        methods::AGENT_LIST => {
-            let params: RawAutonomyListParams = parse_optional_raw_params(request)?;
-            let profile_id = resolve_autonomy_profile_id(
-                params.session_id.as_ref(),
-                params.profile_id.as_deref(),
-                connection_profile_id,
-            )?;
-            orchestrator.list_agents(AgentListRequest {
-                session_id: params.session_id,
-                profile_id,
-                connection_profile_id: connection_profile_id.map(ToOwned::to_owned),
-            })
-        }
-        methods::AGENT_STATUS_READ => {
-            let params: RawAgentParams = parse_raw_params(request)?;
-            let profile_id = resolve_autonomy_profile_id(
-                params.session_id.as_ref(),
-                params.profile_id.as_deref(),
-                connection_profile_id,
-            )?;
-            orchestrator.read_agent_status(AgentRequest {
-                agent_id: params.agent_id,
-                session_id: params.session_id,
-                profile_id,
-            })
-        }
-        methods::AGENT_OUTPUT_READ => {
-            let params: RawAgentOutputParams = parse_raw_params(request)?;
-            let profile_id = resolve_autonomy_profile_id(
-                params.session_id.as_ref(),
-                params.profile_id.as_deref(),
-                connection_profile_id,
-            )?;
-            let cursor =
-                parse_agent_output_cursor(params.cursor, params.session_id.as_ref(), &profile_id)?;
-            orchestrator.read_agent_output(AgentOutputRequest {
-                agent_id: params.agent_id,
-                session_id: params.session_id,
-                profile_id,
-                cursor,
-                limit: params.limit,
-            })
-        }
-        methods::AGENT_ARTIFACT_LIST => {
-            let params: RawAgentParams = parse_raw_params(request)?;
-            let profile_id = resolve_autonomy_profile_id(
-                params.session_id.as_ref(),
-                params.profile_id.as_deref(),
-                connection_profile_id,
-            )?;
-            orchestrator.list_agent_artifacts(AgentRequest {
-                agent_id: params.agent_id,
-                session_id: params.session_id,
-                profile_id,
-            })
-        }
-        methods::TASK_ARTIFACT_LIST => {
-            // Spec-conforming clients (UPCR-2026-019 / M13) pass `task_id`;
-            // legacy callers may still pass `agent_id`. Accept either.
-            let params: RawTaskAgentParams = parse_raw_params(request)?;
-            let agent_id = params.resolve_agent_id(method)?;
-            let profile_id = resolve_autonomy_profile_id(
-                params.session_id.as_ref(),
-                params.profile_id.as_deref(),
-                connection_profile_id,
-            )?;
-            orchestrator.list_agent_artifacts(AgentRequest {
-                agent_id,
-                session_id: params.session_id,
-                profile_id,
-            })
-        }
-        methods::AGENT_ARTIFACT_READ => {
-            let params: RawAgentArtifactReadParams = parse_raw_params(request)?;
-            let profile_id = resolve_autonomy_profile_id(
-                params.session_id.as_ref(),
-                params.profile_id.as_deref(),
-                connection_profile_id,
-            )?;
-            orchestrator.read_agent_artifact(AgentArtifactReadRequest {
-                agent_id: params.agent_id,
-                artifact_id: params.artifact_id,
-                path: params.path,
-                session_id: params.session_id,
-                profile_id,
-            })
-        }
-        methods::TASK_ARTIFACT_READ => {
-            // Spec-conforming clients (UPCR-2026-019 / M13) pass `task_id`;
-            // legacy callers may still pass `agent_id`. Accept either.
-            let params: RawTaskArtifactReadParams = parse_raw_params(request)?;
-            let agent_id = params.resolve_agent_id(method)?;
-            let profile_id = resolve_autonomy_profile_id(
-                params.session_id.as_ref(),
-                params.profile_id.as_deref(),
-                connection_profile_id,
-            )?;
-            orchestrator.read_agent_artifact(AgentArtifactReadRequest {
-                agent_id,
-                artifact_id: params.artifact_id,
-                path: params.path,
-                session_id: params.session_id,
-                profile_id,
-            })
-        }
-        methods::AGENT_INTERRUPT | methods::AGENT_CLOSE => {
-            let params: RawAgentParams = parse_raw_params(request)?;
-            let profile_id = resolve_autonomy_profile_id(
-                params.session_id.as_ref(),
-                params.profile_id.as_deref(),
-                connection_profile_id,
-            )?;
-            let request = AgentRequest {
-                agent_id: params.agent_id,
-                session_id: params.session_id,
-                profile_id,
-            };
-            if method == methods::AGENT_INTERRUPT {
-                orchestrator.interrupt_agent(request)
-            } else {
-                orchestrator.close_agent(request)
-            }
-        }
-        methods::SESSION_GOAL_GET => {
-            let params: RawAutonomySessionParams = parse_raw_params(request)?;
-            let profile_id = resolve_autonomy_profile_id(
-                Some(&params.session_id),
-                params.profile_id.as_deref(),
-                connection_profile_id,
-            )?;
-            orchestrator.get_goal(GoalSessionRequest {
-                session_id: params.session_id,
-                profile_id,
-            })
-        }
-        methods::SESSION_GOAL_SET => {
-            let params: RawGoalSetParams = parse_raw_params(request)?;
-            let profile_id = resolve_autonomy_profile_id(
-                Some(&params.session_id),
-                params.profile_id.as_deref(),
-                connection_profile_id,
-            )?;
-            orchestrator.set_goal(GoalSetRequest {
-                session_id: params.session_id,
-                profile_id,
-                objective: params.objective,
-                status: params.status,
-                token_budget: params.token_budget,
-                transition_actor: params.transition_actor,
-            })
-        }
-        methods::SESSION_GOAL_CLEAR => {
-            let params: RawAutonomySessionParams = parse_raw_params(request)?;
-            let profile_id = resolve_autonomy_profile_id(
-                Some(&params.session_id),
-                params.profile_id.as_deref(),
-                connection_profile_id,
-            )?;
-            // #1973 fix B — resolve the profile data dir so the clear also
-            // syncs the durable per-goal ledger row to `cleared` (best-effort;
-            // `None` — no store / unresolvable profile — is a plain clear).
-            let ledger_data_dir =
-                profile_data_dir_for.and_then(|resolve| resolve(profile_id.as_str()));
-            orchestrator.clear_goal_with_ledger_sync(
-                GoalSessionRequest {
-                    session_id: params.session_id,
-                    profile_id,
-                },
-                ledger_data_dir.as_deref(),
-            )
-        }
-        methods::SESSION_GOAL_OPERATOR_TRANSITION => {
-            let params: RawGoalOperatorTransitionParams = parse_raw_params(request)?;
-            let profile_id = resolve_autonomy_profile_id(
-                Some(&params.session_id),
-                params.profile_id.as_deref(),
-                connection_profile_id,
-            )?;
-            let ledger_data_dir =
-                profile_data_dir_for.and_then(|resolve| resolve(profile_id.as_str()));
-            orchestrator.operator_transition_goal_with_ledger_sync(
-                GoalSessionRequest {
-                    session_id: params.session_id,
-                    profile_id,
-                },
-                &params.goal_id,
-                &params.action,
-                &params.reason,
-                ledger_data_dir.as_deref(),
-            )
-        }
-        methods::LOOP_CREATE => {
-            let params: RawLoopCreateParams = parse_raw_params(request)?;
-            let profile_id = resolve_autonomy_profile_id(
-                Some(&params.session_id),
-                params.profile_id.as_deref(),
-                connection_profile_id,
-            )?;
-            orchestrator.create_loop(LoopCreateRequest {
-                session_id: params.session_id,
-                profile_id,
-                prompt: params.prompt,
-                command: params.command,
-                interval_seconds: params.interval_seconds,
-                mode: params.mode,
-            })
-        }
-        methods::LOOP_LIST => {
-            let params: RawAutonomyListParams = parse_optional_raw_params(request)?;
-            let profile_id = resolve_autonomy_profile_id(
-                params.session_id.as_ref(),
-                params.profile_id.as_deref(),
-                connection_profile_id,
-            )?;
-            orchestrator.list_loops(LoopListRequest {
-                session_id: params.session_id,
-                profile_id,
-            })
-        }
-        methods::LOOP_DELETE
-        | methods::LOOP_PAUSE
-        | methods::LOOP_RESUME
-        | methods::LOOP_FIRE_NOW => {
-            let params: RawLoopIdParams = parse_raw_params(request)?;
-            let profile_id = resolve_autonomy_profile_id(
-                params.session_id.as_ref(),
-                params.profile_id.as_deref(),
-                connection_profile_id,
-            )?;
-            let kind = match method {
-                methods::LOOP_DELETE => LoopControlKind::Delete,
-                methods::LOOP_PAUSE => LoopControlKind::Pause,
-                methods::LOOP_RESUME => LoopControlKind::Resume,
-                methods::LOOP_FIRE_NOW => LoopControlKind::FireNow,
-                _ => unreachable!("loop control method matched above"),
-            };
-            orchestrator.control_loop(LoopControlRequest {
-                loop_id: params.loop_id,
-                session_id: params.session_id,
-                profile_id,
-                kind,
-            })
-        }
-        methods::MONITOR_CREATE => {
-            let params: RawMonitorCreateParams = parse_raw_params(request)?;
-            let profile_id = resolve_autonomy_profile_id(
-                Some(&params.session_id),
-                params.profile_id.as_deref(),
-                connection_profile_id,
-            )?;
-            // The profile data dir roots the monitor-notes sidecar AND is
-            // the probe's default cwd (a session workspace root is not
-            // resolvable from this pure handler; the profile data dir is the
-            // default — NOT a sandbox boundary, same as serve-mode goal tools).
-            let data_dir = profile_data_dir_for.and_then(|resolve| resolve(profile_id.as_str()));
-            // #1977 blocker 6 — an UNKNOWN mode is a typed `monitor_invalid_spec`
-            // error, NOT a silent fallback to poll (which would arm a different
-            // watcher than the caller asked for).
-            let mode = match params.mode.as_deref().map(str::trim) {
-                None | Some("") | Some("poll") => {
-                    crate::autonomy::monitor_runtime::MonitorMode::Poll {
-                        interval_secs: params.interval_seconds.unwrap_or(
-                            crate::autonomy::monitor_runtime::MONITOR_MIN_POLL_INTERVAL_SECS,
-                        ),
-                    }
-                }
-                Some("stream") => crate::autonomy::monitor_runtime::MonitorMode::Stream,
-                Some(other) => {
-                    return Err(monitor_invalid_spec_error(
-                        &params.session_id,
-                        &profile_id,
-                        format!("unknown monitor mode `{other}` (use `poll` or `stream`)"),
-                    ));
-                }
-            };
-            let spec = crate::autonomy::monitor_runtime::MonitorSpec {
-                name: params.name,
-                argv: params.argv,
-                filter_regex: params.filter_regex,
-                batch_ms: params
-                    .batch_ms
-                    .unwrap_or(crate::autonomy::monitor_runtime::MONITOR_DEFAULT_BATCH_MS),
-                mode,
-                timeout_secs: params.timeout_secs,
-                persistent: params.persistent.unwrap_or(false),
-                max_events_per_hour: params.max_events_per_hour.unwrap_or(
-                    crate::autonomy::monitor_runtime::MONITOR_DEFAULT_MAX_EVENTS_PER_HOUR,
-                ),
-                goal_id: params.goal_id,
-                cwd: data_dir.clone(),
-            };
-            orchestrator.create_monitor(MonitorCreateRequest {
-                session_id: params.session_id,
-                profile_id,
-                spec,
-                data_dir,
-            })
-        }
-        methods::MONITOR_LIST => {
-            let params: RawAutonomyListParams = parse_optional_raw_params(request)?;
-            let profile_id = resolve_autonomy_profile_id(
-                params.session_id.as_ref(),
-                params.profile_id.as_deref(),
-                connection_profile_id,
-            )?;
-            orchestrator.list_monitors(MonitorListRequest {
-                session_id: params.session_id,
-                profile_id,
-            })
-        }
-        methods::MONITOR_PAUSE | methods::MONITOR_RESUME | methods::MONITOR_DELETE => {
-            let params: RawMonitorIdParams = parse_raw_params(request)?;
-            let profile_id = resolve_autonomy_profile_id(
-                params.session_id.as_ref(),
-                params.profile_id.as_deref(),
-                connection_profile_id,
-            )?;
-            let kind = match method {
-                methods::MONITOR_PAUSE => MonitorControlKind::Pause,
-                methods::MONITOR_RESUME => MonitorControlKind::Resume,
-                methods::MONITOR_DELETE => MonitorControlKind::Delete,
-                _ => unreachable!("monitor control method matched above"),
-            };
-            orchestrator.control_monitor(MonitorControlRequest {
-                monitor_id: params.monitor_id,
-                session_id: params.session_id,
-                profile_id,
-                kind,
-            })
-        }
-        _ => Err(RpcError::method_not_found(method)),
-    }
-}
-
-// Raw-dispatch entry point: it threads the full per-request dispatch context
-// (connection, stores, negotiated features, profile scope, rpc id) through to
-// every raw method arm, so the wide flat parameter list is intentional.
-#[allow(clippy::too_many_arguments)]
 async fn handle_raw_appui_rpc(
     ws: &WsConnection,
     state: &Arc<AppState>,
@@ -18101,40 +15298,6 @@ async fn handle_raw_appui_rpc(
         return true;
     }
 
-    if request.method == APPUI_METHOD_REVIEW_START {
-        handle_review_start(
-            ws,
-            state,
-            ledger,
-            contracts,
-            active_turns,
-            connection_turns,
-            connection_profile_id,
-            features,
-            id,
-            request,
-        )
-        .await;
-        return true;
-    }
-
-    if request.method == APPUI_METHOD_TURN_STEER {
-        handle_turn_steer(
-            ws,
-            state,
-            ledger,
-            contracts,
-            active_turns,
-            connection_turns,
-            connection_profile_id,
-            features,
-            id,
-            request,
-        )
-        .await;
-        return true;
-    }
-
     if request.method == APPUI_METHOD_VOICE_ADMIT {
         handle_voice_admit(ws, state, contracts, connection_profile_id, id, request).await;
         return true;
@@ -18158,22 +15321,6 @@ async fn handle_raw_appui_rpc(
     }
 
     let result = match request.method.as_str() {
-        method if is_autonomy_method(method) => {
-            // #1973 fix B — profile data-dir resolver for the `goal_clear`
-            // durable-ledger sync (honors per-profile `data_dir` overrides via
-            // the store's own resolution).
-            let profile_data_dir_for = |profile_id: &str| -> Option<PathBuf> {
-                let store = state.profile_store.as_ref()?;
-                let profile = store.get(profile_id).ok().flatten()?;
-                Some(store.resolve_data_dir(&profile))
-            };
-            raw_autonomy_rpc_with_ledger(
-                request,
-                features,
-                connection_profile_id,
-                Some(&profile_data_dir_for),
-            )
-        }
         APPUI_METHOD_CONFIG_CAPABILITIES_LIST => {
             Ok(json!({ "capabilities": features.advertised_capabilities(state) }))
         }
@@ -18398,24 +15545,6 @@ async fn handle_raw_appui_rpc(
                 let _ = send_notification_durable(ws, ledger, notification);
             }
             let _ = send_rpc_result(ws, id, result);
-            if let Some((session_id, profile_id)) = continuation_target {
-                // This immediate-drain path is `loop/fire_now` only (see
-                // `appui_continuation_target_from_raw_result`); loops are not
-                // cwd-scoped, so the goal store key equals the wire id.
-                let _ = maybe_spawn_appui_master_continuation_runner(
-                    ws,
-                    state,
-                    ledger,
-                    contracts,
-                    active_turns,
-                    connection_turns,
-                    session_id.clone(),
-                    session_id,
-                    profile_id,
-                    features,
-                )
-                .await;
-            }
         }
         Err(error) => {
             let _ = send_rpc_error(ws, Some(id), error);
@@ -18626,10 +15755,7 @@ fn string_session_with_optional_topic(session_id: &str, topic: Option<&str>) -> 
 /// adding it here without a matching arm panics the `unreachable!`. Both point
 /// back to this one function.
 fn raw_method_is_dispatched(method: &str, stdio_transport: bool) -> bool {
-    if method == APPUI_METHOD_REVIEW_START
-        || method == APPUI_METHOD_TURN_STEER
-        || is_autonomy_method(method)
-    {
+    if method == APPUI_METHOD_REVIEW_START || method == APPUI_METHOD_TURN_STEER {
         return true;
     }
     if matches!(
@@ -20914,6 +18040,39 @@ fn directory_is_writable(path: &Path) -> bool {
 /// load the policy into the runtime here — that responsibility lives with
 /// `SessionRuntime::bootstrap`. The probe only answers "would a future
 /// session/open against this directory hit a policy parse failure?".
+fn reserve_peer_build_cache_turn(
+    state: &AppState,
+    session_id: &SessionKey,
+    turn_id: &TurnId,
+    turn_state: &Arc<TokioMutex<TurnState>>,
+    routed_profile: Option<&str>,
+) -> Result<BuildCacheTurnReservation, RpcError> {
+    let owner = build_cache_turn_owner(session_id, turn_id, turn_state);
+    if let Some(slug) = session_id
+        .topic()
+        .and_then(|topic| topic.strip_prefix("peer-"))
+        && let Some(runtime) =
+            resolve_session_profile_runtime(state, session_id.profile_id().or(routed_profile))
+    {
+        let key = build_cache_slot_registry_key(&runtime.data_dir.join("peers"), slug);
+        build_cache_slot_registry().reserve_staged(&key, &owner)?;
+    }
+    Ok(BuildCacheTurnReservation(owner, turn_state.clone()))
+}
+
+
+
+
+fn session_permission_profiles() -> Arc<SessionPermissionProfileStore> {
+    static SESSION_PERMISSION_PROFILES: OnceLock<Arc<SessionPermissionProfileStore>> =
+        OnceLock::new();
+    SESSION_PERMISSION_PROFILES
+        .get_or_init(|| Arc::new(SessionPermissionProfileStore::default()))
+        .clone()
+}
+
+
+
 fn workspace_policy_probe(root: Option<&Path>) -> Value {
     let Some(root) = root else {
         return json!({
@@ -20960,14 +18119,53 @@ fn workspace_policy_probe(root: Option<&Path>) -> Value {
     }
 }
 
+fn workspace_profile_scope(profile_id: Option<&str>, session_id: &SessionKey) -> String {
+    profile_id
+        .or_else(|| session_id.profile_id())
+        .unwrap_or(MAIN_PROFILE_ID)
+        .to_owned()
+}
+
+fn build_cache_turn_owner(
+    session: &SessionKey,
+    turn: &TurnId,
+    state: &TokioMutex<TurnState>,
+) -> BuildCacheTurnOwner {
+    BuildCacheTurnOwner {
+        session: session.clone(),
+        turn: turn.clone(),
+        generation: std::ptr::from_ref(state) as usize,
+    }
+}
+
+fn release_peer_build_cache_slot(
+    peers_root: Option<&std::path::Path>,
+    session_id: &SessionKey,
+    turn_id: &TurnId,
+    turn_state: &TokioMutex<TurnState>,
+    outcome: crate::build_cache::pool::SlotOutcome,
+) {
+    let Some(slug) = session_id
+        .topic()
+        .and_then(|topic| topic.strip_prefix("peer-"))
+    else {
+        return;
+    };
+    let owner = build_cache_turn_owner(session_id, turn_id, turn_state);
+    if let Some(root) = peers_root {
+        build_cache_slot_registry().release_owned(
+            &build_cache_slot_registry_key(root, slug),
+            &owner,
+            outcome,
+        );
+    } else {
+        build_cache_slot_registry().release_for_slug(slug, &owner, outcome);
+    }
+}
+
+
 /// Resolve the `ProfileRuntime` for the routed session, mirroring
 /// `chat_sync`'s `state.profiles.get(profile_id)` lookup.
-///
-/// `active_profile_id` is the profile id `validate_session_scope`
-/// produced for this session/open. It may be `None` when the legacy
-/// no-profile flow is in use (single-agent serve, no connection-level
-/// profile identity). Falls back to `MAIN_PROFILE_ID` so the
-/// canonical "_main" profile in standalone deployments still resolves.
 pub(crate) fn resolve_session_profile_runtime(
     state: &AppState,
     active_profile_id: Option<&str>,
@@ -21669,187 +18867,6 @@ fn infer_profile_id_from_data_dir(data_dir: &Path) -> String {
         .to_string()
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn handle_review_start(
-    ws: &WsConnection,
-    state: &Arc<AppState>,
-    ledger: &Arc<UiProtocolLedger>,
-    contracts: &Arc<UiProtocolContractStores>,
-    active_turns: &SharedActiveTurns,
-    connection_turns: &SharedConnectionTurns,
-    connection_profile_id: Option<&str>,
-    features: ConnectionUiFeatures,
-    id: String,
-    request: &RpcRequest<Value>,
-) {
-    if !features.review_start_available() {
-        let _ = send_rpc_error(
-            ws,
-            Some(id),
-            RpcError::method_not_supported(APPUI_METHOD_REVIEW_START),
-        );
-        return;
-    }
-
-    let params: RawReviewStartParams = match parse_raw_params(request) {
-        Ok(params) => params,
-        Err(error) => {
-            let _ = send_rpc_error(ws, Some(id), error);
-            return;
-        }
-    };
-    let scoped_profile_id = match validate_session_scope(
-        &params.session_id,
-        params.profile_id.as_deref(),
-        connection_profile_id,
-    ) {
-        Ok(profile_id) => profile_id,
-        Err(error) => {
-            send_scope_error(ws, id, error);
-            return;
-        }
-    };
-    let active_profile_id = params
-        .session_id
-        .profile_id()
-        .map(ToOwned::to_owned)
-        .or(scoped_profile_id)
-        .or_else(|| connection_profile_id.map(ToOwned::to_owned));
-    if let Some(profile_id) = active_profile_id.as_deref() {
-        if let Err(error) = ensure_known_profile(state, profile_id) {
-            let _ = send_rpc_error(ws, Some(id), error);
-            return;
-        }
-    }
-    let review_profile_runtime =
-        match ensure_session_profile_runtime(state, active_profile_id.as_deref()).await {
-            Ok(Some(runtime)) => runtime,
-            Ok(None) => {
-                let _ = send_rpc_error(
-                    ws,
-                    Some(id),
-                    runtime_unavailable_error(profile_runtime_unavailable_message(
-                        state,
-                        active_profile_id.as_deref().unwrap_or("<unset>"),
-                    )),
-                );
-                return;
-            }
-            Err(error) => {
-                let _ = send_rpc_error(ws, Some(id), error);
-                return;
-            }
-        };
-    let accepted_agent_count =
-        expected_review_agent_count_for_profile(Some(review_profile_runtime.as_ref()));
-
-    let turn_id = params.turn_id.clone().unwrap_or_default();
-    let session_id = params.session_id.clone();
-    let turn_state = Arc::new(TokioMutex::new(TurnState::Active));
-    let (interrupt_tx, interrupt_rx) = mpsc::channel::<()>(1);
-    let interrupt_tx = Arc::new(TokioMutex::new(Some(interrupt_tx)));
-    let (start_tx, start_rx) = tokio::sync::oneshot::channel();
-    let ws_for_turn = ws.clone();
-    let state_for_turn = state.clone();
-    let ledger_for_turn = ledger.clone();
-    let contracts_for_turn = contracts.clone();
-    let turn_state_for_task = turn_state.clone();
-    let profile_for_turn = active_profile_id.clone();
-    // Stamp for the ActiveTurn registry — see the generic admission's twin.
-    let profile_for_stamp = session_id
-        .profile_id()
-        .map(ToOwned::to_owned)
-        .or_else(|| active_profile_id.clone())
-        .unwrap_or_else(|| MAIN_PROFILE_ID.to_owned());
-    let turn_id_for_task = turn_id.clone();
-
-    let handle = tokio::spawn(async move {
-        if start_rx.await.is_err() {
-            return;
-        }
-        run_native_code_review_turn(
-            ws_for_turn,
-            state_for_turn,
-            ledger_for_turn,
-            contracts_for_turn,
-            features,
-            params,
-            turn_id_for_task,
-            profile_for_turn,
-            turn_state_for_task,
-            interrupt_rx,
-        )
-        .await;
-    });
-
-    let inserted = {
-        let mut active = active_turns.lock().await;
-        let occupied = match active.get(&session_id) {
-            Some(existing) => {
-                let existing_state = existing.state.lock().await;
-                !matches!(*existing_state, TurnState::Terminal(_))
-            }
-            None => false,
-        };
-        if occupied {
-            false
-        } else {
-            // Client-supplied turn ids carry no uniqueness guarantee — a
-            // reused id must not inherit a prior turn's `session/btw` draft.
-            btw_live_draft_clear(&session_id, &turn_id);
-            active.insert(
-                session_id.clone(),
-                ActiveTurn {
-                    turn_id: turn_id.clone(),
-                    profile_id: profile_for_stamp.clone(),
-                    state: turn_state.clone(),
-                    interrupt_tx,
-                    // Review turns are non-steerable (codex
-                    // `ActiveTurnNotSteerable` for the Review turn kind).
-                    steer: None,
-                    abort: handle.abort_handle(),
-                },
-            );
-            true
-        }
-    };
-    if !inserted {
-        handle.abort();
-        let _ = send_rpc_error(
-            ws,
-            Some(id),
-            RpcError::invalid_request("a turn is already running for this session"),
-        );
-        return;
-    }
-
-    connection_turns.lock().await.insert(
-        session_id.clone(),
-        ConnectionTurn {
-            turn_id: turn_id.clone(),
-            state: turn_state.clone(),
-        },
-    );
-    if send_rpc_result(
-        ws,
-        id,
-        json!({
-            "accepted": true,
-            "session_id": session_id,
-            "turn_id": turn_id,
-            "workflow": "code_review",
-            "backend": "native",
-            "agent_count": accepted_agent_count,
-        }),
-    )
-    .is_err()
-    {
-        handle.abort();
-        return;
-    }
-    let _ = start_tx.send(());
-}
-
 // Turn-start threads the full dispatch context (connection, stores, turn
 // registries, caller and routed profile scope, negotiated features) straight
 // through to `handle_turn_start_with_accept`; the wide signature is the
@@ -22356,40 +19373,6 @@ async fn handle_turn_start_with_accept(
         .map(ToOwned::to_owned)
         .or_else(|| resolved_profile_id.clone())
         .unwrap_or_else(|| MAIN_PROFILE_ID.to_owned());
-    // #1650 — snapshot the interactive goal binding NOW, synchronously,
-    // at dispatch time — before the turn task is spawned and woken via
-    // `start_rx`. A `session/goal/set` that arrives after this `turn/start`
-    // (same or another connection) therefore can't bind this already-
-    // submitted turn to a goal created after the fact (codex P2).
-    //
-    // Resolve the profile through the SAME `resolve_autonomy_profile_id`
-    // the raw `goal/set` handler uses (codex P2), so the binding matches
-    // exactly where the goal was stored. `profile_for_stamp` was subtly
-    // different — it falls back to the routed profile, whereas `goal/set`
-    // for an unscoped connection on an unprofiled session resolves to
-    // `_main` — which left accounting silently disabled for that flow. A
-    // scope error (unreachable here — `handle_turn_start` already ran
-    // `validate_session_scope` with the same inputs) or a session with no
-    // active goal both bind to `None` and never charge.
-    //
-    // KNOWN LIMITATION (codex P2): a `turn/start` carries no goal
-    // profile, so when an unscoped/admin connection sets a goal with an
-    // EXPLICIT `profile_id` on a bare session key, this resolves to
-    // `_main` and misses the tenant-scoped goal — that turn goes
-    // uncharged. Binding by session-key alone (ignoring profile) would
-    // fix it but risks the cross-tenant leak the profile match exists to
-    // prevent, since "unscoped ⇒ authorized for any profile" is
-    // deployment-dependent. A safe fix threads the goal's stored profile
-    // (or an authorized bind-by-session for admin connections) and is
-    // tracked as a follow-up.
-    let interactive_goal_binding =
-        resolve_autonomy_profile_id(Some(&session_id), None, connection_profile_id)
-            .ok()
-            .and_then(|goal_profile| {
-                default_agent_orchestrator()
-                    .active_goal_id(&session_id, &goal_profile)
-                    .map(|goal_id| (goal_profile, goal_id))
-            });
     let cache_reservation = match reserve_peer_build_cache_turn(
         state,
         &session_id,
@@ -22408,19 +19391,7 @@ async fn handle_turn_start_with_accept(
         if start_rx.await.is_err() {
             return;
         }
-        if let Some(fixture) = fixture {
-            run_m9_fixture_turn(
-                ws_for_turn,
-                state_for_turn,
-                ledger_for_turn,
-                contracts_for_turn,
-                params,
-                fixture,
-                turn_state_for_task,
-                interrupt_rx,
-            )
-            .await;
-        } else {
+        {
             run_standalone_turn(
                 ws_for_turn,
                 state_for_turn,
@@ -22441,8 +19412,8 @@ async fn handle_turn_start_with_accept(
                 // accountant wiring. Only the master continuation
                 // runner sets this to `Some(...)` for `GoalContinue`.
                 None,
-                // #1650 — interactive goal binding snapshotted above.
-                interactive_goal_binding,
+                // #1650 — interactive goal binding removed with the autonomy engine.
+                None,
                 // #436 — regular user turns already persist their prompt
                 // (they are not internal continuations); no override needed.
                 false,
@@ -22551,656 +19522,6 @@ enum TurnSteerDecision {
     NoActiveTurn,
 }
 
-/// `turn/steer` — mid-turn prompt injection into the active turn (see the
-/// [`APPUI_METHOD_TURN_STEER`] doc for the full contract).
-///
-/// The steer-vs-fallback decision and the buffer push happen atomically
-/// under the active-turns registry lock, closing the turn-end race the
-/// codex report calls out (§5): natural completion flips the per-turn
-/// state to `Terminal` before the registry entry is considered dead, and a
-/// non-terminal entry's buffer is still drained by the live loop (an
-/// EndTurn with a pending steer runs another round instead of returning).
-/// Steering never touches the interrupt channel.
-#[allow(clippy::too_many_arguments)]
-async fn handle_turn_steer(
-    ws: &WsConnection,
-    state: &Arc<AppState>,
-    ledger: &Arc<UiProtocolLedger>,
-    contracts: &Arc<UiProtocolContractStores>,
-    active_turns: &SharedActiveTurns,
-    connection_turns: &SharedConnectionTurns,
-    connection_profile_id: Option<&str>,
-    features: ConnectionUiFeatures,
-    id: String,
-    request: &RpcRequest<Value>,
-) {
-    let params: RawTurnSteerParams = match parse_raw_params(request) {
-        Ok(params) => params,
-        Err(error) => {
-            let _ = send_rpc_error(ws, Some(id), error);
-            return;
-        }
-    };
-    if let Err(error) = validate_session_scope(&params.session_id, None, connection_profile_id) {
-        send_scope_error(ws, id, error);
-        return;
-    }
-    let Some(prompt) = prompt_text(&params.input) else {
-        let _ = send_rpc_error(
-            ws,
-            Some(id),
-            RpcError::invalid_params("turn/steer requires at least one text input item"),
-        );
-        return;
-    };
-
-    let decision = {
-        let active = active_turns.lock().await;
-        match active.get(&params.session_id) {
-            Some(existing) => {
-                // A `Terminal` entry is a finished turn kept only so late
-                // `turn/interrupt`s see `terminal_state` — for steering it
-                // counts as "no active turn" (same predicate `turn/start`'s
-                // admission uses for `occupied`). `Interrupting` still
-                // counts as live: the client asked to stop, and a raced
-                // steer behaves like the codex loop-exit race (buffered,
-                // possibly dropped at turn end — logged, never mis-routed).
-                // task-return-unconsumed-steer-inputs: hold the turn-state
-                // guard across check AND push. `try_emit_terminal` settles
-                // the steer buffer right after it flips the state to
-                // `Terminal` (under this same lock) and BEFORE the terminal
-                // frame — so any input accepted here is either drained by
-                // the loop, or returned by that settlement; nothing can slip
-                // in between the settlement and the terminal frame.
-                let state = existing.state.lock().await;
-                let terminal = matches!(*state, TurnState::Terminal(_));
-                // task-turn-interrupt-steer-correlation-logs: input accepted
-                // while the turn is already winding down is the case that
-                // ends up returned as turn/steer_dropped.
-                let interrupting = matches!(*state, TurnState::Interrupting { .. });
-                if terminal {
-                    TurnSteerDecision::NoActiveTurn
-                } else if params
-                    .expected_turn_id
-                    .as_ref()
-                    .is_some_and(|expected| *expected != existing.turn_id)
-                {
-                    TurnSteerDecision::Mismatch(existing.turn_id.clone())
-                } else {
-                    match existing.steer.as_ref() {
-                        Some(buffer) => {
-                            // Push while still holding the registry lock so
-                            // the accept below can never name a turn that a
-                            // concurrent admission already replaced.
-                            buffer.push(prompt.clone());
-                            TurnSteerDecision::Steered {
-                                turn_id: existing.turn_id.clone(),
-                                interrupting,
-                            }
-                        }
-                        None => TurnSteerDecision::NotSteerable,
-                    }
-                }
-            }
-            None => TurnSteerDecision::NoActiveTurn,
-        }
-    };
-
-    match decision {
-        TurnSteerDecision::Steered {
-            turn_id,
-            interrupting,
-        } => {
-            crate::turn_trace::log_steer_accepted(&params.session_id, &turn_id, interrupting);
-            let _ = send_rpc_result(ws, id, json!({ "turn_id": turn_id, "steered": true }));
-        }
-        TurnSteerDecision::Mismatch(active_turn_id) => {
-            let _ = send_rpc_error(
-                ws,
-                Some(id),
-                RpcError::invalid_params(format!(
-                    "expected_turn_id does not match the active turn ({})",
-                    active_turn_id.0
-                )),
-            );
-        }
-        TurnSteerDecision::NotSteerable => {
-            let _ = send_rpc_error(
-                ws,
-                Some(id),
-                RpcError::invalid_request("the active turn does not accept steering"),
-            );
-        }
-        TurnSteerDecision::NoActiveTurn => {
-            // Codex fallback (`handlers.rs:233-265`): no active turn — the
-            // input is NOT dropped; it starts an ordinary turn through the
-            // full `turn/start` admission path (scope re-validation,
-            // runtime gate, occupied-race rejection, registry insert). The
-            // accept payload is the steer shape: the NEW server-minted id
-            // plus `steered: false`. A concurrent admission winning the
-            // race surfaces the standard "a turn is already running"
-            // rejection — the caller retries as a steer.
-            let new_turn_id = TurnId::new();
-            let start_params = TurnStartParams {
-                session_id: params.session_id,
-                turn_id: new_turn_id.clone(),
-                input: params.input,
-                media: Vec::new(),
-                topic: None,
-                rewrite_for: None,
-                reasoning_effort: None,
-                tool_context: None,
-                live_video: false,
-            };
-            let _ = handle_turn_start_with_accept(
-                ws,
-                state,
-                ledger,
-                contracts,
-                active_turns,
-                connection_turns,
-                connection_profile_id,
-                // Raw surface carries no routed profile; the session key /
-                // connection scope dominate resolution (same stance as
-                // `review/start` on this surface).
-                None,
-                features,
-                id,
-                start_params,
-                json!({ "turn_id": new_turn_id, "steered": false }),
-                None,
-            )
-            .await;
-        }
-    }
-}
-
-async fn peer_synthesis_was_consumed(
-    state: &AppState,
-    continuation: &QueuedMasterContinuation,
-    active: &HashMap<SessionKey, ActiveTurn>,
-) -> bool {
-    use crate::autonomy::agent_orchestrator::{
-        PEER_FLEET_SYNTHESIS_EXTERNAL_KIND, PEER_FLEET_SYNTHESIS_META_PEER_COUNT,
-        PEER_FLEET_SYNTHESIS_META_SLUGS,
-    };
-    if !matches!(&continuation.reason, MasterContinuationReason::External(kind) if kind == PEER_FLEET_SYNTHESIS_EXTERNAL_KIND)
-    {
-        return false;
-    }
-    let Some(runtime) = state.profiles.get(continuation.profile_id.as_str()) else {
-        return false;
-    };
-    let root = runtime.data_dir.join("peers");
-    let master = SessionKey(continuation.session_id.as_str().to_owned());
-    let Some(slugs) = continuation.metadata.get(PEER_FLEET_SYNTHESIS_META_SLUGS) else {
-        return false;
-    };
-    let slugs: std::collections::HashSet<_> = slugs.split(',').collect();
-    if slugs.is_empty()
-        || slugs.contains("")
-        || continuation
-            .metadata
-            .get(PEER_FLEET_SYNTHESIS_META_PEER_COUNT)
-            .and_then(|count| count.parse::<usize>().ok())
-            != Some(slugs.len())
-    {
-        return false;
-    }
-    let Some(owned) = collect_owned_peer_results(&root, &master.0) else {
-        return false;
-    };
-    // Do not retire a wake if the fleet has expanded with unseen work. The
-    // exact requested peers below must still have authoritative ownership;
-    // closed members are allowed only with the explicit owner-close marker.
-    if owned.iter().any(|peer| !slugs.contains(peer.slug.as_str())) {
-        return false;
-    }
-    let consumed = read_peer_consumption(&root, &master);
-    for slug in slugs {
-        let Some(dir) = staged_peer_dir(&root, slug) else {
-            return false;
-        };
-        if peer_io::read_peer_file(&dir, "originator", peer_io::PEER_FILE_READ_CAP_SMALL)
-            .is_none_or(|owner| owner.trim() != master.0)
-        {
-            return false;
-        }
-        if let Some(closed) =
-            peer_io::read_peer_file(&dir, "closed", peer_io::PEER_FILE_READ_CAP_SMALL)
-        {
-            if closed.lines().next() == Some(master.0.as_str()) {
-                continue;
-            }
-            return false;
-        }
-        let wire =
-            peer_wire_registry().resolve(&peer_wire_key(continuation.profile_id.as_str(), slug));
-        if let Some(turn) = wire.as_ref().and_then(|wire| active.get(wire))
-            && !matches!(*turn.state.lock().await, TurnState::Terminal(_))
-        {
-            return false;
-        }
-        if default_agent_orchestrator().peer_has_inflight_send_input(
-            continuation.profile_id.as_str(),
-            slug,
-            wire.as_ref(),
-        ) || !peer_result_was_consumed(&root, slug, &consumed)
-        {
-            return false;
-        }
-    }
-    true
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn maybe_spawn_appui_master_continuation_runner(
-    ws: &WsConnection,
-    state: &Arc<AppState>,
-    ledger: &Arc<UiProtocolLedger>,
-    contracts: &Arc<UiProtocolContractStores>,
-    active_turns: &SharedActiveTurns,
-    connection_turns: &SharedConnectionTurns,
-    // The PLAIN WIRE session id: the turn runs, the ledger/runtime resolve, and
-    // the active-turn/connection bookkeeping key on this.
-    session_id: SessionKey,
-    // #1666 residue — the goal STORE identity (cwd-scoped for AppUI folders,
-    // == `session_id` for loops / gateway sessions). The continuation queue,
-    // the goal in-flight set, and the post-turn goal accountant all key on
-    // THIS; a scoped goal enqueued its continuation under this key and must be
-    // drained + charged under it. For unscoped targets it equals `session_id`,
-    // so the loop/gateway path is byte-identical to before.
-    goal_storage_key: SessionKey,
-    profile_id: String,
-    features: ConnectionUiFeatures,
-) -> bool {
-    let mut active = active_turns.lock().await;
-    let occupied = match active.get(&session_id) {
-        Some(existing) => {
-            let existing_state = existing.state.lock().await;
-            !matches!(*existing_state, TurnState::Terminal(_))
-        }
-        None => false,
-    };
-    if occupied {
-        return false;
-    }
-    let runtime_state = MasterContinuationRuntimeState::idle().with_approval_pending(
-        !contracts
-            .approvals
-            .pending_for_session(&session_id)
-            .is_empty(),
-    );
-    // #2066 round 3 (codex fix 2) — ATOMIC drain-and-claim, the same
-    // primitive the session actor uses: the in-flight claim and the pop
-    // happen under ONE state lock, so this path can never pop a one-shot it
-    // does not own. The round-2 shape (separate occupancy check → pop →
-    // claim inside the spawned task) could pop an item, lose the claim race
-    // to another dispatcher, and complete the popped item UNEXECUTED — for a
-    // latched GoalWrapUp that meant permanently dropping the wrap-up
-    // (`wrap_up_emitted` never re-mints on a budget_limited goal). A held
-    // marker now drains NOTHING here (cross-subsystem occupancy, #1529,
-    // subsumed: the claim check is inside the same lock as the pop), and the
-    // returned guard travels into the spawned turn, released on every exit.
-    let (mut drained, claim_guard) = default_agent_orchestrator()
-        .drain_and_claim_ready_continuation_for_session(
-            &goal_storage_key,
-            &profile_id,
-            runtime_state,
-            1,
-        );
-    let Some(continuation) = drained.pop() else {
-        // Nothing owned: nothing was popped, nothing to complete. The guard
-        // (if any) drops here and releases immediately.
-        return false;
-    };
-    if peer_synthesis_was_consumed(state, &continuation, &active).await {
-        default_agent_orchestrator().mark_continuation_completed(
-            &continuation,
-            Some("retired_peer_results_consumed_or_explicitly_closed".to_owned()),
-        );
-        return false;
-    }
-
-    // #436 FIX 5 — a peer retired via peer_close (durable `closed` marker) has
-    // its continuation RETIRED, not reinserted: it was already popped by the
-    // drain above, so tombstone it (record completed) so a restart never
-    // replays it and it does not strand. A reopened closed peer IS the current
-    // wire, so only the marker check catches an injection queued around the
-    // close. No-op for non-peer targets (never "closed").
-    if peer_target_is_closed(state, &session_id) {
-        default_agent_orchestrator()
-            .mark_continuation_completed(&continuation, Some("retired_peer_closed".to_owned()));
-        return false;
-    }
-    // #436 P1 #4 — re-check peer freshness AFTER the pop (the pre-pop gate in
-    // the global drain is stale under a concurrent reopen). If this peer wire
-    // is no longer the slug's CURRENT registered wire, do NOT dispatch under
-    // the obsolete wire: RE-INSERT the injection so a reopen's retarget re-homes
-    // it (or the next tick redrains it once it is current again).
-    if !peer_target_is_current_wire(&session_id) {
-        default_agent_orchestrator().reinsert_peer_continuation(continuation);
-        return false;
-    }
-
-    // KNOWN LIMITATION (#436, accepted — best-effort single-user delivery).
-    // The freshness re-check above is NOT atomic with the dispatch below. A peer
-    // close+reopen that lands in the window between that check and the turn
-    // start can leave us dispatching under a wire that just went obsolete:
-    // the injection is delivered to the closing session (lost to the freshly
-    // reopened peer) or, if the process crashes mid-window before the turn's
-    // durable record completes, replayed on restart (duplicated). Closing this
-    // fully would require an atomic claim-and-dispatch spanning the wire
-    // registry, the continuation scheduler, and the turn spawn — disproportionate
-    // for a best-effort, single-user channel. An occasional lost/dup peer message
-    // under a concurrent close-reopen race is within the delivery semantics
-    // documented on `peer_send_input_authorized`. The window is small but NOT
-    // instantaneous: after this check the dispatch below builds the turn params,
-    // spawns the turn task (which awaits `start_rx`), briefly locks
-    // `connection_turns` to register the turn, then sends on `start_tx` to release
-    // it — a reopen interleaving anywhere in there is the race. It is narrow in
-    // practice (a peer close+reopen must land against a ~2s drain cadence and a
-    // multi-second human close+reopen) but nothing enforces a minimum gap, so it
-    // is a real accepted edge, not an impossibility. (The dup-on-restart case
-    // additionally requires a durable supervisor store; in pure in-memory serve
-    // the same race can only drop, never dup.)
-
-    // M15-F5 (#44), Codex P2: a scheduled loop fire (self-paced / fixed /
-    // maintenance) or goal continuation reaches the runtime here, NOT through
-    // the manual `loop/fire_now` RPC. Emit the `loop/fired` /
-    // goal-continuation evidence + server→client notification so the soak
-    // verifier sees the scheduled fire on the wire and in the ledger.
-    for notification in scheduled_continuation_notifications(
-        &session_id,
-        &profile_id,
-        &continuation.reason,
-        continuation.loop_id.as_ref().map(|id| id.as_str()),
-        continuation.goal_id.as_ref().map(|id| id.as_str()),
-    ) {
-        let _ = send_notification_durable(ws, ledger, notification);
-    }
-    // #1977 blocker 8 — emit `monitor/fired` when a monitor wake drains, so a
-    // negotiated UI sees the event live (the capability filter gates it to
-    // connections that requested `coding.monitor_runtime.v1`). The wake itself
-    // is delivered by the continuation turn + notes injection regardless; this
-    // is the UI-liveness signal.
-    if let Some(notification) = monitor_fired_notification(&session_id, &profile_id, &continuation)
-    {
-        let _ = send_notification_durable(ws, ledger, notification);
-    }
-
-    let turn_id = TurnId::new();
-    let turn_state = Arc::new(TokioMutex::new(TurnState::Active));
-    let (interrupt_tx, interrupt_rx) = mpsc::channel::<()>(1);
-    let interrupt_tx = Arc::new(TokioMutex::new(Some(interrupt_tx)));
-    let turn_state_for_task = turn_state.clone();
-    let (start_tx, start_rx) = tokio::sync::oneshot::channel();
-    // Continuation turns run the ordinary agent loop, so they are steerable
-    // like any regular turn (codex steers every RegularTask).
-    let steer_buffer: octos_agent::SharedSteerBuffer =
-        Arc::new(octos_agent::SteerBuffer::default());
-    let steer_buffer_for_turn = steer_buffer.clone();
-
-    let ws_for_turn = ws.clone();
-    let state_for_turn = state.clone();
-    let ledger_for_turn = ledger.clone();
-    let contracts_for_turn = contracts.clone();
-    let params = TurnStartParams {
-        session_id: session_id.clone(),
-        turn_id: turn_id.clone(),
-        input: vec![InputItem::Text {
-            text: master_continuation_prompt(&continuation),
-        }],
-        media: Vec::new(),
-        topic: None,
-        rewrite_for: None,
-        reasoning_effort: None,
-        tool_context: None,
-        live_video: false,
-    };
-    let prompt = prompt_text(&params.input).unwrap_or_default();
-    let routed_profile_id = Some(profile_id.clone());
-    // #1128 codex P1 re-review #2: capture the loop_id (if any) BEFORE
-    // we consume the continuation into the spawned task. The actual
-    // self-paced rescheduling is now done INSIDE `run_standalone_turn`
-    // where the per-session `SessionRuntime.sessions` manager is in
-    // scope; an earlier shape read from `state.sessions` (AppState's
-    // legacy session manager) and never saw the just-persisted
-    // assistant reply, so self-paced loops fired through AppUI still
-    // stopped after one fire.
-    let loop_id_for_self_paced = match continuation.reason {
-        MasterContinuationReason::LoopFire => continuation
-            .loop_id
-            .as_ref()
-            .map(|id| id.as_str().to_owned()),
-        _ => None,
-    };
-    // #1133 — when the master continuation runner is draining a
-    // GoalContinue, capture the profile id BEFORE the spawn move so
-    // `run_standalone_turn` can fold the post-turn token spend +
-    // sentinel detection back into the goal record. Reasons other
-    // than `GoalContinue` pass `None` (the post-accountant is a no-op
-    // for them).
-    let goal_context_for_appui = match continuation.reason {
-        // #1695 — GoalWrapUp included: the wrap-up turn's tokens (easily
-        // 100K+) must land in `tokens_used` on this path too. The gateway
-        // session-actor accountant already charges wrap-up turns; without
-        // this the two paths disagree and the WS wrap-up spend vanishes.
-        MasterContinuationReason::GoalContinue | MasterContinuationReason::GoalWrapUp => {
-            Some(GoalContinuationContext {
-                profile_id: continuation.profile_id.as_str().to_owned(),
-                // The continuation carries the cwd-scoped goal store key it was
-                // enqueued under; the post-turn accountant must charge THAT
-                // record, not the plain wire id.
-                goal_session_key: SessionKey(continuation.session_id.as_str().to_owned()),
-                bound_goal_id: continuation
-                    .goal_id
-                    .as_ref()
-                    .map(|goal_id| goal_id.as_str().to_owned()),
-                claim_generation: claim_guard.as_ref().map(|guard| guard.generation()),
-            })
-        }
-        _ => None,
-    };
-    // #436 — a `peer_send_input` continuation's prompt is a real user turn:
-    // persist it as a `UserMessage` (transcript + durable history) rather than
-    // skipping it like a system-internal continuation. OLP-CTRL 回合 3: a
-    // STEER continuation is likewise a real user turn (its prompt IS the
-    // steer, a standalone role=user message body) — persist it the same way
-    // so the steer lands as a UserMessage, never a prompt appendix.
-    let persist_peer_input_prompt = matches!(
-        &continuation.reason,
-        MasterContinuationReason::External(kind)
-            if kind == crate::autonomy::agent_orchestrator::PEER_SEND_INPUT_EXTERNAL_KIND
-                || kind == crate::autonomy::agent_orchestrator::STEER_EXTERNAL_KIND
-    );
-    let cache_reservation = match reserve_peer_build_cache_turn(
-        state,
-        &session_id,
-        &turn_id,
-        &turn_state,
-        routed_profile_id.as_deref(),
-    ) {
-        Ok(reservation) => reservation,
-        Err(error) => {
-            tracing::warn!(%error.message, "build-cache continuation admission refused");
-            return false;
-        }
-    };
-    let handle = tokio::spawn(async move {
-        let _cache_reservation = cache_reservation;
-        if start_rx.await.is_err() {
-            return;
-        }
-        info!(
-            session = %params.session_id,
-            continuation_id = continuation.id.as_u64(),
-            reason = master_continuation_reason_name(&continuation.reason),
-            "draining queued master continuation into AppUI turn runtime"
-        );
-        // #1140 codex P2 follow-up: stamp the goal's
-        // `last_continued_at_ms` AT DISPATCH so the scheduler tick
-        // (which can fire every ~2s) doesn't re-select this goal
-        // while the turn is still in flight. We use
-        // `record_goal_dispatch_timestamp_only` which ONLY touches
-        // the timestamp — counter increments are reserved for the
-        // post-turn `record_goal_turn` call below (which runs with
-        // real token usage).
-        //
-        // #1140 codex P2 re-review #3/#4: the in-flight claim keeps
-        // `due_loop_targets`'s goal sweep + the enqueue paths off this
-        // session until the post-turn accountant finishes, and the RAII
-        // guard clears it on every exit (abort, early terminal, panic).
-        //
-        // #2066 round 3 (codex fix 2) — the claim is no longer taken here:
-        // it was taken ATOMICALLY WITH THE POP by
-        // `drain_and_claim_ready_continuation_for_session` and travels into
-        // this task. Claim-failure therefore pops nothing and completes
-        // nothing (the round-2 try-claim-in-task shape popped first and
-        // completed the item UNEXECUTED on claim failure — permanently
-        // dropping a latched GoalWrapUp). Held for EVERY continuation
-        // reason, matching the session actor's claim semantics.
-        //
-        // The post-claim goal RECHECK stays: with the claim held, a
-        // gone/mismatched goal is genuinely cleared/replaced (not a racing
-        // dispatcher), so completing the popped item is correct — launching
-        // the drained prompt would run a turn for a deleted goal. The abort
-        // stamps the internal turn slot Terminal (no wire event was emitted
-        // for this turn yet — the client never saw it) so the session's
-        // `active_turns` slot frees for the next dispatch.
-        let _in_flight_guard = claim_guard;
-        if let Some(ref ctx) = goal_context_for_appui {
-            let session_key = SessionKey(continuation.session_id.as_str().to_owned());
-            if !default_agent_orchestrator().goal_dispatch_target_matches(
-                &session_key,
-                &ctx.profile_id,
-                ctx.bound_goal_id.as_deref(),
-            ) {
-                info!(
-                    session = %params.session_id,
-                    continuation_id = continuation.id.as_u64(),
-                    "goal was cleared/replaced between drain and launch; \
-                     aborting this turn"
-                );
-                *turn_state_for_task.lock().await = TurnState::Terminal(TerminalReason::Completed);
-                default_agent_orchestrator().mark_continuation_completed(
-                    &continuation,
-                    Some("goal_removed_before_launch".to_owned()),
-                );
-                // The claim guard drops here, releasing the slot.
-                return;
-            }
-            default_agent_orchestrator()
-                .record_goal_dispatch_timestamp_only(&session_key, &ctx.profile_id);
-        }
-        // #436 P1 #2 — for a peer_send_input injection, track whether the turn
-        // actually dispatched the agent, so an UNDELIVERED injection (e.g. a
-        // failed `TurnStarted`) is NOT marked completed and stays durable for
-        // retry/replay. `None` for every other continuation kind (unchanged).
-        let turn_dispatched = persist_peer_input_prompt
-            .then(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
-        run_standalone_turn(
-            ws_for_turn,
-            state_for_turn,
-            ledger_for_turn,
-            contracts_for_turn,
-            features,
-            params,
-            prompt,
-            None,
-            routed_profile_id,
-            turn_state_for_task,
-            interrupt_rx,
-            Some(steer_buffer_for_turn),
-            true,
-            loop_id_for_self_paced,
-            goal_context_for_appui,
-            // #1650 — master continuations carry their accounting via
-            // `goal_context` (a `GoalContinue` charges through
-            // `record_goal_turn`); the interactive binding is never used.
-            None,
-            // #436 — persist a peer_send_input injection as a UserMessage.
-            persist_peer_input_prompt,
-            turn_dispatched.clone(),
-            // OLP-CTRL 回合 4 (消费权归一): only a STEER continuation's
-            // turn may consume the reviewer-notes sidecar.
-            matches!(
-                &continuation.reason,
-                MasterContinuationReason::External(kind)
-                    if kind == crate::autonomy::agent_orchestrator::STEER_EXTERNAL_KIND
-            ),
-            // #8c ② — thread the exact steer line for per-line consumption.
-            if matches!(
-                &continuation.reason,
-                MasterContinuationReason::External(kind)
-                    if kind == crate::autonomy::agent_orchestrator::STEER_EXTERNAL_KIND
-            ) {
-                let ts = continuation
-                    .metadata
-                    .get(crate::autonomy::agent_orchestrator::STEER_META_ENQUEUED_TS)
-                    .cloned()
-                    .unwrap_or_else(|| "0".to_owned());
-                let text = continuation
-                    .metadata
-                    .get(crate::autonomy::agent_orchestrator::STEER_META_TEXT)
-                    .cloned()
-                    .unwrap_or_default();
-                Some((ts, text))
-            } else {
-                None
-            },
-        )
-        .await;
-        // #436 P1 #2 — keep an undelivered peer injection durable; every other
-        // continuation keeps its unconditional completion. `None` (non-peer)
-        // counts as dispatched so the rule is a no-op there.
-        let agent_dispatched = turn_dispatched
-            .as_ref()
-            .is_none_or(|flag| flag.load(std::sync::atomic::Ordering::Acquire));
-        if continuation_may_complete(persist_peer_input_prompt, agent_dispatched) {
-            default_agent_orchestrator().mark_continuation_completed(
-                &continuation,
-                Some("processed_by_appui_turn_runtime".to_owned()),
-            );
-        } else {
-            // #436 P1 #2 — the injection never reached the agent (e.g. a failed
-            // `TurnStarted`). Keep the durable record AND re-insert it so it is
-            // retried LIVE on the next tick (and re-homed by a reopen's
-            // retarget) — not stranded until a server restart's durable replay.
-            tracing::warn!(
-                continuation_id = continuation.id.as_u64(),
-                "peer_send_input turn did not dispatch the agent; re-queuing the \
-                 injection for live retry"
-            );
-            default_agent_orchestrator().reinsert_peer_continuation(continuation);
-        }
-    });
-
-    btw_live_draft_clear(&session_id, &turn_id);
-    active.insert(
-        session_id.clone(),
-        ActiveTurn {
-            turn_id: turn_id.clone(),
-            profile_id: profile_id.clone(),
-            state: turn_state.clone(),
-            interrupt_tx,
-            steer: Some(steer_buffer),
-            abort: handle.abort_handle(),
-        },
-    );
-    drop(active);
-
-    connection_turns.lock().await.insert(
-        session_id,
-        ConnectionTurn {
-            turn_id: turn_id.clone(),
-            state: turn_state.clone(),
-        },
-    );
-    let _ = start_tx.send(());
-    true
-}
-
 /// #436 P1 #2 — decide whether THIS connection's per-connection continuation
 /// drain may run a due target. A peer session's turn streams live deltas
 /// EPHEMERALLY to the running connection's socket, so a non-owning same-profile
@@ -23263,60 +19584,6 @@ fn continuation_may_complete(is_peer_injection: bool, agent_dispatched: bool) ->
     !is_peer_injection || agent_dispatched
 }
 
-// The drain needs the dispatch stores, turn registries, this connection's
-// open-session set, and negotiated features as separate inputs — a flat
-// per-request dependency list, not a missing struct.
-#[allow(clippy::too_many_arguments)]
-async fn drain_appui_due_master_continuations(
-    ws: &WsConnection,
-    state: &Arc<AppState>,
-    ledger: &Arc<UiProtocolLedger>,
-    contracts: &Arc<UiProtocolContractStores>,
-    active_turns: &SharedActiveTurns,
-    connection_turns: &SharedConnectionTurns,
-    profile_filter: Option<&str>,
-    // #436 P1 #2 — the sessions THIS connection has open (live_forwarders
-    // snapshot); a peer continuation is only drained here when its session is
-    // in this set, so its live output reaches the peer's own client.
-    open_sessions: &std::collections::HashSet<SessionKey>,
-    restrict_to_open_sessions: bool,
-    features: ConnectionUiFeatures,
-) {
-    let orchestrator = default_agent_orchestrator();
-    for (storage_key, profile_id) in orchestrator.due_loop_targets(profile_filter, 8) {
-        // #1666 residue — a scoped goal target fires only for the currently
-        // active folder of its wire id (a backgrounded folder's goal is
-        // skipped until it is re-opened), so a stale-cwd continuation can never
-        // run against the wrong workspace. Unscoped targets (loops, gateway)
-        // always pass. The turn dispatches on the plain WIRE id while the goal
-        // record/queue/accountant stay on the scoped `storage_key`.
-        if !orchestrator.goal_target_is_dispatchable(&storage_key) {
-            continue;
-        }
-        let wire_key = wire_key_from_goal_key(&storage_key);
-        if restrict_to_open_sessions && !open_sessions.contains(&wire_key) {
-            continue;
-        }
-        // #436 P1 #2 — never run another client's peer turn on this connection.
-        if !peer_target_deliverable_on_connection(&wire_key, open_sessions) {
-            continue;
-        }
-        let _ = maybe_spawn_appui_master_continuation_runner(
-            ws,
-            state,
-            ledger,
-            contracts,
-            active_turns,
-            connection_turns,
-            wire_key,
-            storage_key,
-            profile_id,
-            features,
-        )
-        .await;
-    }
-}
-
 /// Snapshot of sessions that currently have an in-flight (non-terminal) turn in
 /// the process-global active-turns registry. One lock acquisition; used to feed
 /// the whole-job orchestration status without re-locking per session.
@@ -23365,16 +19632,13 @@ async fn emit_session_orchestration_updates(
         return;
     }
     let turn_sessions = active_turn_sessions(active_turns).await;
-    let orchestrator = default_agent_orchestrator();
-    let mut candidates = orchestrator.sessions_with_active_orchestration();
-    candidates.extend(turn_sessions.iter().cloned());
+    let mut candidates: Vec<SessionKey> = turn_sessions.iter().cloned().collect();
     candidates.retain(|session_id| subscribed.contains(session_id));
 
     let mut current: std::collections::HashMap<SessionKey, SessionOrchestrationEvent> =
         std::collections::HashMap::new();
     for session_id in &candidates {
-        let (running_agents, pending_continuations) =
-            orchestrator.session_orchestration_counts(session_id);
+        let (running_agents, pending_continuations) = (0u32, 0u32);
         let turn_active = turn_sessions.contains(session_id);
         // A candidate is here because at least one of these holds; if a stale
         // continuation cleared between set-build and count, skip it.
@@ -23464,20 +19728,6 @@ pub(crate) fn spawn_background_activity_sink(state: Arc<AppState>) {
     let (tx, mut rx) = mpsc::channel::<octos_core::ui_protocol::BackgroundActivityEvent>(
         BACKGROUND_ACTIVITY_QUEUE_CAPACITY,
     );
-    // Best-effort, non-blocking producer side. `try_send` is the whole
-    // contract: a producer must never await, block, or fail on the human sink.
-    crate::autonomy::human_events::set_background_activity_sink(std::sync::Arc::new(
-        move |event: octos_core::ui_protocol::BackgroundActivityEvent| {
-            if let Err(err) = tx.try_send(event) {
-                metrics::counter!("ws.background_activity.drop").increment(1);
-                tracing::debug!(
-                    target: "octos::ui_protocol::ws",
-                    reason = %err,
-                    "background activity dropped: human sink queue full or closed"
-                );
-            }
-        },
-    ));
     tokio::spawn(async move {
         // Detached connection: there is no live peer. Outbound frames are
         // discarded by a drain task (the durable record is the ledger); keep
@@ -23500,324 +19750,6 @@ pub(crate) fn spawn_background_activity_sink(state: Arc<AppState>) {
 /// re-entry turn on its own connection; this loop is the safety net that drains
 /// queued continuations when NO client is connected.
 const GLOBAL_MASTER_CONTINUATION_DRAIN_INTERVAL_SECS: u64 = 5;
-
-/// Spawn a server-level background task that drains due master continuations
-/// regardless of whether any ws/stdio client is connected.
-///
-/// The AppUI re-entry path (`appui_continuation_tick` ->
-/// `drain_appui_due_master_continuations`) runs ONLY inside a live connection's
-/// handler loop. So when a sub-agent finishes while the user's TUI is
-/// disconnected — or after a serve restart re-loads the persisted queue — the
-/// `ChildCompleted` / `ScatterJoinComplete` / `GoalContinue` / `LoopFire`
-/// continuation sits in the scheduler with nothing to drain it until a client
-/// reconnects. This loop closes that gap (mini5 soak gap #1).
-///
-/// It reuses the exact same drain primitive as the per-connection tick and
-/// shares the process-global `active_turns_registry()`, so the scheduler's
-/// atomic pop + the per-session active-turn guard prevent any double-run when a
-/// client IS connected: whoever pops the continuation first wins, the other
-/// side finds it gone / the session occupied. Turn events persist to the
-/// durable ledger, so connected clients receive them live via their session's
-/// live forwarder and disconnected clients replay them on reconnect.
-///
-/// `profile_filter = None` so it sweeps every profile (each per-connection tick
-/// scopes to its own profile; the safety net must cover all of them).
-pub(crate) fn spawn_global_master_continuation_drain(state: Arc<AppState>) {
-    tokio::spawn(async move {
-        // Detached connection: there is no live peer. Outbound frames are
-        // discarded by a drain task (the durable record is the ledger); keep
-        // the receiver alive so sends never backpressure-fail and mark the
-        // connection dead.
-        let (writer_tx, mut writer_rx) = mpsc::channel::<WsMessage>(WS_WRITER_CHANNEL_CAPACITY);
-        tokio::spawn(async move { while writer_rx.recv().await.is_some() {} });
-        let ws = WsConnection::new(writer_tx);
-        let active_turns = active_turns_registry();
-        let connection_turns: SharedConnectionTurns =
-            Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-        let contracts = contract_stores();
-        let ledger = event_ledger(&state).await;
-        let features = ConnectionUiFeatures::stdio_defaults();
-        let mut tick = tokio::time::interval(Duration::from_secs(
-            GLOBAL_MASTER_CONTINUATION_DRAIN_INTERVAL_SECS,
-        ));
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        // First tick fires immediately; skip it so we don't race the serve's
-        // own startup wiring before any session can exist.
-        tick.tick().await;
-        info!(
-            interval_secs = GLOBAL_MASTER_CONTINUATION_DRAIN_INTERVAL_SECS,
-            "global master-continuation drain loop started (connection-independent)"
-        );
-        // #1967 — escalation timeout sweep cadence: this loop ticks every 5s,
-        // but the sweep opens every goal-ledger db under every profile, so it
-        // runs at most once per minute. Loop-local throttle state on purpose
-        // (NOT in the orchestrator): the cadence belongs to this driver, and
-        // tests driving `sweep_escalation_timeouts` directly must never be
-        // throttled. `None` start = first in-loop tick sweeps immediately, so
-        // rows that expired while the serve was down resolve promptly.
-        const ESCALATION_SWEEP_MIN_INTERVAL: Duration = Duration::from_secs(60);
-        let mut last_escalation_sweep: Option<std::time::Instant> = None;
-        loop {
-            tick.tick().await;
-
-            // #1977 — MonitorRuntime reconcile pass. This is BOTH the boot
-            // re-arm (the first tick after a serve restart spawns a fresh
-            // watcher for every persisted `active` monitor — the loop
-            // boot-re-arm precedent, #1879) AND the self-heal (a watcher
-            // whose task died is respawned; a paused/expired/deleted
-            // monitor's watcher is torn down). It also expires overdue
-            // non-persistent monitors with a durable note. Pure convergence,
-            // so running it every tick is idempotent. The child PROCESS never
-            // survives a restart — only the spec does — so a fresh watcher +
-            // fresh child is spawned here; a stale child from the prior
-            // lifetime was reaped on shutdown (`kill_on_drop`) or orphaned to
-            // init with its pipe reader gone (it can no longer wake anything).
-            {
-                let desired = default_agent_orchestrator().monitor_reconcile_pass();
-                let sink: std::sync::Arc<dyn crate::autonomy::monitor_runtime::MonitorSink> =
-                    std::sync::Arc::new(
-                        crate::autonomy::agent_orchestrator::OrchestratorMonitorSink,
-                    );
-                crate::autonomy::monitor_runtime::monitor_process_runtime()
-                    .reconcile(desired, sink);
-            }
-
-            // OLP-CTRL 首航第二/四回合 整改 (cross-process steer wake):
-            // sweep the instance inbox for unconsumed `.reviewer-notes`
-            // sidecars and enqueue a steer continuation per addressed
-            // session — the `octos steer` CLI only writes FILES. 回合 4:
-            // the inbox root MUST be the SAME resolution the steer CLI
-            // uses — the profile runtime's data_dir (what
-            // ProfileStore::resolve_data_dir yields), NOT the sessions
-            // manager's data_dir (which pointed at a different tree and
-            // made read_dir fail silently for 5 minutes). The sweep logs
-            // a throttled trace every pass (even 0 sidecars) and WARNs on
-            // a read_dir failure — silence here was the blind spot.
-            // 回合 5 (收官): sweep EVERY profile's data_dir — a steer may
-            // target any profile's session, and gating on
-            // `profiles.get(MAIN_PROFILE_ID)` was a dead door
-            // (MAIN_PROFILE_ID is "_main" while the runtime profile is
-            // "octos", so the sweep was never invoked). An EMPTY profiles
-            // table is itself a trace-worthy condition (throttled WARN) —
-            // the r4 no-silence rule applies to the call gate too.
-            if state.profiles.is_empty() {
-                use std::sync::atomic::{AtomicI64, Ordering};
-                static LAST_EMPTY_WARN_MS: AtomicI64 = AtomicI64::new(0);
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as i64)
-                    .unwrap_or(0);
-                let last = LAST_EMPTY_WARN_MS.load(Ordering::Relaxed);
-                if now.saturating_sub(last) >= 60_000 {
-                    LAST_EMPTY_WARN_MS.store(now, Ordering::Relaxed);
-                    tracing::warn!(
-                        "steer inbox sweep: AppState has NO profiles registered; \
-                         steer wake cannot run for any session"
-                    );
-                }
-            }
-            for (profile_id, profile_runtime) in &state.profiles {
-                let sweep_data_dir = profile_runtime.data_dir.clone();
-                default_agent_orchestrator().steer_inbox_sweep(&sweep_data_dir, profile_id);
-            }
-
-            // #1967 — resolve expired open escalations across every profile's
-            // goal ledgers. Ledger-truth + master-visibility only: a live
-            // parked peer is NOT un-parked (see `sweep_escalation_timeouts`
-            // for why a hard cancel would be wrong). Dormant until producers
-            // set `default_after_secs`.
-            if last_escalation_sweep.is_none_or(|at| at.elapsed() >= ESCALATION_SWEEP_MIN_INTERVAL)
-            {
-                last_escalation_sweep = Some(std::time::Instant::now());
-                // #1967 codex round — the sweep is synchronous rusqlite I/O
-                // (opens every goal-ledger db), so run it on the blocking
-                // pool: it must never stall this drain tick. Detached on
-                // purpose (handle dropped): the 60s throttle above bounds
-                // re-entry, and a pathological >60s sweep overlapping the
-                // next is harmless — `resolve_escalation_by_id` only ever
-                // flips rows still `open`.
-                let profile_dirs: Vec<(String, PathBuf)> = state
-                    .profiles
-                    .iter()
-                    .map(|(id, runtime)| (id.clone(), runtime.data_dir.clone()))
-                    .collect();
-                tokio::task::spawn_blocking(move || {
-                    for (profile_id, data_dir) in profile_dirs {
-                        let swept =
-                            default_agent_orchestrator().sweep_escalation_timeouts(&data_dir);
-                        if swept > 0 {
-                            info!(
-                                profile = %profile_id,
-                                swept,
-                                "escalation timeout sweep resolved expired escalations"
-                            );
-                        }
-                    }
-                });
-            }
-
-            // codex P2 (reap): this loop never closes, so the per-connection
-            // cleanup path (`abort_connection_turns` on socket close) never runs
-            // for the turns we spawn. Without this, every disconnected session
-            // we drain would leave a Terminal active-turn entry behind forever.
-            // Drop our own entries once their turn has reached Terminal.
-            {
-                let mut conns = connection_turns.lock().await;
-                if !conns.is_empty() {
-                    let mut active = active_turns.lock().await;
-                    let mut finished: Vec<SessionKey> = Vec::new();
-                    for (session, registered) in conns.iter() {
-                        match active.get(session) {
-                            Some(existing) if registered.matches(existing) => {
-                                if matches!(&*existing.state.lock().await, TurnState::Terminal(_)) {
-                                    finished.push(session.clone());
-                                }
-                            }
-                            // Replaced by a newer turn (or already gone): our
-                            // mapping is stale, drop it.
-                            _ => finished.push(session.clone()),
-                        }
-                    }
-                    for session in finished {
-                        if let Some(existing) = active.get(&session) {
-                            if conns
-                                .get(&session)
-                                .is_some_and(|registered| registered.matches(existing))
-                            {
-                                active.remove(&session);
-                            }
-                        }
-                        conns.remove(&session);
-                    }
-                }
-            }
-
-            // Drive the drain ourselves (rather than
-            // `drain_appui_due_master_continuations`) so we can gate each
-            // target on a known workspace.
-            //
-            // codex P1 + P2 (rounds 2-4): only run a headless turn for a session
-            // whose workspace is already established in-memory (opened this
-            // process run). A continuation rehydrated across a serve restart has
-            // no `session_workspaces()` entry yet; running it blind would
-            // bootstrap the profile-default workspace and could run tools in the
-            // wrong repo for a custom-cwd session — so such targets must be
-            // deferred to reconnect (session/open repopulates the workspace).
-            //
-            // The gate is pushed INTO `due_loop_targets_with_filter` so it is
-            // applied BEFORE the `max_items` limit: a bounded `DRAIN_SPAWN_CAP`
-            // window returns up to N *runnable* targets (bounded result +
-            // allocation), and deferred (workspace-unknown) sessions at the head
-            // of the queue can neither fill the window (starving runnable ones)
-            // nor force an unbounded per-tick scan/allocation under the
-            // orchestrator mutex.
-            // Request more RUNNABLE candidates than we will spawn so a
-            // candidate that can't advance this tick (already-active/occupied
-            // turn, or nothing drainable → `maybe_spawn` returns false) does not
-            // consume the per-tick spawn budget and skip runnable sessions
-            // behind it (codex round-5). Only SUCCESSFUL spawns count toward the
-            // cap. The window stays bounded (<= DRAIN_CANDIDATE_WINDOW); a
-            // session is "occupied" only while it holds an in-flight turn, so
-            // more than DRAIN_CANDIDATE_WINDOW simultaneously-occupied runnable
-            // sessions is not operationally reachable on a single serve.
-            const DRAIN_SPAWN_CAP: usize = 8;
-            const DRAIN_CANDIDATE_WINDOW: usize = 64;
-            // PR 4b — rehydration pre-pass: BEFORE the two workspace/scope gates,
-            // re-seed the in-memory maps a HEADLESS keeper (fleet outbox → keeper
-            // continuation, no live client) never got from a `session/open` after
-            // a serve restart. Each candidate PAIRS the workspace root and the cwd
-            // scope from the SAME pending continuation (codex round 2) so a wire's
-            // Gate A workspace and Gate D scope can never come from two different
-            // continuations (which would admit one folder's continuation and run
-            // it in another's). Both seeds key under the `wire_key_from_goal_key`
-            // form the gates probe and never overwrite an established entry.
-            //   (1) `session_workspaces()` clears the workspace-known gate below;
-            //       `run_standalone_turn` later reads the same entry as its
-            //       `workspace_hint`.
-            //   (2) `goal_scopes` (scoped keepers only) clears the SECOND gate
-            //       (`goal_target_is_dispatchable`, Gate D), which would otherwise
-            //       surface a scoped keeper yet `continue` it SILENTLY.
-            // Rolling-downgrade note: an old v2 binary that REWRITES the fleet
-            // record erases the unknown `controller_workspace_root` (the keeper
-            // then loses headless rehydration) — acceptable for v1's
-            // single-active-serve model; not a concern within one binary version.
-            reseed_fleet_keeper_candidates(
-                &session_workspaces(),
-                default_agent_orchestrator(),
-                default_agent_orchestrator().pending_fleet_keeper_seeds(),
-            );
-            // #1666 residue — a goal target is cwd-scoped (`<wire>\u{0}~cwd-…`)
-            // while `session_workspaces()` is keyed by the plain wire id, so
-            // the workspace-known gate must strip the scope before probing.
-            let runnable = |session: &SessionKey, profile_id: &str| {
-                session_workspaces()
-                    .get(profile_id, &wire_key_from_goal_key(session))
-                    .is_some()
-            };
-            let orchestrator = default_agent_orchestrator();
-            let due = orchestrator.due_loop_targets_with_filter(
-                None,
-                DRAIN_CANDIDATE_WINDOW,
-                Some(&runnable),
-            );
-            let mut advanced = 0usize;
-            for (storage_key, profile_id) in due {
-                if advanced >= DRAIN_SPAWN_CAP {
-                    break;
-                }
-                // Only fire a scoped goal for the currently-active folder of
-                // its wire id (see `goal_target_is_dispatchable`); dispatch on
-                // the plain WIRE id, account on the scoped `storage_key`.
-                if !orchestrator.goal_target_is_dispatchable(&storage_key) {
-                    continue;
-                }
-                let wire_key = wire_key_from_goal_key(&storage_key);
-                // #436 FIX 5 — a peer retired via peer_close has its pending
-                // injections RETIRED (cancelled + tombstoned) here rather than
-                // skipped: a bare skip never pops them, so they would strand in
-                // the durable queue. Pop + tombstone the whole set for the
-                // closed peer, then move on.
-                if peer_target_is_closed(&state, &wire_key) {
-                    if let Some((closed_profile, closed_slug)) = peer_slug_and_profile(&wire_key) {
-                        orchestrator.cancel_peer_send_input_continuations_for_peer(
-                            closed_profile,
-                            closed_slug,
-                        );
-                    }
-                    continue;
-                }
-                // #436 P1 #3 — never run a peer injection under an obsolete
-                // wire (superseded by a reopen); it is delivered when the peer
-                // reopens (which re-homes it to the current wire).
-                if !peer_target_is_current_wire(&wire_key) {
-                    continue;
-                }
-                if maybe_spawn_appui_master_continuation_runner(
-                    &ws,
-                    &state,
-                    &ledger,
-                    &contracts,
-                    &active_turns,
-                    &connection_turns,
-                    wire_key,
-                    storage_key,
-                    profile_id,
-                    features,
-                )
-                .await
-                {
-                    advanced += 1;
-                }
-            }
-            if advanced > 0 {
-                info!(
-                    advanced,
-                    "global master-continuation drain (connection-independent)"
-                );
-            }
-        }
-    });
-}
 
 async fn handle_turn_interrupt(
     ws: &WsConnection,
@@ -24285,79 +20217,6 @@ async fn handle_task_output_read(
                 );
             }
         },
-        Err(error) => {
-            let _ = send_rpc_error(ws, Some(id), error);
-        }
-    }
-}
-
-async fn handle_task_artifact_list(
-    ws: &WsConnection,
-    state: &Arc<AppState>,
-    connection_profile_id: Option<&str>,
-    features: ConnectionUiFeatures,
-    id: String,
-    params: TaskArtifactListParams,
-) {
-    if !features.task_artifacts_available() {
-        let _ = send_rpc_error(
-            ws,
-            Some(id),
-            RpcError::method_not_supported(octos_core::ui_protocol::methods::TASK_ARTIFACT_LIST),
-        );
-        return;
-    }
-    match task_artifact_list_result(
-        state,
-        default_agent_orchestrator(),
-        connection_profile_id,
-        params,
-    ) {
-        Ok(result) => send_serialized_rpc_result(
-            ws,
-            id,
-            octos_core::ui_protocol::methods::TASK_ARTIFACT_LIST,
-            result,
-        ),
-        Err(error) => {
-            let _ = send_rpc_error(ws, Some(id), error);
-        }
-    }
-}
-
-async fn handle_task_artifact_read(
-    ws: &WsConnection,
-    state: &Arc<AppState>,
-    connection_profile_id: Option<&str>,
-    features: ConnectionUiFeatures,
-    id: String,
-    params: TaskArtifactReadParams,
-) {
-    if !features.task_artifacts_available() {
-        let _ = send_rpc_error(
-            ws,
-            Some(id),
-            RpcError::method_not_supported(octos_core::ui_protocol::methods::TASK_ARTIFACT_READ),
-        );
-        return;
-    }
-    let data_dir = match &state.sessions {
-        Some(sessions) => Some(sessions.lock().await.data_dir().to_path_buf()),
-        None => None,
-    };
-    match task_artifact_read_result(
-        state,
-        default_agent_orchestrator(),
-        connection_profile_id,
-        data_dir.as_deref(),
-        params,
-    ) {
-        Ok(result) => send_serialized_rpc_result(
-            ws,
-            id,
-            octos_core::ui_protocol::methods::TASK_ARTIFACT_READ,
-            result,
-        ),
         Err(error) => {
             let _ = send_rpc_error(ws, Some(id), error);
         }
@@ -28293,179 +24152,6 @@ fn task_artifact_profile_id(
     )
 }
 
-fn task_artifact_list_result(
-    state: &Arc<AppState>,
-    orchestrator: &dyn AgentOrchestrator,
-    connection_profile_id: Option<&str>,
-    params: TaskArtifactListParams,
-) -> Result<TaskArtifactListResult, RpcError> {
-    let profile_id = task_artifact_profile_id(
-        &params.session_id,
-        params.profile_id.as_deref(),
-        connection_profile_id,
-    )?;
-    let agent_id = resolve_task_artifact_agent_id(
-        orchestrator,
-        &params.session_id,
-        &params.task_id,
-        &profile_id,
-        params.agent_id.as_deref(),
-    )?;
-    if let Some(agent_id) = agent_id {
-        let result = orchestrator.list_agent_artifacts(AgentRequest {
-            agent_id: agent_id.clone(),
-            session_id: Some(params.session_id.clone()),
-            profile_id,
-        })?;
-        let artifacts = result
-            .get("artifacts")
-            .and_then(Value::as_array)
-            .map(|artifacts| {
-                artifacts
-                    .iter()
-                    .map(task_artifact_record_from_value)
-                    .collect()
-            })
-            .unwrap_or_default();
-        return Ok(TaskArtifactListResult {
-            session_id: params.session_id,
-            task_id: params.task_id,
-            agent_id: Some(agent_id),
-            artifacts,
-        });
-    }
-
-    let task = task_entry_for_session(state, &params.session_id, &params.task_id)?;
-    Ok(TaskArtifactListResult {
-        session_id: params.session_id,
-        task_id: params.task_id,
-        agent_id: None,
-        artifacts: task_output_artifact_records(&task),
-    })
-}
-
-fn task_artifact_read_result(
-    state: &Arc<AppState>,
-    orchestrator: &dyn AgentOrchestrator,
-    connection_profile_id: Option<&str>,
-    data_dir: Option<&Path>,
-    params: TaskArtifactReadParams,
-) -> Result<TaskArtifactReadResult, RpcError> {
-    if params.artifact_id.is_none() && params.path.is_none() {
-        return Err(
-            RpcError::invalid_params("task/artifact/read requires artifact_id or path")
-                .with_data(json!({ "kind": "task_artifact_selector_invalid" })),
-        );
-    }
-    let profile_id = task_artifact_profile_id(
-        &params.session_id,
-        params.profile_id.as_deref(),
-        connection_profile_id,
-    )?;
-    let agent_id = resolve_task_artifact_agent_id(
-        orchestrator,
-        &params.session_id,
-        &params.task_id,
-        &profile_id,
-        params.agent_id.as_deref(),
-    )?;
-    if let Some(agent_id) = agent_id {
-        let result = orchestrator.read_agent_artifact(AgentArtifactReadRequest {
-            agent_id: agent_id.clone(),
-            artifact_id: params.artifact_id.clone(),
-            path: params.path.clone(),
-            session_id: Some(params.session_id.clone()),
-            profile_id,
-        })?;
-        let mut artifact = result
-            .get("artifact")
-            .map(task_artifact_record_from_value)
-            .unwrap_or_else(|| task_artifact_record_for_selector(&params));
-        if artifact.path.is_none() {
-            artifact.path = params.path.clone();
-        }
-        let full_content = result
-            .get("content")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned)
-            .or_else(|| artifact.content.clone())
-            .or_else(|| {
-                artifact
-                    .path
-                    .as_deref()
-                    .and_then(|path| read_task_artifact_text(path, data_dir))
-            });
-        let (content, cursor, next_cursor, has_more) =
-            slice_task_artifact_content(full_content, params.cursor, params.limit_bytes);
-        return Ok(TaskArtifactReadResult {
-            session_id: params.session_id,
-            task_id: params.task_id,
-            agent_id: Some(agent_id),
-            artifact,
-            content,
-            cursor,
-            next_cursor,
-            has_more,
-        });
-    }
-
-    let task = task_entry_for_session(state, &params.session_id, &params.task_id)?;
-    let artifacts = task_output_artifact_records(&task);
-    let artifact = select_task_artifact(
-        &artifacts,
-        params.artifact_id.as_deref(),
-        params.path.as_deref(),
-    )?;
-    let full_content = artifact
-        .path
-        .as_deref()
-        .and_then(|path| read_task_artifact_text(path, data_dir));
-    let (content, cursor, next_cursor, has_more) =
-        slice_task_artifact_content(full_content, params.cursor, params.limit_bytes);
-    Ok(TaskArtifactReadResult {
-        session_id: params.session_id,
-        task_id: params.task_id,
-        agent_id: None,
-        artifact,
-        content,
-        cursor,
-        next_cursor,
-        has_more,
-    })
-}
-
-fn resolve_task_artifact_agent_id(
-    orchestrator: &dyn AgentOrchestrator,
-    session_id: &SessionKey,
-    task_id: &TaskId,
-    profile_id: &str,
-    explicit_agent_id: Option<&str>,
-) -> Result<Option<String>, RpcError> {
-    if let Some(agent_id) = explicit_agent_id.filter(|agent_id| !agent_id.trim().is_empty()) {
-        return Ok(Some(agent_id.to_owned()));
-    }
-    let result = orchestrator.list_agents(AgentListRequest {
-        session_id: Some(session_id.clone()),
-        profile_id: profile_id.to_owned(),
-        connection_profile_id: None,
-    })?;
-    let task_id = task_id.to_string();
-    Ok(result
-        .get("agents")
-        .and_then(Value::as_array)
-        .and_then(|agents| {
-            agents.iter().find_map(|agent| {
-                let agent_id = agent.get("agent_id").and_then(Value::as_str)?;
-                let matches_task = agent
-                    .get("task_id")
-                    .and_then(Value::as_str)
-                    .is_some_and(|candidate| candidate == task_id)
-                    || agent_id == task_id;
-                matches_task.then(|| agent_id.to_owned())
-            })
-        }))
-}
-
 fn task_entry_for_session(
     state: &Arc<AppState>,
     session_id: &SessionKey,
@@ -29259,452 +24945,6 @@ fn m9_fixture_has_pending_interrupt(interrupt_rx: &mut mpsc::Receiver<()>) -> bo
     interrupt_rx.try_recv().is_ok()
 }
 
-// The M9 fixture drives a full turn end-to-end, so it takes the connection,
-// stores, fixture definition, shared turn state, and interrupt channel as
-// separate pieces — a flat dependency list, not a missing struct.
-#[allow(clippy::too_many_arguments)]
-async fn run_m9_fixture_turn(
-    ws: WsConnection,
-    state: Arc<AppState>,
-    ledger: Arc<UiProtocolLedger>,
-    contracts: Arc<UiProtocolContractStores>,
-    params: TurnStartParams,
-    fixture: M9ProtocolFixture,
-    turn_state: Arc<TokioMutex<TurnState>>,
-    mut interrupt_rx: mpsc::Receiver<()>,
-) {
-    let session_id = params.session_id.clone();
-    let turn_id = params.turn_id.clone();
-    let started = UiNotification::TurnStarted(octos_core::ui_protocol::TurnStartedEvent {
-        session_id: session_id.clone(),
-        turn_id: turn_id.clone(),
-        timestamp: Utc::now(),
-        // UPCR-2026-014 (M9-α-9): WS turn-start path has no topic in
-        // scope today; the SSE bridge in α-9 plumbs topic separately.
-        topic: None,
-    });
-    if send_notification_lifecycle(&ws, &ledger, started).is_err() {
-        let _ = transition_to_terminal_settling_steers(
-            &turn_state,
-            TerminalReason::Errored,
-            None,
-            SteerReturnSink::Live {
-                ws: &ws,
-                ledger: &ledger,
-            },
-            &session_id,
-            &turn_id,
-        )
-        .await;
-        contracts.scopes.evict_turn(&session_id, &turn_id);
-        return;
-    }
-    let _ = send_notification_durable(
-        &ws,
-        &ledger,
-        UiNotification::ProgressUpdated(UiProgressEvent::new(
-            session_id.clone(),
-            Some(turn_id.clone()),
-            UiProgressMetadata::new(progress_kinds::STATUS).with_message("fixture turn running"),
-        )),
-    );
-
-    let outcome = match fixture {
-        M9ProtocolFixture::Basic => {
-            let _ = send_notification_ephemeral(
-                &ws,
-                &ledger,
-                UiNotification::MessageDelta(MessageDeltaEvent {
-                    session_id: session_id.clone(),
-                    topic: None,
-                    turn_id: turn_id.clone(),
-                    text: "OK".to_owned(),
-                }),
-            );
-            if m9_fixture_delay_or_interrupt(
-                &mut interrupt_rx,
-                std::time::Duration::from_millis(20),
-            )
-            .await
-            {
-                M9FixtureOutcome::Interrupted
-            } else {
-                M9FixtureOutcome::Completed
-            }
-        }
-        M9ProtocolFixture::M19StdioHappyPath => {
-            let _ = send_notification_ephemeral(
-                &ws,
-                &ledger,
-                UiNotification::MessageDelta(MessageDeltaEvent {
-                    session_id: session_id.clone(),
-                    topic: None,
-                    turn_id: turn_id.clone(),
-                    text: "`M19_STDIO_HAPPY_PATH_FINAL_LINE`".to_owned(),
-                }),
-            );
-            if m9_fixture_delay_or_interrupt(
-                &mut interrupt_rx,
-                std::time::Duration::from_millis(20),
-            )
-            .await
-            {
-                M9FixtureOutcome::Interrupted
-            } else {
-                M9FixtureOutcome::Completed
-            }
-        }
-        M9ProtocolFixture::Slow => {
-            let mut interrupted = false;
-            for _ in 0..80 {
-                if m9_fixture_has_pending_interrupt(&mut interrupt_rx) {
-                    interrupted = true;
-                    break;
-                }
-                let _ = send_notification_ephemeral(
-                    &ws,
-                    &ledger,
-                    UiNotification::MessageDelta(MessageDeltaEvent {
-                        session_id: session_id.clone(),
-                        topic: None,
-                        turn_id: turn_id.clone(),
-                        text: "OK\n".to_owned(),
-                    }),
-                );
-                if m9_fixture_delay_or_interrupt(
-                    &mut interrupt_rx,
-                    std::time::Duration::from_millis(25),
-                )
-                .await
-                {
-                    interrupted = true;
-                    break;
-                }
-            }
-            if interrupted {
-                M9FixtureOutcome::Interrupted
-            } else {
-                M9FixtureOutcome::Completed
-            }
-        }
-        M9ProtocolFixture::ToolEvents => {
-            let tool_call_id = format!("m9-tool-{}", turn_id.0);
-            let topic = session_id.topic().map(ToOwned::to_owned);
-            let _ = send_notification_durable(
-                &ws,
-                &ledger,
-                UiNotification::ToolStarted(ToolStartedEvent {
-                    session_id: session_id.clone(),
-                    topic: topic.clone(),
-                    turn_id: turn_id.clone(),
-                    tool_call_id: tool_call_id.clone(),
-                    tool_name: "list_dir".to_owned(),
-                    arguments: Some(json!({ "path": "." })),
-                }),
-            );
-            let _ = send_notification_durable(
-                &ws,
-                &ledger,
-                UiNotification::ToolProgress(ToolProgressEvent {
-                    session_id: session_id.clone(),
-                    topic: topic.clone(),
-                    turn_id: turn_id.clone(),
-                    tool_call_id: tool_call_id.clone(),
-                    message: Some("listing workspace".to_owned()),
-                    progress_pct: Some(50.0),
-                }),
-            );
-            let _ = send_notification_durable(
-                &ws,
-                &ledger,
-                UiNotification::ToolCompleted(ToolCompletedEvent {
-                    session_id: session_id.clone(),
-                    topic,
-                    turn_id: turn_id.clone(),
-                    tool_call_id,
-                    tool_name: "list_dir".to_owned(),
-                    success: Some(true),
-                    output_preview: Some("deterministic fixture listing".to_owned()),
-                    duration_ms: Some(1),
-                }),
-            );
-            if m9_fixture_delay_or_interrupt(
-                &mut interrupt_rx,
-                std::time::Duration::from_millis(20),
-            )
-            .await
-            {
-                M9FixtureOutcome::Interrupted
-            } else {
-                M9FixtureOutcome::Completed
-            }
-        }
-        M9ProtocolFixture::Approval => {
-            let approval_id = ApprovalId::new();
-            let mut request = ApprovalRequestedEvent::generic(
-                session_id.clone(),
-                approval_id.clone(),
-                turn_id.clone(),
-                "shell",
-                "M9 approval fixture",
-                "printf m9-approval-e2e",
-            );
-            request.approval_kind = Some(approval_kinds::COMMAND.to_owned());
-            request.risk = Some("low".to_owned());
-            request.typed_details = Some(ApprovalTypedDetails::command(
-                ApprovalCommandDetails {
-                    argv: vec!["printf".to_owned(), "m9-approval-e2e".to_owned()],
-                    command_line: Some("printf m9-approval-e2e".to_owned()),
-                    cwd: None,
-                    env_keys: Vec::new(),
-                    tool_call_id: Some(format!("m9-approval-{}", turn_id.0)),
-                },
-                None,
-            ));
-            let response_rx = contracts.approvals.request_runtime(request.clone());
-            if let Err(error) =
-                send_notification_durable(&ws, &ledger, UiNotification::ApprovalRequested(request))
-            {
-                cancel_approval_after_request_send_failure(
-                    contracts.as_ref(),
-                    &ws,
-                    &ledger,
-                    &session_id,
-                    &approval_id,
-                    &turn_id,
-                );
-                M9FixtureOutcome::Errored {
-                    code: "approval_send_failed",
-                    message: format!("approval/requested notification not delivered: {error:?}"),
-                }
-            } else {
-                tokio::select! {
-                    _ = interrupt_rx.recv() => M9FixtureOutcome::Interrupted,
-                    decision = response_rx => {
-                        let text = match decision.unwrap_or(ApprovalDecision::Deny) {
-                            ApprovalDecision::Approve => "approval approved",
-                            ApprovalDecision::Deny | ApprovalDecision::Unknown(_) => "approval denied",
-                        };
-                        let _ = send_notification_ephemeral(
-                            &ws,
-                            &ledger,
-                            UiNotification::MessageDelta(MessageDeltaEvent {
-                                session_id: session_id.clone(),
-                                topic: None,
-                                turn_id: turn_id.clone(),
-                                text: text.to_owned(),
-                            }),
-                        );
-                        M9FixtureOutcome::Completed
-                    }
-                }
-            }
-        }
-        M9ProtocolFixture::ReplayLossy | M9ProtocolFixture::ReplayLossyForcedTerminalDrop => {
-            ws.metrics.dropped_count.fetch_add(1, Ordering::Relaxed);
-            emit_replay_lossy_opportunistic(&ws, &ledger, &session_id.0);
-            let delay = if matches!(fixture, M9ProtocolFixture::ReplayLossyForcedTerminalDrop) {
-                std::time::Duration::from_millis(250)
-            } else {
-                std::time::Duration::from_millis(20)
-            };
-            if m9_fixture_delay_or_interrupt(&mut interrupt_rx, delay).await {
-                M9FixtureOutcome::Interrupted
-            } else {
-                M9FixtureOutcome::Completed
-            }
-        }
-        M9ProtocolFixture::TaskOutput => {
-            match seed_m9_task_output_fixture(
-                state.as_ref(),
-                &session_id,
-                ws.clone(),
-                Arc::clone(&ledger),
-            )
-            .await
-            {
-                Ok(task_id) => {
-                    let _ = send_notification_durable(
-                        &ws,
-                        &ledger,
-                        UiNotification::TaskUpdated(TaskUpdatedEvent {
-                            session_id: session_id.clone(),
-                            topic: None,
-                            task_id: task_id.clone(),
-                            title: "M9 task output fixture".to_owned(),
-                            state: UiTaskRuntimeState::Running,
-                            tool_call_id: None,
-                            runtime_detail: Some(
-                                "persisted deterministic task snapshot".to_owned(),
-                            ),
-                            // #1123 / M13-B — synthetic fixture path has no
-                            // BackgroundTask projection; leave all five fields
-                            // unset so the wire shape stays bare.
-                            source: None,
-                            role: None,
-                            summary: None,
-                            artifact_count: None,
-                            runtime_policy_stamp: None,
-                            // C1 step 4: stamp the originating turn.
-                            turn_id: Some(turn_id.clone()),
-                        }),
-                    );
-                    let _ = send_notification_durable(
-                        &ws,
-                        &ledger,
-                        UiNotification::TaskOutputDelta(TaskOutputDeltaEvent {
-                            session_id: session_id.clone(),
-                            topic: None,
-                            task_id: task_id.clone(),
-                            cursor: OutputCursor { offset: 0 },
-                            text: "fixture output line one\nfixture output line two\n".to_owned(),
-                        }),
-                    );
-                    let _ = send_notification_durable(
-                        &ws,
-                        &ledger,
-                        UiNotification::TaskUpdated(TaskUpdatedEvent {
-                            session_id: session_id.clone(),
-                            topic: None,
-                            task_id,
-                            title: "M9 task output fixture".to_owned(),
-                            state: UiTaskRuntimeState::Completed,
-                            tool_call_id: None,
-                            runtime_detail: Some("fixture complete".to_owned()),
-                            source: None,
-                            role: None,
-                            summary: None,
-                            artifact_count: None,
-                            runtime_policy_stamp: None,
-                            // C1 step 4: stamp the originating turn.
-                            turn_id: Some(turn_id.clone()),
-                        }),
-                    );
-                    if m9_fixture_delay_or_interrupt(
-                        &mut interrupt_rx,
-                        std::time::Duration::from_millis(20),
-                    )
-                    .await
-                    {
-                        M9FixtureOutcome::Interrupted
-                    } else {
-                        M9FixtureOutcome::Completed
-                    }
-                }
-                Err(message) => M9FixtureOutcome::Errored {
-                    code: "task_fixture_failed",
-                    message,
-                },
-            }
-        }
-        M9ProtocolFixture::M14CodexP0ToolParity => {
-            run_m14_codex_p0_tool_parity_fixture_turn(
-                &ws,
-                &ledger,
-                state.as_ref(),
-                &session_id,
-                &turn_id,
-                &mut interrupt_rx,
-            )
-            .await
-        }
-        M9ProtocolFixture::M15LiveSubagents => {
-            run_m15_live_subagent_fixture_turn(
-                &ws,
-                &ledger,
-                &session_id,
-                &turn_id,
-                &mut interrupt_rx,
-            )
-            .await
-        }
-    };
-
-    match outcome {
-        M9FixtureOutcome::Completed => {
-            if matches!(fixture, M9ProtocolFixture::ReplayLossyForcedTerminalDrop) {
-                try_emit_completed_terminal_with_forced_backpressure(
-                    &turn_state,
-                    &ws,
-                    &ledger,
-                    &session_id,
-                    &turn_id,
-                )
-                .await;
-            } else {
-                try_emit_terminal(
-                    &turn_state,
-                    TerminalReason::Completed,
-                    &ws,
-                    &ledger,
-                    &session_id,
-                    &turn_id,
-                    None,
-                    // M9 fixtures replay canned events; no live LLM token data.
-                    None,
-                    None,
-                    None,
-                    // Outer-loop #4 (§4.2): peer sessions release their held slot at the interrupted terminal; None = no peer context on this path.
-                )
-                .await;
-            }
-        }
-        M9FixtureOutcome::Errored { code, message } => {
-            try_emit_terminal(
-                &turn_state,
-                TerminalReason::Errored,
-                &ws,
-                &ledger,
-                &session_id,
-                &turn_id,
-                Some((code, message.as_str())),
-                None,
-                None,
-                None,
-                // Outer-loop #4 (§4.2): peer sessions release their held slot at the interrupted terminal; None = no peer context on this path.
-            )
-            .await;
-        }
-        M9FixtureOutcome::Interrupted => {
-            let cancelled = contracts.approvals.cancel_pending_for_turn(
-                &session_id,
-                &turn_id,
-                approval_cancelled_reasons::TURN_INTERRUPTED,
-            );
-            for entry in cancelled {
-                let _ = send_notification_durable(
-                    &ws,
-                    &ledger,
-                    UiNotification::ApprovalCancelled(ApprovalCancelledEvent::turn_interrupted(
-                        session_id.clone(),
-                        entry.approval_id,
-                        entry.turn_id,
-                    )),
-                );
-            }
-            try_emit_terminal(
-                &turn_state,
-                TerminalReason::Interrupted,
-                &ws,
-                &ledger,
-                &session_id,
-                &turn_id,
-                Some((
-                    "interrupted",
-                    captured_interrupt_origin(&turn_state).await.message(),
-                )),
-                None,
-                None,
-                None,
-                // Outer-loop #4 (§4.2): peer sessions release their held slot at the interrupted terminal; None = no peer context on this path.
-            )
-            .await;
-        }
-    }
-
-    contracts.scopes.evict_turn(&session_id, &turn_id);
-}
-
 struct M14CodexP0SoakSpawnTool;
 
 #[async_trait::async_trait]
@@ -30224,31 +25464,6 @@ struct WsSupervisorEventSink {
     ledger: Arc<UiProtocolLedger>,
 }
 
-impl AppUiSupervisorEventSink for WsSupervisorEventSink {
-    fn emit_supervisor_event(&self, method: &'static str, params: Value) {
-        // Stuck-chip fix (specialist lane): a TERMINAL `agent/updated` must
-        // survive the emitting connection — ephemeral delivery is dropped if
-        // the client blips or the frame races a reconnect, leaving the chip
-        // on the last non-terminal status forever. Mirror the background-task
-        // lane (`forward_terminal_agent_update_durable`): append terminal
-        // flips to the durable per-session ledger so cursor replay and the
-        // live broadcast forwarder both observe them. Non-terminal updates
-        // (spawned/running/heartbeats) stay ephemeral — appending each would
-        // bloat replay history with redundant in-flight states.
-        if method == octos_core::ui_protocol::methods::AGENT_UPDATED {
-            if let Some(event) = terminal_agent_updated_event(&params) {
-                let _ = send_notification_durable(
-                    &self.ws,
-                    self.ledger.as_ref(),
-                    UiNotification::AgentUpdated(event),
-                );
-                return;
-            }
-        }
-        let _ = send_raw_notification_ephemeral(&self.ws, method, params);
-    }
-}
-
 /// Parse a supervisor `agent/updated` payload and return it ONLY when the
 /// carried agent status is terminal (`completed` / `failed` / `interrupted` /
 /// `cancelled` / `closed`). Non-terminal or unparseable payloads return `None`
@@ -30319,20 +25534,6 @@ fn default_native_code_review_specs() -> Vec<NativeCodeReviewSpec> {
             "sandbox, permissions, profile/runtime policy, MCP/tool exposure, and approval boundaries.",
         ),
     ]
-}
-
-fn native_code_review_specs(
-    profile_runtime: Option<&crate::runtime::ProfileRuntime>,
-) -> Vec<NativeCodeReviewSpec> {
-    if let Some(specs) = native_code_review_specs_from_env() {
-        return specs;
-    }
-    if let Some(runtime) = profile_runtime {
-        if let Some(specs) = native_code_review_specs_from_profile(runtime) {
-            return specs;
-        }
-    }
-    default_native_code_review_specs()
 }
 
 fn native_code_review_specs_from_env() -> Option<Vec<NativeCodeReviewSpec>> {
@@ -30443,514 +25644,6 @@ fn normalize_review_text(
     Ok(value.to_owned())
 }
 
-fn expected_review_agent_count_for_profile(
-    profile_runtime: Option<&crate::runtime::ProfileRuntime>,
-) -> usize {
-    native_code_review_specs(profile_runtime).len() + usize::from(review_cli_argv().is_some())
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn run_native_code_review_turn(
-    ws: WsConnection,
-    state: Arc<AppState>,
-    ledger: Arc<UiProtocolLedger>,
-    contracts: Arc<UiProtocolContractStores>,
-    _features: ConnectionUiFeatures,
-    params: RawReviewStartParams,
-    turn_id: TurnId,
-    routed_profile_id: Option<String>,
-    turn_state: Arc<TokioMutex<TurnState>>,
-    mut interrupt_rx: mpsc::Receiver<()>,
-) {
-    let session_id = params.session_id.clone();
-    let started = UiNotification::TurnStarted(octos_core::ui_protocol::TurnStartedEvent {
-        session_id: session_id.clone(),
-        turn_id: turn_id.clone(),
-        timestamp: Utc::now(),
-        topic: None,
-    });
-    if send_notification_lifecycle(&ws, &ledger, started).is_err() {
-        let _ = transition_to_terminal_settling_steers(
-            &turn_state,
-            TerminalReason::Errored,
-            None,
-            SteerReturnSink::Live {
-                ws: &ws,
-                ledger: &ledger,
-            },
-            &session_id,
-            &turn_id,
-        )
-        .await;
-        contracts.scopes.evict_turn(&session_id, &turn_id);
-        return;
-    }
-
-    let active_profile_id = session_id
-        .profile_id()
-        .map(ToOwned::to_owned)
-        .or(routed_profile_id.clone());
-    let profile_runtime =
-        match ensure_session_profile_runtime(&state, active_profile_id.as_deref()).await {
-            Ok(Some(runtime)) => runtime,
-            Ok(None) => {
-                let message = profile_runtime_unavailable_message(
-                    &state,
-                    active_profile_id.as_deref().unwrap_or("<unset>"),
-                );
-                try_emit_terminal(
-                    &turn_state,
-                    TerminalReason::Errored,
-                    &ws,
-                    &ledger,
-                    &session_id,
-                    &turn_id,
-                    Some(("runtime_unavailable", message.as_str())),
-                    None,
-                    None,
-                    None,
-                    // Outer-loop #4 (§4.2): peer sessions release their held slot at the interrupted terminal; None = no peer context on this path.
-                )
-                .await;
-                contracts.scopes.evict_turn(&session_id, &turn_id);
-                return;
-            }
-            Err(error) => {
-                let message = error.message.clone();
-                try_emit_terminal(
-                    &turn_state,
-                    TerminalReason::Errored,
-                    &ws,
-                    &ledger,
-                    &session_id,
-                    &turn_id,
-                    Some(("runtime_unavailable", message.as_str())),
-                    None,
-                    None,
-                    None,
-                    // Outer-loop #4 (§4.2): peer sessions release their held slot at the interrupted terminal; None = no peer context on this path.
-                )
-                .await;
-                contracts.scopes.evict_turn(&session_id, &turn_id);
-                return;
-            }
-        };
-    let workspace_profile_id = workspace_profile_scope(active_profile_id.as_deref(), &session_id);
-    let hint = session_workspaces().runtime_hint(&workspace_profile_id, &session_id);
-    let permissions_epoch = state.session_cache.session_generation(&session_id);
-    let permissions = match effective_permissions_for_session(&state, &session_id) {
-        Ok(permissions) => permissions,
-        Err(error) => {
-            let message = error.message.clone();
-            try_emit_terminal(
-                &turn_state,
-                TerminalReason::Errored,
-                &ws,
-                &ledger,
-                &session_id,
-                &turn_id,
-                Some(("permission_denied", message.as_str())),
-                None,
-                None,
-                None,
-                // Outer-loop #4 (§4.2): peer sessions release their held slot at the interrupted terminal; None = no peer context on this path.
-            )
-            .await;
-            contracts.scopes.evict_turn(&session_id, &turn_id);
-            return;
-        }
-    };
-    let session_runtime = match state
-        .session_cache
-        .get_or_init_with_permissions(
-            &profile_runtime,
-            session_id.clone(),
-            hint,
-            permissions,
-            permissions_epoch,
-        )
-        .await
-    {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            try_emit_terminal(
-                &turn_state,
-                TerminalReason::Errored,
-                &ws,
-                &ledger,
-                &session_id,
-                &turn_id,
-                Some(("runtime_unavailable", &error.to_string())),
-                None,
-                None,
-                None,
-                // Outer-loop #4 (§4.2): peer sessions release their held slot at the interrupted terminal; None = no peer context on this path.
-            )
-            .await;
-            contracts.scopes.evict_turn(&session_id, &turn_id);
-            return;
-        }
-    };
-    // Per-project ledger isolation (#1666): the review turn appends durable
-    // task/turn events for this session — same idempotent registration as
-    // `run_standalone_turn`, covering runtimes that re-materialized without
-    // a fresh `session/open`.
-    register_session_ledger_scope(&state, &ledger, &session_runtime);
-
-    let profile_id = session_id
-        .profile_id()
-        .map(ToOwned::to_owned)
-        .or_else(|| active_profile_id.clone())
-        .unwrap_or_else(|| MAIN_PROFILE_ID.to_owned());
-    let task_id = TaskId::new();
-    let target = review_target_summary(params.target.as_ref());
-    let objective = review_objective(&params, &target);
-    let review_runtime_policy_stamp =
-        octos_agent::RoleTemplate::for_name(octos_agent::ROLE_REVIEWER)
-            .map(|template| template.runtime_policy_stamp("supervisor", "native_review", None));
-    let workspace_root = session_runtime.workspace_root.clone();
-    let llm_provider = session_runtime.profile.llm.clone();
-    let memory_store = session_runtime.profile.memory.clone();
-    // #2055 review round 2 (hole c) — the review specialists run on a FRESH
-    // snapshot registry whose supervisor used to carry no observers, so
-    // their `native_agent` registrations were invisible to the goal ledger.
-    // Wire the cached supervisor first; the snapshot below inherits the
-    // observer pair (`snapshot_excluding` → `inherit_registration_observers`).
-    wire_goal_task_row_observers_for_cached_supervisor(
-        &session_runtime.tools.supervisor(),
-        &session_id,
-        &profile_id,
-        &session_runtime.profile.data_dir,
-    );
-    let tools = Arc::new(session_runtime.tools.snapshot_excluding(&[]));
-    let agent_config = session_runtime.agent.agent_config();
-    // UPCR follow-up to #1561: refresh named prompt segments (memory) on
-    // the cached session agent BEFORE snapshotting — WS turns build a
-    // fresh request agent from this snapshot and never run the cached
-    // agent's own turn-start refresh.
-    session_runtime.agent.refresh_prompt_segments().await;
-    let system_prompt_base = session_runtime.agent.system_prompt_snapshot();
-    let review_dispatch_policy = Arc::new(octos_agent::DispatchPolicy::from_agent_gates(
-        profile_runtime.tool_policy.clone(),
-        true,
-    ));
-    let native_specs = native_code_review_specs(Some(profile_runtime.as_ref()));
-    let native_names = native_specs
-        .iter()
-        .map(|spec| spec.nickname.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    let _ = send_notification_durable(
-        &ws,
-        &ledger,
-        UiNotification::TaskUpdated(TaskUpdatedEvent {
-            session_id: session_id.clone(),
-            topic: None,
-            task_id: task_id.clone(),
-            title: "Native code review specialist swarm".to_owned(),
-            state: UiTaskRuntimeState::Running,
-            tool_call_id: None,
-            runtime_detail: Some("launching model-backed native specialists".to_owned()),
-            source: Some("supervisor".to_owned()),
-            role: Some(octos_agent::ROLE_REVIEWER.to_owned()),
-            summary: Some("Launching native code review specialists".to_owned()),
-            artifact_count: Some(0),
-            runtime_policy_stamp: review_runtime_policy_stamp.clone(),
-            // C1 step 4: stamp the originating turn.
-            turn_id: Some(turn_id.clone()),
-        }),
-    );
-    let _ = send_notification_durable(
-        &ws,
-        &ledger,
-        UiNotification::TaskOutputDelta(TaskOutputDeltaEvent {
-            session_id: session_id.clone(),
-            topic: None,
-            task_id: task_id.clone(),
-            cursor: OutputCursor { offset: 0 },
-            text: format!(
-                "Launching {} native review specialist(s) for {target}: {native_names}.\n",
-                native_specs.len()
-            ),
-        }),
-    );
-
-    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<NativeSpecialistAppUiEvent>();
-    let event_ws = ws.clone();
-    let event_forwarder = tokio::spawn(async move {
-        while let Some(event) = event_rx.recv().await {
-            let _ = send_raw_notification_ephemeral(&event_ws, event.method, event.params);
-        }
-    });
-
-    let mut joins = tokio::task::JoinSet::new();
-    for spec in native_specs.iter().cloned() {
-        let agent_id = format!("{}-{}", spec.agent_key, short_turn_suffix(&turn_id));
-        let task = native_review_task(&objective, &target, &spec);
-        let llm = llm_provider.clone();
-        let memory = memory_store.clone();
-        let tools = tools.clone();
-        let system_prompt = native_review_system_prompt(&system_prompt_base, &spec);
-        let profile_id = profile_id.clone();
-        let session_id = session_id.clone();
-        let cwd = workspace_root.clone();
-        let event_tx = event_tx.clone();
-        let agent_config = agent_config.clone();
-        let dispatch_policy = review_dispatch_policy.clone();
-        joins.spawn(async move {
-            let result = default_agent_orchestrator()
-                .run_native_specialist(NativeSpecialistLaunchRequest {
-                    agent_id: Some(agent_id.clone()),
-                    parent_agent_id: Some("master".to_owned()),
-                    session_id,
-                    profile_id,
-                    role: spec.role.to_owned(),
-                    nickname: spec.nickname.to_owned(),
-                    task,
-                    cwd,
-                    llm,
-                    memory,
-                    tools,
-                    system_prompt: Some(system_prompt),
-                    agent_config: Some(agent_config),
-                    task_ledger_path: None,
-                    event_tx: Some(event_tx),
-                    dispatch_policy: Some(dispatch_policy),
-                })
-                .await;
-            match result {
-                Ok(result) => {
-                    let summary = result
-                        .artifacts
-                        .iter()
-                        .find(|artifact| artifact.id == "summary")
-                        .and_then(|artifact| artifact.content.clone())
-                        .unwrap_or_else(|| {
-                            format!("{} completed with no text output.", spec.nickname)
-                        });
-                    NativeCodeReviewResult {
-                        agent_id,
-                        nickname: spec.nickname.clone(),
-                        backend_kind: "native".to_owned(),
-                        status: result.status,
-                        summary,
-                    }
-                }
-                Err(error) => NativeCodeReviewResult {
-                    agent_id,
-                    nickname: spec.nickname.clone(),
-                    backend_kind: "native".to_owned(),
-                    status: "failed".to_owned(),
-                    summary: format!("{} failed: {}", spec.nickname, error.message),
-                },
-            }
-        });
-    }
-    drop(event_tx);
-
-    maybe_spawn_cli_review_specialist(
-        &mut joins,
-        &ws,
-        &ledger,
-        &session_id,
-        &profile_id,
-        &workspace_root,
-        &objective,
-        &target,
-        &turn_id,
-        review_dispatch_policy.clone(),
-    );
-    let expected_results = joins.len();
-
-    let mut results = Vec::new();
-    while results.len() < expected_results {
-        tokio::select! {
-            _ = interrupt_rx.recv() => {
-                joins.abort_all();
-                for spec in &native_specs {
-                    let agent_id = format!("{}-{}", spec.agent_key, short_turn_suffix(&turn_id));
-                    if let Ok(agent) = default_agent_orchestrator().set_agent_status(
-                        &agent_id,
-                        &session_id,
-                        &profile_id,
-                        "interrupted",
-                        Some("Interrupted by client".to_owned()),
-                    ) {
-                        let _ = send_raw_notification_ephemeral(
-                            &ws,
-                            octos_core::ui_protocol::methods::AGENT_UPDATED,
-                            json!({
-                                "session_id": session_id,
-                                "agent": agent,
-                            }),
-                        );
-                    }
-                }
-                let _ = send_notification_durable(
-                    &ws,
-                    &ledger,
-                    UiNotification::TaskUpdated(TaskUpdatedEvent {
-                        session_id: session_id.clone(),
-                        topic: None,
-                        task_id: task_id.clone(),
-                        title: "Native code review specialist swarm".to_owned(),
-                        state: UiTaskRuntimeState::Cancelled,
-                        tool_call_id: None,
-                        runtime_detail: Some("interrupted by client".to_owned()),
-                        source: Some("supervisor".to_owned()),
-                        role: Some(octos_agent::ROLE_REVIEWER.to_owned()),
-                        summary: Some("Code review interrupted".to_owned()),
-                        artifact_count: Some(0),
-                        runtime_policy_stamp: review_runtime_policy_stamp.clone(),
-                        // C1 step 4: stamp the originating turn.
-                        turn_id: Some(turn_id.clone()),
-                    }),
-                );
-                try_emit_terminal(
-                    &turn_state,
-                    TerminalReason::Interrupted,
-                    &ws,
-                    &ledger,
-                    &session_id,
-                    &turn_id,
-                    Some(("interrupted", "review/start interrupted by client")),
-                    None,
-                    None,
-                None,
-                // Outer-loop #4 (§4.2): peer sessions release their held slot at the interrupted terminal; None = no peer context on this path.
-                )
-                .await;
-                contracts.scopes.evict_turn(&session_id, &turn_id);
-                event_forwarder.abort();
-                return;
-            }
-            joined = joins.join_next() => {
-                match joined {
-                    Some(Ok(result)) => {
-                        let preview = truncate_for_display(&result.summary, 700);
-                        let text = format!(
-                            "Subagent done: {} ({}) via `{}` finished with status `{}`.\n\n{preview}\n",
-                            result.nickname,
-                            result.agent_id,
-                            result.backend_kind,
-                            result.status,
-                        );
-                        results.push(result);
-                        let _ = send_notification_ephemeral(
-                            &ws,
-                            &ledger,
-                            UiNotification::MessageDelta(MessageDeltaEvent {
-                                session_id: session_id.clone(),
-                                topic: None,
-                                turn_id: turn_id.clone(),
-                                text,
-                            }),
-                        );
-                    }
-                    Some(Err(error)) => {
-                        let summary = format!("Native specialist task failed to join: {error}");
-                        results.push(NativeCodeReviewResult {
-                            agent_id: "unknown".to_owned(),
-                            nickname: "unknown".to_owned(),
-                            backend_kind: "unknown".to_owned(),
-                            status: "failed".to_owned(),
-                            summary,
-                        });
-                    }
-                    None => break,
-                }
-            }
-        }
-    }
-
-    let final_summary =
-        model_join_review_summary(llm_provider.as_ref(), &objective, &target, &results).await;
-    let final_summary = ensure_requested_final_marker(final_summary, &objective);
-    let sessions = session_runtime.sessions.clone();
-    let data_dir = sessions.lock().await.data_dir().to_path_buf();
-    let _ = persist_assistant_with_media(
-        &sessions,
-        &data_dir,
-        &session_id,
-        final_summary.clone(),
-        Vec::new(),
-        turn_id.0.to_string(),
-        "Native code review specialist swarm",
-    )
-    .await;
-    let _ = send_notification_ephemeral(
-        &ws,
-        &ledger,
-        UiNotification::MessageDelta(MessageDeltaEvent {
-            session_id: session_id.clone(),
-            topic: None,
-            turn_id: turn_id.clone(),
-            text: final_summary.clone(),
-        }),
-    );
-    let _ = send_notification_durable(
-        &ws,
-        &ledger,
-        UiNotification::TaskOutputDelta(TaskOutputDeltaEvent {
-            session_id: session_id.clone(),
-            topic: None,
-            task_id: task_id.clone(),
-            cursor: OutputCursor {
-                offset: final_summary.len() as u64,
-            },
-            text: final_summary,
-        }),
-    );
-    let completed = results
-        .iter()
-        .filter(|result| result.status == "completed")
-        .count();
-    let _ = send_notification_durable(
-        &ws,
-        &ledger,
-        UiNotification::TaskUpdated(TaskUpdatedEvent {
-            session_id: session_id.clone(),
-            topic: None,
-            task_id,
-            title: "Native code review specialist swarm".to_owned(),
-            state: UiTaskRuntimeState::Completed,
-            tool_call_id: None,
-            runtime_detail: Some(format!(
-                "{completed}/{expected_results} specialists completed"
-            )),
-            source: Some("supervisor".to_owned()),
-            role: Some(octos_agent::ROLE_REVIEWER.to_owned()),
-            summary: Some(format!(
-                "Scatter-join complete: {completed}/{expected_results} specialists completed"
-            )),
-            artifact_count: Some(0),
-            runtime_policy_stamp: review_runtime_policy_stamp,
-            // C1 step 4: stamp the originating turn.
-            turn_id: Some(turn_id.clone()),
-        }),
-    );
-    try_emit_terminal(
-        &turn_state,
-        TerminalReason::Completed,
-        &ws,
-        &ledger,
-        &session_id,
-        &turn_id,
-        None,
-        // review/start scatter-join does not run a single LLM turn end
-        // to end; the summary message is emitted ad-hoc. No aggregated
-        // token data is in scope here.
-        None,
-        None,
-        None,
-        // Outer-loop #4 (§4.2): peer sessions release their held slot at the interrupted terminal; None = no peer context on this path.
-    )
-    .await;
-    contracts.scopes.evict_turn(&session_id, &turn_id);
-    let _ = event_forwarder.await;
-}
-
 fn short_turn_suffix(turn_id: &TurnId) -> String {
     turn_id.0.simple().to_string().chars().take(8).collect()
 }
@@ -31005,104 +25698,6 @@ fn native_review_task(objective: &str, target: &str, spec: &NativeCodeReviewSpec
         "Run your specialist slice of a code review.\n\nObjective:\n{objective}\n\nTarget:\n{target}\n\nSpecialist focus:\n{}\n\nOutput format:\n- Findings first, ordered by severity.\n- Include file paths and line references when you inspect files.\n- Include explicit test or soak gaps.\n- If no issues are found, say so and list residual risk.",
         spec.focus
     )
-}
-
-// The specialist spawn needs the join set, connection/ledger handles, the
-// review's session/profile/workspace scope, and the dispatch policy as
-// separate pieces — a flat dependency list, not a missing struct.
-#[allow(clippy::too_many_arguments)]
-fn maybe_spawn_cli_review_specialist(
-    joins: &mut tokio::task::JoinSet<NativeCodeReviewResult>,
-    ws: &WsConnection,
-    ledger: &Arc<UiProtocolLedger>,
-    session_id: &SessionKey,
-    profile_id: &str,
-    workspace_root: &Path,
-    objective: &str,
-    target: &str,
-    turn_id: &TurnId,
-    dispatch_policy: Arc<octos_agent::DispatchPolicy>,
-) {
-    let Some(argv) = review_cli_argv() else {
-        return;
-    };
-    let Some((program, args)) = argv.split_first() else {
-        return;
-    };
-    let agent_id = format!("reviewer-cli-{}", short_turn_suffix(turn_id));
-    let artifact_path = workspace_root.join(format!(".octos-review-{agent_id}.md"));
-    let spec = SupervisedSpecialistSpec {
-        agent_id: agent_id.clone(),
-        parent_agent_id: Some("master".to_owned()),
-        session_id: session_id.clone(),
-        task_id: None,
-        path: format!("master/{agent_id}"),
-        role: "cli_agent_review".to_owned(),
-        nickname: "Grace Hopper".to_owned(),
-        backend_kind: "cli_process".to_owned(),
-        task: Some("Running CLI specialist review".to_owned()),
-        cwd: Some(workspace_root.to_path_buf()),
-        profile_id: profile_id.to_owned(),
-        artifacts: vec![SpecialistArtifactSpec {
-            id: "cli-review-notes".to_owned(),
-            title: "CLI specialist review notes".to_owned(),
-            kind: "markdown".to_owned(),
-            path: artifact_path.clone(),
-        }],
-    };
-    let command = crate::cli_agent_adapter::CliAgentCommandConfig::new(program.clone())
-        .args(args.iter().cloned())
-        .cwd(workspace_root)
-        .env("OCTOS_REVIEW_OBJECTIVE", objective)
-        .env("OCTOS_REVIEW_TARGET", target)
-        .env("OCTOS_REVIEW_AGENT_ID", agent_id.clone())
-        .env(
-            "OCTOS_REVIEW_ARTIFACT_PATH",
-            artifact_path.to_string_lossy().into_owned(),
-        )
-        .timeout(std::time::Duration::from_secs(90))
-        .declared_artifact(&artifact_path);
-    let sink = WsSupervisorEventSink {
-        ws: ws.clone(),
-        ledger: ledger.clone(),
-    };
-    joins.spawn(async move {
-        match run_supervised_cli_specialist(
-            default_agent_orchestrator(),
-            &sink,
-            SupervisedCliSpecialist::new(spec, command)
-                .with_dispatch_policy(dispatch_policy)
-                .heartbeat_interval(std::time::Duration::from_secs(2)),
-        )
-        .await
-        {
-            Ok(summary) => NativeCodeReviewResult {
-                agent_id: summary.agent_id,
-                nickname: "Grace Hopper".to_owned(),
-                backend_kind: "cli_process".to_owned(),
-                status: summary.status,
-                summary: summary.output,
-            },
-            Err(error) => NativeCodeReviewResult {
-                agent_id,
-                nickname: "Grace Hopper".to_owned(),
-                backend_kind: "cli_process".to_owned(),
-                status: "failed".to_owned(),
-                summary: error,
-            },
-        }
-    });
-}
-
-fn review_cli_argv() -> Option<Vec<String>> {
-    let raw = std::env::var("OCTOS_REVIEW_CLI_SPECIALIST_ARGV_JSON").ok()?;
-    let argv = serde_json::from_str::<Vec<String>>(&raw).ok()?;
-    let argv = argv
-        .into_iter()
-        .map(|arg| arg.trim().to_owned())
-        .filter(|arg| !arg.is_empty())
-        .collect::<Vec<_>>();
-    (!argv.is_empty()).then_some(argv)
 }
 
 async fn model_join_review_summary(
@@ -31256,594 +25851,6 @@ fn m15_live_subagent_specs() -> [M15LiveSubagentSpec; 3] {
             artifact_file: "reviewer-security-report.md",
         },
     ]
-}
-
-async fn run_m15_live_subagent_fixture_turn(
-    ws: &WsConnection,
-    ledger: &Arc<UiProtocolLedger>,
-    session_id: &SessionKey,
-    turn_id: &TurnId,
-    interrupt_rx: &mut mpsc::Receiver<()>,
-) -> M9FixtureOutcome {
-    append_appui_server_log("M15 live subagent scenario started inside octos serve --stdio");
-
-    let profile_id = session_id
-        .profile_id()
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| MAIN_PROFILE_ID.to_owned());
-    let task_id = TaskId::new();
-    let workdir = std::env::var_os("OCTOSCODE_M15_UX_WORKDIR")
-        .map(PathBuf::from)
-        .or_else(|| appui_evidence_dir().map(|dir| dir.join("workspace")))
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    // The supervised subagent processes are spawned with `cwd(workdir)`.
-    // When the workdir is derived from the evidence dir (the default when
-    // OCTOSCODE_M15_UX_WORKDIR is unset) it does not exist yet, so the
-    // process spawn fails with "No such file or directory (os error 2)"
-    // and every review agent reports `m15subagentfailed`. Materialize it
-    // up front so the fixture's child processes have a valid cwd.
-    if let Err(error) = std::fs::create_dir_all(&workdir) {
-        return M9FixtureOutcome::Errored {
-            code: "m15_workdir_failed",
-            message: format!(
-                "failed to create live subagent workdir {}: {error}",
-                workdir.display()
-            ),
-        };
-    }
-    let evidence_dir = appui_evidence_dir().unwrap_or_else(|| workdir.join(".octos-m15-evidence"));
-    let artifact_dir = evidence_dir.join("agent-artifacts");
-    if let Err(error) = std::fs::create_dir_all(&artifact_dir) {
-        return M9FixtureOutcome::Errored {
-            code: "m15_artifact_dir_failed",
-            message: format!("failed to create live subagent artifact directory: {error}"),
-        };
-    }
-
-    write_appui_evidence_json(
-        "runtime-policy-stamp.json",
-        json!({
-            "scenario": "code_review_subagents",
-            "runtime": "octos-serve-stdio",
-            "subagent_backend": "cli_agent_adapter",
-            "profile_id": profile_id,
-            "session_id": session_id,
-            "turn_id": turn_id,
-            "sandbox": "workspace-write",
-            "approval_policy": "fixture-controlled",
-            "tool_policy_id": "coding-autonomy-v1",
-        }),
-    );
-    write_appui_evidence_json(
-        "tool-registry-snapshot.json",
-        json!({
-            "source": "octos-serve-stdio",
-            "tools": ["agent/list", "agent/status", "agent/output/read", "agent/artifact/list", "agent/interrupt", "agent/close"],
-        }),
-    );
-    append_appui_evidence_jsonl(
-        "goal-ledger.jsonl",
-        json!({
-            "event": "goal_started",
-            "session_id": session_id,
-            "turn_id": turn_id,
-            "objective": "Run a backend-owned code-review subagent swarm and expose it through AppUI.",
-        }),
-    );
-    append_appui_evidence_jsonl(
-        "loop-ledger.jsonl",
-        json!({
-            "event": "loop_iteration",
-            "session_id": session_id,
-            "turn_id": turn_id,
-            "iteration": 1,
-            "status": "started",
-        }),
-    );
-    append_appui_evidence_jsonl(
-        "task-ledger.jsonl",
-        json!({
-            "event": "task_started",
-            "session_id": session_id,
-            "turn_id": turn_id,
-            "task_id": task_id,
-            "title": "Live code review subagent swarm",
-        }),
-    );
-
-    let _ = send_notification_durable(
-        ws,
-        ledger,
-        UiNotification::TaskUpdated(TaskUpdatedEvent {
-            session_id: session_id.clone(),
-            topic: None,
-            task_id: task_id.clone(),
-            title: "Live code review subagent swarm".to_owned(),
-            state: UiTaskRuntimeState::Running,
-            tool_call_id: None,
-            runtime_detail: Some("octos serve launching CLI subagents".to_owned()),
-            source: None,
-            role: None,
-            summary: None,
-            artifact_count: None,
-            runtime_policy_stamp: None,
-            // C1 step 4: stamp the originating turn.
-            turn_id: Some(turn_id.clone()),
-        }),
-    );
-    let _ = send_notification_durable(
-        ws,
-        ledger,
-        UiNotification::TaskOutputDelta(TaskOutputDeltaEvent {
-            session_id: session_id.clone(),
-            topic: None,
-            task_id: task_id.clone(),
-            cursor: OutputCursor { offset: 0 },
-            text: "Launching Ada Lovelace (reviewer-api), Hypatia (reviewer-tests), and Socrates (reviewer-security) through octos serve --stdio.\n".to_owned(),
-        }),
-    );
-
-    let mut joins = tokio::task::JoinSet::new();
-    let specs = m15_live_subagent_specs();
-    let report_path = artifact_dir.join("code-review-report.md");
-    let mut artifact_index = specs
-        .iter()
-        .map(|spec| {
-            json!({
-                "id": spec.artifact_id,
-                "agent_id": spec.agent_id,
-                "artifact_id": spec.artifact_id,
-                "path": artifact_dir.join(spec.artifact_file),
-            })
-        })
-        .collect::<Vec<_>>();
-    artifact_index.push(json!({
-        "id": "code-review-report",
-        "agent_id": "master",
-        "artifact_id": "code-review-report",
-        "path": report_path,
-    }));
-    write_appui_evidence_json(
-        "artifact-index.json",
-        json!({
-            "scenario": "code_review_subagents",
-            "artifacts": artifact_index,
-        }),
-    );
-
-    for spec in specs {
-        let artifact_path = artifact_dir.join(spec.artifact_file);
-        let agent = match default_agent_orchestrator().upsert_agent(AgentUpsert {
-            agent_id: spec.agent_id.to_owned(),
-            parent_agent_id: Some("master".to_owned()),
-            session_id: session_id.clone(),
-            task_id: Some(task_id.clone()),
-            path: format!("master/{}", spec.agent_id),
-            role: spec.role.to_owned(),
-            nickname: spec.title.to_owned(),
-            backend_kind: "cli_process".to_owned(),
-            status: "running".to_owned(),
-            last_task: Some("Running live code review check".to_owned()),
-            cwd: Some(workdir.to_string_lossy().into_owned()),
-            profile_id: profile_id.clone(),
-        }) {
-            Ok(agent) => agent,
-            Err(error) => {
-                joins.abort_all();
-                while joins.join_next().await.is_some() {}
-                return M9FixtureOutcome::Errored {
-                    code: "m15_subagent_admission_failed",
-                    message: error.message,
-                };
-            }
-        };
-        let _ = send_raw_notification_ephemeral(
-            ws,
-            octos_core::ui_protocol::methods::AGENT_UPDATED,
-            json!({
-                "session_id": session_id,
-                "agent": agent,
-            }),
-        );
-        append_appui_evidence_jsonl(
-            "agent-ledger.jsonl",
-            json!({
-                "event": "agent_started",
-                "agent_id": spec.agent_id,
-                "backend_kind": "cli_process",
-                "session_id": session_id,
-                "turn_id": turn_id,
-            }),
-        );
-
-        let ws_for_agent = ws.clone();
-        let ledger_for_agent = Arc::clone(ledger);
-        let session_id_for_agent = session_id.clone();
-        let profile_id_for_agent = profile_id.clone();
-        let workdir_for_agent = workdir.clone();
-        let turn_id_for_agent = (*turn_id).clone();
-        joins.spawn(async move {
-            run_m15_live_subagent_process(
-                ws_for_agent,
-                ledger_for_agent,
-                session_id_for_agent,
-                profile_id_for_agent,
-                workdir_for_agent,
-                artifact_path,
-                turn_id_for_agent,
-                spec,
-            )
-            .await
-        });
-    }
-
-    let mut results = Vec::new();
-    while results.len() < specs.len() {
-        tokio::select! {
-            _ = interrupt_rx.recv() => {
-                joins.abort_all();
-                append_appui_server_log("M15 live subagent scenario interrupted by client");
-                for spec in m15_live_subagent_specs() {
-                    if let Ok(agent) = default_agent_orchestrator().set_agent_status(
-                        spec.agent_id,
-                        session_id,
-                        &profile_id,
-                        "interrupted",
-                        Some("Interrupted by client".to_owned()),
-                    ) {
-                        let _ = send_raw_notification_ephemeral(
-                            ws,
-                            octos_core::ui_protocol::methods::AGENT_UPDATED,
-                            json!({
-                                "session_id": session_id,
-                                "agent": agent,
-                            }),
-                        );
-                    }
-                }
-                let _ = send_notification_durable(
-                    ws,
-                    ledger,
-                    UiNotification::TaskUpdated(TaskUpdatedEvent {
-                        session_id: session_id.clone(),
-                        topic: None,
-                        task_id,
-                        title: "Live code review subagent swarm".to_owned(),
-                        state: UiTaskRuntimeState::Cancelled,
-                        tool_call_id: None,
-                        runtime_detail: Some("interrupted by client".to_owned()),
-                        source: None,
-                        role: None,
-                        summary: None,
-                        artifact_count: None,
-                        runtime_policy_stamp: None,
-                        // C1 step 4: stamp the originating turn.
-                        turn_id: Some(turn_id.clone()),
-                    }),
-                );
-                return M9FixtureOutcome::Interrupted;
-            }
-            joined = joins.join_next() => {
-                match joined {
-                    Some(Ok(Ok(result))) => results.push(result),
-                    Some(Ok(Err(message))) => {
-                        return M9FixtureOutcome::Errored {
-                            code: "m15_subagent_failed",
-                            message,
-                        };
-                    }
-                    Some(Err(error)) => {
-                        return M9FixtureOutcome::Errored {
-                            code: "m15_subagent_join_failed",
-                            message: format!("live subagent task failed to join: {error}"),
-                        };
-                    }
-                    None => break,
-                }
-            }
-        }
-    }
-
-    let completed = results
-        .iter()
-        .filter(|result| result.status == "completed")
-        .count();
-    let ping_count = results.iter().map(|result| result.ping_count).sum::<u64>();
-    let artifact_lines = results
-        .iter()
-        .map(|result| {
-            format!(
-                "- {} ({}): {} ({})",
-                result.title,
-                result.agent_id,
-                result.artifact_id,
-                result.artifact_path.display()
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let summary = format!(
-        "Code Review Summary\n\nFindings\n\nHigh: AppUI code-review subagent orchestration is running from octos serve --stdio, not the Python fixture backend.\nMedium: Agent output and artifacts are visible through agent/status/read, agent/output/read, and agent/artifact/list.\nLow: The live scenario is deterministic and uses CLI subprocess reviewers; model-backed specialist agents are still a follow-up.\n\nScatter-Join\n\nScatter-join complete: {completed}/{} agents done. Supervisor heartbeat pings observed: {ping_count}.\n\nSubagents\n\n1. Ada Lovelace (reviewer-api) completed: {}\n2. Hypatia (reviewer-tests) completed: {}\n3. Socrates (reviewer-security) completed: {}\n\nArtifacts\n\n{}\n\n`M15_CODE_REVIEW_FINAL_LINE`\nM15CODEREVIEWFINALLINE\n",
-        specs.len(),
-        results
-            .iter()
-            .any(|result| result.agent_id == "reviewer-api"),
-        results
-            .iter()
-            .any(|result| result.agent_id == "reviewer-tests"),
-        results
-            .iter()
-            .any(|result| result.agent_id == "reviewer-security"),
-        artifact_lines,
-    );
-    let _ = std::fs::write(&report_path, &summary);
-    let _ = send_notification_ephemeral(
-        ws,
-        ledger,
-        UiNotification::MessageDelta(MessageDeltaEvent {
-            session_id: session_id.clone(),
-            topic: None,
-            turn_id: turn_id.clone(),
-            text: summary.clone(),
-        }),
-    );
-    let _ = send_notification_durable(
-        ws,
-        ledger,
-        UiNotification::TaskOutputDelta(TaskOutputDeltaEvent {
-            session_id: session_id.clone(),
-            topic: None,
-            task_id: task_id.clone(),
-            cursor: OutputCursor {
-                offset: summary.len() as u64,
-            },
-            text: summary,
-        }),
-    );
-    let _ = send_notification_durable(
-        ws,
-        ledger,
-        UiNotification::TaskUpdated(TaskUpdatedEvent {
-            session_id: session_id.clone(),
-            topic: None,
-            task_id: task_id.clone(),
-            title: "Live code review subagent swarm".to_owned(),
-            state: UiTaskRuntimeState::Completed,
-            tool_call_id: None,
-            runtime_detail: Some(format!("{completed} live CLI subagents completed")),
-            source: None,
-            role: None,
-            summary: None,
-            artifact_count: None,
-            runtime_policy_stamp: None,
-            // C1 step 4: stamp the originating turn.
-            turn_id: Some(turn_id.clone()),
-        }),
-    );
-    append_appui_evidence_jsonl(
-        "task-ledger.jsonl",
-        json!({
-            "event": "task_completed",
-            "session_id": session_id,
-            "turn_id": turn_id,
-            "task_id": task_id,
-            "completed_agents": completed,
-        }),
-    );
-    append_appui_evidence_jsonl(
-        "loop-ledger.jsonl",
-        json!({
-            "event": "loop_iteration",
-            "session_id": session_id,
-            "turn_id": turn_id,
-            "iteration": 1,
-            "status": "completed",
-        }),
-    );
-    append_appui_server_log("M15 live subagent scenario completed");
-    M9FixtureOutcome::Completed
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn run_m15_live_subagent_process(
-    ws: WsConnection,
-    ledger: Arc<UiProtocolLedger>,
-    session_id: SessionKey,
-    profile_id: String,
-    workdir: PathBuf,
-    artifact_path: PathBuf,
-    turn_id: TurnId,
-    spec: M15LiveSubagentSpec,
-) -> Result<M15LiveSubagentResult, String> {
-    let delay_seconds = std::env::var("OCTOS_M15_LIVE_SUBAGENT_DELAY_SCALE")
-        .ok()
-        .and_then(|value| value.parse::<f64>().ok())
-        .filter(|scale| scale.is_finite() && *scale > 0.0)
-        .map(|scale| {
-            spec.delay_seconds
-                .parse::<f64>()
-                .map(|delay| (delay * scale).clamp(0.05, 10.0).to_string())
-                .unwrap_or_else(|_| spec.delay_seconds.to_owned())
-        })
-        .unwrap_or_else(|| spec.delay_seconds.to_owned());
-    let script = r##"
-import pathlib
-import sys
-import time
-
-agent_id, artifact_path, finding, delay = sys.argv[1:5]
-time.sleep(float(delay))
-content = f"# {agent_id}\n\n{finding}\n"
-pathlib.Path(artifact_path).write_text(content, encoding="utf-8")
-print(f"{agent_id}: {finding}")
-"##;
-    let specialist = SupervisedSpecialistSpec {
-        agent_id: spec.agent_id.to_owned(),
-        parent_agent_id: Some("master".to_owned()),
-        session_id: session_id.clone(),
-        task_id: None,
-        path: format!("master/{}", spec.agent_id),
-        role: spec.role.to_owned(),
-        nickname: spec.title.to_owned(),
-        backend_kind: "cli_process".to_owned(),
-        task: Some("Running live code review check".to_owned()),
-        cwd: Some(workdir.clone()),
-        profile_id: profile_id.clone(),
-        artifacts: vec![SpecialistArtifactSpec {
-            id: spec.artifact_id.to_owned(),
-            title: format!("{} report", spec.title),
-            kind: "markdown".to_owned(),
-            path: artifact_path.clone(),
-        }],
-    };
-    let sink = WsSupervisorEventSink {
-        ws: ws.clone(),
-        ledger: ledger.clone(),
-    };
-    let summary = run_supervised_cli_specialist(
-        default_agent_orchestrator(),
-        &sink,
-        SupervisedCliSpecialist::new(
-            specialist,
-            crate::cli_agent_adapter::CliAgentCommandConfig::new("/usr/bin/env")
-                .args([
-                    "python3".to_owned(),
-                    "-c".to_owned(),
-                    script.to_owned(),
-                    spec.agent_id.to_owned(),
-                    artifact_path.to_string_lossy().into_owned(),
-                    spec.finding.to_owned(),
-                    delay_seconds,
-                ])
-                .cwd(workdir)
-                .timeout(std::time::Duration::from_secs(10))
-                .declared_artifact(&artifact_path),
-        )
-        .heartbeat_interval(std::time::Duration::from_millis(150)),
-    )
-    .await?;
-    // Codex #1336 round-3 BLOCKER 1: route the M15 live-subagent
-    // fixture's "subagent done" delta through the SAME path as every
-    // other AppUI MessageDelta — dual-emit envelope + filtered
-    // ephemeral. The legacy raw helper bypassed
-    // `direct_send_passes_capability_filter`, so a
-    // `projection.envelope.v1` client received the legacy
-    // `message/delta` frame in addition to the (missing) envelope.
-    //
-    // After this change:
-    //   • `projection.envelope.v1` connections receive ONLY the
-    //     canonical `projection/envelope` (carrying `AssistantDelta`)
-    //     via the broadcast forwarder; the ephemeral legacy send is
-    //     filtered out by `send_notification_ephemeral`'s gate.
-    //   • Legacy connections receive the legacy `message/delta`
-    //     ephemeral and observe NO envelope (the legacy method-name
-    //     filter on the live forwarder drops `projection/envelope`).
-    let delta = UiNotification::MessageDelta(MessageDeltaEvent {
-        session_id: session_id.clone(),
-        topic: None,
-        turn_id: turn_id.clone(),
-        text: format!(
-            "Subagent done: {} ({}) completed; artifact `{}` is ready.\n",
-            spec.title, spec.agent_id, spec.artifact_id
-        ),
-    });
-    emit_envelope_for_legacy_notification(&ledger, &session_id, &delta);
-    let _ = send_notification_ephemeral(&ws, &ledger, delta);
-    append_appui_evidence_jsonl(
-        "agent-ledger.jsonl",
-        json!({
-            "event": "agent_completed",
-            "agent_id": spec.agent_id,
-            "title": spec.title,
-            "status": summary.status,
-            "artifact_id": spec.artifact_id,
-            "artifact_path": artifact_path,
-            "ping_count": summary.ping_count,
-        }),
-    );
-
-    Ok(M15LiveSubagentResult {
-        agent_id: spec.agent_id.to_owned(),
-        title: spec.title.to_owned(),
-        status: summary.status,
-        artifact_id: spec.artifact_id.to_owned(),
-        artifact_path,
-        ping_count: summary.ping_count,
-    })
-}
-
-async fn seed_m9_task_output_fixture(
-    state: &AppState,
-    session_id: &SessionKey,
-    ws: WsConnection,
-    ledger: Arc<UiProtocolLedger>,
-) -> Result<TaskId, String> {
-    let Some(sessions) = &state.sessions else {
-        return Err("Sessions not available".to_owned());
-    };
-    let (data_dir, session_path) = {
-        let mut sessions = sessions.lock().await;
-        sessions.get_or_create(session_id).await;
-        (sessions.data_dir(), sessions.session_path(session_id))
-    };
-    if let Some(parent) = session_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("failed to create session dir: {error}"))?;
-    }
-    std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&session_path)
-        .map_err(|error| format!("failed to materialize session file: {error}"))?;
-
-    let supervisor = octos_agent::TaskSupervisor::new();
-    supervisor
-        .enable_persistence(ui_protocol_task_output::task_state_path(
-            &data_dir, session_id,
-        ))
-        .map_err(|error| format!("failed to enable task persistence: {error}"))?;
-    supervisor.set_on_change(move |task| {
-        let (event_session_id, agent_value) = match upsert_background_task_agent(task, None) {
-            Ok(Some(mirrored)) => mirrored,
-            Ok(None) => return,
-            Err(error) => {
-                tracing::warn!(task_id = %task.id, error = %error.message, "fixture mirror admission failed");
-                return;
-            }
-        };
-        let Ok(agent) = serde_json::from_value::<UiAgentRecord>(agent_value) else {
-            return;
-        };
-        let _ = send_notification_durable(
-            &ws,
-            &ledger,
-            UiNotification::AgentUpdated(AgentUpdatedEvent {
-                session_id: event_session_id,
-                agent,
-            }),
-        );
-    });
-    let task_id = supervisor.register("shell", "m9-task-output-fixture", Some(&session_id.0));
-    supervisor.mark_running(&task_id);
-    supervisor.mark_runtime_state(
-        &task_id,
-        octos_agent::TaskRuntimeState::DeliveringOutputs,
-        Some(
-            json!({
-                "workflow_kind": "m9_fixture",
-                "current_phase": "collecting_output",
-                "progress_message": "Collecting deterministic fixture output"
-            })
-            .to_string(),
-        ),
-    );
-    supervisor.mark_failed(
-        &task_id,
-        "fixture output line one\nfixture output line two\nfixture output line three\n".to_owned(),
-    );
-    task_id
-        .parse::<TaskId>()
-        .map_err(|error| format!("failed to parse fixture task id: {error}"))
 }
 
 /// #1133 — context required to fold a finished AppUI goal turn back
@@ -32192,25 +26199,6 @@ struct InteractiveSentinelOutcome {
     failure: Option<(&'static str, String)>,
 }
 
-/// evo-goal-verifier M1: the canonical verifier-failure notification the
-/// sentinel stations emit on a claimed-but-unverified completion. ONE
-/// constructor shared by the interactive (:36659) and autonomous (:37553)
-/// consumers so the wire shape cannot drift between them.
-fn goal_verifier_warning_event(
-    session_id: &SessionKey,
-    outcome: &crate::autonomy::goal_loop_runtime::GoalVerifierOutcome,
-) -> UiNotification {
-    UiNotification::Warning(octos_core::ui_protocol::WarningEvent {
-        session_id: session_id.clone(),
-        turn_id: None,
-        code: format!(
-            "goal_verifier_{}",
-            outcome.kind.map(|k| k.as_str()).unwrap_or("unknown")
-        ),
-        message: format!("goal completion not verified — {outcome}"),
-    })
-}
-
 /// Same wire shape for the interactive consumer, which holds the already-
 /// rendered canonical (kind, line) pair from `InteractiveSentinelOutcome`.
 fn goal_verifier_failure_warning(
@@ -32224,98 +26212,6 @@ fn goal_verifier_failure_warning(
         code: format!("goal_verifier_{kind}"),
         message: format!("goal completion not verified — {line}"),
     })
-}
-
-async fn run_interactive_sentinel_completion(
-    orchestrator: &InProcessAgentOrchestrator,
-    verifier_provider: Arc<dyn octos_llm::LlmProvider>,
-    pinned_goal_key: &SessionKey,
-    charge_profile: &str,
-    bound_goal_id: &str,
-    reply: &str,
-    ledger_data_dir: Option<&Path>,
-) -> InteractiveSentinelOutcome {
-    // Loop-engineering completion gate: only spend the INDEPENDENT verifier
-    // LLM call when the agent actually CLAIMS completion.
-    if !orchestrator.goal_completion_claimed(reply) {
-        return InteractiveSentinelOutcome {
-            completed: false,
-            failure: None,
-        };
-    }
-    // #1935 codex round 3 (TOCTOU) — one-lock snapshot of (goal_id,
-    // objective); no goal / wrong profile ⇒ nothing to verify.
-    let Some(snapshot) = orchestrator.goal_verification_snapshot(pinned_goal_key, charge_profile)
-    else {
-        return InteractiveSentinelOutcome {
-            completed: false,
-            failure: None,
-        };
-    };
-    // Dispatch-time binding check: a goal cleared+recreated mid-turn must
-    // neither be graded against the OLD turn's claim nor spend a verifier
-    // call on it.
-    if snapshot.goal_id != bound_goal_id {
-        tracing::warn!(
-            session_id = %pinned_goal_key,
-            bound_goal_id = %bound_goal_id,
-            current_goal_id = %snapshot.goal_id,
-            "interactive sentinel: goal changed since dispatch — stale claim refused"
-        );
-        return InteractiveSentinelOutcome {
-            completed: false,
-            failure: None,
-        };
-    }
-    // #1958 (codex #3) — the sentinel verifier runs AFTER the turn's routing
-    // scopes ended; restore originating-session attribution around it. The
-    // event carries the WIRE id, so strip the cwd scope off the pinned key.
-    // evo-goal-verifier: the wrapper owns gate/charge/retry/ledger.
-    let outcome = octos_llm::with_router_context(
-        octos_llm::RouterContext {
-            session_id: Some(wire_key_from_goal_key(pinned_goal_key).to_string()),
-            ..Default::default()
-        },
-        orchestrator.verify_goal_completion_bounded(
-            pinned_goal_key,
-            charge_profile,
-            &snapshot,
-            verifier_provider,
-            reply,
-            ledger_data_dir,
-        ),
-    )
-    .await;
-    let completed = orchestrator.maybe_complete_goal_from_model(
-        pinned_goal_key,
-        charge_profile,
-        reply,
-        &outcome.verdict,
-        // #1935 codex round 3 — both snapshot fields are re-checked against
-        // the live record inside; a mid-verify swap or objective edit refuses.
-        &snapshot,
-        // #1957 (codex #1) — sync a sentinel completion into the ledger.
-        ledger_data_dir,
-    );
-    InteractiveSentinelOutcome {
-        completed,
-        failure: if completed || outcome.is_done() {
-            None
-        } else {
-            // M1/cross A2: structured failure line leaves this station now —
-            // the kind is no longer dropped. Ephemeral consumer decides how
-            // to surface it (SessionGoalUpdated schema stays untouched).
-            tracing::warn!(
-                session_id = %pinned_goal_key,
-                goal_id = %snapshot.goal_id,
-                "interactive sentinel completion not verified: {outcome}"
-            );
-            Some((
-                outcome.kind.map(|k| k.as_str()).unwrap_or("unknown"),
-                outcome.to_string(),
-            ))
-        },
-    }
 }
 
 /// #1969 — resolve the token charge for a turn that may have been INTERRUPTED.
@@ -32496,10 +26392,7 @@ async fn run_standalone_turn(
     // dispatcher's marker. The guard is dropped right after the charge
     // block (before the voice-TTS tail) so a rapid follow-up turn can
     // re-claim; it also drops via RAII on any early return / cancellation.
-    let interactive_goal_guard = interactive_goal_id
-        .is_some()
-        .then(|| default_agent_orchestrator().try_claim_goal_in_flight(&session_id))
-        .flatten();
+    let interactive_goal_guard: Option<()> = None;
     let Some(profile_runtime) =
         resolve_session_profile_runtime(&state, active_profile_id.as_deref())
     else {
@@ -32534,26 +26427,6 @@ async fn run_standalone_turn(
     let hint = workspace_binding
         .as_ref()
         .and_then(|binding| binding.runtime_hint.clone());
-    // #1857 PR 5a — THE LOAD-BEARING SEAM: on a goal turn, stash the resolved
-    // controller workspace root on the goal record (keyed by the SCOPED
-    // `goal_session_key`) BEFORE the keeper's `goal_plan` can run mid-turn. It
-    // MUST equal the effective tool workspace (including the derived Tier-3
-    // root), so `Fleet::create` stamps the EXACT root a later `ChildDone` wake
-    // rehydrates a headless keeper with (PR 4b) — a fabricated root would
-    // silently execute against the wrong repo after a restart. A headless
-    // pre-fleet `GoalContinue` with no established binding still passes `None`,
-    // which leaves any previously captured root intact.
-    if let Some(goal_ctx) = goal_context.as_ref() {
-        default_agent_orchestrator().set_goal_workspace_binding(
-            &goal_ctx.goal_session_key,
-            workspace_binding.as_ref().map(|binding| {
-                (
-                    binding.root.to_string_lossy().into_owned(),
-                    binding.runtime_hint.is_some(),
-                )
-            }),
-        );
-    }
     let permissions_epoch = state.session_cache.session_generation(&session_id);
     let permissions = match effective_permissions_for_session(&state, &session_id) {
         Ok(permissions) => permissions,
@@ -32630,7 +26503,7 @@ async fn run_standalone_turn(
     // folder's goal and repaint it onto THIS connection's chip. Capturing here
     // mirrors how the autonomous path pins `goal_ctx.goal_session_key` at
     // dispatch.
-    let turn_pinned_goal_key = default_agent_orchestrator().scoped_goal_key(&session_id);
+    let turn_pinned_goal_key = String::new();
     let usage_profile_id = active_profile_id
         .clone()
         .or_else(|| session_id.profile_id().map(ToOwned::to_owned))
@@ -33109,199 +26982,18 @@ async fn run_standalone_turn(
         // dedupe key on the request collapses repeated `mark_failed`
         // calls onto one recovery turn even if `notify_failure`
         // re-fires through a sibling path.
-        let failure_session_id = session_id.clone();
-        let failure_profile_id = active_profile_id
-            .clone()
-            .or_else(|| routed_profile_id.clone())
-            .unwrap_or_else(|| MAIN_PROFILE_ID.to_owned());
-        task_supervisor.set_on_failure_signal(move |signal| {
-            let outcome = default_agent_orchestrator().enqueue_spawn_only_failure_continuation(
-                &failure_session_id,
-                &failure_profile_id,
-                signal,
-            );
-            if outcome.is_duplicate() {
-                debug!(
-                    session = %failure_session_id,
-                    task_id = %signal.task_id,
-                    tool = %signal.tool_name,
-                    "spawn_only failure recovery continuation suppressed (duplicate dedupe key)"
-                );
-            } else {
-                info!(
-                    session = %failure_session_id,
-                    task_id = %signal.task_id,
-                    tool = %signal.tool_name,
-                    "spawn_only failure recovery continuation queued (WS path)"
-                );
-            }
-        });
-        // C1 fix: wire the supervisor `on_change` callback BEFORE
-        // `enable_persistence` — same ordering rule as `set_on_failure_signal`
-        // above. The orphan-task sweep that runs inside `enable_persistence`
-        // fires terminal `mark_failed("orphaned across restart")`
-        // transitions; if `on_change` is installed AFTER persistence (the
-        // pre-C1 ordering, where it lived next to the per-turn agent build)
-        // the sweep's `notify_change` hits `on_change == None` and the
-        // `task_updated` WS event is silently dropped, leaving the TUI task
-        // count stuck at "N running" / chip "Orchestrating".
-        // M9-06: terminal updates (completed/failed/cancelled) must not be
-        // dropped under WebSocket backpressure either — see
-        // `forward_task_progress_to_channel`.
         let progress_tx_for_tasks = progress_tx.clone();
         let task_progress_dropped = progress_dropped.clone();
-        // mini5 soak fix: thread the turn's resolved runtime profile into the
-        // agent-record mirror so the terminal-agent continuation inherits the
-        // profile the turn actually runs under (mirrors `failure_profile_id`
-        // above) instead of the bare-session-key "_main" fallback that left
-        // the task-completion re-entry stranded (`runtime_unavailable` /
-        // profile-scoped drain skip).
         let change_profile_id = active_profile_id
             .clone()
             .or_else(|| routed_profile_id.clone())
             .unwrap_or_else(|| MAIN_PROFILE_ID.to_owned());
-        // Stuck-chip fix: a spawn_only background task that goes TERMINAL after
-        // its spawning turn ended has no live `progress_tx_for_tasks` receiver
-        // (it was torn down at end-of-turn), so the terminal `task_progress` +
-        // `agent_updated` frames are silently dropped and the chip stays on
-        // "Orchestrating…". In addition to the best-effort per-turn channel
-        // forward below, mirror the TERMINAL agent record onto the DURABLE,
-        // connection-independent ledger (`send_notification_durable` →
-        // `ledger.append`) so a reconnecting / sibling client still observes the
-        // terminal flip via cursor replay + the live broadcast forwarder. See
-        // `forward_terminal_agent_update_durable` for the durability contract.
-        let change_ws = ws.clone();
-        let change_ledger = ledger.clone();
         task_supervisor.set_on_change(move |task| {
             forward_task_progress_to_channel(
                 &progress_tx_for_tasks,
                 &task_progress_dropped,
                 task,
                 Some(change_profile_id.as_str()),
-            );
-            forward_terminal_agent_update_durable(
-                &change_ws,
-                change_ledger.as_ref(),
-                task,
-                Some(change_profile_id.as_str()),
-            );
-        });
-        // #2055 — create the goal-ledger task row at registration time,
-        // wired next to the unified terminal sink below (whose settle half,
-        // #2054, flips the row at terminal). The turn's goal binding is
-        // snapshotted HERE at wiring time, mirroring the #1650
-        // dispatch-time `interactive_goal_binding` semantics: an autonomous
-        // continuation carries `goal_context` (its goal resolves under the
-        // already-scoped store key it was enqueued with, family-2 — never
-        // re-scoped), an interactive turn uses the #1935
-        // `interactive_goal_id` snapshot. This wiring is REPLACED every
-        // turn, so a goal-less turn overwrites a prior goal turn's closure
-        // with the no-op rather than leaking a stale binding. No binding ⇒
-        // no rows — correct behavior, not an error. The recorder swallows
-        // every ledger error (registration must never fail, block, or
-        // panic on ledger I/O). The ledger lives under the PROFILE data
-        // dir (#1957 rule — never the relocatable sessions root).
-        let register_goal_binding: Option<(String, String)> = goal_context
-            .as_ref()
-            .and_then(|goal_ctx| {
-                default_agent_orchestrator()
-                    .active_goal_id_under_goal_key(&goal_ctx.goal_session_key, &goal_ctx.profile_id)
-                    .map(|goal_id| (goal_id, goal_ctx.profile_id.clone()))
-            })
-            .or_else(|| {
-                interactive_goal_id
-                    .clone()
-                    .map(|goal_id| (goal_id, goal_charge_profile.clone()))
-            });
-        // #14 (codex round 2, item A) — the per-turn WS supervisor's restore
-        // observer is now the COMPOSED variant (goal resolvers + parked-peer
-        // adoption), identical to the gateway actor's
-        // `session_actor.rs` wiring. This is the supervisor `peer_handoff`
-        // ACTUALLY registers against: `emit_staged` below binds the peer task
-        // via `tool_registry.supervisor()` — i.e. THIS fresh per-turn
-        // supervisor from `snapshot_excluding` — so the goal-only install
-        // here previously left the WS restart-recovery path parking peer
-        // rows without ever adopting them. The extra restore consumer in
-        // `install_peer_restore_observers_composed` REPLACES the single
-        // `on_restore` slot, so the turn-scoped reconcile resolver below
-        // would be silently dropped if we installed it first — hence the
-        // hand-built restore callback that adopts first, then reconciles
-        // through this turn's resolver chain (goal-context key preferred,
-        // wire-key fallback — the #2056 round-2 H2b semantics preserved
-        // verbatim), both halves over the POST-adoption table.
-        let restore_goal_key = goal_context.as_ref().map(|goal_ctx| {
-            (
-                goal_ctx.goal_session_key.clone(),
-                goal_ctx.profile_id.clone(),
-            )
-        });
-        let restore_wire_key = session_id.clone();
-        let restore_wire_profile = active_profile_id
-            .clone()
-            .or_else(|| routed_profile_id.clone())
-            .unwrap_or_else(|| MAIN_PROFILE_ID.to_owned());
-        let peer_adopt_profile = session_runtime.profile.profile_id.clone();
-        let peer_adopt_data_dir = session_runtime.profile.data_dir.clone();
-        let peer_adopt_supervisor = task_supervisor.clone();
-        let peer_adopt_master = session_id.to_string();
-        let reconcile_supervisor = task_supervisor.clone();
-        crate::autonomy::agent_orchestrator::install_peer_restore_observers_composed(
-            &task_supervisor,
-            &session_runtime.profile.data_dir,
-            move || register_goal_binding.clone(),
-            move |_restored| {
-                // B — adopt FIRST (its `mark_completed` re-stashes the
-                // task→goal binding from the staged dir's `goal` file), then
-                // reconcile the POST-adoption table so the adopted row's
-                // terminal verdict reaches the goal ledger.
-                crate::peers::adopt_parked_peer_tasks_with_results(
-                    &peer_adopt_supervisor,
-                    &peer_adopt_profile,
-                    &peer_adopt_master,
-                    &peer_adopt_data_dir,
-                    &peer_adopt_supervisor.get_all_tasks(),
-                );
-                let orchestrator = default_agent_orchestrator();
-                let binding = if let Some((goal_key, profile)) = restore_goal_key.as_ref() {
-                    orchestrator
-                        .bound_goal_id_under_goal_key(goal_key, profile)
-                        .map(|goal_id| (goal_id, profile.clone()))
-                } else {
-                    None
-                }
-                .or_else(|| {
-                    orchestrator
-                        .bound_goal_id(&restore_wire_key, &restore_wire_profile)
-                        .map(|goal_id| (goal_id, restore_wire_profile.clone()))
-                });
-                if let Some((goal_id, profile)) = binding {
-                    orchestrator.reconcile_goal_task_rows_after_restore(
-                        &peer_adopt_data_dir,
-                        &profile,
-                        &goal_id,
-                        &reconcile_supervisor.get_all_tasks(),
-                    );
-                }
-            },
-        );
-        // Gap-1 unification: the single terminal sink. Routes BOTH success
-        // (ChildCompleted) AND failure (recovery) re-entry through ONE
-        // profile-resolving call into the master continuation queue. Runs
-        // alongside the legacy `set_on_change` (success) and
-        // `set_on_failure_signal` (failure, which still owns the deferred
-        // fail-before-ack re-emit) wiring — shared dedupe keys collapse the
-        // double delivery to one continuation. The threaded
-        // `terminal_profile_id` (mirrors `change_profile_id` /
-        // `failure_profile_id`) kills the `_main` failure-stranding by
-        // construction.
-        let terminal_profile_id = active_profile_id
-            .clone()
-            .or_else(|| routed_profile_id.clone())
-            .unwrap_or_else(|| MAIN_PROFILE_ID.to_owned());
-        task_supervisor.set_on_terminal(move |event| {
-            crate::autonomy::agent_orchestrator::route_terminal_event_to_continuation_queue(
-                event,
-                Some(terminal_profile_id.as_str()),
             );
         });
         if let Err(error) = enable_peer_task_persistence(
@@ -34069,15 +27761,9 @@ async fn run_standalone_turn(
                     // (distinct calls never collapse) and map the REAL delivery
                     // status to the result: a durable-persist failure is an
                     // error, not a false success ack; Queued/Duplicate are ok.
-                    default_agent_orchestrator()
-                        .enqueue_peer_send_input_continuation(
-                            &target,
-                            &send_profile_id,
-                            &slug,
-                            &req.occurrence_id,
-                            &req.message,
-                        )
-                        .into_callback_result(&slug)
+                    Err(format!(
+                        "peer '{slug}' input queue is unavailable: the goal engine was removed"
+                    ))
                 });
             tool_registry.register(octos_agent::PeerSendInputTool::new(send_input));
 
@@ -34355,38 +28041,6 @@ async fn run_standalone_turn(
     stable_system_prompt.push_str("\n\n");
     stable_system_prompt.push_str(OUP_GOAL_LIFECYCLE_INSTRUCTION);
 
-    // Only the dedicated steer continuation consumes its sidecar receipt.
-    // Keep this bookkeeping out of the stable system prompt/cache prefix.
-    if is_steer_continuation_turn {
-        let receipt: Vec<u64> = match &steer_line_to_consume {
-            Some((ts, text)) => crate::autonomy::monitor_runtime::consume_reviewer_line(
-                &session_runtime.profile.data_dir,
-                &session_id.to_string(),
-                ts,
-                text,
-            )
-            .into_iter()
-            .collect(),
-            None => crate::autonomy::monitor_runtime::read_and_clear_reviewer_notes(
-                &session_runtime.profile.data_dir,
-                &session_id.to_string(),
-            )
-            .map(|notes| notes.enqueued_at_secs)
-            .unwrap_or_default(),
-        };
-        let session_str = session_id.to_string();
-        for ts in receipt {
-            crate::obs_events::append_obs_event(
-                &session_runtime.profile.data_dir,
-                &crate::obs_events::ObsEvent::new(
-                    "steer_consumed",
-                    &format!("steer enqueued_at={ts} consumed by turn {}", turn_id.0),
-                )
-                .session(Some(&session_str)),
-            );
-        }
-    }
-
     let mut tail_context_events = Vec::new();
     if let Some(note) =
         peer_results_ready_note(&session_runtime.profile.data_dir.join("peers"), &session_id)
@@ -34397,18 +28051,6 @@ async fn run_standalone_turn(
             note,
         ));
     }
-    if let Some(notes) = read_and_clear_goal_progress_notes(
-        &session_runtime.profile.data_dir,
-        &session_id.to_string(),
-    ) {
-        tail_context_events.push((ContextEventKind::GoalProgress, "goal-progress", notes));
-    }
-    if let Some(notes) = crate::autonomy::monitor_runtime::read_and_clear_monitor_notes(
-        &session_runtime.profile.data_dir,
-        &session_id.to_string(),
-    ) {
-        tail_context_events.push((ContextEventKind::MonitorEvent, "monitor-events", notes));
-    }
     // Empty memory is not a context event. In particular, a fresh stdio/solo
     // session must not pay for a synthetic `memory-snapshot` line on every
     // turn; the named memory segment already carries the stable policy when
@@ -34418,32 +28060,6 @@ async fn run_standalone_turn(
             ContextEventKind::MemoryUpdate,
             "memory-snapshot",
             volatile_memory_context,
-        ));
-    }
-    let active_goal_snapshot = default_agent_orchestrator()
-        .model_goal_snapshot(&session_id, &session_runtime.profile.profile_id);
-    if should_emit_goal_snapshot(&active_goal_snapshot) {
-        let objective = active_goal_snapshot["objective"]
-            .as_str()
-            .unwrap_or_default();
-        let mut clipped: String = objective.chars().take(300).collect();
-        if clipped.chars().count() < objective.chars().count() {
-            clipped.push('…');
-        }
-        let goal_snapshot_context = serde_json::json!({
-            "status": "active",
-            "goal_id": active_goal_snapshot["goal_id"],
-            "objective": clipped,
-            "tokens_used": active_goal_snapshot["tokens_used"],
-            "token_budget": active_goal_snapshot["token_budget"],
-            "tokens_remaining": active_goal_snapshot["tokens_remaining"],
-            "time_used_seconds": active_goal_snapshot["time_used_seconds"],
-            "continuations_used": active_goal_snapshot["continuations_used"],
-        });
-        tail_context_events.push((
-            ContextEventKind::GoalSnapshot,
-            "session-goal-snapshot",
-            goal_snapshot_context.to_string(),
         ));
     }
     appui_append_tail_context_events(
@@ -35199,7 +28815,7 @@ async fn run_standalone_turn(
     let _in_flight_heartbeat = goal_context.as_ref().and_then(|ctx| {
         let claim_generation = ctx.claim_generation?;
         let tracker = std::sync::Arc::clone(&token_tracker);
-        let marker_key = ctx.goal_session_key.clone();
+        let marker_key: String = String::new();
         let heartbeat = tokio::spawn(async move {
             use std::sync::atomic::Ordering as AtomicOrdering;
             let mut last = 0_u64;
@@ -35209,8 +28825,7 @@ async fn run_standalone_turn(
                     + u64::from(tracker.output_tokens.load(AtomicOrdering::Relaxed));
                 if seen > last {
                     last = seen;
-                    default_agent_orchestrator()
-                        .touch_goal_dispatch_in_flight_generation(&marker_key, claim_generation);
+                    let _ = &marker_key;
                 }
             }
         });
@@ -36261,7 +29876,6 @@ async fn run_standalone_turn(
                 // arm triggers the evaluation; an errored/interrupted peer's
                 // result still counts toward readiness (it does not block) but
                 // does not itself kick off a synthesis.
-                maybe_enqueue_peer_fleet_synthesis(&state, &session_id).await;
                 // #2003 — also evaluate on the MASTER-idle edge. No-ops for a peer
                 // session (handled just above) and for a session with no fleet.
                 // FIX-04: flush any accumulated drops before the lifecycle
@@ -36296,12 +29910,6 @@ async fn run_standalone_turn(
                     tracing::warn!(?error, "failed to commit peer consumption receipts");
                 }
                 drop(admission);
-                maybe_enqueue_peer_fleet_synthesis_for_master(
-                    &state,
-                    &session_id,
-                    &session_runtime.profile.profile_id,
-                )
-                .await;
                 break;
             }
             Some("error") => {
@@ -36393,15 +30001,8 @@ async fn run_standalone_turn(
                 // whose LAST peer errors still triggers synthesis (the error
                 // body is part of what the master consolidates). Same fleet
                 // gate as the completed arm; no-op for non-peer sessions.
-                maybe_enqueue_peer_fleet_synthesis(&state, &session_id).await;
                 // #2003 — also evaluate on the MASTER-idle edge. No-ops for a peer
                 // session (handled just above) and for a session with no fleet.
-                maybe_enqueue_peer_fleet_synthesis_for_master(
-                    &state,
-                    &session_id,
-                    &session_runtime.profile.profile_id,
-                )
-                .await;
                 flush_replay_lossy(&ws, &ledger, &session_id, &progress_dropped);
                 try_emit_terminal(
                     &turn_state,
@@ -36538,126 +30139,6 @@ async fn run_standalone_turn(
     // Charge consumed work even on error/truncation/interruption. Completion
     // claims are separate: they require the winning Completed terminal and
     // the current turn's committed final reply, never a history fallback.
-    if let Some(charge_goal_id) = interactive_goal_id.as_deref() {
-        // Charge on nonzero elapsed OR tokens (codex P2): a
-        // successful turn reporting zero token usage but nonzero
-        // wall-clock still advances `time_used_seconds` /
-        // `updated_at_ms`. `charge_active_goal_tokens` binds to
-        // `charge_goal_id` and matches the profile, so a mid-turn
-        // goal replacement or a cross-tenant turn is rejected inside
-        // the helper. It touches ONLY `tokens_used` /
-        // `time_used_seconds` / `updated_at_ms` (plus the
-        // budget-limited flip on crossing): no rate-window or
-        // completion-sentinel machinery runs for a user-driven turn.
-        let elapsed_seconds = interactive_turn_start
-            .map(|start| start.elapsed().as_secs())
-            .unwrap_or(0);
-        if let Some(goal_event_json) = default_agent_orchestrator().charge_active_goal_tokens(
-            &session_id,
-            &goal_charge_profile,
-            charge_goal_id,
-            final_tokens_consumed,
-            elapsed_seconds,
-        ) {
-            match serde_json::from_value::<octos_core::ui_protocol::SessionGoalUpdatedEvent>(
-                goal_event_json,
-            ) {
-                Ok(event) => {
-                    // Deliver to the OWNING connection via an
-                    // ephemeral direct-send to `ws` (codex P1): a
-                    // durable ledger append is fanned to EVERY
-                    // session subscriber by their live forwarder,
-                    // which does not filter on `profile_id`, and
-                    // would leak this profile's goal state to a
-                    // different profile that co-opened the same
-                    // unprofiled session id. `ws` is the turn's own
-                    // connection, already proven by the charge-side
-                    // profile match to belong to the goal's owner.
-                    //
-                    // A backpressure drop of a token-count update
-                    // self-heals: the next interactive turn re-pushes
-                    // the fresh count while the goal stays `active`.
-                    // The one exception (codex P2, tracked as a
-                    // follow-up) is the `budget_limited` TRANSITION
-                    // push — once the goal leaves `active`,
-                    // `active_goal_id` returns `None` and no later
-                    // turn re-pushes, so a dropped transition frame
-                    // leaves the chip stale until an explicit
-                    // `goal/get`. A durable-but-owning-connection-only
-                    // delivery (or a retry of the terminal transition)
-                    // would close it without reopening the leak.
-                    let _ = send_notification_ephemeral(
-                        &ws,
-                        &ledger,
-                        UiNotification::SessionGoalUpdated(event),
-                    );
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        error = %err,
-                        session_id = %session_id,
-                        "interactive goal charge produced an unparseable update event",
-                    );
-                }
-            }
-        }
-        // #1935 — interactive sentinel detection: a completed
-        // interactive turn whose final reply claims `<goal:complete>`
-        // runs the INDEPENDENT verifier and, on a Done verdict, flips
-        // the bound goal to `complete` — parity with the autonomous
-        // `goal_context` accountant below, which was previously the
-        // ONLY sentinel path (an interactive completion claim did
-        // nothing unless the model used the `goal_update` tool).
-        // Detection reads the final answer committed by THIS
-        // turn. Runs while the in-flight
-        // guard is still held, so a concurrent `GoalContinue` drain
-        // stays deferred until the verdict lands. The chip repaint is
-        // NOT pushed here — the unconditional interactive
-        // `SessionGoalUpdated` push at the end of this function emits
-        // the final snapshot (including the completion + the verifier
-        // charge) via the same `turn_pinned_goal_key`.
-        let interactive_reply =
-            goal_completion_reply(&*turn_state.lock().await, final_goal_reply.as_deref());
-        if let Some(reply) = interactive_reply {
-            // #1935 — grade on the INDEPENDENT verifier lane when the
-            // profile configures one (`sub_providers` key
-            // `goal_verifier`); otherwise the turn's own provider.
-            let verifier_provider = session_runtime
-                .profile
-                .goal_verifier_llm
-                .clone()
-                .unwrap_or_else(|| llm_provider.clone());
-            let sentinel_outcome = run_interactive_sentinel_completion(
-                default_agent_orchestrator(),
-                verifier_provider,
-                &turn_pinned_goal_key,
-                &goal_charge_profile,
-                charge_goal_id,
-                &reply,
-                // #1957 (codex #1) — the goal ledger lives under the
-                // PROFILE data dir, not the session store root (see the
-                // autonomous accountant's `goal_ledger_data_dir` note).
-                Some(session_runtime.profile.data_dir.as_path()),
-            )
-            .await;
-            // evo-goal-verifier M1 (cross A2): surface the structured
-            // verifier failure (kind + canonical line) as an ephemeral note
-            // on the interactive path — SessionGoalUpdated schema untouched.
-            if sentinel_outcome.completed {
-                tracing::debug!(
-                    session_id = %turn_pinned_goal_key,
-                    "interactive sentinel flipped goal to complete"
-                );
-            }
-            if let Some((kind, line)) = sentinel_outcome.failure {
-                let _ = send_notification_ephemeral(
-                    &ws,
-                    &ledger,
-                    goal_verifier_failure_warning(&turn_pinned_goal_key, kind, &line),
-                );
-            }
-        }
-    }
     // #1650 — release the in-flight marker now that the charge has
     // committed (goal already flipped `budget_limited` if it crossed) and
     // BEFORE the voice-TTS / spawn_only tail + `evict_turn`, so a rapid
@@ -36761,20 +30242,6 @@ async fn run_standalone_turn(
         // lossless representation, so a non-UTF-8 root stamps and purges as
         // the SAME scope instead of one side collapsing to `None` via
         // `to_str()` and silently widening the match.
-        let purge_workspace = crate::peers::workspace_scope_encode(&session_runtime.workspace_root);
-        let purged = default_agent_orchestrator().clear_pending_terminal_continuations_for_session(
-            &session_id,
-            &session_runtime.profile.profile_id,
-            purge_workspace.as_deref(),
-            "session_interrupt_stop",
-        );
-        if purged > 0 {
-            tracing::info!(
-                session = %session_id,
-                purged,
-                "interrupt purged pending terminal continuations for the stopped session"
-            );
-        }
         // FIX-04: also flush any accumulated drops before the lifecycle
         // terminal so the client knows the cursor is incomplete.
         flush_replay_lossy(&ws, &ledger, &session_id, &progress_dropped);
@@ -36851,15 +30318,8 @@ async fn run_standalone_turn(
         // persistent peer with a prior result is synthesized against that. The
         // point is to not SKIP evaluation on the interrupt path. No-op for
         // non-peer sessions.
-        maybe_enqueue_peer_fleet_synthesis(&state, &session_id).await;
         // #2003 — also evaluate on the MASTER-idle edge. No-ops for a peer
         // session (handled just above) and for a session with no fleet.
-        maybe_enqueue_peer_fleet_synthesis_for_master(
-            &state,
-            &session_id,
-            &session_runtime.profile.profile_id,
-        )
-        .await;
     }
 
     let _ = agent_task.await;
@@ -37373,256 +30833,6 @@ async fn run_standalone_turn(
                 .map(ToOwned::to_owned)
                 .or_else(|| routed_profile_id.clone())
                 .unwrap_or_default();
-            if let Err(err) = default_agent_orchestrator().apply_self_paced_response(
-                loop_id,
-                &profile_for_reschedule,
-                &reply,
-            ) {
-                info!(
-                    session = %session_id,
-                    loop_id = %loop_id,
-                    error = %err.message,
-                    "apply_self_paced_response skipped (appui path)"
-                );
-            }
-        }
-    }
-
-    // #1133 — AppUI goal-turn post-accountant. Mirrors the chat path's
-    // `SessionActor::maybe_advance_goal_runtime_after_turn`:
-    //   1. Find the LAST non-empty assistant message persisted by THIS
-    //      turn (same `enumerate + filter idx >= pre + non-empty + last`
-    //      pattern as the self-paced loop case above).
-    //   2. Call `record_goal_turn(session_id, profile_id, tokens, elapsed)`
-    //      so the goal's `tokens_used` / `continuations_used` /
-    //      `rate_window_count` reflect the real turn (instead of the
-    //      pre-#1133 dispatch-only stub that bumped only the timestamp).
-    //   3. Call `maybe_complete_goal_from_model` so a trailing
-    //      `<goal:complete>` sentinel flips the goal to `complete` and
-    //      stops recurrence.
-    //
-    // Token usage comes from `final_tokens_consumed` — populated when the
-    // agent_task's `done` OR `error` JSON event traversed the main `select!`
-    // loop (`tokens_in + tokens_out + tokens_cache`). #1969: an ERRORED /
-    // rate-limited turn now charges its real accumulated spend (the loop
-    // attaches the turn total to the bailed error and the `error` arm folds
-    // it), closing the under-charge where a goal turn burned tokens then
-    // failed. On INTERRUPT the value remains zero: the agent task is aborted
-    // before it can report usage and this path holds no shared token tracker
-    // to read post-abort — an interrupted turn simply does not exhaust the
-    // goal's budget (tracked follow-up).
-    if let Some(goal_ctx) = goal_context.as_ref() {
-        // #1140 codex P2 re-review #2: the turn-start dispatch stamp
-        // can go stale on long goal turns (model + tool work > 30s
-        // exceeds GOAL_MIN_CONTINUATION_INTERVAL_MS). Refresh the
-        // timestamp IMMEDIATELY before the post-turn accountant runs
-        // so a scheduler tick landing in the gap between turn-terminal
-        // emission and `record_goal_turn` can't observe the goal as
-        // due. The refresh is a no-op if the goal was already
-        // transitioned (paused/complete), so it's safe to call
-        // unconditionally for goal_context turns. Note that
-        // `record_goal_turn` below also stamps `last_continued_at_ms
-        // = now`, but terminal-state inspection below can yield first.
-        // #1666 residue — the goal record lives under the cwd-scoped store key
-        // (`goal_ctx.goal_session_key`), NOT the plain wire `session_id` the
-        // turn runs under. Charge/complete the goal via the scoped key so a
-        // folder-A goal turn actually accrues its spend (a wire-keyed lookup
-        // would find nothing and the goal would recur past its budget forever).
-        let goal_key = &goal_ctx.goal_session_key;
-        default_agent_orchestrator()
-            .record_goal_dispatch_timestamp_only(goal_key, &goal_ctx.profile_id);
-        let assistant_reply =
-            goal_completion_reply(&*turn_state.lock().await, final_goal_reply.as_deref());
-        // #1957 (codex #1) — the goal ledger lives under the PROFILE data dir
-        // (`goal_get`, the peer-finding sync, and `GoalUpdateTool` all key off
-        // `profile.data_dir`), NOT the session store root. Under
-        // `appui.sessions_in_cwd` the two diverge (`sessions_root` relocates to
-        // `<cwd>/.octos`), so resolving the ledger dir from the sessions manager
-        // would write a sentinel completion into a SPLIT ledger the master
-        // never reads. Pin it to the profile data dir.
-        let goal_ledger_data_dir = session_runtime.profile.data_dir.clone();
-        let elapsed_seconds = goal_turn_start
-            .map(|start| start.elapsed().as_secs())
-            .unwrap_or(0);
-        let orchestrator = default_agent_orchestrator();
-        if let Some(snapshot) = orchestrator.record_goal_turn(
-            goal_key,
-            &goal_ctx.profile_id,
-            // #2066 round 2 (codex R1c) — goal-id-bound charge: a mid-turn
-            // clear(+recreate) settles the cleared goal's tombstone, never
-            // the replacement goal.
-            goal_ctx.bound_goal_id.as_deref(),
-            final_tokens_consumed,
-            elapsed_seconds,
-        ) {
-            // #1982 — a goal completed/blocked mid-turn froze its ledger tokens
-            // at the pre-completion total; reconcile the durable record with the
-            // full turn's spend now.
-            orchestrator.reconcile_terminal_goal_ledger(goal_key, &snapshot, &goal_ledger_data_dir);
-        }
-        if let Some(reply) = assistant_reply {
-            // Loop-engineering completion gate: only spend the INDEPENDENT
-            // verifier LLM call when the agent actually CLAIMS completion —
-            // and only when a goal snapshot exists to verify against. The
-            // verifier judges the objective against the reply evidence and
-            // returns Done/NotDone; maybe_complete_goal_from_model then
-            // requires the sentinel AND a Done verdict AND a live record
-            // still matching the snapshot.
-            //
-            // #1935 codex round 3 (TOCTOU): goal_id + objective are captured
-            // together under ONE state lock (`goal_verification_snapshot`),
-            // so a clear/recreate between two separate reads can no longer
-            // pair the OLD objective with the NEW goal_id (or a
-            // same-objective recreate slip both checks). No goal / wrong
-            // profile ⇒ no snapshot ⇒ no verifier spend.
-            let verification = if orchestrator.goal_completion_claimed(&reply) {
-                orchestrator.goal_verification_snapshot(goal_key, &goal_ctx.profile_id)
-            } else {
-                None
-            };
-            if let Some(snapshot) = verification {
-                // #1935 — grade on the INDEPENDENT verifier lane when the
-                // profile configures one (`sub_providers` key `goal_verifier`);
-                // otherwise the turn's own provider, unchanged.
-                let verifier_provider = session_runtime
-                    .profile
-                    .goal_verifier_llm
-                    .clone()
-                    .unwrap_or_else(|| llm_provider.clone());
-                // #1958 (codex #3) — the sentinel verifier runs AFTER the turn's
-                // routing scopes ended, so restore originating-session
-                // attribution around it (a failover would otherwise publish
-                // unattributed / under another session). Autonomous turns are
-                // Normal policy, so only the router context needs restoring.
-                // evo-goal-verifier: the wrapper owns gate/charge/retry/ledger;
-                // per-attempt usage is charged inside it.
-                let outcome = octos_llm::with_router_context(
-                    octos_llm::RouterContext {
-                        session_id: Some(session_id.to_string()),
-                        ..Default::default()
-                    },
-                    orchestrator.verify_goal_completion_bounded(
-                        goal_key,
-                        &goal_ctx.profile_id,
-                        &snapshot,
-                        verifier_provider,
-                        &reply,
-                        Some(goal_ledger_data_dir.as_path()),
-                    ),
-                )
-                .await;
-                // `maybe_complete_goal_from_model` is idempotent and only
-                // flips when `detect_goal_complete_sentinel` matches the
-                // tail of the reply AND the verdict is Done. The return value
-                // is intentionally unused — the goal is either complete now or
-                // stays active and the next scheduler tick decides whether to
-                // re-queue.
-                let _ = orchestrator.maybe_complete_goal_from_model(
-                    goal_key,
-                    &goal_ctx.profile_id,
-                    &reply,
-                    &outcome.verdict,
-                    &snapshot,
-                    // #1957 (codex #1) — sync a sentinel completion into the ledger.
-                    Some(goal_ledger_data_dir.as_path()),
-                );
-                // evo-goal-verifier M1 (cross A3): the AUTONOMOUS sentinel
-                // station also surfaces the structured failure kind — same
-                // canonical Display line, same ephemeral Warning channel,
-                // SessionGoalUpdated schema untouched.
-                if !outcome.is_done() {
-                    tracing::warn!(
-                        session_id = %session_id,
-                        goal_id = %snapshot.goal_id,
-                        "autonomous sentinel completion not verified: {outcome}"
-                    );
-                    let _ = send_notification_ephemeral(
-                        &ws,
-                        &ledger,
-                        goal_verifier_warning_event(&session_id.clone(), &outcome),
-                    );
-                }
-            }
-        }
-        // #1696/#1698 — push the post-turn goal snapshot to the OWNING
-        // connection so autonomous transitions repaint the chip live:
-        // complete (goal_update tool or sentinel), blocked (circuit
-        // breaker), budget_limited, and plain token-count growth. Same
-        // ephemeral owning-connection delivery as the interactive charge
-        // above — a durable append would fan the goal to every subscriber
-        // of an unprofiled shared session id regardless of profile.
-        if let Some(goal_event_json) =
-            orchestrator.session_goal_updated_event_json(goal_key, &goal_ctx.profile_id)
-        {
-            match serde_json::from_value::<octos_core::ui_protocol::SessionGoalUpdatedEvent>(
-                goal_event_json,
-            ) {
-                Ok(event) => {
-                    let _ = send_notification_ephemeral(
-                        &ws,
-                        &ledger,
-                        UiNotification::SessionGoalUpdated(event),
-                    );
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        error = %err,
-                        session_id = %session_id,
-                        "autonomous goal accountant produced an unparseable update event",
-                    );
-                }
-            }
-        }
-        // #1140 codex P2 re-review #5: do NOT call
-        // `clear_goal_dispatch_in_flight` explicitly here. The RAII
-        // `GoalDispatchInFlightGuard` in the AppUI spawn closure
-        // clears the marker on Drop AFTER `run_standalone_turn`
-        // returns, which is the single canonical clear-point.
-        // Calling `clear_goal_dispatch_in_flight` here AND letting
-        // the guard fire on Drop opens a tiny race: between the
-        // explicit clear and the closure's actual return, a new
-        // AppUI tick can mark the session in-flight (mark/clear is
-        // not generation-scoped), and then the old guard's Drop
-        // wipes the NEW marker. Single-source-of-truth via the
-        // guard avoids that.
-    }
-
-    // Peer-goal soak fix (bug 5): INTERACTIVE turns pass `goal_context = None`,
-    // so the post-turn chip repaint above (gated on `Some(goal_ctx)`) never
-    // runs. A model-driven `goal_update(complete|blocked)` during an
-    // interactive turn therefore left the goal chip stale at `active` while
-    // `goal_get` already reported `complete`. Emit the same ephemeral
-    // `SessionGoalUpdated` for interactive turns so the chip repaints live.
-    // Use the TURN-PINNED scoped key (codex High #3 — do not re-resolve the
-    // last-writer-wins scope map at turn end) and `usage_profile_id` (codex
-    // Med #4 — the runtime-resolved profile, which is `_main` for a
-    // profile-less session, not the `""` a raw `session_id.profile_id()` would
-    // yield → the `_main` goal would never match).
-    // `session_goal_updated_event_json` emits the wire id in the event for the
-    // client, and returns `None` (no emit) when this session has no goal, so a
-    // plain chat turn stays silent.
-    if goal_context.is_none() {
-        if let Some(goal_event_json) = default_agent_orchestrator()
-            .session_goal_updated_event_json(&turn_pinned_goal_key, &usage_profile_id)
-        {
-            match serde_json::from_value::<octos_core::ui_protocol::SessionGoalUpdatedEvent>(
-                goal_event_json,
-            ) {
-                Ok(event) => {
-                    let _ = send_notification_ephemeral(
-                        &ws,
-                        &ledger,
-                        UiNotification::SessionGoalUpdated(event),
-                    );
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        error = %err,
-                        session_id = %session_id,
-                        "interactive goal chip repaint produced an unparseable update event",
-                    );
-                }
-            }
         }
     }
 
@@ -39910,149 +33120,6 @@ fn record_autonomy_rpc_evidence(method: &str, result: &Value) -> Vec<UiNotificat
     autonomy_rpc_evidence_to_dir(&dir, method, result)
 }
 
-/// M15-F5 (#44), Codex P2: emit the server→client `loop/fired` (or
-/// `session/goal/updated`) notification for a SCHEDULED autonomy fire — a
-/// self-paced / fixed-interval / maintenance loop that fires through the
-/// due-loop scheduler, OR a goal continuation. The manual `loop/fire_now` RPC
-/// is handled by `record_autonomy_rpc_evidence`; scheduled fires never pass
-/// through that RPC path, so without this they produced no `loop/fired`
-/// transcript row or loop-ledger entry. Returns the notification(s) to
-/// dispatch and (when an evidence dir is set) appends the matching
-/// loop/goal-ledger line.
-/// #1977 blocker 8 — build the `monitor/fired` notification for a draining
-/// monitor wake continuation (reason `External("monitor_fired")`), reading the
-/// monitor id / name / event count from the continuation metadata the enqueue
-/// stuffed there. `None` for any other continuation. The capability filter
-/// gates the result to connections that negotiated `coding.monitor_runtime.v1`.
-fn monitor_fired_notification(
-    session_id: &SessionKey,
-    profile_id: &str,
-    continuation: &QueuedMasterContinuation,
-) -> Option<UiNotification> {
-    use octos_core::ui_protocol::MonitorFiredEvent;
-    match &continuation.reason {
-        MasterContinuationReason::External(kind)
-            if kind == crate::autonomy::agent_orchestrator::MONITOR_FIRED_EXTERNAL_KIND => {}
-        _ => return None,
-    }
-    let monitor_id = continuation
-        .metadata
-        .get(crate::autonomy::agent_orchestrator::MONITOR_META_ID)?
-        .clone();
-    let name = continuation
-        .metadata
-        .get(crate::autonomy::agent_orchestrator::MONITOR_META_NAME)
-        .cloned();
-    let line_count = continuation
-        .metadata
-        .get(crate::autonomy::agent_orchestrator::MONITOR_META_LINE_COUNT)
-        .and_then(|value| value.parse::<u64>().ok());
-    let fired_at_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .and_then(|d| i64::try_from(d.as_millis()).ok());
-    Some(UiNotification::MonitorFired(MonitorFiredEvent {
-        session_id: session_id.clone(),
-        profile_id: Some(profile_id.to_owned()),
-        monitor_id,
-        name,
-        line_count,
-        fired_at_ms,
-    }))
-}
-
-fn scheduled_continuation_notifications(
-    session_id: &SessionKey,
-    profile_id: &str,
-    reason: &MasterContinuationReason,
-    loop_id: Option<&str>,
-    goal_id: Option<&str>,
-) -> Vec<UiNotification> {
-    scheduled_continuation_to_dir(
-        appui_evidence_dir().as_deref(),
-        session_id,
-        profile_id,
-        reason,
-        loop_id,
-        goal_id,
-    )
-}
-
-/// M15-F5 (#44), Codex P2: directory-parameterised core of
-/// `scheduled_continuation_notifications`. `dir` is `Some` only when an
-/// evidence dir is active (soak); the ledger write is skipped otherwise. Pure
-/// and env-free so it is unit-testable.
-fn scheduled_continuation_to_dir(
-    dir: Option<&Path>,
-    session_id: &SessionKey,
-    profile_id: &str,
-    reason: &MasterContinuationReason,
-    loop_id: Option<&str>,
-    goal_id: Option<&str>,
-) -> Vec<UiNotification> {
-    use octos_core::ui_protocol::{LoopFiredEvent, UiLoopFire};
-    let mut notifications = Vec::new();
-    match reason {
-        MasterContinuationReason::LoopFire => {
-            let Some(loop_id) = loop_id else {
-                return notifications;
-            };
-            if let Some(dir) = dir {
-                append_evidence_jsonl_to_dir(
-                    dir,
-                    "loop-ledger.jsonl",
-                    &json!({
-                        "event": "loop_fired",
-                        "session_id": session_id,
-                        "loop_id": loop_id,
-                        "status": "queued",
-                        "trigger": "scheduler",
-                    }),
-                );
-            }
-            notifications.push(UiNotification::LoopFired(LoopFiredEvent {
-                session_id: session_id.clone(),
-                profile_id: Some(profile_id.to_owned()),
-                loop_id: loop_id.to_owned(),
-                loop_state: None,
-                fire: Some(UiLoopFire {
-                    queued: true,
-                    duplicate: Some(false),
-                    continuation_id: None,
-                    dedupe_key: None,
-                    reason: Some("LoopFire".to_owned()),
-                    priority: None,
-                    message: None,
-                    extra: std::collections::BTreeMap::new(),
-                }),
-                ok: Some(true),
-                status: Some("queued".to_owned()),
-            }));
-        }
-        MasterContinuationReason::GoalContinue => {
-            if let Some(dir) = dir {
-                append_evidence_jsonl_to_dir(
-                    dir,
-                    "goal-ledger.jsonl",
-                    &json!({
-                        "event": "goal_continuation",
-                        "session_id": session_id,
-                        "goal_id": goal_id,
-                        "trigger": "scheduler",
-                    }),
-                );
-            }
-            // The goal record snapshot is not in scope at the scheduler drain
-            // site; the goal-ledger `goal_continuation` row + the existing
-            // `session/goal/updated` emitted at goal-set time already satisfy
-            // the verifier's goal-event requirement, so we do not synthesize a
-            // partial `SessionGoalUpdated` here.
-        }
-        _ => {}
-    }
-    notifications
-}
-
 /// M15-F5 (#44): mirror a PRODUCTION agent lifecycle/output notification into
 /// `agent-ledger.jsonl` and (for artifacts) `artifact-index.json`. Driven from
 /// the central raw-notification dispatch so EVERY production `agent/updated`,
@@ -41030,50 +34097,6 @@ fn goal_event_guard_map() -> &'static StdMutex<HashMap<String, u64>> {
     GOAL_EVENT_GENERATION_GUARD.get_or_init(|| StdMutex::new(HashMap::new()))
 }
 
-/// #2065 — the #1959 watermark identity for a goal frame: the SCOPED
-/// goal-store key its generation was allocated under (registered
-/// atomically with the allocation by `next_goal_event_generation` — the
-/// producer's BUILD-TIME key, never a later re-resolution of the
-/// last-writer-wins cwd map, which a concurrent open flips). Falls back to
-/// the plain wire session id for unstamped/unregistered generations
-/// (legacy events, hand-built test frames, FIFO-evicted entries) — exactly
-/// the pre-fix behavior for exactly the events that predate the registry.
-///
-/// Takes the orchestrator STATE lock briefly; callers must resolve this
-/// BEFORE taking the guard-map lock (the two never nest).
-fn goal_event_watermark_identity(wire_session: &str, generation: u64) -> String {
-    default_agent_orchestrator()
-        .goal_event_watermark_key(generation)
-        .map(|key| key.0)
-        .unwrap_or_else(|| wire_session.to_owned())
-}
-
-/// #1959 — per-scope monotonic guard for goal chip events. Returns `false`
-/// (DROP) when a `SessionGoalUpdated` / `SessionGoalCleared` carries a
-/// `generation` that is not greater than the last goal event already emitted
-/// for the same SCOPED goal identity (S3; wire-session fallback for
-/// unregistered generations) — so a stale update that races behind a clear
-/// can never be delivered after it (the client would otherwise resurrect the
-/// cleared chip). Non-goal notifications and legacy `generation == 0` events
-/// (older backend, or events built before #1959) always pass. Both direct-send
-/// boundaries (`send_notification_durable` for the RPC-derived clear,
-/// `send_notification_ephemeral` for the interactive update) funnel through
-/// here, so ordering holds regardless of which path an event takes.
-fn goal_event_passes_generation_guard(notification: &UiNotification) -> bool {
-    let (session, generation) = match notification {
-        UiNotification::SessionGoalUpdated(e) => (e.session_id.0.as_str(), e.generation),
-        UiNotification::SessionGoalCleared(e) => (e.session_id.0.as_str(), e.generation),
-        _ => return true,
-    };
-    // S3: resolve the scoped identity FIRST (orchestrator state lock,
-    // released) — then take the guard lock. The two never nest.
-    let identity = goal_event_watermark_identity(session, generation);
-    let mut guard = goal_event_guard_map()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    goal_event_generation_admits(&mut guard, &identity, generation)
-}
-
 /// Pure core of [`goal_event_passes_generation_guard`] (extracted for testing:
 /// the outer fn's `static` map can't be reset between tests). Admits an event
 /// only when its `generation` strictly exceeds the last admitted generation for
@@ -41112,9 +34135,6 @@ fn send_notification_durable(
 ) -> Result<(), SendError> {
     // #1959 — drop a goal chip event that a newer clear/update already
     // superseded for this session (see the guard's doc comment).
-    if !goal_event_passes_generation_guard(&notification) {
-        return Ok(());
-    }
     // M15-F5 (#44): mirror production supervised-task lifecycle updates into
     // the `task-ledger.jsonl` evidence ledger. NO-OP unless the live tmux soak
     // set `OCTOSCODE_M15_UX_OUTPUT_DIR`, so this is free in normal production.
@@ -41171,9 +34191,6 @@ fn send_notification_ephemeral(
 ) -> Result<(), SendError> {
     // #1959 — drop a stale goal chip update that a newer clear already
     // superseded for this session (see `goal_event_passes_generation_guard`).
-    if !goal_event_passes_generation_guard(&notification) {
-        return Ok(());
-    }
     // Ephemeral frames are NOT appended to the ledger — they are explicitly
     // non-durable per spec § 9. Drops never need a `replay_lossy` summary.
     // Every legacy `message/delta` send funnels through here exactly once

@@ -825,21 +825,6 @@ impl ProfileRuntime {
         ));
         let skills_dir_candidate = self.data_dir.join("skills");
 
-        // #20b — install the main-tree sovereignty provider for the shell
-        // tool. The main tree is the process working directory (the tree the
-        // serve/master was launched from); the closure re-reads its branch and
-        // the caller goal's ledger per command, fail-open when solo/unowned.
-        // Process-global: the LAST profile to bootstrap wins the shared slot,
-        // which is correct for the single-profile serve/master loop this
-        // guards; multi-profile hosts re-install the same rule with their own
-        // data dir.
-        if let Ok(cwd) = std::env::current_dir() {
-            crate::autonomy::agent_orchestrator::InProcessAgentOrchestrator::install_main_tree_sovereignty(
-                self.data_dir.clone(),
-                cwd,
-            );
-        }
-
         Ok(Arc::new(Self {
             profile_id: self.profile_id.clone(),
             data_dir: self.data_dir.clone(),
@@ -1420,12 +1405,6 @@ impl ProfileRuntime {
         let runtime_lifecycle = Some(Arc::new(ProfileRuntimeLifecycle {
             cron_service: Some(cron_service.clone()),
         }));
-        // Hand the same service to the AppUI orchestrator so `loop/delete` can
-        // reap the cron jobs a loop created. Without this the orchestrator has
-        // no cron handle at all and the reap silently does nothing.
-        #[cfg(feature = "api")]
-        crate::autonomy::agent_orchestrator::default_agent_orchestrator()
-            .set_cron_service(cron_service.clone());
         // #1935 — resolve the INDEPENDENT goal-completion verifier lane
         // (`sub_providers` key `goal_verifier`) once at profile build. It is
         // threaded into the `goal_update` tool below and stored on the
@@ -1434,64 +1413,6 @@ impl ProfileRuntime {
         // falls back to the grading session's own provider (pre-#1935
         // behavior, the back-compat default).
         let goal_verifier_llm = build_goal_verifier_provider(&config);
-
-        // #1696 — structured goal tools: goal_get (objective + remaining
-        // budget) and goal_update (model-owned complete|blocked ONLY,
-        // executor-enforced). Session resolved per-call from
-        // ToolContext::parent_session_key; profile scope pinned here.
-        // The orchestrator itself now lives in the un-gated `crate::autonomy`
-        // (so `goal_tool` compiles without `api`), but REGISTRATION stays
-        // `api`-gated: only the serve/AppUI runtime drives goal turns today.
-        // Wiring `octos chat` onto the same engine is a separate change.
-        #[cfg(feature = "api")]
-        {
-            // Peer-agent-based goal: pass the profile's data_dir so
-            // `goal_get` can aggregate BOTH live peer findings (under
-            // `<data_dir>/peers/<slug>/goal`) AND durable ledger findings
-            // (under `<data_dir>/goal-ledgers/<goal_id>.db`).
-            tools.register(
-                crate::goal_tool::GoalGetTool::new(profile.id.clone())
-                    .with_data_dir(data_dir.to_path_buf()),
-            );
-            tools.register(crate::goal_tool::GoalCreateTool::new(profile.id.clone()));
-            {
-                // #1935 — completion claims are graded on the independent
-                // verifier lane when one is configured.
-                let mut goal_update = crate::goal_tool::GoalUpdateTool::new(profile.id.clone())
-                    .with_data_dir(data_dir.to_path_buf());
-                if let Some(ref verifier) = goal_verifier_llm {
-                    goal_update = goal_update.with_verifier_provider(verifier.clone());
-                }
-                tools.register(goal_update);
-            }
-            // #1857 PR 5a — the goal keeper's fleet controls: decompose the
-            // objective onto a durable fleet (`goal_plan`) and launch its ready
-            // tasks onto the live worker pool (`goal_dispatch`). `goal_get`
-            // (above) folds in the fleet plan view + self-detects completion.
-            tools.register(crate::goal_tool::GoalPlanTool::new(profile.id.clone()));
-            tools.register(crate::goal_tool::GoalDispatchTool::new(profile.id.clone()));
-            // PR B — the keeper's escalation controls: approve a worker's
-            // mid-task grant-widen request (`goal_grant`, resumes the task) or
-            // refuse it (`goal_deny`, fails the task). A Blocked task surfaced by
-            // goal_get needs exactly one of these. #1964 — `goal_deny` carries
-            // the profile data_dir like goal_get/goal_update, so a deny that
-            // renders the fleet un-completable syncs the per-goal ledger.
-            tools.register(crate::goal_tool::GoalGrantTool::new(profile.id.clone()));
-            tools.register(
-                crate::goal_tool::GoalDenyTool::new(profile.id.clone())
-                    .with_data_dir(data_dir.to_path_buf()),
-            );
-            // #1977 — zero-token event watchers. Keeper-gated like the
-            // goal_plan family (peers cannot arm monitors). `monitor_create`
-            // carries the profile data_dir so the probe's sandboxed cwd and
-            // the monitor-notes wake sidecar both root there.
-            tools.register(
-                crate::goal_tool::MonitorCreateTool::new(profile.id.clone())
-                    .with_data_dir(data_dir.to_path_buf()),
-            );
-            tools.register(crate::goal_tool::MonitorListTool::new(profile.id.clone()));
-            tools.register(crate::goal_tool::MonitorDeleteTool::new(profile.id.clone()));
-        }
 
         // Step 17: re-apply tool policy AFTER plugin / memory-bank
         // registration so deny entries can target plugin-declared

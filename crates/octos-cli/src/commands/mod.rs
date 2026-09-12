@@ -13,12 +13,8 @@ mod config;
 mod cron;
 mod docs;
 pub mod gateway;
-mod goal;
-
-mod inbox;
 
 mod init;
-mod ledger;
 pub mod mcp;
 pub mod mcp_serve;
 mod memory;
@@ -40,7 +36,6 @@ mod serve;
 pub mod serve_console;
 pub mod skills;
 mod status;
-mod steer;
 
 use std::path::PathBuf;
 
@@ -68,12 +63,8 @@ pub use config::ConfigCommand;
 pub use cron::CronCommand;
 pub use docs::DocsCommand;
 pub use gateway::GatewayCommand;
-pub use goal::GoalCommand;
-
-pub use inbox::InboxCommand;
 
 pub use init::InitCommand;
-pub use ledger::LedgerCommand;
 pub use mcp::McpCommand;
 pub use mcp_serve::McpServeCommand;
 pub use memory::MemoryCommand;
@@ -88,7 +79,6 @@ pub use profile::ProfileCommand;
 pub use serve::ServeCommand;
 pub use skills::SkillsCommand;
 pub use status::StatusCommand;
-pub use steer::SteerCommand;
 
 /// octos: Rust-native coding agent orchestration.
 #[derive(Debug, Parser)]
@@ -147,8 +137,6 @@ pub enum Command {
     Docs(DocsCommand),
     /// Initialize a new .octos configuration.
     Init(InitCommand),
-    /// Query inbox notes file paths (read-only; OLP observability).
-    Inbox(InboxCommand),
     /// Manage OAuth-authenticated MCP servers (`login`/`logout`).
     Mcp(McpCommand),
     /// Inspect and drive the memory-refresh pipeline.
@@ -164,15 +152,8 @@ pub enum Command {
     Skills(SkillsCommand),
     /// Show system status.
     Status(StatusCommand),
-    /// Queue an external-reviewer steer into a session (OLP control).
-    Steer(SteerCommand),
     /// Run as a persistent messaging gateway.
     Gateway(GatewayCommand),
-
-    /// Operator goal transitions (reopen a blocked/paused goal, archive a goal terminally).
-    Goal(GoalCommand),
-    /// Read-only goal-ledger tail (findings/escalations/decisions; OLP).
-    Ledger(LedgerCommand),
 
     /// Clean up stale state and cache files.
     Clean(CleanCommand),
@@ -201,8 +182,6 @@ pub fn reserve_stdout(command: &Command) -> bool {
         | Command::McpServe(_)
         | Command::Chat(_)
         | Command::Arc(_) => true,
-        // `inbox path` is a machine-readable single path.
-        Command::Inbox(_) => true,
         // `octos cache <sub> --json` emits a machine-readable object meant
         // for scripting / the outer loop's gate check. Without `--json` the
         // human table stays on the historical stdout routing.
@@ -421,7 +400,6 @@ impl Executable for Command {
             Self::Cron(cmd) => cmd.execute(),
             Self::Docs(cmd) => cmd.execute(),
             Self::Init(cmd) => cmd.execute(),
-            Self::Inbox(cmd) => cmd.execute(),
             Self::Mcp(cmd) => cmd.execute(),
             Self::Profile(cmd) => cmd.execute(),
             Self::McpServe(cmd) => cmd.execute(),
@@ -429,10 +407,7 @@ impl Executable for Command {
             Self::Serve(cmd) => cmd.execute(),
             Self::Skills(cmd) => cmd.execute(),
             Self::Status(cmd) => cmd.execute(),
-            Self::Steer(cmd) => cmd.execute(),
             Self::Gateway(cmd) => cmd.execute(),
-            Self::Goal(cmd) => cmd.execute(),
-            Self::Ledger(cmd) => cmd.execute(),
             Self::Clean(cmd) => cmd.execute(),
             Self::Memory(cmd) => cmd.execute(),
             Self::Completions(cmd) => cmd.execute(),

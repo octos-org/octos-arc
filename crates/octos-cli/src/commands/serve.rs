@@ -31,14 +31,6 @@ const FLEET_POOL_LEASE_TTL_MS: u64 = 900_000;
 /// Tokens reserved on the fleet budget at launch (soft admission). #1857 PR 5a
 /// fix (MEDIUM): reduced from 50k — that is a whole small goal's budget, so a
 /// modestly-budgeted goal would have EVERY task rejected. This is a per-attempt
-/// admission estimate, not a hard cap (the attempt's real usage is committed on
-/// completion), so a conservative 12k admits many more tasks per budget while
-/// still bounding fan-out.
-const FLEET_POOL_PROJECTED_TOKENS: u64 = 12_000;
-/// #1857 PR 5a fix (HIGH 2): bounded boot-reconcile retries before the pool is
-/// left uninstalled for this boot (a store that can't reconcile must not accept
-/// new dispatch). Kept small — reconcile touches only prior-boot leases.
-const FLEET_BOOT_RECONCILE_MAX_ATTEMPTS: u32 = 3;
 
 /// #1857 PR 5a fix (HIGH 1) — a fleet worker's shell reach is bounded ONLY by
 /// the sandbox (the closed worker tool set is a denylist, not a boundary). Fail
@@ -74,50 +66,6 @@ fn fleet_sandbox_supports_repo_git_write(
     sandbox_cfg: &octos_agent::sandbox::SandboxConfig,
 ) -> bool {
     octos_agent::sandbox::create_sandbox(sandbox_cfg).supports_repo_git_write()
-}
-
-/// #1857 PR 5a fix (HIGH 2) — reconcile the fleet store at boot with a bounded
-/// retry. `reconcile` is the ONLY production recovery of a prior boot's stale
-/// leases: a stale `Launching`/`Running` child never re-readies on its own
-/// (lease expiry promotes only `Planned`), so a transient reconcile failure
-/// would silently wedge those children until a LATER clean boot. Retry up to
-/// `max_attempts` (small linear backoff); return whether reconcile ultimately
-/// SUCCEEDED. On persistent failure the caller must NOT install the pool, but
-/// serve boot itself is never aborted (advisory, like `FleetKernelStore::open`).
-async fn fleet_boot_reconcile(
-    store: &octos_fleet::FleetKernelStore,
-    now_ms: u64,
-    owner_epoch: u64,
-    max_attempts: u32,
-) -> bool {
-    for attempt in 1..=max_attempts.max(1) {
-        match store.reconcile(now_ms, owner_epoch).await {
-            Ok(report) => {
-                tracing::info!(
-                    interrupted = report.interrupted.len(),
-                    owner_epoch,
-                    attempt,
-                    "fleet-kernel boot reconcile complete"
-                );
-                return true;
-            }
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    attempt,
-                    max_attempts,
-                    "fleet-kernel boot reconcile failed; retrying"
-                );
-                if attempt < max_attempts {
-                    tokio::time::sleep(std::time::Duration::from_millis(
-                        50u64.saturating_mul(u64::from(attempt)),
-                    ))
-                    .await;
-                }
-            }
-        }
-    }
-    false
 }
 
 fn smtp_email_is_usable(email: &crate::profiles::EmailSettings) -> bool {
@@ -617,132 +565,6 @@ impl ServeCommand {
             }
         };
 
-        // #1973 fix A — load the persisted cwd-scope registry BEFORE the
-        // supervisor store restores goals, so a goal stored under a scoped key
-        // (`<wire>\0~cwd-<scope>`) resolves — and its restored continuation is
-        // dispatchable — immediately at boot instead of only after a client
-        // reopens the session. Failure is non-fatal: the registry starts empty
-        // (the pre-sidecar behavior) and repopulates on session/open.
-        if let Err(error) = crate::autonomy::agent_orchestrator::default_agent_orchestrator()
-            .configure_goal_scopes_sidecar(data_dir.join("goal-scopes.json"))
-        {
-            tracing::warn!(
-                %error,
-                "failed to load goal-scopes sidecar; restored cwd-scoped goals stay \
-                 invisible until their session reopens"
-            );
-        }
-        if let Err(error) = crate::autonomy::agent_orchestrator::default_agent_orchestrator()
-            .configure_supervisor_store(data_dir.join("supervisor"))
-        {
-            tracing::warn!(
-                %error,
-                "failed to configure durable agent supervisor store; continuing with in-process supervision only"
-            );
-        } else if self.solo && std::env::var("OCTOS_SOLO_RESUME_LOOPS").ok().as_deref() != Some("1")
-        {
-            // Solo-boot loop safety: restored loops must not silently resume
-            // firing model turns on a single-operator box. Park them paused;
-            // `/loop resume <id>` re-arms, OCTOS_SOLO_RESUME_LOOPS=1 opts out.
-            for (loop_id, session_id) in
-                crate::autonomy::agent_orchestrator::default_agent_orchestrator()
-                    .pause_restored_loops_for_solo_boot()
-            {
-                tracing::info!(
-                    loop_id = %loop_id,
-                    session_id = %session_id.0,
-                    "solo boot: restored loop parked as paused (resume with /loop resume)"
-                );
-            }
-            // Same safety for GOALS (#1694): a goal restored `active`
-            // resumes autonomous model turns nobody asked this process
-            // for. Park paused; `/goal resume` re-arms,
-            // OCTOS_SOLO_RESUME_GOALS=1 opts out.
-            if std::env::var("OCTOS_SOLO_RESUME_GOALS").ok().as_deref() != Some("1") {
-                // #1973 fix C — resolve each parked goal's PROFILE data dir so
-                // the park also flips the durable per-goal SQLite ledger row to
-                // `paused` (it used to keep saying `active` forever). A
-                // short-lived registry handle: the long-lived `profile_store`
-                // is built later in boot, and opening the store twice is just
-                // idempotent path math + create_dir_all.
-                let park_profile_registry =
-                    crate::profiles::ProfileStore::open(&state_home, &data_dir).ok();
-                let park_profile_data_dir = |profile_id: &str| -> Option<PathBuf> {
-                    let registry = park_profile_registry.as_ref()?;
-                    let profile = registry.get(profile_id).ok().flatten()?;
-                    Some(registry.resolve_data_dir(&profile))
-                };
-                for (goal_id, session_id) in
-                    crate::autonomy::agent_orchestrator::default_agent_orchestrator()
-                        .pause_restored_goals_for_solo_boot_with_ledger_sync(&park_profile_data_dir)
-                {
-                    tracing::info!(
-                        goal_id = %goal_id,
-                        session_id = %session_id.0,
-                        "solo boot: restored goal parked as paused (resume with /goal resume)"
-                    );
-                }
-            }
-        }
-
-        // Fleet-kernel outbox consumer (#1857 PR 4a): open the durable fleet
-        // store beside the supervisor store — guarded by the same serve
-        // single-writer lock, and redb is single-process, so the sibling
-        // `fleet-kernel.redb` is safe — install it on the orchestrator and
-        // spawn the background consumer that turns `ChildDone` / `FleetDrained`
-        // events into keeper wake-ups. Dormant until a fleet writes events (a
-        // later PR); a failure to open is non-fatal (fleet features stay inert).
-        // #1857 PR 5a — mint ONE boot lease owner epoch, shared by the boot
-        // reconcile (below) and the worker pool (built after the ProfileRuntime
-        // loop). It fences stale completions from a PRIOR boot: reconcile
-        // interrupts leases stamped with a different epoch, and the pool stamps
-        // THIS epoch on every launch. Wall-clock ms is monotone across restarts
-        // (unlike a random id), so a later boot always out-ranks an earlier one.
-        let fleet_owner_epoch = chrono::Utc::now().timestamp_millis().max(0) as u64;
-        // #1857 PR 5a fix (HIGH 2) — gates the worker-pool build below: the pool
-        // is installed ONLY if the boot reconcile succeeded (a store that can't
-        // reconcile a prior boot's stale leases must not accept new dispatch).
-        let mut fleet_reconciled = false;
-        match octos_fleet::FleetKernelStore::open(data_dir.join("fleet-kernel")).await {
-            Ok(fleet_store) => {
-                crate::autonomy::agent_orchestrator::default_agent_orchestrator()
-                    .set_fleet_store(fleet_store.clone());
-                // #1857 PR 5a — BOOT RECOVERY: interrupt any attempt still
-                // holding a stale (prior-epoch) lease, release its budget
-                // reservation, and return its child to `Ready` so this boot can
-                // relaunch it. Fix (HIGH 2): retry a bounded number of times —
-                // reconcile is the ONLY production recovery of a prior boot's
-                // stale `Launching`/`Running` children — and on PERSISTENT
-                // failure leave the pool uninstalled (loud ERROR) rather than
-                // accept new dispatch onto an unreconciled store. Never abort
-                // serve boot (advisory, like `open`).
-                let reconcile_now = chrono::Utc::now().timestamp_millis().max(0) as u64;
-                fleet_reconciled = fleet_boot_reconcile(
-                    &fleet_store,
-                    reconcile_now,
-                    fleet_owner_epoch,
-                    FLEET_BOOT_RECONCILE_MAX_ATTEMPTS,
-                )
-                .await;
-                if !fleet_reconciled {
-                    tracing::error!(
-                        owner_epoch = fleet_owner_epoch,
-                        "fleet-kernel boot reconcile failed after retries; fleet dispatch \
-                         DISABLED this boot (a store that can't reconcile must not accept new \
-                         dispatch). Stale leases still expire on their TTL."
-                    );
-                }
-                crate::autonomy::fleet_wake::spawn_fleet_outbox_consumer(fleet_store);
-                tracing::info!("fleet-kernel outbox consumer started");
-            }
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    "failed to open fleet-kernel store; fleet wake consumer not started"
-                );
-            }
-        }
-
         let broadcaster = Arc::new(EventBroadcaster::new(256));
 
         // M11-F: per-profile LLM, credentials, tool registry, plugins,
@@ -814,15 +636,11 @@ impl ServeCommand {
             crate::profiles::ProfileStore::open(&state_home, &data_dir)
                 .wrap_err("failed to open profile store")?,
         );
-        // Operator goal transitions must serialize with the live
+
         // orchestrator. The data-dir serve lock tells the CLI whether this
         // endpoint is mandatory; a missing endpoint while the lock is held is
         // therefore a fail-closed old-version/startup condition, never an
         // excuse to append an offline snapshot behind the live cache.
-        #[cfg(unix)]
-        let _goal_operator_control =
-            crate::commands::goal::spawn_goal_operator_control(&data_dir, profile_store.clone())
-                .wrap_err("failed to start local goal operator-control RPC")?;
 
         // M11-F regression fix REG-4: bootstrap bundled app-skills
         // (`crates/app-skills/`) and platform-skills (`crates/platform-
@@ -942,242 +760,6 @@ impl ServeCommand {
                     );
                 }
             }
-        }
-
-        // #1857 PR 5a — build the LIVE fleet worker pool the goal keeper
-        // dispatches ready tasks onto, then install it on the orchestrator
-        // singleton (`goal_dispatch` reaches it through `fleet_pool()`). It
-        // needs a bootstrapped `ProfileRuntime` (LLM + episodic memory +
-        // sandbox), so it is built HERE — after the profile loop — whereas the
-        // `reconcile` above ran at store-open time (it needs only store+epoch).
-        //
-        // v1 limitation (documented): the pool binds ONE keeper profile —
-        // preferring the synthetic main profile (`MAIN_PROFILE_ID`), else the
-        // lexicographically-first bootstrapped profile. All fleet workers run on
-        // that profile's model/memory/sandbox regardless of which profile a goal
-        // is set on. A goal on a DIFFERENT profile is fenced at dispatch time
-        // against the pool's bound `keeper_profile_id` (see model_dispatch_fleet).
-        //
-        // Fix (HIGH 2): gated on `fleet_reconciled` — a store that failed its
-        // boot reconcile must not accept new dispatch, so no pool is installed.
-        if let Some(fleet_store) = crate::autonomy::agent_orchestrator::default_agent_orchestrator()
-            .fleet_store()
-            .filter(|_| fleet_reconciled)
-        {
-            let keeper = profile_runtimes
-                .get(octos_core::MAIN_PROFILE_ID)
-                .cloned()
-                .or_else(|| {
-                    profile_runtimes
-                        .iter()
-                        .min_by(|left, right| left.0.cmp(right.0))
-                        .map(|(_, rt)| rt.clone())
-                });
-            match keeper {
-                Some(rt) => {
-                    // PR-3 requires a network-isolated sandbox: the worker tool
-                    // set is a denylist, not a boundary, so the shell's reach is
-                    // bounded only by the sandbox. Base the sandbox on the profile
-                    // default with network OFF; PR A re-enables raw egress
-                    // PER-ATTEMPT only for a `Full` network grant (see the factory
-                    // closure below). `None`/`Hosts` keep it off (`Hosts` is
-                    // enforced by the granted web tools, not raw egress).
-                    let mut sandbox_cfg = rt.default_sandbox.clone();
-                    sandbox_cfg.allow_network = false;
-                    // #1857 PR 5a fix (HIGH 1) — FAIL CLOSED: install the pool
-                    // ONLY when the sandbox is a REAL isolating backend. A
-                    // disabled sandbox (or `Auto` with no backend on this host)
-                    // yields `NoSandbox` = unbounded shell reach (curl / git push
-                    // / host access), breaking PR-3's replay-safe boundary. The
-                    // isolation of the BACKEND is independent of the network flag,
-                    // so probing with network off is sufficient. Leave the pool
-                    // unset so goal_dispatch cleanly reports "unavailable" instead
-                    // of running a fleet worker unsandboxed.
-                    if !fleet_sandbox_is_isolating(&sandbox_cfg) {
-                        tracing::error!(
-                            keeper_profile = %rt.profile_id,
-                            sandbox_mode = ?sandbox_cfg.mode,
-                            "fleet dispatch disabled: no network-isolating sandbox available \
-                             (requires a real backend: bwrap / macos / docker). goal_dispatch \
-                             will report the pool unavailable."
-                        );
-                    } else {
-                        // §5 gate condition 3: compute the repo-`.git`-write
-                        // capability BEFORE the factory closure moves `sandbox_cfg`
-                        // in (the closure needs the whole config; the pool only
-                        // needs the bool).
-                        let repo_git_write_supported =
-                            fleet_sandbox_supports_repo_git_write(&sandbox_cfg);
-                        // The SandboxFactory folds the per-attempt SandboxGrant
-                        // (derived from the task's WorkerGrant) onto the base
-                        // network-isolated sandbox: `allow_network` from the
-                        // network lane (`Full` → true, `None`/`Hosts` → false) and
-                        // `repo_git_write` from the FS lane (`FsGrant::Host` worktree
-                        // worker → `Some(<repo>/.git)`, a TARGETED rw-bind so its
-                        // `git commit` can reach `<repo>/.git` outside its cwd
-                        // WITHOUT exposing host sockets via `--bind / /`).
-                        let sandbox_factory: octos_fleet_worker::SandboxFactory = Arc::new(
-                            move |_cwd: &std::path::Path,
-                                  grant: octos_fleet_worker::SandboxGrant| {
-                                let mut cfg = sandbox_cfg.clone();
-                                cfg.allow_network = grant.allow_network;
-                                cfg.repo_git_write = grant.repo_git_dir;
-                                // #1976 — fold the per-path SHELL write fence
-                                // onto the base config. macOS enforces it as
-                                // SBPL regex rules; bwrap/docker degrade the
-                                // workspace to read-only for the shell (warned
-                                // in create_sandbox). Deny-wins with the file
-                                // tools' own fence.
-                                cfg.write_allow_globs = grant.write_allow_globs;
-                                Arc::<dyn octos_agent::sandbox::Sandbox>::from(
-                                    octos_agent::sandbox::create_sandbox(&cfg),
-                                )
-                            },
-                        );
-                        // #1976 — the `[denied]` write-grant violation sink:
-                        // a fenced worker's refused write is returned to the
-                        // model by the tool AND recorded here as a durable
-                        // `[denied]`-class finding on the offending task's
-                        // goal ledger. Detached to the blocking pool (sqlite
-                        // I/O) so a rare violation never stalls the worker's
-                        // async turn. Best-effort — the tool refusal already
-                        // bounded the write.
-                        let denial_data_dir = rt.data_dir.clone();
-                        let denial_profile_id = rt.profile_id.clone();
-                        let violation_sink: octos_agent::tools::write_grant::WriteGrantViolationSink =
-                            Arc::new(move |v: octos_agent::tools::write_grant::WriteGrantViolation| {
-                                let data_dir = denial_data_dir.clone();
-                                let profile_id = denial_profile_id.clone();
-                                let record = move || {
-                                    crate::autonomy::agent_orchestrator::default_agent_orchestrator()
-                                        .record_fleet_write_grant_denial(
-                                            &data_dir,
-                                            &profile_id,
-                                            &v.workspace,
-                                            &v.detail,
-                                        );
-                                };
-                                match tokio::runtime::Handle::try_current() {
-                                    Ok(handle) => {
-                                        handle.spawn_blocking(record);
-                                    }
-                                    Err(_) => record(),
-                                }
-                            });
-                        let factory = Arc::new(
-                            octos_fleet_worker::AgentFactory::new(
-                                rt.llm.clone(),
-                                rt.memory.clone(),
-                                sandbox_factory,
-                            )
-                            .with_violation_sink(violation_sink),
-                        );
-                        let cfg = octos_fleet_worker::PoolConfig {
-                            global_concurrency: FLEET_POOL_GLOBAL_CONCURRENCY,
-                            per_fleet_concurrency: FLEET_POOL_PER_FLEET_CONCURRENCY,
-                            deadline: std::time::Duration::from_secs(
-                                FLEET_POOL_ATTEMPT_DEADLINE_SECS,
-                            ),
-                            owner_epoch: fleet_owner_epoch,
-                            lease_ttl_ms: FLEET_POOL_LEASE_TTL_MS,
-                            projected_tokens: FLEET_POOL_PROJECTED_TOKENS,
-                            // Each attempt gets its own `<root>/<fleet>/<task>` cwd.
-                            workspace_root: data_dir.join("fleet-work"),
-                            // Fix (HIGH 4): the pool's bound keeper profile — the
-                            // keeper fences a cross-profile goal against it.
-                            keeper_profile_id: rt.profile_id.clone(),
-                            // §5 gate condition 3: only take the worktree flow when
-                            // the resolved backend supports full-FS write (bwrap /
-                            // full-read macOS). Otherwise every task falls back to a
-                            // scratch workspace so a non-supporting backend never
-                            // loses a deliverable.
-                            repo_git_write_supported,
-                        };
-                        let pool = octos_fleet_worker::FleetWorkerPool::new(
-                            Arc::new(fleet_store),
-                            factory,
-                            cfg,
-                            Arc::new(|| chrono::Utc::now().timestamp_millis().max(0) as u64),
-                        );
-                        crate::autonomy::agent_orchestrator::default_agent_orchestrator()
-                            .set_fleet_pool(Arc::new(pool));
-                        // #1865/#1964 — the keeper profile's data dir, installed
-                        // beside the pool it belongs to: the eager fleet settle
-                        // monitor syncs fleet-driven goal terminals into
-                        // `<data_dir>/goal-ledgers/` (the SAME dir the profile's
-                        // goal_get/goal_update/goal_deny tools carry via
-                        // `.with_data_dir` in runtime/profile.rs).
-                        crate::autonomy::agent_orchestrator::default_agent_orchestrator()
-                            .set_fleet_ledger_data_dir(rt.data_dir.clone());
-                        tracing::info!(
-                            keeper_profile = %rt.profile_id,
-                            "fleet worker pool installed (goal keeper dispatch enabled)"
-                        );
-                    }
-                }
-                None => tracing::warn!(
-                    "no bootstrapped profile runtime; fleet worker pool not built \
-                     (goal_dispatch will report the pool unavailable)"
-                ),
-            }
-        }
-
-        // Boot-resume — "a fleet survives an octos restart". The boot reconcile
-        // above flipped any restart-interrupted fleet's in-flight children back
-        // to `Ready`, but emitted NO outbox event — so the outbox consumer never
-        // wakes the keeper and an in-progress fleet would STALL forever after a
-        // restart (nothing re-dispatches its ready tasks). Now that the worker
-        // pool is installed, enqueue a keeper wake for every live fleet with a
-        // launchable child; the global master-continuation drain (started below,
-        // ~5s poll) picks them up on its next tick → PR-4b reseed pre-pass →
-        // `run_standalone_turn` → the keeper's `goal_dispatch` re-launches the
-        // ready set. Gated on a reconciled store AND an installed pool (no pool ⇒
-        // nothing to dispatch onto). Re-fetch the store here: the local binding
-        // was moved into the outbox consumer / worker pool above.
-        let boot_resume_orchestrator =
-            crate::autonomy::agent_orchestrator::default_agent_orchestrator();
-        let boot_resume_store =
-            if fleet_reconciled && boot_resume_orchestrator.fleet_pool().is_some() {
-                boot_resume_orchestrator.fleet_store()
-            } else {
-                None
-            };
-        if let Some(store) = boot_resume_store {
-            let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
-            match crate::autonomy::fleet_wake::enqueue_fleet_boot_resume_wakes(
-                &store,
-                boot_resume_orchestrator,
-                now_ms,
-            )
-            .await
-            {
-                Ok(n) if n > 0 => tracing::info!(
-                    fleets = n,
-                    "fleet boot-resume: re-woke keepers for restart-stranded fleets"
-                ),
-                Ok(_) => {}
-                Err(error) => tracing::warn!(%error, "fleet boot-resume wake pass failed"),
-            }
-        }
-
-        // #2033 — the PEER-fleet half of boot-resume. The peer-fleet synthesis
-        // gate is edge-triggered (a peer turn terminal / a master turn
-        // terminal), which is sound inside a process but leaves a restart with
-        // no edge at all: a synthesis that was owed when the previous process
-        // exited is recovered only by the next unrelated turn — never, on a
-        // fleet whose master is idle and whose peers are done. Recompute it here
-        // for every profile, bounded to fleets whose delivered round is past
-        // their recorded mark. Enqueue-only; the global continuation drain
-        // spawned below turns it into a turn under the usual gates.
-        //
-        // Peers live under the PROFILE data dir (not the serve `data_dir`), so
-        // this walks the profile runtimes rather than a single root.
-        for (profile_id, rt) in &profile_runtimes {
-            crate::api::ui_protocol_transport::enqueue_boot_owed_peer_fleet_synthesis(
-                profile_id,
-                &rt.data_dir.join("peers"),
-            )
-            .await;
         }
 
         let session_cache = Arc::new(
@@ -1511,7 +1093,6 @@ impl ServeCommand {
         // restored goal/loop continuations now drain even while the stdio
         // client is idle or detached, instead of waiting for connection ticks.
         // Everything the drain needs (the full AppState) is constructed above.
-        crate::api::ui_protocol_transport::spawn_global_master_continuation_drain(state.clone());
 
         // #2019 — install the HUMAN sink over background events that today
         // only wake the model (monitor event lines, claimed fleet outbox
@@ -1835,56 +1416,6 @@ mod tests {
         );
     }
 
-    /// #1973 fix E — a SOURCE-ORDER tripwire, stated plainly for what it is:
-    /// no unit-level harness can boot a real `octos serve --stdio` (the run()
-    /// method is a monolith that binds sockets, opens redb stores, and holds a
-    /// data-dir lock), so this test asserts the one thing the fix changed — in
-    /// `run()`, `spawn_global_master_continuation_drain` is called BEFORE the
-    /// stdio early-return (`stdio_connection`) — by scanning this file's own
-    /// source. It proves wiring ORDER at the call-site level, not runtime
-    /// behavior; a refactor that reorders the two lines trips it immediately.
-    #[test]
-    fn global_drain_spawns_before_the_stdio_early_return() {
-        let src = include_str!("serve.rs");
-        // Needles assembled at runtime so this test's own string literals
-        // cannot satisfy (or double-count) the search.
-        let spawn_needle = format!(
-            "spawn_global_master_continuation_drain{}",
-            "(state.clone());"
-        );
-        // Anchor on the CALL, not on the module path that reaches it. The
-        // original needle was `ui_protocol::stdio_connection(state)`; #1728
-        // renamed the module to `ui_protocol_transport`, so the needle stopped
-        // matching, `find` returned `None`, and this guard has been failing
-        // ever since — unnoticed, because CI's api-feature steps are a list of
-        // hand-written name filters and `commands::serve::tests::*` matches
-        // none of them (#2029). Dropping the module prefix makes the anchor
-        // survive a rename while still pinning the one call that matters.
-        let stdio_needle = format!("::stdio_connection{}", "(state)");
-        let spawn_at = src
-            .find(&spawn_needle)
-            .expect("the global drain spawn call must exist in serve.rs");
-        let stdio_at = src.find(&stdio_needle).unwrap_or_else(|| {
-            panic!(
-                "the stdio connection call must exist in serve.rs — if it was \
-                 renamed, update `stdio_needle` rather than deleting this guard: \
-                 it is the only thing pinning the drain BEFORE the early return"
-            )
-        });
-        assert!(
-            spawn_at < stdio_at,
-            "the global master-continuation drain must be spawned BEFORE the stdio \
-             early-return, or headless `serve --stdio` loses its goal-continuation \
-             safety net and escalation-timeout sweep"
-        );
-        assert_eq!(
-            src.matches(&spawn_needle).count(),
-            1,
-            "exactly one drain spawn call site (the pre-#1973 post-stdio site was \
-             MOVED, not duplicated — two loops would burn duplicate sweep I/O)"
-        );
-    }
-
     #[test]
     fn non_stdio_serve_leaves_task_query_store_none_for_gateway_proxy() {
         // HTTP/gateway serve must leave it `None` so `handle_task_cancel`
@@ -1966,83 +1497,6 @@ mod tests {
         assert!(
             !fleet_sandbox_is_isolating(&unhonorable),
             "a refusing sandbox resolution must NOT install the fleet pool",
-        );
-    }
-
-    /// #1857 PR 5a fix (HIGH 2) — the bounded boot reconcile recovers a prior
-    /// boot's stale-lease attempt AND reports success on a healthy store (so the
-    /// pool is allowed to install). Drives the serve-boot helper through the
-    /// store-level recovery contract.
-    #[tokio::test]
-    async fn fleet_boot_reconcile_recovers_a_stale_attempt_on_a_healthy_store() {
-        use octos_core::SessionKey;
-        use octos_fleet::{
-            ChildStatus, Fleet, FleetBudget, FleetKernelStore, LaunchOutcome, TaskSpec,
-        };
-        use std::sync::Arc;
-
-        let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(
-            FleetKernelStore::open(dir.path().join("fleet-kernel"))
-                .await
-                .expect("open store"),
-        );
-        Fleet::create(
-            store.clone(),
-            "fboot",
-            SessionKey::new("api", "keeper-boot"),
-            Some("/repos/app".to_owned()),
-            "tenant-a",
-            FleetBudget {
-                token_budget: 1_000_000,
-                tokens_reserved: 0,
-                tokens_committed: 0,
-                hard: false,
-            },
-            "obj",
-            vec![TaskSpec {
-                task_id: "t1".to_owned(),
-                title: "t".to_owned(),
-                detail: "d".to_owned(),
-                deps: Vec::new(),
-                acceptance: Vec::new(),
-                grant: octos_fleet::WorkerGrant::minimal(),
-            }],
-            1,
-        )
-        .await
-        .expect("create fleet");
-
-        // A prior boot (epoch 100) launched + started the attempt.
-        let prior_epoch = 100u64;
-        match store
-            .launch_child("fboot", "t1", 100, 1, prior_epoch, 60_000)
-            .await
-            .unwrap()
-        {
-            LaunchOutcome::Launched { attempt_id } => {
-                store.mark_running("t1", &attempt_id).await.unwrap();
-            }
-            other => panic!("expected Launched, got {other:?}"),
-        }
-
-        // This boot (epoch 101) reconciles via the serve-boot helper.
-        let ok = fleet_boot_reconcile(
-            &store,
-            2,
-            prior_epoch + 1,
-            FLEET_BOOT_RECONCILE_MAX_ATTEMPTS,
-        )
-        .await;
-        assert!(
-            ok,
-            "reconcile must succeed on a healthy store (the pool may install)",
-        );
-        let child = store.get_child("fboot", "t1").await.unwrap().unwrap();
-        assert_eq!(
-            child.status,
-            ChildStatus::Ready,
-            "the stale attempt must return to Ready for this boot to relaunch",
         );
     }
 

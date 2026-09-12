@@ -113,17 +113,6 @@ pub struct ChatCommand {
     #[arg(long)]
     pub profile: Option<String>,
 
-    /// Enable the GOAL tools (`goal_create` / `goal_get` / `goal_update`) in
-    /// this chat session. A goal is a durable objective + token budget that
-    /// SURVIVES across `octos chat` invocations: state lives in the profile's
-    /// supervisor store, so a later `octos chat --goals` in the same profile
-    /// re-reads the same goal. Off by default — the tool surface is unchanged
-    /// unless you ask for it.
-    ///
-    /// Peers are opt-in on top of this — see `--peers`.
-    #[arg(long)]
-    pub goals: bool,
-
     /// Enable the PEER tools (`peer_handoff` / `peer_list` / `peer_respond`)
     /// and host staged peers IN THIS PROCESS.
     ///
@@ -133,10 +122,7 @@ pub struct ChatCommand {
     /// `ask_user_question` does NOT prompt this terminal — the terminal belongs
     /// to you, the master. It PARKS, `peer_list` reports it as
     /// `awaiting_input`, and you answer it with `peer_respond`.
-    ///
-    /// Requires `--goals`: a peer is a unit of work under a goal, and the
-    /// handoff auto-binds to the session's active goal.
-    #[arg(long, requires = "goals")]
+    #[arg(long)]
     pub peers: bool,
 
     /// FULL AUTONOMY ("yolo"): bypass all approvals AND the sandbox — the
@@ -635,11 +621,6 @@ fn parse_question_selection(
     (selected_labels, other_picked)
 }
 
-/// The goal tools `octos chat --goals` registers. Also the exact set added to
-/// an allow-list profile surface so `filter_by_profile` keeps them.
-#[cfg(any(feature = "api", test))]
-const CHAT_GOAL_TOOLS: &[&str] = &["goal_get", "goal_create", "goal_update"];
-
 /// The peer tools `octos chat --peers` registers, and the exact set added to an
 /// allow-list profile surface.
 ///
@@ -667,18 +648,6 @@ fn widen_allow_list(surface: &mut octos_agent::profile::ProfileTools, wanted: &[
             }
         }
     }
-}
-
-/// Stable goal session key for `octos chat --goals`.
-///
-/// Goal tools and the OUP dispatcher share this durable session identity.
-/// Minting the SAME key on every run is precisely what
-/// makes a chat goal outlive the process. Scoped by profile so two profiles
-/// don't share one goal; the `cli` segment keeps it from colliding with a
-/// `serve` wire session (`<profile>:local:<name>` / `<profile>:api:<name>`).
-#[cfg(any(feature = "api", test))]
-fn chat_goal_session_key(profile_id: &str) -> String {
-    format!("{profile_id}:cli:chat")
 }
 
 /// Machine-readable result envelope for `octos chat --json --message`.
@@ -1886,87 +1855,6 @@ fn create_custom_provider(
 }
 
 #[cfg(test)]
-mod chat_goal_tests {
-    use super::*;
-
-    /// The durability contract for `octos chat --goals`: the goal session key
-    /// must be STABLE across runs (same profile -> same key, so a later chat
-    /// rehydrates the same goal) and SCOPED per profile (so two profiles never
-    /// share one goal record).
-    #[test]
-    fn should_mint_a_stable_per_profile_key_when_chat_goals_are_enabled() {
-        assert_eq!(
-            chat_goal_session_key("dev"),
-            chat_goal_session_key("dev"),
-            "same profile must map to the same key on every run — this is what \
-             makes a chat goal survive the process",
-        );
-        assert_ne!(
-            chat_goal_session_key("dev"),
-            chat_goal_session_key("prod"),
-            "different profiles must not share a goal record",
-        );
-        // The `cli` segment keeps chat goals off serve's wire-session keys
-        // (`<profile>:local:<name>` / `<profile>:api:<name>`).
-        assert_eq!(chat_goal_session_key("dev"), "dev:cli:chat");
-    }
-
-    /// Registering the goal tools is NOT enough: chat's default `coding`
-    /// profile is an ALLOW LIST, so `filter_by_profile` silently drops any tool
-    /// not named in it — the tools were registered and the model still could
-    /// not see them (observed live: tool count identical with and without
-    /// `--goals`). The allow list must be widened for exactly the goal tools.
-    #[test]
-    fn should_keep_goal_tools_when_the_profile_surface_is_an_allow_list() {
-        use octos_agent::profile::ProfileTools;
-        let coding = ProfileTools::AllowList {
-            tools: vec![
-                "group:fs".to_owned(),
-                "group:runtime".to_owned(),
-                "spawn".to_owned(),
-            ],
-        };
-        // Baseline: the untouched surface drops every goal tool.
-        for name in CHAT_GOAL_TOOLS {
-            assert!(
-                !coding.allows(name),
-                "{name} must be filtered out before the fix — otherwise this \
-                 test proves nothing",
-            );
-        }
-        // Apply the same widening `--goals` performs.
-        let mut widened = coding.clone();
-        if let ProfileTools::AllowList { tools } = &mut widened {
-            for name in CHAT_GOAL_TOOLS {
-                tools.push((*name).to_owned());
-            }
-        }
-        for name in CHAT_GOAL_TOOLS {
-            assert!(widened.allows(name), "{name} must survive the filter");
-        }
-        // And the widening must not smuggle in anything else.
-        assert!(!widened.allows("web_search"));
-        assert!(!widened.allows("peer_handoff"));
-    }
-
-    /// `--goals` is opt-in: the default chat tool surface must be unchanged.
-    #[test]
-    fn should_default_goals_to_off() {
-        use clap::Parser as _;
-        #[derive(clap::Parser)]
-        struct TestCli {
-            #[command(flatten)]
-            chat: ChatCommand,
-        }
-        assert!(
-            !TestCli::parse_from(["octos-chat"]).chat.goals,
-            "goal tools must not appear in the default chat tool surface",
-        );
-        assert!(TestCli::parse_from(["octos-chat", "--goals"]).chat.goals);
-    }
-}
-
-#[cfg(test)]
 mod chat_peer_tests {
     use super::*;
     use clap::Parser as _;
@@ -1978,23 +1866,17 @@ mod chat_peer_tests {
         chat: ChatCommand,
     }
 
-    /// `--peers` is opt-in and RIDES on `--goals`. A peer is a unit of work
-    /// under a goal — `peer_handoff` auto-binds to the session's active goal —
-    /// so `--peers` alone would stage peers bound to nothing. clap must reject
-    /// it at parse time rather than letting it half-work at runtime.
+    /// `--peers` is opt-in: the default chat tool surface must be unchanged.
     #[test]
-    fn should_require_goals_when_peers_is_requested() {
+    fn should_default_peers_to_off() {
         assert!(
             !TestCli::parse_from(["octos-chat"]).chat.peers,
             "peers must be off by default",
         );
         assert!(
-            TestCli::try_parse_from(["octos-chat", "--peers"]).is_err(),
-            "--peers without --goals must be a parse error, not a silent no-op",
+            TestCli::parse_from(["octos-chat", "--peers"]).chat.peers,
+            "--peers must parse on its own",
         );
-        let both = TestCli::try_parse_from(["octos-chat", "--peers", "--goals"])
-            .expect("--peers --goals is the supported combination");
-        assert!(both.chat.peers && both.chat.goals);
     }
 
     /// Registering the peer tools is not enough: chat's default `coding`
@@ -2018,13 +1900,8 @@ mod chat_peer_tests {
                  this test proves nothing",
             );
         }
-        let wanted: Vec<&str> = CHAT_GOAL_TOOLS
-            .iter()
-            .chain(CHAT_PEER_TOOLS.iter())
-            .copied()
-            .collect();
-        widen_allow_list(&mut surface, &wanted);
-        for name in CHAT_GOAL_TOOLS.iter().chain(CHAT_PEER_TOOLS.iter()) {
+        widen_allow_list(&mut surface, CHAT_PEER_TOOLS);
+        for name in CHAT_PEER_TOOLS {
             assert!(surface.allows(name), "{name} must survive the filter");
         }
         // The carve is exactly three peer tools — the ones chat can actually

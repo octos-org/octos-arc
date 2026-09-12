@@ -44,11 +44,11 @@ use octos_core::ui_protocol::{
 };
 use tracing::{debug, info, warn};
 
-use crate::autonomy::agent_orchestrator::default_agent_orchestrator;
 use crate::build_cache::pool::{BuildCacheConfig, Slot, SlotOutcome};
 use crate::contracts::UiProtocolContractStores;
 
 mod recovery;
+mod workspace_scope;
 pub(crate) use recovery::*;
 // task-evo-peer-turn-status — the typed lifetime projection lives in
 // `recovery` (next to its writers); the derivation below uses both.
@@ -311,7 +311,7 @@ pub(crate) fn bind_peer_supervised_task_with_workspace_strict(
 /// `None` (unstamped, legacy shape).
 #[cfg_attr(not(any(feature = "api", test)), allow(dead_code))]
 pub(crate) fn workspace_scope_encode(root: &std::path::Path) -> Option<String> {
-    crate::autonomy::workspace_scope::WorkspaceScope::peer_stamp(root)
+    workspace_scope::WorkspaceScope::peer_stamp(root)
 }
 
 /// #1868 Phase 1 — retire the task bound at staging, on the CLOSE path only.
@@ -468,7 +468,7 @@ pub(crate) fn bind_staged_peer_supervised_task(
 /// staged dir's `goal` file (`goal_id\ntask_id`, written by [`stage_peer`])
 /// survives; when its task-id line matches THIS row (or is blank — the file
 /// predates the task-id column), the sweep re-stashes the binding via
-/// [`default_agent_orchestrator().record_goal_task_registration`] FIRST, so
+/// The goal ledger FIRST, so
 /// the adoption's terminal transition settles the goal ledger row instead of
 /// leaving it `running` forever. That recorder is idempotent per task id
 /// (re-stash installs a fresh generation), so double-binding is safe.
@@ -636,27 +636,6 @@ pub(crate) fn adopt_parked_peer_tasks_with_results(
                 "parked peer task has no result.md yet; leaving Parked (client may still adopt)"
             );
             continue;
-        }
-        // #14 B — restore the in-memory task→goal settle binding BEFORE the
-        // terminal transition, so the change-feed settle lands the ledger
-        // row. The `goal` file is authoritative only for the task it was
-        // staged with (its second line); a blank line predates the task-id
-        // column, and check 3 already vouched for the row when the `task-id`
-        // leaf exists.
-        if let Some(goal_body) =
-            peer_io::read_peer_file(&dir, "goal", peer_io::PEER_FILE_READ_CAP_SMALL)
-        {
-            let mut lines = goal_body.lines();
-            let goal_id = lines.next().map(str::trim).unwrap_or("");
-            let bound_task_id = lines.next().map(str::trim).unwrap_or("");
-            if !goal_id.is_empty() && (bound_task_id.is_empty() || bound_task_id == task.id) {
-                default_agent_orchestrator().record_goal_task_registration(
-                    profile_data_dir,
-                    expected_profile,
-                    goal_id,
-                    task,
-                );
-            }
         }
         let result_path = dir.join("result.md").display().to_string();
         supervisor.mark_completed(&task.id, vec![result_path]);
@@ -3365,9 +3344,7 @@ pub(crate) fn peer_handoff_allowed_for_session(session_id: &SessionKey) -> bool 
 /// (unfenced) — the single-goal / single-branch path pays nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FenceCollisionReason {
-    /// ① More than one ACTIVE goal exists for this profile in this instance.
-    MultipleActiveGoals,
-    /// ② The master's tree is not on `main`/`master` — this run already
+    /// ① The master's tree is not on `main`/`master` — this run already
     /// branched away from trunk, so an unfenced peer would share it.
     MainTreeOnNonDefaultBranch,
     /// ③ Another peer is staged, not closed, has no result yet (in-flight)
@@ -3378,7 +3355,6 @@ pub(crate) enum FenceCollisionReason {
 impl FenceCollisionReason {
     fn note(self) -> &'static str {
         match self {
-            Self::MultipleActiveGoals => "multiple active goals in this instance",
             Self::MainTreeOnNonDefaultBranch => "the master's tree is on a non-default branch",
             Self::UnfencedPeerInFlight => "an unfenced peer is already in flight",
         }
@@ -3396,11 +3372,6 @@ fn fence_collision_reasons(
     profile_id: &str,
 ) -> Vec<FenceCollisionReason> {
     let mut reasons = Vec::new();
-    // ① Active-goal count: pure in-memory map scan.
-    if default_agent_orchestrator().profile_active_goal_count(profile_id) > 1 {
-        reasons.push(FenceCollisionReason::MultipleActiveGoals);
-        return reasons;
-    }
     // ② Master's current branch (the workspace root passed in IS the master's
     // tree — peers fence as CLONES, so a fenced master's root still reads its
     // own branch here). Detached HEAD / non-git / git failure all read as
@@ -3494,16 +3465,7 @@ pub(crate) fn build_peer_handoff_callback(
         // `stage_peer` writes it atomically BEFORE brief.md and rolls the
         // staging back on failure, so a peer is never visible-but-ownerless.
         let originator = originating_session.to_string();
-        // Peer-agent-based goal AUTO-BIND (#1953): if the master handed off
-        // WITHOUT an explicit goal_id but its session has an ACTIVE goal, bind
-        // the peer to that goal. The model (esp. k3) does not reliably thread
-        // goal_id — it parallelizes goal_create+peer_handoff (the id isn't
-        // available yet) or simply omits it — so relying on the LLM leaves
-        // every peer goal-less and the whole loop inert. The active goal is
-        // the correct default; an explicit goal_id still wins.
-        let resolved_goal_id: Option<String> = request.goal_id.clone().or_else(|| {
-            default_agent_orchestrator().active_goal_id(&originating_session, &profile_id)
-        });
+        let resolved_goal_id: Option<String> = request.goal_id.clone();
         // #20a — smart fencing default. An explicit `worktree=true` fences
         // with NO predicate evaluation (no syscalls added for the caller who
         // already said "fence"); an explicit/absent value evaluates the
@@ -4050,27 +4012,6 @@ pub(crate) fn peer_respond_resolve(
     // actually answered (the delivered answer itself is unaffected). Dormant
     // while producers write `default_after_secs = None`; the hazard and the
     // deliberate no-amend-API decision are documented on the sweep.
-    if let Some(peer_dir) = staged_peer_dir(peers_root, &slug) {
-        let goal_id = peer_io::read_peer_file(&peer_dir, "goal", peer_io::PEER_FILE_READ_CAP_SMALL)
-            .and_then(|body| body.lines().next().map(|l| l.trim().to_owned()))
-            .filter(|s| !s.is_empty());
-        if let (Some(goal_id), Some(data_dir)) = (goal_id, peers_root.parent()) {
-            if let Err(err) = default_agent_orchestrator().model_goal_resolve_peer_escalation(
-                data_dir,
-                &goal_id,
-                &slug,
-                &escalation_resolution,
-                origin_session,
-            ) {
-                tracing::warn!(
-                    slug = %slug,
-                    goal_id = %goal_id,
-                    error = %err,
-                    "peer-goal: failed to resolve escalation in goal ledger (answer already delivered)"
-                );
-            }
-        }
-    }
     Ok(())
 }
 
@@ -6217,12 +6158,12 @@ mod peer_task_registry_tests {
         // A plain UTF-8 root round-trips its bytes.
         let plain = std::path::Path::new("/home/zhang/work/octos");
         let encoded = workspace_scope_encode(plain).expect("plain root encodes");
-        let decoded = crate::autonomy::workspace_scope::WorkspaceScope::from_argument(&encoded)
+        let decoded = workspace_scope::WorkspaceScope::from_argument(&encoded)
             .unwrap()
             .unwrap();
         assert_eq!(
             decoded,
-            crate::autonomy::workspace_scope::WorkspaceScope::from_path(plain).unwrap(),
+            workspace_scope::WorkspaceScope::from_path(plain).unwrap(),
             "the tagged wire decodes back to the exact path scope"
         );
         // A NON-UTF-8 root (invalid UTF-8 byte 0xff) still encodes —

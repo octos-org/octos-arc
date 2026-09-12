@@ -4164,8 +4164,6 @@ dependencies = [
  "octos-arc",
  "octos-bus",
  "octos-core",
- "octos-fleet",
- "octos-fleet-worker",
  "octos-llm",
  "octos-memory",
  "octos-pipeline",
@@ -4225,39 +4223,6 @@ dependencies = [
  "tokio-test",
  "tracing",
  "uuid",
-]
-
-[[package]]
-name = "octos-fleet"
-version = "2.0.3-rc.11"
-dependencies = [
- "eyre",
- "octos-core",
- "redb",
- "rusqlite",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "octos-fleet-worker"
-version = "2.0.3-rc.11"
-dependencies = [
- "async-trait",
- "eyre",
- "octos-agent",
- "octos-core",
- "octos-fleet",
- "octos-llm",
- "octos-memory",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
 ]
 
 [[package]]
