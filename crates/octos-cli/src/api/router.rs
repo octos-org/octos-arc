@@ -26,7 +26,6 @@ use super::private_asr;
 use super::purge;
 use super::session_ingress;
 use super::solo_auth;
-use super::static_files;
 use super::ui_protocol_transport;
 use super::usage;
 use super::user_admin;
@@ -85,11 +84,7 @@ fn make_http_trace_span(request: &axum::http::Request<axum::body::Body>) -> trac
 pub fn cors_allowlist_for_base_domain(base: Option<&str>) -> Vec<String> {
     let base = base.unwrap_or(DEFAULT_BASE_DOMAIN);
     vec![
-        "https://app.ominix.io".to_string(),
-        "https://admin.ominix.io".to_string(),
         "https://api.ominix.io".to_string(),
-        format!("https://app.{base}"),
-        format!("https://admin.{base}"),
         format!("https://api.{base}"),
         "http://localhost:3000".to_string(),
         "http://localhost:5173".to_string(),
@@ -932,7 +927,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     // any handler / auth middleware runs.
     public
         .merge(protected)
-        .fallback(static_files::static_handler)
         .layer(middleware::from_fn(strip_untrusted_profile_id_middleware))
         .layer(TraceLayer::new_for_http().make_span_with(make_http_trace_span))
         .layer(cors)
@@ -1822,81 +1816,24 @@ mod tests {
         server.abort();
     }
 
-    /// Bug 1 regression (fallback side): an unknown `/api/*` path reaches
-    /// the SPA fallback because no route matches. It must return
-    /// `404 application/json`, NOT `307 Location: /admin/`, so API
-    /// clients see a typed error instead of being redirected into the
-    /// SPA.
-    #[tokio::test]
-    async fn unmatched_api_path_returns_json_404_not_redirect() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = Arc::new(AppState {
-            admin_token_store: Arc::new(crate::admin_token_store::AdminTokenStore::new(dir.path())),
-            setup_state_store: Arc::new(crate::setup_state_store::SetupStateStore::new(dir.path())),
-            ..AppState::empty_for_tests()
-        });
-
-        let app = build_router(state);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            axum::serve(listener, app.into_make_service())
-                .await
-                .unwrap();
-        });
-        tokio::task::yield_now().await;
-
-        let response = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .unwrap()
-            .get(format!("http://{addr}/api/definitely-not-a-route"))
-            .send()
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        let ct = response
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        assert!(ct.starts_with("application/json"), "got {ct:?}");
-        let body: serde_json::Value = response.json().await.unwrap();
-        assert_eq!(body["error"], "not_found");
-
-        server.abort();
-    }
-
     #[test]
     fn should_compose_cors_allowlist_from_base_domain() {
-        let list = cors_allowlist_for_base_domain(Some("bot.ominix.io"));
-        assert!(
-            list.contains(&"https://app.bot.ominix.io".to_string()),
-            "missing app.bot.ominix.io in {list:?}"
-        );
-        assert!(
-            list.contains(&"https://admin.bot.ominix.io".to_string()),
-            "missing admin.bot.ominix.io in {list:?}"
-        );
-        assert!(
-            list.contains(&"https://api.bot.ominix.io".to_string()),
-            "missing api.bot.ominix.io in {list:?}"
-        );
-        // The bare ominix.io entries remain for shared landing pages.
-        assert!(list.contains(&"https://app.ominix.io".to_string()));
-    }
+    let list = cors_allowlist_for_base_domain(Some("bot.ominix.io"));
+    assert!(
+        list.contains(&"https://api.bot.ominix.io".to_string()),
+        "missing api.bot.ominix.io in {list:?}"
+    );
+    // The web-UI (app./admin.) origins were removed with the dashboard slim-down.
+    assert!(!list.contains(&"https://app.bot.ominix.io".to_string()));
+    assert!(!list.contains(&"https://admin.bot.ominix.io".to_string()));
+}
 
     #[test]
     fn should_default_cors_to_crew_ominix_io_when_unset() {
-        // Backward-compat: when no base_domain is configured the server
-        // must still accept the historical `*.crew.ominix.io` origins so
-        // existing minis keep working without a config change.
-        let list = cors_allowlist_for_base_domain(None);
-        assert!(list.contains(&"https://app.crew.ominix.io".to_string()));
-        assert!(list.contains(&"https://admin.crew.ominix.io".to_string()));
-        assert!(list.contains(&"https://api.crew.ominix.io".to_string()));
-    }
+    let list = cors_allowlist_for_base_domain(None);
+    assert!(list.contains(&"https://api.crew.ominix.io".to_string()));
+    assert!(!list.contains(&"https://app.crew.ominix.io".to_string()));
+}
 
     #[test]
     fn should_not_accept_unrelated_origin_in_base_domain_allowlist() {
@@ -1987,8 +1924,6 @@ mod tests {
                 .unwrap();
         let list = browser_origin_allowlist(Some("bot.ominix.io"), &custom);
 
-        assert!(list.contains(&"https://app.ominix.io".to_string()));
-        assert!(list.contains(&"https://app.bot.ominix.io".to_string()));
         assert!(list.contains(&"http://localhost:5174".to_string()));
         assert!(list.contains(&"https://public.example".to_string()));
         assert!(list.contains(&"http://127.0.0.1:50081".to_string()));

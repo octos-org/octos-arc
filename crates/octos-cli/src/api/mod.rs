@@ -31,7 +31,6 @@ pub(crate) mod skill_action_jobs;
 mod smart_home_bridge;
 mod smart_home_panel;
 pub(crate) mod solo_auth;
-mod static_files;
 mod ui_protocol_alpha2_bridge;
 mod ui_protocol_alpha9_bridge;
 // Relocated to crate::contracts (Phase 3 of goal-in-chat) so `octos chat
