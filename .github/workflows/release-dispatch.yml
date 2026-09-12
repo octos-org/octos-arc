@@ -1,0 +1,71 @@
+name: Release (Manual)
+
+# Version bumper ONLY: bumps the workspace version with cargo-release, pushes
+# the bump commit + tag, then hands off to release.yml.
+#
+# This workflow previously ALSO built the macOS bundle and created the GitHub
+# release itself — duplicating release.yml, racing it for the same tag, and
+# shipping an asset set (macOS-only, with model_catalog.json) that differed
+# from what release.yml uploads moments later. release.yml is now the single
+# release publisher; this workflow just gets a tag created.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version bump level'
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write   # cargo release pushes the bump commit + tag
+  actions: write    # dispatch release.yml after tagging
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  release:
+    # No builds happen here anymore — ubuntu is plenty (this used macos-14 to
+    # compile the bundle that release.yml now builds).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Install cargo-release
+        run: cargo install cargo-release --locked
+
+      # Bumps the version, commits, tags, and pushes BOTH the main commit and
+      # the tag. If main rejects the push (branch protection), either allow
+      # github-actions[bot] a bypass for version-bump commits or switch this
+      # step to open a PR and tag after merge.
+      - name: Bump version and tag
+        run: cargo release ${{ inputs.bump }} --execute --no-confirm
+
+      # A tag pushed with GITHUB_TOKEN does NOT trigger release.yml (GitHub
+      # suppresses events from the default token), so dispatch it explicitly.
+      # release.yml checks out inputs.tag, builds all four platforms, and
+      # creates the GitHub release with the full asset set.
+      - name: Trigger release build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "Dispatching release.yml for v${VERSION}"
+          gh workflow run release.yml --repo "${{ github.repository }}" \
+            -f platform=all -f tag="v${VERSION}"

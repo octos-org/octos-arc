@@ -1,0 +1,414 @@
+//! Message preparation pipeline for long-turn loop calls.
+//!
+//! The loop runner previously inlined a fixed sequence of trimming, repair,
+//! and normalization steps before each model call.  Keeping that sequence in a
+//! dedicated helper makes the behavior easier to exercise in isolation without
+//! booting the full agent loop.
+
+use octos_core::Message;
+
+use super::Agent;
+use super::message_repair::{
+    normalize_system_messages, normalize_tool_call_ids, repair_message_order, repair_tool_pairs,
+    synthesize_missing_tool_results, truncate_old_tool_results,
+};
+use super::turn_state::{LoopRepairReason, LoopTurnState};
+
+/// Prepare a conversation turn for the next model call.
+///
+/// This keeps the existing behavior stable while centralizing the order of the
+/// cleanup passes:
+/// 1. trim to the context window
+/// 2. normalize system messages
+/// 3. repair tool ordering/pairs
+/// 4. synthesize missing tool results as a last resort
+/// 5. truncate old tool outputs
+/// 6. normalize tool call IDs
+pub(crate) fn prepare_conversation_messages(
+    agent: &Agent,
+    messages: &mut Vec<Message>,
+    turn: &mut LoopTurnState,
+) {
+    if agent.trim_to_context_window(messages) {
+        turn.record_repair(LoopRepairReason::ContextTrimmed);
+    }
+    if normalize_system_messages(messages) {
+        turn.record_repair(LoopRepairReason::SystemMessagesNormalized);
+    }
+    if repair_message_order(messages) {
+        turn.record_repair(LoopRepairReason::MessageOrderRepaired);
+    }
+    if repair_tool_pairs(messages) {
+        turn.record_repair(LoopRepairReason::ToolPairsRepaired);
+    }
+    if synthesize_missing_tool_results(messages) {
+        turn.record_repair(LoopRepairReason::MissingToolResultsSynthesized);
+    }
+    // With a caller-owned ContextManager the bridge replaces the vector with
+    // its canonical frame before the model call, so this truncation cannot
+    // affect the final prompt — but it mutates frame-derived rows (the
+    // envelope's model-visible content is bounded at 4096 bytes, above the
+    // 800-char cut here) and breaks the bridge's contiguous coverage match,
+    // which then re-records the whole conversation as duplicates. Tool-output
+    // bounding is the ContextManager's job there (ToolOutputPolicy).
+    if agent.prompt_context_manager.is_none() && truncate_old_tool_results(messages) {
+        turn.record_repair(LoopRepairReason::OldToolResultsTruncated);
+    }
+    if normalize_tool_call_ids(messages) {
+        turn.record_repair(LoopRepairReason::ToolCallIdsNormalized);
+    }
+}
+
+/// Prepare a task turn for the next model call.
+///
+/// Task loops need context trimming, system-message normalization, and
+/// tool-call ID normalization. The system-message pass matters once the
+/// opt-in verifier is enabled (#1365): the verifier appends a mid-transcript
+/// `System` note after assistant/tool rows, and providers that require a
+/// single leading system prompt would reject the next task request without
+/// this normalization (codex pre-merge P2). The chat path already runs it via
+/// `prepare_conversation_messages`; mirror it here.
+pub(crate) fn prepare_task_messages(
+    agent: &Agent,
+    messages: &mut Vec<Message>,
+    turn: &mut LoopTurnState,
+) {
+    if agent.trim_to_context_window(messages) {
+        turn.record_repair(LoopRepairReason::ContextTrimmed);
+    }
+    if normalize_system_messages(messages) {
+        turn.record_repair(LoopRepairReason::SystemMessagesNormalized);
+    }
+    if normalize_tool_call_ids(messages) {
+        turn.record_repair(LoopRepairReason::ToolCallIdsNormalized);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use async_trait::async_trait;
+    use eyre::Result;
+    use octos_core::{AgentId, MessageRole, ToolCall};
+    use octos_llm::{ChatConfig, ChatResponse, LlmProvider, ToolSpec};
+    use octos_memory::EpisodeStore;
+    use std::sync::Arc;
+    use std::time::Instant;
+    use tempfile::TempDir;
+
+    use crate::prompt_context::{
+        PromptContextManager, PromptContextPhase, PromptContextReport, PromptContextRequest,
+    };
+    use crate::tools::ToolRegistry;
+
+    struct SmallWindowProvider {
+        window: u32,
+    }
+
+    #[async_trait]
+    impl LlmProvider for SmallWindowProvider {
+        async fn chat(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            _config: &ChatConfig,
+        ) -> Result<ChatResponse> {
+            eyre::bail!("not used in compaction tests");
+        }
+
+        fn context_window(&self) -> u32 {
+            self.window
+        }
+
+        fn model_id(&self) -> &str {
+            "mock-model"
+        }
+
+        fn provider_name(&self) -> &str {
+            "mock"
+        }
+    }
+
+    struct NoopPromptContextManager;
+
+    impl PromptContextManager for NoopPromptContextManager {
+        fn prepare_prompt(
+            &self,
+            _request: PromptContextRequest,
+            messages: &mut Vec<Message>,
+        ) -> std::result::Result<PromptContextReport, String> {
+            Ok(PromptContextReport {
+                messages_before: messages.len(),
+                messages_after: messages.len(),
+                ..PromptContextReport::default()
+            })
+        }
+    }
+
+    fn sys(content: &str) -> Message {
+        Message {
+            role: MessageRole::System,
+            content: content.to_string(),
+            media: vec![],
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            client_message_id: None,
+            thread_id: None,
+            timestamp: chrono::Utc::now(),
+        }
+    }
+
+    fn user(content: &str) -> Message {
+        Message {
+            role: MessageRole::User,
+            content: content.to_string(),
+            media: vec![],
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            client_message_id: None,
+            thread_id: None,
+            timestamp: chrono::Utc::now(),
+        }
+    }
+
+    fn assistant(content: &str) -> Message {
+        Message {
+            role: MessageRole::Assistant,
+            content: content.to_string(),
+            media: vec![],
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            client_message_id: None,
+            thread_id: None,
+            timestamp: chrono::Utc::now(),
+        }
+    }
+
+    fn assistant_with_tools(tool_ids: &[&str]) -> Message {
+        Message {
+            role: MessageRole::Assistant,
+            content: String::new(),
+            media: vec![],
+            tool_calls: Some(
+                tool_ids
+                    .iter()
+                    .map(|id| ToolCall {
+                        id: id.to_string(),
+                        name: "test_tool".to_string(),
+                        arguments: serde_json::json!({}),
+                        metadata: None,
+                    })
+                    .collect(),
+            ),
+            tool_call_id: None,
+            reasoning_content: None,
+            client_message_id: None,
+            thread_id: None,
+            timestamp: chrono::Utc::now(),
+        }
+    }
+
+    fn tool_result_msg(id: &str, content: &str) -> Message {
+        Message {
+            role: MessageRole::Tool,
+            content: content.to_string(),
+            media: vec![],
+            tool_calls: None,
+            tool_call_id: Some(id.to_string()),
+            reasoning_content: None,
+            client_message_id: None,
+            thread_id: None,
+            timestamp: chrono::Utc::now(),
+        }
+    }
+
+    async fn setup_agent(window: u32) -> (TempDir, Agent) {
+        let dir = TempDir::new().unwrap();
+        let provider: Arc<dyn LlmProvider> = Arc::new(SmallWindowProvider { window });
+        let tools = ToolRegistry::with_builtins(dir.path());
+        let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
+        let agent = Agent::new(AgentId::new("test-agent"), provider, tools, memory);
+        (dir, agent)
+    }
+
+    fn projection(messages: &[Message]) -> Vec<(MessageRole, String, Option<String>, Vec<String>)> {
+        messages
+            .iter()
+            .map(|m| {
+                let tool_ids = m
+                    .tool_calls
+                    .as_ref()
+                    .map(|calls| calls.iter().map(|c| c.id.clone()).collect())
+                    .unwrap_or_default();
+                (m.role, m.content.clone(), m.tool_call_id.clone(), tool_ids)
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn should_budget_oversized_tool_outputs_deterministically() {
+        let (_dir, agent) = setup_agent(300).await;
+        let mut turn = LoopTurnState::new(Instant::now());
+        let huge = "x".repeat(5_000);
+        let base = vec![
+            sys("prompt"),
+            user("old filler 1"),
+            assistant("old reply 1"),
+            user("old filler 2"),
+            assistant("old reply 2"),
+            assistant_with_tools(&["call_1"]),
+            tool_result_msg("call_1", &huge),
+            user("current question"),
+        ];
+
+        let mut first = base.clone();
+        let mut second = base.clone();
+        prepare_conversation_messages(&agent, &mut first, &mut turn);
+        let mut second_turn = LoopTurnState::new(Instant::now());
+        prepare_conversation_messages(&agent, &mut second, &mut second_turn);
+
+        assert_eq!(projection(&first), projection(&second));
+        let truncated_tool = first
+            .iter()
+            .find(|m| m.role == MessageRole::Tool && m.tool_call_id.as_deref() == Some("call_1"))
+            .expect("missing truncated old tool result");
+        assert!(
+            truncated_tool
+                .content
+                .contains("[... truncated for brevity]")
+        );
+        assert!(truncated_tool.content.len() <= 830);
+        assert!(!turn.repair_reasons().is_empty());
+        assert!(
+            turn.repair_reasons()
+                .contains(&LoopRepairReason::ContextTrimmed)
+                || turn
+                    .repair_reasons()
+                    .contains(&LoopRepairReason::OldToolResultsTruncated)
+        );
+    }
+
+    #[tokio::test]
+    async fn context_managed_agent_skips_legacy_context_trimming() {
+        let (_dir, agent) = setup_agent(120).await;
+        let agent = agent.with_prompt_context_manager(Arc::new(NoopPromptContextManager));
+        let mut turn = LoopTurnState::new(Instant::now());
+        let mut messages = vec![sys("prompt")];
+        for index in 0..12 {
+            messages.push(user(&format!("old filler {index} {}", "x".repeat(80))));
+            messages.push(assistant(&format!("old reply {index} {}", "y".repeat(80))));
+        }
+        messages.push(user("current question"));
+        let original_len = messages.len();
+
+        prepare_conversation_messages(&agent, &mut messages, &mut turn);
+        agent.prepare_prompt_with_context_manager(&mut messages, PromptContextPhase::TurnStart, 1);
+
+        assert_eq!(
+            messages.len(),
+            original_len,
+            "ContextManager-owned sessions must not run the legacy extractive trim before the context bridge"
+        );
+        assert!(
+            !turn
+                .repair_reasons()
+                .contains(&LoopRepairReason::ContextTrimmed),
+            "legacy ContextTrimmed repair should stay absent when ContextManager owns prompt compaction"
+        );
+    }
+
+    /// A caller-owned ContextManager bridge replaces the loop's prompt
+    /// vector with its canonical frame anyway, so the legacy 800-char
+    /// old-tool-result truncation has no effect on the final prompt — but it
+    /// DOES mutate the frame-derived vector before the bridge's coverage
+    /// matcher compares it against the frame (ToolOutputEnvelope emits up to
+    /// 4096 bytes), which broke the contiguous window match and re-recorded
+    /// the whole conversation as source-less duplicates every turn.
+    #[tokio::test]
+    async fn context_managed_agent_skips_old_tool_result_truncation() {
+        let (_dir, agent) = setup_agent(1_000_000).await;
+        let agent = agent.with_prompt_context_manager(Arc::new(NoopPromptContextManager));
+        let mut turn = LoopTurnState::new(Instant::now());
+        let old_tool_output = "z".repeat(2_000);
+        let mut messages = vec![
+            sys("prompt"),
+            user("old question"),
+            assistant_with_tools(&["call_old"]),
+            tool_result_msg("call_old", &old_tool_output),
+            assistant("old answer"),
+            user("current question"),
+        ];
+
+        prepare_conversation_messages(&agent, &mut messages, &mut turn);
+
+        let tool = messages
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some("call_old"))
+            .expect("old tool result still present");
+        assert_eq!(
+            tool.content, old_tool_output,
+            "ContextManager-owned sessions must not run the legacy old-tool-result \
+             truncation before the context bridge — it breaks bridge coverage matching"
+        );
+        assert!(
+            !turn
+                .repair_reasons()
+                .contains(&LoopRepairReason::OldToolResultsTruncated),
+            "OldToolResultsTruncated repair must stay absent when ContextManager owns prompt compaction"
+        );
+    }
+
+    #[tokio::test]
+    async fn should_preserve_tool_result_validity_after_compaction() {
+        let (_dir, agent) = setup_agent(300).await;
+        let mut turn = LoopTurnState::new(Instant::now());
+        let huge = "y".repeat(5_000);
+        let mut messages = vec![
+            sys("prompt"),
+            user("old filler 1"),
+            assistant("old reply 1"),
+            user("old filler 2"),
+            assistant("old reply 2"),
+            assistant_with_tools(&["call_recent"]),
+            tool_result_msg("call_recent", &huge),
+            user("current question"),
+        ];
+
+        prepare_conversation_messages(&agent, &mut messages, &mut turn);
+
+        let assistant_idx = messages
+            .iter()
+            .position(|m| {
+                m.role == MessageRole::Assistant
+                    && m.tool_calls
+                        .as_ref()
+                        .is_some_and(|calls| calls.iter().any(|c| c.id == "call_recent"))
+            })
+            .expect("missing recent assistant tool call");
+        assert_eq!(
+            messages[assistant_idx + 1].role,
+            MessageRole::Tool,
+            "recent tool result must remain adjacent to its assistant"
+        );
+        assert_eq!(
+            messages[assistant_idx + 1].tool_call_id.as_deref(),
+            Some("call_recent")
+        );
+        assert!(
+            messages[assistant_idx + 1]
+                .content
+                .contains("[... truncated for brevity]"),
+            "recent oversized tool output should be budgeted deterministically"
+        );
+
+        assert!(
+            messages
+                .iter()
+                .all(|m| m.role != MessageRole::Tool || m.tool_call_id.is_some())
+        );
+    }
+}

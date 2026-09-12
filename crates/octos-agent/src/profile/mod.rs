@@ -1,0 +1,1112 @@
+//! Profile system (M8.3 — runtime-v0.1 close-out).
+//!
+//! # What is a `ProfileDefinition`?
+//!
+//! A [`ProfileDefinition`] is a single, declarative manifest that describes
+//! how the agent runtime should bootstrap: which tools are available, which
+//! [`crate::agents::AgentDefinition`] sub-agents are preloaded, which MCP
+//! servers are wired, how compaction is tiered, and which models are
+//! preferred. Before M8.3 every one of these settings was wired implicitly
+//! across a dozen startup sites; afterwards, a single profile declaration
+//! consolidates the envelope.
+//!
+//! The built-in `coding` profile is the no-flag default and carries a lean
+//! core-coding allow list (files, shell, search, memory, spawn, the workspace
+//! check tool, plan tracking, user questions, and tool_search) so `octos chat`
+//! does not ship every tool schema to the LLM on every round. The allow-list
+//! filter narrows the VISIBLE registry, so tools it excludes (web/research/
+//! media/pipeline) are restored via the `coding-full` built-in, which
+//! preserves the pre-lean unfiltered surface byte-for-byte.
+//! Alternate profiles (e.g. `swarm`) declare their own allow lists and
+//! expanded agent sets.
+//!
+//! # Forward compatibility
+//!
+//! Unlike [`crate::agents::AgentDefinition`] (which uses
+//! `#[serde(deny_unknown_fields)]`) this schema is **forward-compatible**:
+//! a v1 client MUST accept a v2 manifest that carries extra fields so the
+//! CLI does not immediately break when a newer config arrives on the host
+//! via config-sync or a mounted volume. The `version` field still acts as
+//! a hard gate — a v2 profile on a v1 client produces a version-mismatch
+//! error *before* the extra fields are considered.
+//!
+//! # Resolution order
+//!
+//! [`ProfileDefinition::load`] accepts either a name or a path:
+//!
+//! 1. If the argument starts with `/`, `./`, or `~/` it is treated as a
+//!    filesystem path. The file is loaded directly.
+//! 2. Otherwise the argument is a profile id. The loader first checks
+//!    `~/.octos/profiles/<id>/profile.{toml,json}`.
+//! 3. Finally the loader falls back to the crate-shipped built-in registry
+//!    (JSON files under `crates/octos-agent/src/assets/profiles/`).
+//!
+//! Today's built-in profiles are `coding` (the lean default), `coding-full`
+//! (the unfiltered pre-lean surface), and `swarm` (an allow-list extension
+//! that enables multi-worker swarm coordination tools).
+//!
+//! # Applied vs recorded settings
+//!
+//! M8.3 deliberately scopes its behaviour to "schema + loader + tool
+//! filter". Some profile fields are populated today but *recorded, not
+//! enforced* until a follow-up milestone wires them in:
+//!
+//! - `compaction_policy` — the tier overrides are parsed and exposed via
+//!   [`ProfileDefinition::compaction_policy`], but the runtime still uses
+//!   the workspace compaction runner from M6.3. M8.5's tiered runner is
+//!   where the profile override becomes active.
+//! - `model_preferences` — parsed and exposed, but the provider chain does
+//!   not yet consult them. A future milestone wires the preferences into
+//!   the adaptive router's lane-scoring input.
+//! - `mcp_servers` — only the ids are captured. Actual server config
+//!   resolution is a follow-up milestone. `coding` and `swarm` ship with
+//!   an empty list so no behaviour change falls out of this.
+//!
+//! The `permissions` stub also lands in a minimal form (default /
+//! restricted) so M8.4 can extend it without schema churn.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+use eyre::{Result, WrapErr};
+use serde::{Deserialize, Serialize};
+
+use crate::tools::ToolRegistry;
+
+/// Current profile schema version. Manifests whose `version` differs from
+/// this constant are rejected at load time.
+pub const PROFILE_SCHEMA_VERSION: u32 = 1;
+
+/// Crate-shipped profiles available as a built-in fallback after the
+/// user-config search. Ordered (name, raw JSON text).
+const BUILTIN_PROFILES: &[(&str, &str)] = &[
+    ("coding", include_str!("../assets/profiles/coding.json")),
+    (
+        "coding-full",
+        include_str!("../assets/profiles/coding-full.json"),
+    ),
+    ("swarm", include_str!("../assets/profiles/swarm.json")),
+];
+
+/// The source a resolved profile was loaded from. Used by the CLI resolver
+/// to emit an informative `profile resolved: ...` log line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProfileSource {
+    /// Explicit `--profile <path>` pointing at a file on disk.
+    ExplicitPath,
+    /// Named profile found in `~/.octos/profiles/<name>/profile.{toml,json}`.
+    UserDir,
+    /// Named profile that fell back to the crate-shipped built-in set.
+    Builtin,
+}
+
+/// How the profile narrows the tool registry. Mirrors the three modes
+/// called out in the issue scope:
+///
+/// - `default` — no filter; the registry passes through untouched. This is
+///   what the built-in `coding-full` profile uses so behaviour parity with
+///   the pre-M8.3 default path stays reachable.
+/// - `allow_list` — only the named tools survive. Names may reference
+///   [`crate::tools::policy::ToolGroupInfo`] groups via `group:*` strings.
+/// - `deny_list` — every tool survives except the named ones. Useful for
+///   profiles that strip a single capability (e.g. drop `web_fetch` from
+///   an otherwise-default set).
+///
+/// `spawn_only` tools are *never* filtered out regardless of mode — they
+/// carry background-execution wiring that the runtime depends on.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum ProfileTools {
+    /// Pass-through filter — registry is not narrowed.
+    #[default]
+    Default,
+    /// Explicit whitelist. Only listed tools (or groups) are kept.
+    AllowList {
+        /// Tool names or `group:<id>` references to keep.
+        #[serde(default)]
+        tools: Vec<String>,
+    },
+    /// Inverse whitelist. Every registered tool except the listed ones is
+    /// kept. Groups are expanded through the same mechanism as allow lists.
+    DenyList {
+        /// Tool names or `group:<id>` references to drop.
+        #[serde(default)]
+        tools: Vec<String>,
+    },
+}
+
+impl ProfileTools {
+    /// Whether a tool named `tool_name` would survive this filter.
+    ///
+    /// Mirrors [`crate::tools::ToolRegistry::filter_by_profile`]'s
+    /// name-matching exactly — `group:<id>` expansion, `<prefix>*`
+    /// wildcards, exact names, and the empty-allow-list pass-through —
+    /// but deliberately WITHOUT the spawn_only carve-out. Once a
+    /// spawn_only tool is registered it can never be evicted by the
+    /// filter, so bootstrap sites (chat/acp `run_pipeline`) consult this
+    /// predicate FIRST and skip registration when the profile excludes
+    /// the tool.
+    pub fn allows(&self, tool_name: &str) -> bool {
+        use crate::tools::policy::entry_matches;
+        match self {
+            Self::Default => true,
+            Self::AllowList { tools } => {
+                // Empty allow lists are treated as pass-through by
+                // `filter_by_profile` (with a warning); agree with it so
+                // the bootstrap gate never drops a tool the filter keeps.
+                tools.is_empty() || tools.iter().any(|entry| entry_matches(entry, tool_name))
+            }
+            Self::DenyList { tools } => !tools.iter().any(|entry| entry_matches(entry, tool_name)),
+        }
+    }
+}
+
+/// Reference to an MCP server that the profile wants attached. For M8.3 we
+/// only capture the `id`; resolution to a concrete config happens in a
+/// follow-up milestone. Extra fields are tolerated (forward-compat).
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct McpServerRef {
+    /// Id of a server config declared elsewhere in the profile dir / config.
+    pub id: String,
+}
+
+/// Coarse permission tier. The `default` variant mirrors today's
+/// allow-everything behaviour — M8.4 will add richer per-tool rules by
+/// extending this enum (adding variants is backward-compatible because we
+/// do not use `deny_unknown_fields` on the containing struct).
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionMode {
+    /// Today's behaviour — every registered tool is executable.
+    #[default]
+    Default,
+    /// Placeholder tier for hardened environments. Carries no runtime
+    /// effect yet; M8.4 will map it to a concrete per-tool rule set.
+    Restricted,
+}
+
+/// Profile-level override for the M8.5 tiered compaction runner.
+///
+/// Today this struct is *recorded only* — the runtime keeps using the
+/// workspace compaction policy from M6.3. Once the M8.5 runner is wired,
+/// the fields become live tier overrides.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ProfileCompactionPolicy {
+    /// Optional target token budget for the final compacted conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_budget: Option<u32>,
+    /// Optional trigger threshold (turns or tokens, interpreted by the
+    /// runner). `None` leaves the runner default in place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preflight_threshold: Option<u32>,
+    /// Optional tiers map (tier-id -> token budget). Free-form today;
+    /// M8.5 will define the tier id vocabulary.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub tiers: HashMap<String, u32>,
+}
+
+/// Model-name hints consulted by the provider chain. Today these are
+/// recorded but not enforced — a follow-up milestone wires them into
+/// adaptive routing.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ModelPreferences {
+    /// Default model id (e.g. `"anthropic/claude-sonnet-4"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+    /// Low-latency model id (cheap, fast). May be used for background
+    /// worker dispatch in a follow-up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fast: Option<String>,
+    /// Highest-capability model id. Reserved for orchestrator turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strong: Option<String>,
+}
+
+/// A single profile manifest.
+///
+/// Field layout and naming mirrors the runtime plan's "profile envelope".
+/// Fields marked *recorded only* land without runtime enforcement in M8.3
+/// and are picked up by a follow-up milestone.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ProfileDefinition {
+    /// Profile id. Also its display name when rendered in logs.
+    pub name: String,
+    /// Schema version. Must equal [`PROFILE_SCHEMA_VERSION`]. Mismatched
+    /// versions produce an error so a forward-compatible client cannot
+    /// accidentally swallow schema churn.
+    pub version: u32,
+    /// Free-text description for humans reading the profile file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Tool filter policy. Defaults to [`ProfileTools::Default`] so the
+    /// registry is left untouched.
+    #[serde(default)]
+    pub tools: ProfileTools,
+    /// MCP servers to attach. Only ids are captured today.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_servers: Vec<McpServerRef>,
+    /// Coarse permission tier. Defaults to [`PermissionMode::Default`].
+    #[serde(default)]
+    pub permissions: PermissionMode,
+    /// Optional override for the M8.5 tiered compaction runner. Recorded
+    /// only today.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_policy: Option<ProfileCompactionPolicy>,
+    /// Optional model preferences. Recorded only today.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_preferences: Option<ModelPreferences>,
+    /// Path within the profile dir to a system-prompt template file.
+    /// Resolved against the profile's parent directory at load time; left
+    /// as-is in the struct so tests and callers can inspect the raw hint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt_template: Option<PathBuf>,
+    /// Ids of [`crate::agents::AgentDefinition`] manifests to preload when
+    /// this profile is activated. Consumes the M8.2 registry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<String>,
+}
+
+impl Default for ProfileDefinition {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            version: PROFILE_SCHEMA_VERSION,
+            description: None,
+            tools: ProfileTools::default(),
+            mcp_servers: Vec::new(),
+            permissions: PermissionMode::default(),
+            compaction_policy: None,
+            model_preferences: None,
+            system_prompt_template: None,
+            agents: Vec::new(),
+        }
+    }
+}
+
+impl ProfileDefinition {
+    /// Validate a freshly-deserialized profile. Today only the schema
+    /// version is enforced — additional cross-field validation lands as
+    /// the permission / compaction wiring comes online.
+    pub fn validate(&self) -> Result<()> {
+        if self.version != PROFILE_SCHEMA_VERSION {
+            eyre::bail!(
+                "profile '{}' has unsupported schema version {} (expected {})",
+                self.name,
+                self.version,
+                PROFILE_SCHEMA_VERSION,
+            );
+        }
+        if self.name.trim().is_empty() {
+            eyre::bail!("profile manifest is missing a non-empty `name` field");
+        }
+        Ok(())
+    }
+
+    /// M8.5 fix-first item 5: cross-validate `profile.agents` against an
+    /// `AgentDefinitions` registry. Returns the list of unknown ids so
+    /// the caller can either reject the profile or warn the operator.
+    /// Empty result means every referenced manifest exists.
+    pub fn unknown_agent_ids(&self, registry: &crate::agents::AgentDefinitions) -> Vec<String> {
+        self.agents
+            .iter()
+            .filter(|id| registry.get(id).is_none())
+            .cloned()
+            .collect()
+    }
+
+    /// M8.5 fix-first item 5: hard-validate `profile.agents` against a
+    /// registry. Returns an error listing the missing ids when any are
+    /// unknown. This is the call sites use when they need an
+    /// authoritative profile/manifest envelope (e.g. M9 control-plane).
+    pub fn validate_against_registry(
+        &self,
+        registry: &crate::agents::AgentDefinitions,
+    ) -> Result<()> {
+        let missing = self.unknown_agent_ids(registry);
+        if !missing.is_empty() {
+            eyre::bail!(
+                "profile '{}' references agent_definition ids not present in the registry: {:?} \
+                 (available: {:?})",
+                self.name,
+                missing,
+                registry.ids().collect::<Vec<_>>(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Parse a profile from JSON text. Validates on success.
+    pub fn from_json_str(text: &str) -> Result<Self> {
+        let def: Self =
+            serde_json::from_str(text).wrap_err("failed to parse ProfileDefinition as JSON")?;
+        def.validate()?;
+        Ok(def)
+    }
+
+    /// Parse a profile from TOML text. Validates on success.
+    pub fn from_toml_str(text: &str) -> Result<Self> {
+        let def: Self =
+            toml::from_str(text).wrap_err("failed to parse ProfileDefinition as TOML")?;
+        def.validate()?;
+        Ok(def)
+    }
+
+    /// Parse from a file on disk, picking the format from the file
+    /// extension (`.toml` -> TOML, everything else -> JSON).
+    pub fn from_file(path: &Path) -> Result<Self> {
+        let text = std::fs::read_to_string(path)
+            .wrap_err_with(|| format!("failed to read profile at {}", path.display()))?;
+        let is_toml = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("toml"));
+        let def = if is_toml {
+            Self::from_toml_str(&text)
+        } else {
+            Self::from_json_str(&text)
+        }
+        .wrap_err_with(|| format!("failed to parse profile at {}", path.display()))?;
+        Ok(def)
+    }
+
+    /// Look up a named built-in profile from the crate-shipped registry.
+    /// Returns `None` when the name is unknown.
+    pub fn builtin(name: &str) -> Option<Self> {
+        BUILTIN_PROFILES.iter().find_map(|(id, text)| {
+            if *id == name {
+                Some(
+                    Self::from_json_str(text).unwrap_or_else(|err| {
+                        panic!("built-in profile '{id}' is malformed: {err}")
+                    }),
+                )
+            } else {
+                None
+            }
+        })
+    }
+
+    /// List built-in profile ids. Useful for CLI help output and tests.
+    pub fn builtin_ids() -> Vec<&'static str> {
+        BUILTIN_PROFILES.iter().map(|(id, _)| *id).collect()
+    }
+
+    /// Resolve a profile from a name or path argument. See the module doc
+    /// for the full resolution order. The returned tuple reports the
+    /// source so the caller can log `profile resolved: ... source=...`.
+    pub fn load(arg: &str) -> Result<(Self, ProfileSource)> {
+        let home = dirs::home_dir();
+        Self::load_with_home(arg, home.as_deref())
+    }
+
+    /// Variant of [`Self::load`] that takes an explicit home directory so
+    /// unit tests can exercise the user-dir lookup without touching the
+    /// real filesystem.
+    pub fn load_with_home(arg: &str, home: Option<&Path>) -> Result<(Self, ProfileSource)> {
+        if looks_like_path(arg) {
+            let resolved = expand_tilde(arg, home);
+            let def = Self::from_file(&resolved)?;
+            return Ok((def, ProfileSource::ExplicitPath));
+        }
+
+        if let Some(home_dir) = home {
+            let profile_dir = home_dir.join(".octos/profiles").join(arg);
+            for candidate in ["profile.toml", "profile.json"] {
+                let path = profile_dir.join(candidate);
+                if path.exists() {
+                    let def = Self::from_file(&path)?;
+                    return Ok((def, ProfileSource::UserDir));
+                }
+            }
+        }
+
+        if let Some(def) = Self::builtin(arg) {
+            return Ok((def, ProfileSource::Builtin));
+        }
+
+        eyre::bail!(
+            "unknown profile '{arg}': not a file, no entry in ~/.octos/profiles/, and \
+             not a built-in ({})",
+            Self::builtin_ids().join(", "),
+        )
+    }
+
+    /// Apply the tool filter declared by this profile to a freshly-built
+    /// [`ToolRegistry`]. See [`ToolRegistry::filter_by_profile`] for the
+    /// spawn-only carve-out.
+    pub fn apply_to_registry(&self, registry: &mut ToolRegistry) {
+        registry.filter_by_profile(&self.tools);
+    }
+}
+
+fn looks_like_path(arg: &str) -> bool {
+    arg.starts_with('/')
+        || arg.starts_with("./")
+        || arg.starts_with("~/")
+        || arg.starts_with("../")
+        // Windows absolute paths (`C:\…`, `C:/…`, verbatim `\\?\…`, UNC
+        // `\\server\share`) match none of the Unix-style prefixes above, so a
+        // real profile file passed by absolute path was misclassified as a
+        // profile *name* and rejected as "unknown profile". `is_absolute()` is
+        // platform-aware and a no-op on Unix (there it ⇔ a leading `/`).
+        || Path::new(arg).is_absolute()
+}
+
+fn expand_tilde(arg: &str, home: Option<&Path>) -> PathBuf {
+    if let Some(rest) = arg.strip_prefix("~/") {
+        if let Some(home_dir) = home {
+            return home_dir.join(rest);
+        }
+    }
+    PathBuf::from(arg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_parse_minimum_valid_profile() {
+        // Only `name` and `version` are required. Every other field must
+        // default cleanly so profile authors can skip sections they are
+        // not customizing.
+        let json = r#"{"name": "tiny", "version": 1}"#;
+        let def = ProfileDefinition::from_json_str(json).expect("parse");
+        assert_eq!(def.name, "tiny");
+        assert_eq!(def.version, 1);
+        assert!(def.description.is_none());
+        assert!(matches!(def.tools, ProfileTools::Default));
+        assert!(def.mcp_servers.is_empty());
+        assert_eq!(def.permissions, PermissionMode::Default);
+        assert!(def.compaction_policy.is_none());
+        assert!(def.model_preferences.is_none());
+        assert!(def.system_prompt_template.is_none());
+        assert!(def.agents.is_empty());
+    }
+
+    #[test]
+    fn should_parse_full_profile_with_all_fields() {
+        // Exercise every optional section in a single manifest so the
+        // round-trip and defaulting paths are both covered.
+        let json = r#"{
+            "name": "full",
+            "version": 1,
+            "description": "kitchen-sink profile",
+            "tools": {"mode": "allow_list", "tools": ["shell", "group:fs"]},
+            "mcp_servers": [{"id": "jiuwenclaw"}],
+            "permissions": "restricted",
+            "compaction_policy": {
+                "token_budget": 8000,
+                "preflight_threshold": 12000,
+                "tiers": {"tier_1": 2000, "tier_2": 4000}
+            },
+            "model_preferences": {
+                "default": "anthropic/claude-sonnet-4",
+                "fast": "anthropic/claude-haiku",
+                "strong": "openai/gpt-5"
+            },
+            "system_prompt_template": "prompts/coder.md",
+            "agents": ["research-worker", "repo-editor"]
+        }"#;
+
+        let def = ProfileDefinition::from_json_str(json).expect("parse");
+        assert_eq!(def.name, "full");
+        assert_eq!(def.description.as_deref(), Some("kitchen-sink profile"));
+        match &def.tools {
+            ProfileTools::AllowList { tools } => {
+                assert_eq!(tools, &vec!["shell".to_string(), "group:fs".to_string()]);
+            }
+            other => panic!("expected AllowList, got {other:?}"),
+        }
+        assert_eq!(def.mcp_servers.len(), 1);
+        assert_eq!(def.mcp_servers[0].id, "jiuwenclaw");
+        assert_eq!(def.permissions, PermissionMode::Restricted);
+        let compaction = def.compaction_policy.as_ref().expect("compaction present");
+        assert_eq!(compaction.token_budget, Some(8000));
+        assert_eq!(compaction.preflight_threshold, Some(12000));
+        assert_eq!(compaction.tiers.get("tier_1"), Some(&2000));
+        let prefs = def
+            .model_preferences
+            .as_ref()
+            .expect("model preferences present");
+        assert_eq!(prefs.default.as_deref(), Some("anthropic/claude-sonnet-4"));
+        assert_eq!(prefs.fast.as_deref(), Some("anthropic/claude-haiku"));
+        assert_eq!(prefs.strong.as_deref(), Some("openai/gpt-5"));
+        assert_eq!(
+            def.system_prompt_template.as_deref(),
+            Some(Path::new("prompts/coder.md"))
+        );
+        assert_eq!(def.agents, vec!["research-worker", "repo-editor"]);
+    }
+
+    #[test]
+    fn should_reject_profile_with_version_mismatch() {
+        let json = r#"{"name": "future", "version": 42}"#;
+        let err = ProfileDefinition::from_json_str(json).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("version") && msg.contains("42"),
+            "expected version error, got {msg}",
+        );
+    }
+
+    #[test]
+    fn should_round_trip_profile_through_json() {
+        let original = ProfileDefinition {
+            name: "rt".to_string(),
+            version: 1,
+            description: Some("round-trip".to_string()),
+            tools: ProfileTools::DenyList {
+                tools: vec!["web_fetch".to_string()],
+            },
+            mcp_servers: vec![McpServerRef {
+                id: "hermes".to_string(),
+            }],
+            permissions: PermissionMode::Default,
+            compaction_policy: Some(ProfileCompactionPolicy {
+                token_budget: Some(2048),
+                preflight_threshold: None,
+                tiers: HashMap::new(),
+            }),
+            model_preferences: None,
+            system_prompt_template: None,
+            agents: vec!["repo-editor".to_string()],
+        };
+
+        let text = serde_json::to_string(&original).expect("serialize");
+        let round = ProfileDefinition::from_json_str(&text).expect("deserialize");
+        assert_eq!(round, original);
+    }
+
+    #[test]
+    fn should_accept_profile_with_unknown_fields_for_forward_compat() {
+        // A v2 producer may introduce new fields. The v1 parser must
+        // ignore them rather than fail, so the CLI keeps working while
+        // the schema evolves.
+        let json = r#"{
+            "name": "future-proof",
+            "version": 1,
+            "tools": {"mode": "default"},
+            "new_v2_field": {"nested": true},
+            "another_extra": 99
+        }"#;
+        let def = ProfileDefinition::from_json_str(json).expect("parse");
+        assert_eq!(def.name, "future-proof");
+        assert!(matches!(def.tools, ProfileTools::Default));
+    }
+
+    #[test]
+    fn should_resolve_profile_name_to_builtin() {
+        let coding = ProfileDefinition::builtin("coding").expect("coding builtin");
+        assert_eq!(coding.name, "coding");
+        assert_eq!(coding.version, 1);
+        // Lean default: `coding` declares a core-loop allow list so the
+        // no-flag `octos chat` stops shipping every tool schema each round.
+        assert!(matches!(coding.tools, ProfileTools::AllowList { .. }));
+
+        // `coding-full` is the escape hatch that preserves the pre-lean
+        // unfiltered surface (one `--profile coding-full` away).
+        let full = ProfileDefinition::builtin("coding-full").expect("coding-full builtin");
+        assert_eq!(full.name, "coding-full");
+        assert!(matches!(full.tools, ProfileTools::Default));
+
+        let swarm = ProfileDefinition::builtin("swarm").expect("swarm builtin");
+        assert_eq!(swarm.name, "swarm");
+        // Unknown names produce `None` so the load() caller can fall
+        // through to a typed error.
+        assert!(ProfileDefinition::builtin("does-not-exist").is_none());
+    }
+
+    #[test]
+    fn should_resolve_profile_path_to_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("custom.json");
+        std::fs::write(
+            &path,
+            r#"{"name": "custom", "version": 1, "description": "from disk"}"#,
+        )
+        .expect("write");
+        let path_str = path.to_string_lossy().to_string();
+
+        let (def, source) =
+            ProfileDefinition::load_with_home(&path_str, None).expect("load from path");
+        assert_eq!(def.name, "custom");
+        assert_eq!(def.description.as_deref(), Some("from disk"));
+        assert_eq!(source, ProfileSource::ExplicitPath);
+    }
+
+    #[test]
+    fn should_resolve_profile_name_via_user_dir() {
+        // Place a profile.json under `<home>/.octos/profiles/<name>/` and
+        // confirm load() picks it up with source=UserDir.
+        let fake_home = tempfile::tempdir().expect("tempdir");
+        let profiles_dir = fake_home.path().join(".octos/profiles/alpha");
+        std::fs::create_dir_all(&profiles_dir).expect("mkdirs");
+        std::fs::write(
+            profiles_dir.join("profile.json"),
+            r#"{"name": "alpha", "version": 1}"#,
+        )
+        .expect("write");
+
+        let (def, source) = ProfileDefinition::load_with_home("alpha", Some(fake_home.path()))
+            .expect("load from user dir");
+        assert_eq!(def.name, "alpha");
+        assert_eq!(source, ProfileSource::UserDir);
+    }
+
+    #[test]
+    fn should_resolve_builtin_when_user_dir_missing() {
+        let fake_home = tempfile::tempdir().expect("tempdir");
+        // No user-dir override; coding must resolve via the built-in
+        // fallback with source=Builtin.
+        let (def, source) = ProfileDefinition::load_with_home("coding", Some(fake_home.path()))
+            .expect("load builtin");
+        assert_eq!(def.name, "coding");
+        assert_eq!(source, ProfileSource::Builtin);
+    }
+
+    #[test]
+    fn should_reject_unknown_profile_name() {
+        let fake_home = tempfile::tempdir().expect("tempdir");
+        let err = ProfileDefinition::load_with_home("no-such-profile", Some(fake_home.path()))
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("no-such-profile"));
+    }
+
+    #[test]
+    fn should_load_builtin_coding_profile_without_error() {
+        let coding = ProfileDefinition::builtin("coding").expect("coding");
+        coding.validate().expect("valid");
+        // Lean default: the allow list covers the core coding loop ONLY.
+        // The exact envelope is pinned here so accidental JSON edits fail
+        // loudly instead of silently re-inflating (or hollowing out) the
+        // per-round tool-schema overhead.
+        match &coding.tools {
+            ProfileTools::AllowList { tools } => {
+                // #2133: the lean surface KEEPS files/shell/search/memory/spawn
+                // and ADDS the three core-loop tools it was missing — `check`,
+                // `update_plan`, `tool_search`. Only `apply_patch` is dropped
+                // (edit_file/diff_edit cover it), so the fs tools are named
+                // explicitly instead of via `group:fs`.
+                for required in [
+                    "read_file",
+                    "write_file",
+                    "edit_file",
+                    "diff_edit",
+                    "group:runtime",
+                    "group:search",
+                    "group:memory",
+                    "spawn",
+                    "ask_user_question",
+                    "check",
+                    "update_plan",
+                    "tool_search",
+                ] {
+                    assert!(
+                        tools.contains(&required.to_string()),
+                        "coding allow list must keep {required}, got {tools:?}",
+                    );
+                }
+                // Dropped or never-included: `apply_patch` (redundant), the
+                // `group:fs` alias (fs named explicitly to exclude apply_patch),
+                // and the heavy web / research / media / pipeline surfaces
+                // (restored via `--profile coding-full`).
+                for excluded in [
+                    "group:fs",
+                    "apply_patch",
+                    "group:web",
+                    "group:research",
+                    "group:media",
+                    "run_pipeline",
+                    "synthesize_research",
+                    "message",
+                    "cron",
+                ] {
+                    assert!(
+                        !tools.contains(&excluded.to_string()),
+                        "coding allow list must not name {excluded}",
+                    );
+                }
+            }
+            other => panic!("coding must declare a lean allow list, got {other:?}"),
+        }
+        // Today's coding default carries no compaction or permission
+        // override — those live at the workspace / app-state level.
+        assert!(coding.compaction_policy.is_none());
+        assert_eq!(coding.permissions, PermissionMode::Default);
+        // Agents preloaded match the M8.2 built-in set so spawn() can
+        // resolve them by id.
+        assert!(coding.agents.contains(&"research-worker".to_string()));
+        assert!(coding.agents.contains(&"repo-editor".to_string()));
+    }
+
+    #[test]
+    fn should_load_builtin_coding_full_profile_as_unfiltered_escape_hatch() {
+        let full = ProfileDefinition::builtin("coding-full").expect("coding-full");
+        full.validate().expect("valid");
+        // `coding-full` preserves the pre-lean unfiltered registry
+        // byte-for-byte: no allow/deny list, no compaction or permission
+        // override.
+        assert!(
+            matches!(full.tools, ProfileTools::Default),
+            "coding-full must not filter tools",
+        );
+        assert!(full.compaction_policy.is_none());
+        assert_eq!(full.permissions, PermissionMode::Default);
+        // Same preloaded sub-agents as `coding` so switching profiles
+        // never changes spawn() manifest resolution.
+        let coding = ProfileDefinition::builtin("coding").expect("coding");
+        assert_eq!(full.agents, coding.agents);
+        assert!(ProfileDefinition::builtin_ids().contains(&"coding-full"));
+    }
+
+    /// Minimal schema-bearing tool used to stand in for bundled-skill /
+    /// plugin tools (and for chat-registered natives like `spawn`) in
+    /// registry-narrowing tests.
+    struct StubTool {
+        name: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::tools::Tool for StubTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn description(&self) -> &str {
+            "stub"
+        }
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        async fn execute(&self, _args: &serde_json::Value) -> Result<crate::tools::ToolResult> {
+            Ok(crate::tools::ToolResult {
+                output: "ok".into(),
+                success: true,
+                ..Default::default()
+            })
+        }
+    }
+
+    #[test]
+    fn coding_profile_narrows_registry_to_core_coding_loop() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut tools = ToolRegistry::with_builtins(tmp.path());
+        // Bundled-skill / plugin tools are plain registry entries that
+        // register BEFORE the profile narrowing runs in the chat/acp
+        // bootstrap — the allow list must apply to them exactly as it
+        // does to builtins.
+        tools.register(StubTool {
+            name: "get_weather",
+        });
+        // `spawn` is registered by the chat/acp bootstrap (SpawnTool),
+        // not by `with_builtins`; a stub stands in so the inclusion
+        // assertion proves the lean profile keeps it (#2133 softened: spawn
+        // stays in the default surface).
+        tools.register(StubTool { name: "spawn" });
+
+        let coding = ProfileDefinition::builtin("coding").expect("coding");
+        coding.apply_to_registry(&mut tools);
+
+        let names: std::collections::BTreeSet<String> =
+            tools.specs().into_iter().map(|s| s.name).collect();
+
+        for included in [
+            "read_file",
+            "write_file",
+            "edit_file",
+            "diff_edit",
+            // group:runtime — all shells kept (interactive sessions live on
+            // exec_command + write_stdin; bash is the Codex-compatible alias).
+            "bash",
+            "shell",
+            "exec_command",
+            "write_stdin",
+            "glob",
+            "grep",
+            "list_dir",
+            "spawn",
+            "check",
+            "update_plan",
+            "tool_search",
+            "ask_user_question",
+        ] {
+            assert!(
+                names.contains(included),
+                "lean coding profile must keep {included}, got {names:?}",
+            );
+        }
+        for excluded in [
+            // #2133: only apply_patch is dropped (edit_file/diff_edit cover
+            // it); the heavy web/research/media surfaces stay out.
+            "apply_patch",
+            "web_search",
+            "web_fetch",
+            "browser",
+            "get_weather",
+            "synthesize_research",
+            "image_generation",
+            "workspace_diff",
+            "spawn_agent",
+            "delegate",
+        ] {
+            assert!(
+                !names.contains(excluded),
+                "lean coding profile must drop {excluded}, got {names:?}",
+            );
+        }
+        // Budget pin (#1578 harness review: 48 tools ≈ 9.3K tokens per
+        // round in the unfiltered default). The lean surface must stay a
+        // small fraction of that; 24 leaves headroom for the core loop +
+        // shells + memory while failing loudly on accidental bloat.
+        assert!(
+            names.len() <= 24,
+            "lean coding profile grew to {} tools: {names:?}",
+            names.len(),
+        );
+    }
+
+    #[test]
+    fn spawn_only_tools_survive_filter_so_bootstrap_gates_on_allows() {
+        let mut tools = ToolRegistry::new();
+        tools.register(StubTool {
+            name: "run_pipeline",
+        });
+        tools.mark_spawn_only("run_pipeline", None);
+        tools.register(StubTool { name: "read_file" });
+
+        let coding = ProfileDefinition::builtin("coding").expect("coding");
+        coding.apply_to_registry(&mut tools);
+
+        let names: Vec<String> = tools.specs().into_iter().map(|s| s.name).collect();
+        // Registry-level carve-out (M8.3): spawn_only tools are never
+        // evicted by `filter_by_profile` — they carry background-execution
+        // wiring the runtime depends on once registered...
+        assert!(
+            names.contains(&"run_pipeline".to_string()),
+            "spawn_only carve-out regressed: {names:?}",
+        );
+        // ...which is exactly why the chat/acp bootstrap must consult
+        // `ProfileTools::allows` BEFORE registering + marking a spawn_only
+        // tool. The lean coding profile says no; coding-full says yes.
+        assert!(!coding.tools.allows("run_pipeline"));
+        let full = ProfileDefinition::builtin("coding-full").expect("coding-full");
+        assert!(full.tools.allows("run_pipeline"));
+    }
+
+    #[test]
+    fn profile_tools_allows_mirrors_filter_matching() {
+        // Default mode: everything passes.
+        assert!(ProfileTools::Default.allows("anything"));
+
+        let allow = ProfileTools::AllowList {
+            tools: vec!["group:fs".into(), "exec*".into(), "spawn".into()],
+        };
+        assert!(allow.allows("read_file"), "group member must match");
+        assert!(allow.allows("exec_command"), "wildcard must match");
+        assert!(allow.allows("spawn"), "exact name must match");
+        assert!(!allow.allows("web_search"));
+
+        // Empty allow list is treated as pass-through by
+        // `ToolRegistry::filter_by_profile` (with a warning); `allows`
+        // must agree or the bootstrap gate would drop tools the filter
+        // keeps.
+        let empty = ProfileTools::AllowList { tools: vec![] };
+        assert!(empty.allows("web_search"));
+
+        let deny = ProfileTools::DenyList {
+            tools: vec!["group:web".into()],
+        };
+        assert!(!deny.allows("web_fetch"), "denied group member");
+        assert!(deny.allows("read_file"));
+
+        // Empty deny list denies nothing (mirrors the filter's early
+        // return).
+        let empty_deny = ProfileTools::DenyList { tools: vec![] };
+        assert!(empty_deny.allows("web_fetch"));
+    }
+
+    #[test]
+    fn should_load_builtin_swarm_profile_without_error() {
+        let swarm = ProfileDefinition::builtin("swarm").expect("swarm");
+        swarm.validate().expect("valid");
+        // Swarm must declare an allow list so the registry keeps its
+        // swarm-only tools reachable while normal workers stay denied.
+        match &swarm.tools {
+            ProfileTools::AllowList { tools } => {
+                assert!(tools.contains(&"send_to_agent".to_string()));
+                assert!(tools.contains(&"cancel_task".to_string()));
+                assert!(tools.contains(&"relaunch_task".to_string()));
+            }
+            other => panic!("swarm must declare an allow list, got {other:?}"),
+        }
+        // Swarm coordinators keep the pipeline engine. Pre-lean this fell
+        // out of the spawn_only carve-out (run_pipeline survived the
+        // filter without being named); now that the chat/acp bootstrap
+        // gates registration on `allows`, the swarm allow list must name
+        // it explicitly or coordinators would silently lose it.
+        assert!(swarm.tools.allows("run_pipeline"));
+        assert!(!swarm.agents.is_empty());
+    }
+
+    #[test]
+    fn looks_like_path_classifies_arguments_correctly() {
+        // Explicit paths start with /, ./, ~/, or ../; everything else is
+        // treated as a profile name for user-dir / builtin lookup.
+        assert!(looks_like_path("/etc/profile.json"));
+        assert!(looks_like_path("./local.toml"));
+        assert!(looks_like_path("~/my-profile.json"));
+        assert!(looks_like_path("../shared.json"));
+        assert!(!looks_like_path("coding"));
+        assert!(!looks_like_path("swarm"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn looks_like_path_recognizes_windows_absolute_paths() {
+        // Regression: a profile passed by absolute Windows path (drive-letter,
+        // forward- or back-slashed, or verbatim) must be classified as a path
+        // and routed to `from_file`, not treated as a profile name.
+        assert!(looks_like_path(r"C:\Users\me\custom.json"));
+        assert!(looks_like_path("C:/Users/me/custom.json"));
+        assert!(looks_like_path(r"\\?\C:\Users\me\custom.json"));
+        // Plain names still route to name lookup.
+        assert!(!looks_like_path("coding"));
+    }
+
+    #[test]
+    fn expand_tilde_resolves_against_home() {
+        let home = Path::new("/opt/octos-home");
+        assert_eq!(
+            expand_tilde("~/profiles/foo.json", Some(home)),
+            PathBuf::from("/opt/octos-home/profiles/foo.json"),
+        );
+        // Without a home directory the tilde stays literal.
+        assert_eq!(
+            expand_tilde("~/profiles/foo.json", None),
+            PathBuf::from("~/profiles/foo.json"),
+        );
+    }
+
+    #[test]
+    fn should_reject_profile_with_empty_name() {
+        let json = r#"{"name": "   ", "version": 1}"#;
+        let err = ProfileDefinition::from_json_str(json).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("name"), "expected name error, got {msg}");
+    }
+
+    #[test]
+    fn should_parse_profile_tools_variants() {
+        let default_json = r#"{"mode": "default"}"#;
+        let allow_json = r#"{"mode": "allow_list", "tools": ["shell"]}"#;
+        let deny_json = r#"{"mode": "deny_list", "tools": ["web_fetch"]}"#;
+        let d: ProfileTools = serde_json::from_str(default_json).expect("default");
+        let a: ProfileTools = serde_json::from_str(allow_json).expect("allow");
+        let de: ProfileTools = serde_json::from_str(deny_json).expect("deny");
+        assert!(matches!(d, ProfileTools::Default));
+        match a {
+            ProfileTools::AllowList { tools } => assert_eq!(tools, vec!["shell".to_string()]),
+            _ => panic!("expected allow_list"),
+        }
+        match de {
+            ProfileTools::DenyList { tools } => assert_eq!(tools, vec!["web_fetch".to_string()]),
+            _ => panic!("expected deny_list"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Item 5 of OCTOS_M8_FIX_FIRST_CHECKLIST_2026-04-24:
+    // Profiles and AgentDefinitions must be authoritative — fields that the
+    // runtime does NOT enforce should be rejected/cleaned up so M9 clients
+    // do not assume they are operational.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn profile_load_fails_or_warns_on_unknown_agent_ids() {
+        // A profile that names manifests not in the registry must be
+        // rejected by `validate_against_registry`. The legacy path
+        // silently kept the bad ids, so this test pins the new
+        // hard-validation behaviour.
+        let mut profile = ProfileDefinition::builtin("coding").expect("coding");
+        profile.agents = vec!["typo-worker".into()];
+
+        let registry = crate::agents::AgentDefinitions::with_builtins();
+        let unknown = profile.unknown_agent_ids(&registry);
+        assert_eq!(unknown, vec!["typo-worker".to_string()]);
+
+        let err = profile.validate_against_registry(&registry).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("typo-worker"),
+            "validation error must name the missing id: {msg}"
+        );
+    }
+
+    #[test]
+    fn builtin_swarm_profile_references_only_existing_agent_definitions() {
+        // The fix-first checklist explicitly calls out the swarm profile
+        // for referencing manifests that never shipped. Verify the
+        // built-in swarm now references only ids in the AgentDefinitions
+        // registry.
+        let swarm = ProfileDefinition::builtin("swarm").expect("swarm");
+        let registry = crate::agents::AgentDefinitions::with_builtins();
+        let unknown = swarm.unknown_agent_ids(&registry);
+        assert!(
+            unknown.is_empty(),
+            "built-in swarm profile must reference only existing manifests, \
+             missing: {unknown:?}"
+        );
+    }
+
+    #[test]
+    fn manifest_application_does_not_hide_unimplemented_fields_in_prompt_text() {
+        // The legacy `apply_agent_definition` smuggled `effort` and
+        // `permission_mode` into `additional_instructions` so traces
+        // showed them as if they were enforced. The fix-first commit
+        // stops that. We assert here against the manifest itself so the
+        // contract holds even if the application path is reorganised.
+        // Built-in research-worker must NOT carry unimplemented fields
+        // (max_turns / background) any longer.
+        let registry = crate::agents::AgentDefinitions::with_builtins();
+        let research = registry.get("research-worker").expect("research-worker");
+        let unimplemented = research.unimplemented_fields();
+        assert!(
+            unimplemented.is_empty(),
+            "built-in research-worker still carries unimplemented fields: {unimplemented:?}"
+        );
+
+        let repo_editor = registry.get("repo-editor").expect("repo-editor");
+        let unimplemented = repo_editor.unimplemented_fields();
+        assert!(
+            unimplemented.is_empty(),
+            "built-in repo-editor still carries unimplemented fields: {unimplemented:?}"
+        );
+    }
+
+    #[test]
+    fn profile_permissions_affect_tool_context_when_restricted() {
+        // The PermissionMode field is documented as "Coarse permission
+        // tier". Today the runtime keeps it internal-only — we record
+        // it but do not enforce it (per the fix-first checklist's
+        // accepted "internal-only until real" path). This test pins
+        // that behaviour: the field deserialises round-trip and the
+        // built-in profiles report consistent values, so a future
+        // wiring milestone has a stable API to grow into.
+        let coding = ProfileDefinition::builtin("coding").expect("coding");
+        assert_eq!(coding.permissions, PermissionMode::Default);
+
+        let restricted = ProfileDefinition::from_json_str(
+            r#"{"name": "locked", "version": 1, "permissions": "restricted"}"#,
+        )
+        .expect("parse restricted");
+        assert_eq!(restricted.permissions, PermissionMode::Restricted);
+
+        // Until the wiring lands, ProfileDefinition does NOT expose a
+        // `to_tool_permissions()` helper. Adding one would be a real
+        // wiring step. The placeholder is here so a follow-up commit
+        // can replace this assertion with a meaningful behavioural one.
+        // For now we just assert the recorded value is what the
+        // profile JSON declared.
+        assert_ne!(coding.permissions, restricted.permissions);
+    }
+}

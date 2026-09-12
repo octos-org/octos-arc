@@ -1,0 +1,576 @@
+//! Progress reporting for agent execution.
+//!
+//! This module provides a trait for reporting agent progress,
+//! allowing CLI and other consumers to display real-time updates.
+
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+
+use crate::abi_schema::PROGRESS_EVENT_SCHEMA_VERSION;
+
+/// Canonical schema identifier for harness progress events on the wire.
+///
+/// Producers that emit progress envelopes into the structured event transport
+/// MUST use this string; consumers can branch on it to identify supported
+/// payload shapes. See `docs/OCTOS_HARNESS_ABI_VERSIONING.md`.
+pub const HARNESS_PROGRESS_EVENT_SCHEMA: &str = "octos.agent.progress.event.v1";
+
+/// Versioned wrapper for a [`ProgressEvent`] when it is serialized onto the
+/// transport. This is the durable ABI consumers should branch on — the raw
+/// enum variants are an implementation detail that may grow between minor
+/// versions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProgressEventEnvelope {
+    /// Canonical schema identifier (see [`HARNESS_PROGRESS_EVENT_SCHEMA`]).
+    #[serde(default = "default_progress_event_schema_name")]
+    pub schema: String,
+    /// Numeric schema version companion to `schema`. Defaults to
+    /// [`PROGRESS_EVENT_SCHEMA_VERSION`] when absent so older replayed
+    /// streams remain parseable.
+    #[serde(default = "default_progress_event_schema_version")]
+    pub schema_version: u32,
+    /// The event payload.
+    pub event: ProgressEvent,
+}
+
+fn default_progress_event_schema_name() -> String {
+    HARNESS_PROGRESS_EVENT_SCHEMA.to_string()
+}
+
+fn default_progress_event_schema_version() -> u32 {
+    PROGRESS_EVENT_SCHEMA_VERSION
+}
+
+impl ProgressEventEnvelope {
+    /// Wrap an event with the current harness progress schema.
+    pub fn wrap(event: ProgressEvent) -> Self {
+        Self {
+            schema: HARNESS_PROGRESS_EVENT_SCHEMA.to_string(),
+            schema_version: PROGRESS_EVENT_SCHEMA_VERSION,
+            event,
+        }
+    }
+}
+
+/// Events emitted during agent execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProgressEvent {
+    /// Agent started working on task.
+    TaskStarted { task_id: String },
+
+    /// Agent is thinking (calling LLM).
+    Thinking { iteration: u32 },
+
+    /// Live telemetry for an unbounded interactive turn. This is deliberately
+    /// usage/time visibility, not a fee budget or a terminal limit.
+    AgentProgress {
+        iteration: u32,
+        active_tokens: u64,
+        elapsed: Duration,
+        checkpoints: u32,
+        reflecting: bool,
+    },
+
+    /// LLM responded with text.
+    Response { content: String, iteration: u32 },
+
+    /// Agent is calling a tool.
+    ToolStarted {
+        name: String,
+        tool_id: String,
+        /// The call arguments as requested by the LLM (pre-hook). Carried so
+        /// downstream projections (UI protocol tool cards, envelope
+        /// `arguments_preview`) can echo what the tool was asked to do.
+        arguments: Option<serde_json::Value>,
+    },
+
+    /// Mid-execution progress from a tool (e.g., stderr line from binary plugin).
+    ToolProgress {
+        name: String,
+        tool_id: String,
+        message: String,
+    },
+
+    /// Tool execution completed.
+    ToolCompleted {
+        name: String,
+        tool_id: String,
+        success: bool,
+        output_preview: String,
+        duration: Duration,
+    },
+
+    /// File was modified.
+    FileModified { path: String },
+
+    /// Model-authored plan/todo checklist snapshot from the `update_plan`
+    /// tool. Carried as the serialized `UiPlanRecord` JSON so this low-level
+    /// event stays decoupled from the octos-core wire structs; the serve
+    /// mapper deserializes it into a `plan/updated` notification.
+    PlanUpdated { plan: serde_json::Value },
+
+    /// Token usage update.
+    TokenUsage {
+        input_tokens: u32,
+        output_tokens: u32,
+    },
+
+    /// Task completed.
+    TaskCompleted {
+        success: bool,
+        iterations: u32,
+        duration: Duration,
+    },
+
+    /// Task was interrupted (Ctrl+C).
+    TaskInterrupted { iterations: u32 },
+
+    /// Hit max iterations limit.
+    MaxIterationsReached { limit: u32 },
+
+    /// Hit token budget limit.
+    TokenBudgetExceeded { used: u32, limit: u32 },
+
+    /// Hit activity timeout.
+    ActivityTimeoutReached { elapsed: Duration, limit: Duration },
+
+    /// Status update during LLM call (e.g. retry progress, provider switching).
+    LlmStatus { message: String, iteration: u32 },
+
+    /// Streaming text chunk from LLM.
+    StreamChunk { text: String, iteration: u32 },
+
+    /// Streaming reasoning chunk from LLM.
+    ReasoningChunk { text: String, iteration: u32 },
+
+    /// Streaming completed.
+    StreamDone { iteration: u32 },
+
+    /// LLM call is being retried — signals stream forwarder to clear its buffer
+    /// so partial text from the failed attempt isn't concatenated with the retry.
+    StreamRetry { iteration: u32 },
+
+    /// Cost update after a response.
+    CostUpdate {
+        /// Session-cumulative token counts: completed runs folded into the
+        /// shared session-usage base (when the embedder injected one) plus
+        /// the live turn. u64 because sessions outlive single turns.
+        session_input_tokens: u64,
+        session_output_tokens: u64,
+        /// TURN-cumulative token counts (every response recorded this
+        /// turn so far, including ones that emit no cost update of their
+        /// own — mid-turn tool iterations, the verifier). Metrics
+        /// counters meter the DELTA between successive events, so
+        /// nothing is dropped when only the terminal response emits;
+        /// the session_* fields are unsuitable for that (their base
+        /// includes pre-turn history the per-turn reporter never saw).
+        turn_input_tokens: u32,
+        turn_output_tokens: u32,
+        /// Cost of this response (None if pricing unknown).
+        response_cost: Option<f64>,
+        /// Cumulative session cost: each completed run and each response
+        /// of the live turn priced at the model that produced it. `None`
+        /// until any priced usage exists.
+        session_cost: Option<f64>,
+        /// Model identifier that produced this response. Forwarded by the
+        /// API bridge into `metadata.token_cost.model` so chat clients can
+        /// render `model · tokens_in / tokens_out · duration` footers.
+        /// `None` when the reporter cannot resolve a model id (e.g.
+        /// synthetic test fixtures).
+        model: Option<String>,
+        /// Model context window in tokens, when the provider exposes it.
+        /// Lets clients render an honest ctx-fill gauge against the real
+        /// window instead of a hardcoded default.
+        context_window: Option<u32>,
+    },
+}
+
+/// Stable, compact status-line text shared by terminal and UI projections.
+pub fn agent_progress_message(
+    iteration: u32,
+    active_tokens: u64,
+    elapsed: Duration,
+    checkpoints: u32,
+    reflecting: bool,
+) -> String {
+    let seconds = elapsed.as_secs();
+    let elapsed = if seconds >= 60 {
+        format!("{}m{:02}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{seconds}s")
+    };
+    if reflecting {
+        format!(
+            "Reflection checkpoint {} · Step {iteration} · {active_tokens} tokens · {elapsed}",
+            checkpoints.saturating_add(1),
+        )
+    } else {
+        format!(
+            "Step {iteration} · {active_tokens} tokens · {elapsed} · {checkpoints} reflection{}",
+            if checkpoints == 1 { "" } else { "s" },
+        )
+    }
+}
+
+/// Trait for receiving progress updates.
+pub trait ProgressReporter: Send + Sync {
+    /// Called when a progress event occurs.
+    fn report(&self, event: ProgressEvent);
+
+    /// M8.10 follow-up (#649): the per-turn `thread_id` (typically the user
+    /// message's `client_message_id`) bound to this reporter. Tools that
+    /// spawn long-running background work read this so the late-arriving
+    /// completion can be stamped with the originating turn's id rather than
+    /// inheriting whatever the per-chat sticky map currently holds.
+    /// Default is `None` — silent / console reporters don't track threads.
+    fn thread_id(&self) -> Option<&str> {
+        None
+    }
+}
+
+/// Default reporter that does nothing (silent mode).
+pub struct SilentReporter;
+
+impl ProgressReporter for SilentReporter {
+    fn report(&self, _event: ProgressEvent) {}
+}
+
+/// Reporter that prints to stdout with colors.
+pub struct ConsoleReporter {
+    /// Whether to use colors.
+    use_colors: bool,
+    /// Whether to show verbose output.
+    verbose: bool,
+    /// Buffered stdout writer for streaming chunks.
+    stdout: std::sync::Mutex<std::io::BufWriter<std::io::Stdout>>,
+}
+
+impl Default for ConsoleReporter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ConsoleReporter {
+    /// Create a new console reporter.
+    pub fn new() -> Self {
+        Self {
+            use_colors: true,
+            verbose: false,
+            stdout: std::sync::Mutex::new(std::io::BufWriter::new(std::io::stdout())),
+        }
+    }
+
+    /// Enable or disable colors.
+    pub fn with_colors(mut self, use_colors: bool) -> Self {
+        self.use_colors = use_colors;
+        self
+    }
+
+    /// Enable or disable verbose output.
+    pub fn with_verbose(mut self, verbose: bool) -> Self {
+        self.verbose = verbose;
+        self
+    }
+
+    fn cyan(&self, s: &str) -> String {
+        if self.use_colors {
+            format!("\x1b[36m{s}\x1b[0m")
+        } else {
+            s.to_string()
+        }
+    }
+
+    fn green(&self, s: &str) -> String {
+        if self.use_colors {
+            format!("\x1b[32m{s}\x1b[0m")
+        } else {
+            s.to_string()
+        }
+    }
+
+    fn yellow(&self, s: &str) -> String {
+        if self.use_colors {
+            format!("\x1b[33m{s}\x1b[0m")
+        } else {
+            s.to_string()
+        }
+    }
+
+    fn red(&self, s: &str) -> String {
+        if self.use_colors {
+            format!("\x1b[31m{s}\x1b[0m")
+        } else {
+            s.to_string()
+        }
+    }
+
+    fn dim(&self, s: &str) -> String {
+        if self.use_colors {
+            format!("\x1b[2m{s}\x1b[0m")
+        } else {
+            s.to_string()
+        }
+    }
+
+    fn bold(&self, s: &str) -> String {
+        if self.use_colors {
+            format!("\x1b[1m{s}\x1b[0m")
+        } else {
+            s.to_string()
+        }
+    }
+}
+
+impl ProgressReporter for ConsoleReporter {
+    fn report(&self, event: ProgressEvent) {
+        match event {
+            ProgressEvent::TaskStarted { task_id } => {
+                if self.verbose {
+                    println!("{} Task: {}", self.dim("▶"), self.dim(&task_id));
+                }
+            }
+            ProgressEvent::Thinking { iteration } => {
+                print!(
+                    "\r{} {}",
+                    self.yellow("⟳"),
+                    self.dim(&format!("Thinking... (iteration {iteration})"))
+                );
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
+            }
+            ProgressEvent::AgentProgress {
+                iteration,
+                active_tokens,
+                elapsed,
+                checkpoints,
+                reflecting,
+            } => {
+                print!(
+                    "\r{} {}",
+                    self.yellow("⟳"),
+                    self.dim(&agent_progress_message(
+                        iteration,
+                        active_tokens,
+                        elapsed,
+                        checkpoints,
+                        reflecting,
+                    ))
+                );
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
+            }
+            ProgressEvent::Response {
+                content,
+                iteration: _,
+            } => {
+                // Clear the "Thinking..." line
+                print!("\r{}\r", " ".repeat(40));
+
+                if !content.is_empty() {
+                    // Show first few lines of response
+                    let preview: String = content.lines().take(3).collect::<Vec<_>>().join("\n");
+                    let truncated = if content.lines().count() > 3 {
+                        format!("{preview}...")
+                    } else {
+                        preview
+                    };
+                    if !truncated.trim().is_empty() {
+                        println!("{} {}", self.cyan("◆"), truncated);
+                    }
+                }
+            }
+            ProgressEvent::ToolProgress { name, message, .. } => {
+                print!(
+                    "\r{} {} {}{}",
+                    self.yellow("⚙"),
+                    self.dim(&name),
+                    self.dim(&message),
+                    " ".repeat(10),
+                );
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
+            }
+            ProgressEvent::ToolStarted { name, .. } => {
+                print!(
+                    "\r{} {}",
+                    self.yellow("⚙"),
+                    self.dim(&format!("Running {name}..."))
+                );
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
+            }
+            ProgressEvent::ToolCompleted {
+                name,
+                tool_id: _,
+                success,
+                output_preview,
+                duration,
+            } => {
+                // Clear the "Running..." line
+                print!("\r{}\r", " ".repeat(50));
+
+                let status = if success {
+                    self.green("✓")
+                } else {
+                    self.red("✗")
+                };
+
+                let duration_str = if duration.as_millis() > 1000 {
+                    format!("{:.1}s", duration.as_secs_f64())
+                } else {
+                    format!("{}ms", duration.as_millis())
+                };
+
+                println!(
+                    "{} {} {}",
+                    status,
+                    self.bold(&name),
+                    self.dim(&format!("({duration_str})"))
+                );
+
+                // Show truncated output if verbose
+                if self.verbose && !output_preview.is_empty() {
+                    let lines: Vec<_> = output_preview.lines().take(5).collect();
+                    for line in lines {
+                        println!("  {}", self.dim(line));
+                    }
+                    if output_preview.lines().count() > 5 {
+                        println!("  {}", self.dim("..."));
+                    }
+                }
+            }
+            ProgressEvent::FileModified { path } => {
+                println!("{} {} {}", self.green("📝"), self.dim("Modified:"), path);
+            }
+            ProgressEvent::PlanUpdated { plan } => {
+                if self.verbose {
+                    if let Some(items) = plan.get("items").and_then(|v| v.as_array()) {
+                        println!("{}", self.dim("Plan:"));
+                        for item in items {
+                            let title = item.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                            let glyph = match item.get("status").and_then(|v| v.as_str()) {
+                                Some("completed") => self.green("✔"),
+                                Some("in_progress") => self.dim("▸"),
+                                _ => self.dim("◼"),
+                            };
+                            println!("  {glyph} {title}");
+                        }
+                    }
+                }
+            }
+            ProgressEvent::TokenUsage {
+                input_tokens,
+                output_tokens,
+            } => {
+                if self.verbose {
+                    println!(
+                        "  {} {} in, {} out",
+                        self.dim("Tokens:"),
+                        input_tokens,
+                        output_tokens
+                    );
+                }
+            }
+            ProgressEvent::TaskCompleted {
+                success,
+                iterations,
+                duration,
+            } => {
+                println!();
+                if success {
+                    println!(
+                        "{} {} iterations, {:.1}s",
+                        self.green("✓ Completed"),
+                        iterations,
+                        duration.as_secs_f64()
+                    );
+                } else {
+                    println!("{} after {} iterations", self.red("✗ Failed"), iterations);
+                }
+            }
+            ProgressEvent::TaskInterrupted { iterations } => {
+                println!();
+                println!(
+                    "{} State saved. Run 'octos resume' to continue.",
+                    self.yellow(&format!("⚠ Interrupted after {iterations} iterations."))
+                );
+            }
+            ProgressEvent::MaxIterationsReached { limit } => {
+                println!();
+                println!(
+                    "{} Increase with --max-iterations",
+                    self.yellow(&format!("⚠ Reached max iterations limit ({limit})."))
+                );
+            }
+            ProgressEvent::TokenBudgetExceeded { used, limit } => {
+                println!();
+                println!(
+                    "{} Increase with --max-tokens",
+                    self.yellow(&format!(
+                        "⚠ Token budget exceeded ({used} used, {limit} limit)."
+                    ))
+                );
+            }
+            ProgressEvent::ActivityTimeoutReached { limit, .. } => {
+                println!();
+                println!(
+                    "{} Increase with --max-timeout",
+                    self.yellow(&format!(
+                        "⚠ Activity timeout ({:.0}s limit).",
+                        limit.as_secs_f64()
+                    ))
+                );
+            }
+            ProgressEvent::LlmStatus { message, .. } => {
+                print!("\r{} {}", self.yellow("⟳"), self.dim(&message));
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
+            }
+            ProgressEvent::StreamChunk { text, .. } => {
+                use std::io::Write;
+                if let Ok(mut buf) = self.stdout.lock() {
+                    let _ = write!(buf, "{text}");
+                    // Flush only on newlines to reduce syscalls
+                    if text.contains('\n') {
+                        let _ = buf.flush();
+                    }
+                }
+            }
+            ProgressEvent::ReasoningChunk { .. } => {}
+            ProgressEvent::StreamDone { .. } => {
+                use std::io::Write;
+                if let Ok(mut buf) = self.stdout.lock() {
+                    let _ = writeln!(buf);
+                    let _ = buf.flush();
+                }
+            }
+            ProgressEvent::StreamRetry { .. } => {
+                // Console doesn't need to do anything special on retry
+                // (the LlmStatus message already shows retry info).
+            }
+            ProgressEvent::CostUpdate {
+                session_input_tokens,
+                session_output_tokens,
+                session_cost,
+                ..
+            } => {
+                if self.verbose {
+                    let cost_str = match session_cost {
+                        Some(c) => format!("${c:.4}"),
+                        None => "N/A".to_string(),
+                    };
+                    println!(
+                        "  {} {} in / {} out | Cost: {}",
+                        self.dim("Tokens:"),
+                        session_input_tokens,
+                        session_output_tokens,
+                        cost_str,
+                    );
+                }
+            }
+        }
+    }
+}

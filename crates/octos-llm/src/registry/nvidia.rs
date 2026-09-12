@@ -1,0 +1,53 @@
+use std::sync::Arc;
+
+use eyre::Result;
+
+use crate::openai::OpenAIProvider;
+use crate::provider::LlmProvider;
+
+use super::{CreateParams, ProviderEntry};
+
+pub const ENTRY: ProviderEntry = ProviderEntry {
+    name: "nvidia",
+    aliases: &["nim"],
+    api_key_env: Some("NVIDIA_API_KEY"),
+    key_env_aliases: &[],
+    default_base_url: Some("https://integrate.api.nvidia.com/v1"),
+    requires_api_key: true,
+    requires_base_url: false,
+    requires_model: false,
+    // Nvidia NIM hosts many models — no simple detect pattern.
+    detect_patterns: &[],
+    model_discovery: crate::discovery::OPENAI_MODELS,
+    model_discovery_for_model: None,
+    create,
+};
+
+fn create(p: CreateParams) -> Result<Arc<dyn LlmProvider>> {
+    let http_timeout = p.http_timeout();
+    let key = p
+        .api_key
+        .ok_or_else(|| eyre::eyre!("NVIDIA_API_KEY not set"))?;
+    let model = p
+        .model
+        .or_else(|| ENTRY.default_model().map(str::to_string))
+        .ok_or_else(|| {
+            eyre::eyre!(
+                "{}: no model given and the catalog declares no default for this family",
+                ENTRY.name
+            )
+        })?;
+    let url = p
+        .base_url
+        .unwrap_or_else(|| "https://integrate.api.nvidia.com/v1".into());
+    let mut provider = OpenAIProvider::new(&key, &model)
+        .with_provider_label("nvidia")
+        .with_base_url(&url);
+    if let Some(hints) = p.model_hints {
+        provider = provider.with_hints(hints);
+    }
+    if let Some((t, c)) = http_timeout {
+        provider = provider.with_http_timeout(t, c);
+    }
+    Ok(Arc::new(provider))
+}

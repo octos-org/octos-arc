@@ -1,0 +1,741 @@
+//! Process-wide event broadcaster for the API surface.
+//!
+//! Originally the SSE wire format module (M9-α-5/α-6 deleted the chat
+//! SSE transport entirely — see ADR PR #830 / audit issue #845). The
+//! legacy `/api/ws` text-frame handler (the last consumer of the
+//! per-request `ChannelReporter`) was retired in a follow-up cleanup.
+//! The JSON shape produced by [`event_to_json`] is now consumed by:
+//!
+//! * the harness/admin `/api/events/harness` endpoint (subscribes to
+//!   the broadcaster for M7.6 swarm-dashboard live frames),
+//! * the swarm dispatch / cost-attribution typed event publishers in
+//!   `crate::api::swarm`,
+//! * the UI Protocol v1 WS bridge in `crate::api::ui_protocol`, which
+//!   reuses `event_to_json` to encode forwarded progress frames.
+//!
+//! No SSE wire path remains in the chat transport — every chat client
+//! talks to `/api/ui-protocol/ws` exclusively.
+
+use octos_agent::{ProgressEvent, ProgressReporter};
+use tokio::sync::broadcast;
+
+/// Producer iteration identity, opaque to clients. It does not depend on how
+/// many progress events were delivered or retained by the ledger.
+pub(super) fn assistant_segment_id_for_iteration(thread_id: &str, iteration: u32) -> String {
+    format!("{thread_id}:assistant:iteration:{iteration}")
+}
+
+/// Process-wide broadcaster of progress events, used by the harness +
+/// swarm event surfaces. Publishes pre-serialized JSON frames so
+/// downstream subscribers (admin dashboard, M7.8 live gate) can forward
+/// them verbatim.
+pub struct EventBroadcaster {
+    tx: broadcast::Sender<String>,
+}
+
+impl EventBroadcaster {
+    pub fn new(capacity: usize) -> Self {
+        let (tx, _) = broadcast::channel(capacity);
+        Self { tx }
+    }
+
+    /// Subscribe to the event stream.
+    pub fn subscribe(&self) -> broadcast::Receiver<String> {
+        self.tx.subscribe()
+    }
+
+    /// Send a raw pre-encoded JSON frame. Used by typed endpoints
+    /// (M7.6 swarm review decision) that construct the JSON body
+    /// directly instead of routing through a [`ProgressEvent`].
+    /// Returns the number of receivers the frame reached (0 when no
+    /// subscribers are connected — the send silently drops, matching
+    /// the `report` impl).
+    pub(crate) fn tx_send(&self, payload: String) -> usize {
+        self.tx.send(payload).unwrap_or(0)
+    }
+}
+
+impl ProgressReporter for EventBroadcaster {
+    fn report(&self, event: ProgressEvent) {
+        // Broadcaster is process-wide and not turn-scoped, so it cannot
+        // resolve a thread_id without further plumbing. Per-request
+        // consumers (e.g. the UI Protocol v1 `BoundedChannelReporter`)
+        // tag every payload with their turn-bound thread_id; broadcaster
+        // subscribers are debug-only and tolerate the absence.
+        let json = match serde_json::to_string(&event_to_json(&event, None)) {
+            Ok(j) => j,
+            Err(_) => return,
+        };
+        // Ignore send errors (no subscribers)
+        let _ = self.tx.send(json);
+    }
+}
+
+/// Serialize a [`ProgressEvent`] to a JSON wire payload. When `thread_id`
+/// is `Some`, every payload is tagged with the thread it belongs to.
+///
+/// M8.10 PR #2: strictly additive — clients that don't know `thread_id`
+/// silently ignore the field. When `thread_id` is `None`, the field is
+/// omitted from the payload entirely.
+pub(crate) fn event_to_json(event: &ProgressEvent, thread_id: Option<&str>) -> serde_json::Value {
+    let mut value = match event {
+        ProgressEvent::TaskStarted { task_id } => {
+            serde_json::json!({
+                "type": "task_started",
+                "task_id": task_id,
+            })
+        }
+        ProgressEvent::ToolStarted {
+            name,
+            tool_id,
+            arguments,
+        } => {
+            let mut value = serde_json::json!({
+                "type": "tool_start",
+                "tool": name,
+                "tool_call_id": tool_id,
+            });
+            // Additive: carried so the UI-protocol mapper (`map_tool_start`)
+            // and the envelope `arguments_preview` can echo the call.
+            if let Some(arguments) = arguments {
+                value["arguments"] = arguments.clone();
+            }
+            value
+        }
+        ProgressEvent::ToolCompleted {
+            name,
+            tool_id,
+            success,
+            output_preview,
+            duration,
+        } => {
+            let mut value = serde_json::json!({
+                "type": "tool_end",
+                "tool": name,
+                "tool_call_id": tool_id,
+                "success": success,
+                "duration_ms": duration.as_millis() as u64,
+            });
+            // Additive: the mapper (`map_tool_end`) lifts these onto
+            // `ToolCompletedEvent` so tool cards and envelope previews can
+            // show the result excerpt. Bounded HERE — the chokepoint feeding
+            // both the durable notification ledger and the envelope lane —
+            // because producers are not trustworthy about size (a failing
+            // tool emits unbounded `e.to_string()`).
+            if !output_preview.is_empty() {
+                value["output_preview"] = serde_json::json!(octos_core::truncated_utf8(
+                    output_preview,
+                    octos_core::ui_protocol::ENVELOPE_TOOL_OUTPUT_PREVIEW_MAX,
+                    "…",
+                ));
+            }
+            value
+        }
+        ProgressEvent::ToolProgress {
+            name,
+            tool_id,
+            message,
+        } => {
+            serde_json::json!({
+                "type": "tool_progress",
+                "tool": name,
+                "tool_call_id": tool_id,
+                "message": message,
+            })
+        }
+        ProgressEvent::StreamChunk { text, iteration } => {
+            serde_json::json!({"type": "token", "text": text, "iteration": iteration})
+        }
+        ProgressEvent::ReasoningChunk { text, iteration } => {
+            serde_json::json!({
+                "type": "reasoning_chunk",
+                "text": text,
+                "iteration": iteration,
+            })
+        }
+        ProgressEvent::StreamDone { .. } => {
+            serde_json::json!({"type": "stream_end"})
+        }
+        ProgressEvent::CostUpdate {
+            session_input_tokens,
+            session_output_tokens,
+            session_cost,
+            model,
+            context_window,
+            ..
+        } => {
+            // Always serialize the cost_update payload as an object so we
+            // can attach the optional `model` identifier without
+            // disturbing the historical field order. Clients without the
+            // new field continue to ignore unknown keys.
+            let mut payload = serde_json::json!({
+                "type": "cost_update",
+                "input_tokens": session_input_tokens,
+                "output_tokens": session_output_tokens,
+                "session_cost": session_cost,
+            });
+            if let Some(model) = model.as_deref() {
+                payload["model"] = serde_json::Value::String(model.to_string());
+            }
+            // Per-model context window so clients render an honest ctx gauge
+            // against the real window instead of a hardcoded default.
+            if let Some(window) = context_window {
+                payload["context_window"] = serde_json::json!(window);
+            }
+            payload
+        }
+        ProgressEvent::Thinking { iteration } => {
+            serde_json::json!({"type": "thinking", "iteration": iteration})
+        }
+        ProgressEvent::AgentProgress {
+            iteration,
+            active_tokens,
+            elapsed,
+            checkpoints,
+            reflecting,
+        } => {
+            serde_json::json!({
+                "type": "agent_progress",
+                "message": octos_agent::progress::agent_progress_message(
+                    *iteration,
+                    *active_tokens,
+                    *elapsed,
+                    *checkpoints,
+                    *reflecting,
+                ),
+                "iteration": iteration,
+                "active_tokens": active_tokens,
+                "elapsed_ms": elapsed.as_millis() as u64,
+                "checkpoints": checkpoints,
+                "reflecting": reflecting,
+            })
+        }
+        ProgressEvent::Response { iteration, .. } => {
+            serde_json::json!({"type": "response", "iteration": iteration})
+        }
+        ProgressEvent::FileModified { path } => {
+            serde_json::json!({"type": "file_modified", "path": path})
+        }
+        ProgressEvent::PlanUpdated { plan } => {
+            serde_json::json!({"type": "plan_updated", "plan": plan})
+        }
+        ProgressEvent::TokenUsage {
+            input_tokens,
+            output_tokens,
+        } => {
+            serde_json::json!({
+                "type": "cost_update",
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+            })
+        }
+        ProgressEvent::TaskCompleted {
+            success,
+            iterations,
+            duration,
+        } => {
+            serde_json::json!({
+                "type": "task_completed",
+                "success": success,
+                "iterations": iterations,
+                "duration_ms": duration.as_millis() as u64,
+            })
+        }
+        ProgressEvent::TaskInterrupted { iterations } => {
+            serde_json::json!({
+                "type": "task_interrupted",
+                "iterations": iterations,
+            })
+        }
+        ProgressEvent::MaxIterationsReached { limit } => {
+            serde_json::json!({
+                "type": "max_iterations_reached",
+                "limit": limit,
+            })
+        }
+        ProgressEvent::TokenBudgetExceeded { used, limit } => {
+            serde_json::json!({
+                "type": "token_budget_exceeded",
+                "used": used,
+                "limit": limit,
+            })
+        }
+        ProgressEvent::ActivityTimeoutReached { elapsed, limit } => {
+            serde_json::json!({
+                "type": "activity_timeout_reached",
+                "elapsed_ms": elapsed.as_millis() as u64,
+                "limit_ms": limit.as_millis() as u64,
+            })
+        }
+        ProgressEvent::LlmStatus { message, iteration } => {
+            serde_json::json!({
+                "type": "llm_status",
+                "message": message,
+                "iteration": iteration,
+            })
+        }
+        ProgressEvent::StreamRetry { iteration } => {
+            serde_json::json!({
+                "type": "stream_retry",
+                "message": "stream retry",
+                "iteration": iteration,
+            })
+        }
+    };
+    if let (Some(tid), Some(obj)) = (thread_id, value.as_object_mut()) {
+        obj.insert(
+            "thread_id".to_string(),
+            serde_json::Value::String(tid.to_string()),
+        );
+    }
+    value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn event_to_json_tool_started() {
+        let event = ProgressEvent::ToolStarted {
+            name: "shell".into(),
+            tool_id: "t1".into(),
+            arguments: None,
+        };
+        let json = event_to_json(&event, None);
+        assert_eq!(json["type"], "tool_start");
+        assert_eq!(json["tool"], "shell");
+        assert_eq!(json["tool_call_id"], "t1");
+        // No-args calls omit the field entirely (additive wire).
+        assert!(json.get("arguments").is_none());
+    }
+
+    #[test]
+    fn event_to_json_tool_started_carries_arguments() {
+        // The fidelity route: arguments must survive Progress→JSON so the
+        // UI-protocol mapper (`map_tool_start`) and the envelope
+        // `arguments_preview` can echo the call.
+        let event = ProgressEvent::ToolStarted {
+            name: "shell".into(),
+            tool_id: "t1".into(),
+            arguments: Some(serde_json::json!({"command": "cargo test"})),
+        };
+        let json = event_to_json(&event, None);
+        assert_eq!(json["arguments"]["command"], "cargo test");
+    }
+
+    #[test]
+    fn event_to_json_tool_completed() {
+        let event = ProgressEvent::ToolCompleted {
+            name: "read_file".into(),
+            tool_id: "t2".into(),
+            success: true,
+            output_preview: "contents".into(),
+            duration: Duration::from_millis(42),
+        };
+        let json = event_to_json(&event, None);
+        assert_eq!(json["type"], "tool_end");
+        assert_eq!(json["tool"], "read_file");
+        assert_eq!(json["tool_call_id"], "t2");
+        assert_eq!(json["success"], true);
+        // Fidelity route: preview + duration survive Progress→JSON for the
+        // mapper (`map_tool_end`) and the envelope `output_preview`.
+        assert_eq!(json["output_preview"], "contents");
+        assert_eq!(json["duration_ms"], 42);
+    }
+
+    #[test]
+    fn event_to_json_bounds_giant_output_preview() {
+        // A failing tool emits unbounded `e.to_string()` — this serializer is
+        // the chokepoint before the durable ledger + envelope lane.
+        let event = ProgressEvent::ToolCompleted {
+            name: "shell".into(),
+            tool_id: "t9".into(),
+            success: false,
+            output_preview: "é".repeat(9000),
+            duration: Duration::from_millis(1),
+        };
+        let json = event_to_json(&event, None);
+        let preview = json["output_preview"].as_str().expect("preview");
+        assert!(
+            preview.chars().count()
+                <= octos_core::ui_protocol::ENVELOPE_TOOL_OUTPUT_PREVIEW_MAX + 1,
+            "preview must be bounded, got {} chars",
+            preview.chars().count()
+        );
+    }
+
+    #[test]
+    fn event_to_json_tool_completed_failure() {
+        let event = ProgressEvent::ToolCompleted {
+            name: "shell".into(),
+            tool_id: "t3".into(),
+            success: false,
+            output_preview: "error".into(),
+            duration: Duration::from_secs(1),
+        };
+        let json = event_to_json(&event, None);
+        assert_eq!(json["success"], false);
+    }
+
+    #[test]
+    fn event_to_json_tool_progress_includes_tool_call_id() {
+        let event = ProgressEvent::ToolProgress {
+            name: "run_pipeline".into(),
+            tool_id: "call_00_XXX".into(),
+            message: "plan_and_search_task_3 [...]: running deep_search".into(),
+        };
+        let json = event_to_json(&event, None);
+        assert_eq!(json["type"], "tool_progress");
+        assert_eq!(json["tool"], "run_pipeline");
+        assert_eq!(json["tool_call_id"], "call_00_XXX");
+        assert_eq!(
+            json["message"],
+            "plan_and_search_task_3 [...]: running deep_search"
+        );
+    }
+
+    #[test]
+    fn event_to_json_stream_chunk() {
+        let event = ProgressEvent::StreamChunk {
+            text: "Hello".into(),
+            iteration: 1,
+        };
+        let json = event_to_json(&event, None);
+        assert_eq!(json["type"], "token");
+        assert_eq!(json["text"], "Hello");
+    }
+
+    #[test]
+    fn event_to_json_reasoning_chunk() {
+        let event = ProgressEvent::ReasoningChunk {
+            text: "thinking".into(),
+            iteration: 1,
+        };
+        let json = event_to_json(&event, None);
+        assert_eq!(json["type"], "reasoning_chunk");
+        assert_eq!(json["text"], "thinking");
+        assert_eq!(json["iteration"], 1);
+    }
+
+    #[test]
+    fn event_to_json_stream_done() {
+        let event = ProgressEvent::StreamDone { iteration: 2 };
+        let json = event_to_json(&event, None);
+        assert_eq!(json["type"], "stream_end");
+    }
+
+    #[test]
+    fn event_to_json_cost_update() {
+        let event = ProgressEvent::CostUpdate {
+            session_input_tokens: 100,
+            session_output_tokens: 50,
+            turn_input_tokens: 100,
+            turn_output_tokens: 50,
+            response_cost: Some(0.001),
+            session_cost: Some(0.005),
+            model: None,
+            context_window: None,
+        };
+        let json = event_to_json(&event, None);
+        assert_eq!(json["type"], "cost_update");
+        assert_eq!(json["input_tokens"], 100);
+        assert_eq!(json["output_tokens"], 50);
+        assert_eq!(json["session_cost"], 0.005);
+        assert!(
+            json.get("model").is_none(),
+            "model must be omitted when the reporter has no model id, got {json}",
+        );
+    }
+
+    #[test]
+    fn event_to_json_cost_update_no_cost() {
+        let event = ProgressEvent::CostUpdate {
+            session_input_tokens: 200,
+            session_output_tokens: 100,
+            turn_input_tokens: 200,
+            turn_output_tokens: 100,
+            response_cost: None,
+            session_cost: None,
+            model: None,
+            context_window: None,
+        };
+        let json = event_to_json(&event, None);
+        assert_eq!(json["type"], "cost_update");
+        assert!(json["session_cost"].is_null());
+    }
+
+    /// New: when the agent emit layer populates `model`, the JSON wire
+    /// payload must carry the identifier so the UI Protocol mapper can
+    /// thread it through to `metadata.token_cost.model`. This is the
+    /// first link in the chain that ends with the chat bubble footer.
+    #[test]
+    fn event_to_json_cost_update_carries_model_when_set() {
+        let event = ProgressEvent::CostUpdate {
+            session_input_tokens: 12,
+            session_output_tokens: 7,
+            turn_input_tokens: 12,
+            turn_output_tokens: 7,
+            response_cost: None,
+            session_cost: None,
+            model: Some("deepseek-v4-pro".into()),
+            context_window: None,
+        };
+        let json = event_to_json(&event, None);
+        assert_eq!(json["type"], "cost_update");
+        assert_eq!(json["model"], "deepseek-v4-pro");
+    }
+
+    #[test]
+    fn event_to_json_cost_update_carries_context_window() {
+        let event = ProgressEvent::CostUpdate {
+            session_input_tokens: 1,
+            session_output_tokens: 1,
+            turn_input_tokens: 1,
+            turn_output_tokens: 1,
+            response_cost: None,
+            session_cost: None,
+            model: None,
+            context_window: Some(200_000),
+        };
+        let json = event_to_json(&event, None);
+        assert_eq!(json["context_window"], 200_000);
+    }
+
+    #[test]
+    fn event_to_json_thinking() {
+        let event = ProgressEvent::Thinking { iteration: 3 };
+        let json = event_to_json(&event, None);
+        assert_eq!(json["type"], "thinking");
+        assert_eq!(json["iteration"], 3);
+    }
+
+    #[test]
+    fn event_to_json_agent_progress_carries_step_tokens_and_time() {
+        let event = ProgressEvent::AgentProgress {
+            iteration: 21,
+            active_tokens: 18_432,
+            elapsed: Duration::from_secs(307),
+            checkpoints: 1,
+            reflecting: false,
+        };
+        let json = event_to_json(&event, None);
+        assert_eq!(json["type"], "agent_progress");
+        assert_eq!(json["iteration"], 21);
+        assert_eq!(json["active_tokens"], 18_432);
+        assert_eq!(json["elapsed_ms"], 307_000);
+        assert_eq!(json["checkpoints"], 1);
+        assert_eq!(
+            json["message"],
+            "Step 21 · 18432 tokens · 5m07s · 1 reflection"
+        );
+    }
+
+    #[test]
+    fn event_to_json_response() {
+        let event = ProgressEvent::Response {
+            content: "answer".into(),
+            iteration: 1,
+        };
+        let json = event_to_json(&event, None);
+        assert_eq!(json["type"], "response");
+        assert_eq!(json["iteration"], 1);
+    }
+
+    #[test]
+    fn event_to_json_task_started_preserves_task_id() {
+        let event = ProgressEvent::TaskStarted {
+            task_id: "abc".into(),
+        };
+        let json = event_to_json(&event, None);
+        assert_eq!(json["type"], "task_started");
+        assert_eq!(json["task_id"], "abc");
+    }
+
+    /// M8.10 PR #2: every payload tagged with the bound thread_id so
+    /// the web client can route to the right per-cmid thread bubble.
+    #[test]
+    fn event_to_json_includes_thread_id_when_provided() {
+        let cases: &[(ProgressEvent, &str)] = &[
+            (
+                ProgressEvent::ToolStarted {
+                    name: "shell".into(),
+                    tool_id: "t1".into(),
+                    arguments: None,
+                },
+                "tool_start",
+            ),
+            (
+                ProgressEvent::ToolCompleted {
+                    name: "shell".into(),
+                    tool_id: "t1".into(),
+                    success: true,
+                    output_preview: "ok".into(),
+                    duration: Duration::from_millis(1),
+                },
+                "tool_end",
+            ),
+            (
+                ProgressEvent::ToolProgress {
+                    name: "shell".into(),
+                    tool_id: "t1".into(),
+                    message: "step".into(),
+                },
+                "tool_progress",
+            ),
+            (
+                ProgressEvent::StreamChunk {
+                    text: "x".into(),
+                    iteration: 0,
+                },
+                "token",
+            ),
+            (
+                ProgressEvent::ReasoningChunk {
+                    text: "r".into(),
+                    iteration: 0,
+                },
+                "reasoning_chunk",
+            ),
+            (ProgressEvent::StreamDone { iteration: 0 }, "stream_end"),
+            (
+                ProgressEvent::CostUpdate {
+                    session_input_tokens: 0,
+                    session_output_tokens: 0,
+                    turn_input_tokens: 0,
+                    turn_output_tokens: 0,
+                    response_cost: None,
+                    session_cost: None,
+                    model: None,
+                    context_window: None,
+                },
+                "cost_update",
+            ),
+            (ProgressEvent::Thinking { iteration: 0 }, "thinking"),
+            (
+                ProgressEvent::AgentProgress {
+                    iteration: 1,
+                    active_tokens: 10,
+                    elapsed: Duration::from_secs(1),
+                    checkpoints: 0,
+                    reflecting: false,
+                },
+                "agent_progress",
+            ),
+            (
+                ProgressEvent::Response {
+                    content: "c".into(),
+                    iteration: 0,
+                },
+                "response",
+            ),
+        ];
+
+        for (event, expected_type) in cases {
+            let json = event_to_json(event, Some("cmid-T-thread"));
+            assert_eq!(json["type"], *expected_type);
+            assert_eq!(
+                json.get("thread_id").and_then(|v| v.as_str()),
+                Some("cmid-T-thread"),
+                "event with type `{expected_type}` missing thread_id field, got {json}",
+            );
+        }
+    }
+
+    #[test]
+    fn event_to_json_omits_thread_id_when_absent() {
+        let json = event_to_json(&ProgressEvent::Thinking { iteration: 0 }, None);
+        assert!(
+            json.get("thread_id").is_none(),
+            "thread_id must be absent when caller passes None, got {json}"
+        );
+    }
+
+    #[test]
+    fn event_to_json_maps_terminal_and_budget_events() {
+        let completed = event_to_json(
+            &ProgressEvent::TaskCompleted {
+                success: true,
+                iterations: 4,
+                duration: Duration::from_millis(250),
+            },
+            None,
+        );
+        assert_eq!(completed["type"], "task_completed");
+        assert_eq!(completed["success"], true);
+        assert_eq!(completed["iterations"], 4);
+        assert_eq!(completed["duration_ms"], 250);
+
+        let interrupted = event_to_json(&ProgressEvent::TaskInterrupted { iterations: 2 }, None);
+        assert_eq!(interrupted["type"], "task_interrupted");
+        assert_eq!(interrupted["iterations"], 2);
+
+        let max_iterations =
+            event_to_json(&ProgressEvent::MaxIterationsReached { limit: 10 }, None);
+        assert_eq!(max_iterations["type"], "max_iterations_reached");
+        assert_eq!(max_iterations["limit"], 10);
+
+        let token_budget = event_to_json(
+            &ProgressEvent::TokenBudgetExceeded {
+                used: 1200,
+                limit: 1000,
+            },
+            None,
+        );
+        assert_eq!(token_budget["type"], "token_budget_exceeded");
+        assert_eq!(token_budget["used"], 1200);
+        assert_eq!(token_budget["limit"], 1000);
+    }
+
+    #[test]
+    fn event_to_json_maps_status_and_usage_events() {
+        let usage = event_to_json(
+            &ProgressEvent::TokenUsage {
+                input_tokens: 11,
+                output_tokens: 7,
+            },
+            None,
+        );
+        assert_eq!(usage["type"], "cost_update");
+        assert_eq!(usage["input_tokens"], 11);
+        assert_eq!(usage["output_tokens"], 7);
+
+        let timeout = event_to_json(
+            &ProgressEvent::ActivityTimeoutReached {
+                elapsed: Duration::from_secs(30),
+                limit: Duration::from_secs(60),
+            },
+            None,
+        );
+        assert_eq!(timeout["type"], "activity_timeout_reached");
+        assert_eq!(timeout["elapsed_ms"], 30_000);
+        assert_eq!(timeout["limit_ms"], 60_000);
+
+        let llm_status = event_to_json(
+            &ProgressEvent::LlmStatus {
+                message: "retrying".into(),
+                iteration: 3,
+            },
+            None,
+        );
+        assert_eq!(llm_status["type"], "llm_status");
+        assert_eq!(llm_status["message"], "retrying");
+
+        let retry = event_to_json(&ProgressEvent::StreamRetry { iteration: 5 }, None);
+        assert_eq!(retry["type"], "stream_retry");
+        assert_eq!(retry["iteration"], 5);
+    }
+
+    #[test]
+    fn broadcaster_subscribe_receives_events() {
+        let broadcaster = EventBroadcaster::new(16);
+        let mut rx = broadcaster.subscribe();
+
+        broadcaster.report(ProgressEvent::Thinking { iteration: 1 });
+
+        let msg = rx.try_recv().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&msg).unwrap();
+        assert_eq!(parsed["type"], "thinking");
+    }
+}

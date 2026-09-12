@@ -1,0 +1,2504 @@
+# Octos 用户指南
+
+部署、配置和使用 Octos AI 智能体平台的完整指南。
+
+---
+
+## 目录
+
+1. [概览](#1-概览)
+2. [仪表盘与 OTP 登录](#2-仪表盘与-otp-登录)
+3. [配置 LLM 提供商](#3-配置-llm-提供商)
+4. [故障转移与自适应路由](#4-故障转移与自适应路由)
+5. [搜索 API 配置](#5-搜索-api-配置)
+6. [工具配置](#6-工具配置)
+7. [工具策略](#7-工具策略)
+8. [配置文件管理](#8-配置文件管理)
+9. [子账户管理](#9-子账户管理)
+10. [聊天中切换模型](#10-聊天中切换模型)
+11. [聊天功能与命令](#11-聊天功能与命令)
+12. [内置应用技能](#12-内置应用技能)
+    - [新闻获取](#121-新闻获取)
+    - [深度搜索](#122-深度搜索)
+    - [深度爬取](#123-深度爬取)
+    - [发送邮件](#124-发送邮件)
+    - [账户管理器](#125-账户管理器)
+    - [时钟](#126-时钟)
+    - [天气](#127-天气)
+    - [微信桥接](#128-微信桥接wechat-bridge)
+    - [智能家居](#129-智能家居)
+    - [Skill Evolve](#1210-skill-evolve)
+    - [Harness Starter](#1211-harness-starter启动模板)
+13. [平台技能 (ASR/TTS)](#13-平台技能-asrtts)
+14. [自定义技能安装](#14-自定义技能安装)
+15. [配置参考](#15-配置参考)
+16. [Matrix Appservice（Palpo）](#16-matrix-appservicepalpo)
+
+---
+
+## 1. 概览
+
+Octos 是一个 Rust 原生的 AI 智能体平台，支持三种运行模式：
+
+- **`octos serve`** — 控制面板 + 管理仪表盘 + 约 140 个 REST 端点。管理多个 **配置文件**（机器人实例），每个实例作为独立的 gateway 子进程运行，拥有独立的配置、记忆、会话和消息通道。首次启动且无管理员配置时，嵌入式仪表盘会运行**首次设置向导**。
+- **`octos gateway`** — 单个 gateway 实例，服务于各消息通道（Telegram、Discord、Slack、WhatsApp、Matrix、飞书、邮件、微信、企业微信、企业微信群机器人、QQ 机器人、Twilio）。
+- **`octos chat`** — 交互式 CLI 聊天，用于开发和测试。
+
+chat 和 `octos acp` 通过进程内连接使用与 OctosCode 相同的 OUP 会话 runtime，
+共享历史、压缩、权限和取消逻辑，不再各自执行另一套 Agent 循环。
+两者需要默认启用的 `api` feature，无需额外启动服务进程或网络监听。
+ACP 支持 `session/load` 回放和工具权限请求；OUP 结构化用户提问仍由
+终端 chat／OctosCode 提供交互。
+
+### 架构
+
+```
+octos serve（控制面板 + 仪表盘，约 140 个 REST 端点）
+  ├── 首次设置向导 /api/admin/setup/{state,step,complete,skip}
+  ├── 配置 A → gateway 进程（Telegram、WhatsApp）
+  ├── 配置 B → gateway 进程（飞书、Slack、Matrix）
+  └── 配置 C → gateway 进程（CLI）
+       │
+       ├── LLM 提供商（15 家，AdaptiveRouter → ProviderChain → RetryProvider）
+       ├── 工具注册表（约 50 个内置 + 插件 + 9 个用户级 app-skill）
+       │      每轮发送全部已启用工具；spawn_only 自动转后台
+       ├── 沙箱（bwrap / sandbox-exec / Docker / Windows AppContainer）
+       ├── Pipeline 引擎（DOT 图，逐节点模型，限流扇出）
+       ├── Swarm 调度器（/api/swarm/dispatch — 扇出到 N 个子 Agent）
+       ├── 子 Agent 输出路由器（M8.7 — 摘要 + 持久化全文）
+       ├── 任务监督者（限流扇出、孤立任务清理、运行时恢复）
+       ├── 会话存储（JSONL，sticky thread_id，committed_seq，三层压缩）
+       ├── 记忆（MEMORY.md + 实体库 + episodes.redb + HNSW）
+       └── 技能（内置 + 自定义；mofa-fm 克隆音色经由 voice_profiles 注册）
+```
+
+每个配置文件完全隔离 — 拥有独立的数据目录、记忆、会话、技能和 API 密钥。可以在配置文件下创建子账户，子账户继承父配置的 LLM 设置。
+
+---
+
+## 2. 仪表盘与 OTP 登录
+
+管理仪表盘是嵌入在 `octos serve` 二进制文件中的 React Web 应用。它提供了管理配置文件、监控 gateway 状态和配置系统的可视化界面。
+
+### 2.1 访问仪表盘
+
+```bash
+# 启动控制面板
+octos serve --host 0.0.0.0
+
+# 仪表盘地址：
+# http://localhost:50080
+```
+
+如果在反向代理（如 Caddy 或 Nginx）后运行，请配置转发到 serve 端口。
+
+### 2.2 OTP 邮件认证
+
+仪表盘使用基于邮件的一次性密码（OTP）认证。不存储密码 — 每次登录时向用户发送 6 位验证码。
+
+#### 配置 SMTP 发送 OTP 邮件
+
+在 serve 配置文件中添加 `dashboard_auth`（`~/.octos/config.json` 或按配置文件）：
+
+```json
+{
+  "dashboard_auth": {
+    "smtp": {
+      "host": "smtp.gmail.com",
+      "port": 465,
+      "username": "your-email@gmail.com",
+      "password_env": "SMTP_PASSWORD",
+      "from_address": "your-email@gmail.com"
+    },
+    "session_expiry_hours": 24,
+    "allow_self_registration": false
+  }
+}
+```
+
+- **`host`** — SMTP 服务器（如 `smtp.gmail.com`、`smtp.office365.com`）
+- **`port`** — 465 为隐式 TLS，587 为 STARTTLS
+- **`username`** — SMTP 登录用户名
+- **`password_env`** — 存放 SMTP 密码的环境变量名（如 `SMTP_PASSWORD`）。Gmail 请使用[应用密码](https://support.google.com/accounts/answer/185833)
+- **`from_address`** — OTP 邮件的发件人地址
+- **`session_expiry_hours`** — 登录会话有效期（默认：24 小时）
+- **`allow_self_registration`** — 如果为 `false`，只有预先创建的用户才能登录
+
+启动前设置 SMTP 密码环境变量：
+
+```bash
+export SMTP_PASSWORD="your-app-password"
+```
+
+#### 登录流程
+
+1. 在浏览器中打开仪表盘
+2. 在登录页面输入邮箱地址
+3. 查收包含 6 位 OTP 验证码的邮件
+4. 在验证页面输入验证码
+5. 登录成功，在配置的会话时长内保持登录状态
+
+**安全细节：**
+- 每个邮箱每 60 秒只能请求一次 OTP（限流）
+- OTP 在 5 分钟后过期
+- 输错 3 次后 OTP 失效
+- 会话令牌：64 字符十六进制字符串（32 字节随机数）
+- 使用常量时间比较防止时序攻击
+- 如果 `allow_self_registration` 禁用且邮箱未注册，不发送邮件（但服务器返回成功以防止邮箱枚举）
+
+**开发模式：** 如果未配置 SMTP，OTP 验证码会打印到服务器控制台日志中而不是发送邮件。适用于本地开发。
+
+### 2.3 仪表盘功能
+
+登录后，仪表盘提供：
+
+- **总览** — 配置文件总数、运行中/已停止数量、所有机器人的快速状态
+- **配置管理** — 创建、编辑、启动、停止、重启和删除配置文件
+- **日志查看** — 每个 gateway 进程的实时 SSE 日志流
+- **提供商测试** — 在部署前测试 LLM 提供商/模型/API 密钥组合
+- **WhatsApp 二维码** — 扫描二维码绑定 WhatsApp 号码
+- **平台技能** — 监控并管理 ASR/TTS 服务；mofa-fm 克隆音色通过 voice_profiles 部署脚本注册
+- **Swarm 调度** — 查看进行中的扇出调度、产物以及单次调度账本
+- **Pipeline 运行** — 节点树、单节点成本、对进行中的运行进行取消/重启
+- **指标** — 每个配置文件的 LLM 提供商 QoS 指标（延迟、错误率）
+
+### 2.4 首次设置向导
+
+当 `octos serve` 首次启动且没有管理员配置时，嵌入式仪表盘会启动**设置向导**，引导操作员依次完成：
+
+1. **部署模式** — 在本地、自托管云 + 租户、Octos Cloud 注册之间选择，每种模式有相应指引文本。
+2. **SMTP 配置** — OTP 邮件登录所需（本地部署可跳过）。
+3. **LLM 提供商** — 选择提供商、填入 API 密钥并在保存前进行联通测试。
+4. **管理员配置** — 名称、通道、可选的 Family Plan 子账户。
+
+进度由后端跟踪：
+
+- `GET /api/admin/setup/state` — 当前向导步骤 + 完成标志
+- `POST /api/admin/setup/step` — 提交/保存某个步骤
+- `POST /api/admin/setup/complete` — 完成并创建管理员配置
+- `POST /api/admin/setup/skip` — 操作员逃生口（跳过剩余可选步骤）
+
+源码：`crates/octos-cli/src/api/admin_setup.rs`、`dashboard/src/pages/wizard/`。
+
+---
+
+## 3. 配置 LLM 提供商
+
+Octos 开箱即用支持 16 个 LLM 提供商家族。云端提供商需要设置对应的环境变量 API 密钥；本地服务器（见 [3.6](#36-本地模型llamacppollamavllmlm-studio)）无需密钥。
+
+### 3.1 支持的提供商
+
+| 提供商 | 环境变量 | 默认模型 | API 格式 | 别名 |
+|--------|----------|----------|----------|------|
+| `anthropic` | `ANTHROPIC_API_KEY` | claude-sonnet-4-20250514 | 原生 Anthropic | — |
+| `openai` | `OPENAI_API_KEY` | gpt-4o | 原生 OpenAI | — |
+| `gemini` | `GEMINI_API_KEY` | gemini-2.5-flash | 原生 Gemini | — |
+| `openrouter` | `OPENROUTER_API_KEY` | anthropic/claude-sonnet-4-20250514 | 原生 OpenRouter | — |
+| `r9s` | `R9S_API_KEY` | claude-sonnet-4-6 | Anthropic / OpenAI 自动判定 | `r9s.ai` |
+| `deepseek` | `DEEPSEEK_API_KEY` | deepseek-chat | OpenAI 兼容 | — |
+| `groq` | `GROQ_API_KEY` | llama-3.3-70b-versatile | OpenAI 兼容 | — |
+| `moonshot` | `MOONSHOT_API_KEY` | kimi-k2.5 | OpenAI 兼容 | `kimi` |
+| `dashscope` | `DASHSCOPE_API_KEY` | qwen-max | OpenAI 兼容 | `qwen` |
+| `minimax` | `MINIMAX_API_KEY` | MiniMax-Text-01 | OpenAI 兼容 | — |
+| `zhipu` | `ZHIPU_API_KEY` | glm-4-plus | OpenAI 兼容 | `glm` |
+| `zai` | `ZAI_API_KEY` | glm-5-turbo | Anthropic 兼容 | `z.ai` |
+| `nvidia` | `NVIDIA_API_KEY` | meta/llama-3.3-70b-instruct | OpenAI 兼容 | `nim` |
+| `ollama` | *（无需）* | llama3.2 | OpenAI 兼容 | — |
+| `vllm` | `VLLM_API_KEY` | *（必须指定）* | OpenAI 兼容 | — |
+| `local` | *（无需）* | local-default | OpenAI 兼容 | `llamacpp`、`llama.cpp`、`llama-server`、`lmstudio`、`openai-compatible` |
+
+#### 如何获取 API 密钥
+
+**Google Gemini：**
+1. 访问 [Google AI Studio](https://aistudio.google.com/apikey)
+2. 使用 Google 账号登录
+3. 点击"Create API Key"，选择或创建一个 Google Cloud 项目
+4. 复制生成的 API 密钥
+5. 设置环境变量：`export GEMINI_API_KEY="your-key"`
+
+**阿里云灵积 DashScope（通义千问 Qwen）：**
+1. 访问[灵积控制台](https://dashscope.console.aliyun.com/)
+2. 注册或登录阿里云账号
+3. 进入 **API-KEY 管理** 页面
+4. 点击"创建新的 API-KEY"
+5. 复制生成的密钥
+6. 设置环境变量：`export DASHSCOPE_API_KEY="your-key"`
+
+**DeepSeek（深度求索）：**
+1. 访问 [DeepSeek 开放平台](https://platform.deepseek.com/api_keys)
+2. 注册或登录
+3. 点击"创建 API key"
+4. 复制密钥
+5. 设置环境变量：`export DEEPSEEK_API_KEY="your-key"`
+
+**Moonshot / Kimi（月之暗面）：**
+1. 访问 [Moonshot 开放平台](https://platform.moonshot.cn/console/api-keys)
+2. 注册或登录
+3. 点击"新建 API Key"
+4. 复制密钥
+5. 设置环境变量：`export MOONSHOT_API_KEY="your-key"`
+
+**OpenAI：**
+1. 访问 [OpenAI API Keys](https://platform.openai.com/api-keys)
+2. 注册或登录
+3. 点击"Create new secret key"
+4. 复制密钥
+5. 设置环境变量：`export OPENAI_API_KEY="your-key"`
+
+**Anthropic：**
+1. 访问 [Anthropic Console](https://console.anthropic.com/settings/keys)
+2. 注册或登录
+3. 点击"Create Key"
+4. 复制密钥
+5. 设置环境变量：`export ANTHROPIC_API_KEY="your-key"`
+
+**MiniMax（稀宇科技）：**
+1. 访问 [MiniMax 开放平台](https://platform.minimaxi.com/)
+2. 注册或登录
+3. 在控制台中进入 **API Keys** 管理页面
+4. 点击"创建 API Key"
+5. 复制密钥
+6. 设置环境变量：`export MINIMAX_API_KEY="your-key"`
+
+**Z.AI：**
+1. 访问 [Z.AI 平台](https://z.ai/)
+2. 注册或登录
+3. 进入 API 密钥管理页面
+4. 创建新的 API 密钥
+5. 复制密钥
+6. 设置环境变量：`export ZAI_API_KEY="your-key"`
+7. 注意：Z.AI 使用 Anthropic Messages API 协议（`api_type: "anthropic"`）
+
+**Nvidia NIM：**
+1. 访问 [Nvidia NIM](https://build.nvidia.com/)
+2. 使用 Nvidia 账号注册或登录
+3. 进入任意模型页面，点击"Get API Key"
+4. 复制生成的密钥
+5. 设置环境变量：`export NVIDIA_API_KEY="your-key"`
+6. 注意：Nvidia NIM 托管多种模型 — 必须显式指定模型名称（如 `meta/llama-3.3-70b-instruct`）
+
+**OpenRouter：**
+1. 访问 [OpenRouter](https://openrouter.ai/keys)
+2. 注册或登录
+3. 点击"Create Key"
+4. 复制密钥
+5. 设置环境变量：`export OPENROUTER_API_KEY="your-key"`
+6. 注意：OpenRouter 是多模型聚合器 — 使用类似 `anthropic/claude-sonnet-4-20250514`、`openai/gpt-4o` 等模型名称
+
+### 3.2 配置方法
+
+#### 方法 1：配置文件
+
+在配置中设置 `provider` 和 `model`：
+
+```json
+{
+  "provider": "moonshot",
+  "model": "kimi-2.5",
+  "api_key_env": "KIMI_API_KEY"
+}
+```
+
+`api_key_env` 字段可覆盖提供商的默认环境变量名。例如 Moonshot 默认使用 `MOONSHOT_API_KEY`，但你可以改用 `KIMI_API_KEY`。
+
+#### 方法 2：CLI 参数
+
+```bash
+octos chat --provider deepseek --model deepseek-chat
+octos chat --model gpt-4o  # 从模型名称自动检测提供商
+```
+
+#### 方法 3：自动检测
+
+省略 `provider` 时，Octos 会从模型名称自动检测提供商：
+
+| 模型名模式 | 检测到的提供商 |
+|-----------|--------------|
+| `claude-*` | anthropic |
+| `gpt-*`、`o1-*`、`o3-*`、`o4-*` | openai |
+| `gemini-*` | gemini |
+| `deepseek-*` | deepseek |
+| `kimi-*`、`moonshot-*` | moonshot |
+| `qwen-*` | dashscope |
+| `glm-*` | zhipu |
+| `llama-*` | groq |
+
+### 3.3 自定义端点
+
+使用 `base_url` 指向自托管或代理端点：
+
+```json
+{
+  "provider": "openai",
+  "model": "gpt-4o",
+  "base_url": "https://your-azure-endpoint.openai.azure.com/v1"
+}
+```
+
+```json
+{
+  "provider": "ollama",
+  "model": "llama3.2",
+  "base_url": "http://localhost:11434/v1"
+}
+```
+
+### 3.4 API 类型覆盖
+
+`api_type` 字段强制使用特定的 API 传输格式：
+
+```json
+{
+  "provider": "zai",
+  "model": "glm-5-turbo",
+  "api_type": "anthropic"
+}
+```
+
+- `"openai"` — OpenAI Chat Completions 格式（大多数提供商的默认值）
+- `"anthropic"` — Anthropic Messages 格式（用于 Z.AI 等 Anthropic 兼容代理）
+
+### 3.5 认证存储（OAuth 和粘贴令牌）
+
+除了环境变量，还可以通过 auth CLI 存储 API 密钥：
+
+```bash
+# OAuth PKCE（仅 OpenAI）
+octos auth login --provider openai
+
+# 设备码流程（仅 OpenAI）
+octos auth login --provider openai --device-code
+
+# 粘贴令牌（所有其他提供商）
+octos auth login --provider anthropic
+# → 提示："Paste your API key:"
+
+# 查看已存储的凭据
+octos auth status
+
+# 删除凭据
+octos auth logout --provider openai
+```
+
+凭据存储在 `~/.octos/auth.json`（文件权限 0600）。解析 API 密钥时，认证存储**优先于**环境变量。
+
+### 3.6 本地模型（llama.cpp、Ollama、vLLM、LM Studio）
+
+主流本地模型服务器都提供 OpenAI 兼容 API，因此 Octos 将它们统一为**一个提供商家族：`local`**。无需关心背后是哪个引擎——选择 `local`，把 `base_url` 指向服务器即可。引擎名也可作为别名使用（`"provider": "llamacpp"`、`"lmstudio"` 等都会解析为 `local`）。
+
+零配置默认指向 llama.cpp `llama-server` 的标准端口：
+
+```json
+{
+  "provider": "local"
+}
+```
+
+这就是一份完整配置——无需 API 密钥、无需模型名（llama.cpp、LM Studio 这类单模型服务器会忽略 `model` 字段），`base_url` 默认为 `http://127.0.0.1:8080/v1`。
+
+其他引擎只需设置 `base_url`：
+
+| 引擎 | 常用 `base_url` | 说明 |
+|---|---|---|
+| llama.cpp（`llama-server`） | `http://127.0.0.1:8080/v1` | 默认值——用 `llama-server -m model.gguf --jinja` 启动 |
+| Ollama | `http://127.0.0.1:11434/v1` | 将 `model` 设为已拉取的模型（如 `llama3.2`），Ollama 按名称选择模型 |
+| vLLM | `http://127.0.0.1:8000/v1` | 将 `model` 设为所服务的模型 id |
+| LM Studio | `http://127.0.0.1:1234/v1` | 单模型；`model` 可不设 |
+
+如果服务器启动时设置了 API 密钥（llama.cpp 的 `--api-key`），照常通过 `api_key_env` 提供。在**共享/多用户机器**上，请务必为服务器设置密钥：未鉴权的 localhost 端点可被任意本地进程抢占绑定，从而截获你的完整对话内容。`ollama`、`vllm` 家族仍然可用且行为一致——推荐使用与引擎无关的 `local`。
+
+**用 `octos doctor` 验证配置。** 对本地家族，doctor 会查询服务器的 `/v1/models` 端点，报告实际加载的模型，并在配置的 `model` 不在列表中或端口无响应时给出警告（并列出常见的本地端点）。
+
+**工具调用注意事项：** Agent 循环依赖工具/函数调用，而对本地服务器来说这取决于*模型及其聊天模板*，与 Octos 无关。请使用支持工具调用的模型；llama.cpp 需以 `--jinja` 启动以启用模板的工具支持。如果聊天正常但工具异常，请首先检查这一点。
+
+---
+
+## 4. 故障转移与自适应路由
+
+### 4.1 静态故障转移链
+
+配置按优先级排序的故障转移链。如果主要提供商失败（401、403、限流、5xx），自动尝试链中的下一个提供商：
+
+```json
+{
+  "provider": "moonshot",
+  "model": "kimi-2.5",
+  "fallback_models": [
+    {
+      "provider": "deepseek",
+      "model": "deepseek-chat",
+      "api_key_env": "DEEPSEEK_API_KEY"
+    },
+    {
+      "provider": "gemini",
+      "model": "gemini-2.5-flash",
+      "api_key_env": "GEMINI_API_KEY"
+    }
+  ]
+}
+```
+
+**故障转移规则：**
+- 401/403（认证错误）→ 立即故障转移（不重试同一提供商）
+- 429（限流）/ 5xx（服务器错误）→ 指数退避重试，然后故障转移
+- 熔断器：连续 3 次失败 → 提供商标记为降级
+
+### 4.2 自适应路由
+
+配置多个备用模型后，启用自适应路由可根据实时指标动态选择最佳提供商：
+
+```json
+{
+  "adaptive_routing": {
+    "enabled": true,
+    "latency_threshold_ms": 30000,
+    "error_rate_threshold": 0.3,
+    "probe_probability": 0.1,
+    "probe_interval_secs": 60,
+    "failure_threshold": 3
+  }
+}
+```
+
+- **`latency_threshold_ms`** — 平均延迟超过此值的提供商被降权（默认：30 秒）
+- **`error_rate_threshold`** — 错误率超过此值的提供商被降低优先级（默认：30%）
+- **`probe_probability`** — 发送到非主要提供商的探测请求比例（默认：10%）
+- **`probe_interval_secs`** — 同一提供商两次探测之间的最小间隔（默认：60 秒）
+- **`failure_threshold`** — 连续失败次数后触发熔断器（默认：3）
+
+启用自适应路由后，它将替代静态优先级链，基于延迟和错误率指标进行动态选择。
+
+---
+
+## 5. 搜索 API 配置
+
+`web_search` 工具使用多个搜索提供商，支持自动故障转移。
+
+### 5.1 支持的搜索提供商
+
+| 提供商 | 环境变量 | 费用 | 说明 |
+|--------|----------|------|------|
+| DuckDuckGo | *（无需）* | 免费 | 始终可用，HTML 抓取作为兜底 |
+| Brave Search | `BRAVE_API_KEY` | 免费额度：每月 2K 次 | REST API |
+| You.com | `YDC_API_KEY` | 付费 | 丰富的 JSON 结果和摘要 |
+| Perplexity Sonar | `PERPLEXITY_API_KEY` | 付费 | AI 合成答案并附带引用 |
+
+### 5.2 提供商选择
+
+提供商按顺序尝试：**DuckDuckGo → Brave → You.com → Perplexity**。第一个返回非空结果的提供商获胜。如果全部失败，返回 DuckDuckGo 结果作为兜底。
+
+**配额/限流时自动轮换（M8.10b，#578）**：当前提供商若返回配额耗尽或限流错误（HTTP 402、429 或服务自定义错误串），`web_search` 在调用过程中即切换到下一个已配置的提供商，而不是把错误抛给 Agent。这让该工具在配额波动下仍然稳定，无需 Agent 端重试逻辑。
+
+设置对应的 API 密钥即可使用特定提供商：
+
+```bash
+export BRAVE_API_KEY="your-brave-key"
+# 或
+export PERPLEXITY_API_KEY="pplx-your-key"
+```
+
+### 5.3 配置默认结果数量
+
+```
+/config set web_search.count 10
+```
+
+此设置跨会话持久化，适用于所有搜索，除非调用方显式提供 `count`。
+
+### 5.4 聊天使用示例
+
+```
+用户：搜索一下最新的 Rust 1.85 发布说明
+
+机器人：[使用 web_search 工具搜索 "Rust 1.85 release notes"]
+       以下是 Rust 1.85 的新特性摘要...
+```
+
+---
+
+## 6. 工具配置
+
+可以在运行时使用 `/config` 斜杠命令配置工具。设置持久化到 `{data_dir}/tool_config.json`。
+
+### 6.1 可配置的工具
+
+| 工具 | 设置项 | 类型 | 默认值 | 说明 |
+|------|--------|------|--------|------|
+| `news_digest` | `language` | `"zh"` / `"en"` | `"zh"` | 新闻摘要输出语言 |
+| `news_digest` | `hn_top_stories` | 5-100 | 30 | 获取的 Hacker News 故事数量 |
+| `news_digest` | `max_rss_items` | 5-100 | 30 | 每个 RSS 源的条目数量 |
+| `news_digest` | `max_deep_fetch_total` | 1-50 | 20 | 深度获取的文章总数 |
+| `news_digest` | `max_source_chars` | 1000-50000 | 12000 | 每个来源的 HTML 字符限制 |
+| `news_digest` | `max_article_chars` | 1000-50000 | 8000 | 每篇文章的内容字符限制 |
+| `deep_crawl` | `page_settle_ms` | 500-10000 | 3000 | JS 渲染等待时间（毫秒） |
+| `deep_crawl` | `max_output_chars` | 10000-200000 | 50000 | 输出截断限制 |
+| `web_search` | `count` | 1-10 | 5 | 默认搜索结果数量 |
+| `web_fetch` | `extract_mode` | `"markdown"` / `"text"` | `"markdown"` | 内容提取格式 |
+| `web_fetch` | `max_chars` | 1000-200000 | 50000 | 内容大小限制 |
+| `browser` | `action_timeout_secs` | 30-600 | 300 | 单次操作超时 |
+| `browser` | `idle_timeout_secs` | 60-600 | 300 | 空闲会话超时 |
+
+### 6.2 聊天中的配置命令
+
+```
+/config                              # 显示所有工具设置
+/config web_search                   # 显示 web_search 设置
+/config set web_search.count 10      # 设置默认结果数为 10
+/config set news_digest.language en  # 切换新闻摘要为英文
+/config reset web_search.count       # 重置为默认值（5）
+```
+
+### 6.3 优先级顺序
+
+设置值按以下顺序解析（最高优先级在前）：
+1. 显式的每次调用参数（工具调用时传入的参数）
+2. `/config` 覆盖（存储在 `tool_config.json` 中）
+3. 硬编码默认值
+
+---
+
+## 7. 工具策略
+
+工具策略控制智能体可以使用哪些工具。可以全局设置、按提供商设置或按上下文设置。
+
+### 7.1 全局策略
+
+```json
+{
+  "tool_policy": {
+    "allow": ["group:fs", "group:search", "web_search"],
+    "deny": ["shell", "spawn"]
+  }
+}
+```
+
+- **`allow`** — 如果非空，只允许列出的工具。如果为空，允许所有工具。
+- **`deny`** — 这些工具始终被禁止。**deny 优先于 allow。**
+
+### 7.2 命名分组
+
+权威定义：`crates/octos-agent/src/tools/policy.rs:154-223` 中的 `TOOL_GROUPS`。具体工具清单：
+
+| 分组 | 展开为 |
+|------|--------|
+| `group:fs` | `read_file`、`write_file`、`edit_file`、`diff_edit` |
+| `group:runtime` | `shell` |
+| `group:web` | `web_search`、`web_fetch`、`browser` |
+| `group:search` | `glob`、`grep`、`list_dir` |
+| `group:sessions` | `spawn` |
+| `group:memory` | `recall_memory`、`save_memory` |
+| `group:research` | `deep_search`、`synthesize_research`、`deep_crawl` |
+| `group:admin` | `manage_skills`、`configure_tool`、`model_check` |
+| `group:media` | `mofa_comic`、`mofa_slides`、`mofa_infographic`、`mofa_cards`、`fm_tts`、`fm_voice_list` |
+| `group:delegated` | `delegate_task`、`spawn`、`send_message`、`message`、`save_memory`、`execute_code` —— 委派子 Agent 通用的拒绝列表。把它加到子 Agent 的 deny 列表，即可一次性关闭再委派、后台扇出、用户消息、记忆写入和任意代码执行。 |
+
+`group:robot:*` 系列机器人分级分组在 `docs/OCTOS_ROBOTICS_ARCHITECTURE.md` 描述，由 `robot_groups::group_covers_tool` 解析，而不通过 `TOOL_GROUPS`。
+
+### 7.3 通配符匹配
+
+后缀 `*` 表示前缀匹配：
+
+```json
+{
+  "tool_policy": {
+    "deny": ["web_*"]
+  }
+}
+```
+
+这将禁止 `web_search`、`web_fetch` 等。
+
+### 7.4 按提供商策略
+
+为不同的 LLM 模型设置不同的工具集：
+
+```json
+{
+  "tool_policy_by_provider": {
+    "openai/gpt-4o-mini": {
+      "deny": ["shell", "write_file"]
+    },
+    "gemini": {
+      "deny": ["diff_edit"]
+    }
+  }
+}
+```
+
+模型级别的键（如 `openai/gpt-4o-mini`）优先于提供商级别的键（如 `gemini`）。
+
+### 7.5 标签过滤
+
+使用 `context_filter` 限制工具到特定标签：
+
+```json
+{
+  "context_filter": ["gateway"]
+}
+```
+
+只有具有至少一个匹配标签的工具才可用。没有标签的工具始终通过（它们是"通用"的）。
+
+---
+
+## 8. 配置文件管理
+
+配置文件是通过管理仪表盘或 API 管理的机器人实例。每个配置文件拥有独立的配置、数据目录和 gateway 进程。
+
+### 8.1 创建配置文件
+
+#### 通过仪表盘
+
+1. 在仪表盘上点击"新建配置文件"
+2. 填写：ID（标识符）、显示名称、提供商、模型、API 密钥环境变量
+3. 添加通道（Telegram 令牌、WhatsApp 桥接 URL 等）
+4. 设置系统提示词
+5. 点击"创建"
+
+#### 通过管理 API
+
+```bash
+curl -X POST http://localhost:50080/api/admin/profiles \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "my-bot",
+    "name": "我的机器人",
+    "enabled": false,
+    "config": {
+      "provider": "moonshot",
+      "model": "kimi-2.5",
+      "api_key_env": "KIMI_API_KEY",
+      "gateway": {
+        "channels": [
+          {"type": "telegram", "allowed_senders": ["123456789"]}
+        ],
+        "system_prompt": "你是一个有用的助手。"
+      }
+    }
+  }'
+```
+
+### 8.2 配置文件生命周期（启动/停止/重启）
+
+#### 通过仪表盘
+
+使用每个配置文件卡片上的"启动"/"停止"/"重启"按钮。
+
+#### 通过管理 API
+
+```bash
+# 启动配置文件的 gateway
+curl -X POST http://localhost:50080/api/admin/profiles/my-bot/start
+
+# 停止配置文件的 gateway
+curl -X POST http://localhost:50080/api/admin/profiles/my-bot/stop
+
+# 重启（停止 + 启动）
+curl -X POST http://localhost:50080/api/admin/profiles/my-bot/restart
+
+# 检查状态
+curl http://localhost:50080/api/admin/profiles/my-bot/status
+```
+
+**启动验证：** 启动端点会在启动 gateway 之前验证 LLM 提供商是否已配置。如果提供商或 API 密钥缺失，将返回错误。
+
+### 8.3 更新配置文件
+
+更新使用 **JSON 合并** — 只有你包含的字段会被修改。所有其他字段保持不变。
+
+```bash
+curl -X PUT http://localhost:50080/api/admin/profiles/my-bot \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "更新后的机器人名称",
+    "config": {
+      "model": "kimi-k2.5",
+      "fallback_models": [
+        {"provider": "deepseek", "model": "deepseek-chat"}
+      ]
+    }
+  }'
+```
+
+### 8.4 删除配置文件
+
+```bash
+curl -X DELETE http://localhost:50080/api/admin/profiles/my-bot
+```
+
+这将停止 gateway 进程（如果正在运行）并级联删除所有子账户。
+
+### 8.5 查看日志
+
+```bash
+# Gateway 子进程 SSE 日志流（实时）
+curl http://localhost:50080/api/admin/profiles/my-bot/logs
+
+# 主 daemon SSE 日志流，支持初始回放和可选过滤
+curl -H "Authorization: Bearer $OCTOS_ADMIN_TOKEN" \
+  'http://localhost:50080/api/admin/serve/logs?tail_n=200&grep=.*error.*'
+
+# 提供商指标
+curl http://localhost:50080/api/admin/profiles/my-bot/metrics
+```
+
+### 8.6 API 总览端点
+
+```bash
+# 获取所有配置文件的摘要
+curl http://localhost:50080/api/admin/overview
+```
+
+返回总数、运行中/已停止数量以及每个配置文件的状态。
+
+### 8.7 测试提供商
+
+部署前测试提供商配置：
+
+```bash
+curl -X POST http://localhost:50080/api/admin/test-provider \
+  -H "Content-Type: application/json" \
+  -d '{
+    "provider": "moonshot",
+    "model": "kimi-2.5",
+    "api_key_env": "KIMI_API_KEY"
+  }'
+```
+
+返回成功/失败以及提供商的响应。
+
+---
+
+## 9. 子账户管理
+
+子账户是继承父配置文件 LLM 提供商设置的子机器人实例，但拥有自己的数据目录（记忆、会话、技能）和消息通道。
+
+### 9.1 子账户工作原理
+
+- **继承自父级：** LLM 提供商、模型、API 密钥、故障转移链
+- **独有的：** 数据目录、会话、记忆、技能、系统提示词、通道
+- **ID 格式：** `{父级ID}--{标识符}`（例如 `dspfac--work-bot`）
+- **管理方式：** 通过 `manage_account` 工具（聊天中使用）或管理 API
+
+### 9.2 聊天中的子账户管理
+
+内置的 `account-manager` 技能提供了 `manage_account` 工具。用户可以通过自然对话管理子账户：
+
+#### 列出子账户
+
+```
+用户：显示我所有的子账户
+
+机器人：[使用 manage_account 工具，action="list"]
+       以下是你的子账户：
+       1. work-bot (dspfac--work-bot) - 运行中
+       2. news-bot (dspfac--news-bot) - 已停止
+```
+
+#### 创建子账户
+
+```
+用户：创建一个叫"编程助手"的子账户，系统提示词是"你是一个专注于 Rust 和 Python 的编程专家"，
+     连接 Telegram，令牌是 123:ABC...
+
+机器人：[使用 manage_account 工具，action="create"]
+       已创建子账户"编程助手"(dspfac--coding-assistant)。
+       Telegram 通道已配置。正在启动...
+```
+
+#### 启动/停止/重启
+
+```
+用户：停止 work-bot 子账户
+机器人：[使用 manage_account，action="stop"，sub_account_id="dspfac--work-bot"]
+       已停止 work-bot。
+
+用户：重启 news-bot
+机器人：[使用 manage_account，action="restart"，sub_account_id="dspfac--news-bot"]
+       已重启 news-bot。
+```
+
+#### 更新配置
+
+```
+用户：更新 work-bot，只允许 Telegram 用户 5460262597 发消息
+
+机器人：[使用 manage_account，action="update"，sub_account_id="dspfac--work-bot"，
+        telegram_senders="5460262597"]
+       已更新 work-bot：Telegram 发送者白名单设置为 [5460262597]。
+```
+
+#### 删除子账户
+
+```
+用户：删除 old-bot 子账户
+
+机器人：[使用 manage_account，action="delete"，sub_account_id="dspfac--old-bot"]
+       已删除子账户 old-bot 及其所有数据。
+```
+
+#### 查看子账户详情
+
+```
+用户：显示 work-bot 的详细信息
+
+机器人：[使用 manage_account，action="info"，sub_account_id="dspfac--work-bot"]
+       work-bot (dspfac--work-bot)：
+       - 状态：运行中
+       - 通道：Telegram（允许：5460262597）
+       - 系统提示词："你是一个工作助手。"
+```
+
+---
+
+## 10. 聊天中切换模型
+
+`switch_model` 工具允许用户在聊天中列出可用的 LLM 提供商并在运行时切换模型。此工具仅在 gateway 模式下可用。
+
+### 10.1 列出可用提供商
+
+```
+用户：有哪些可用的模型？
+
+机器人：[使用 switch_model 工具，action="list"]
+       当前模型：moonshot/kimi-2.5
+
+       可用提供商：
+         - anthropic（默认：claude-sonnet-4-20250514）[就绪]
+         - openai（默认：gpt-4o）[就绪]
+         - deepseek（默认：deepseek-chat）[就绪]
+         - gemini（默认：gemini-2.5-flash）[就绪]
+         - moonshot（默认：kimi-k2.5）[就绪] [别名：kimi]
+         - ollama（默认：llama3.2）[无需密钥]
+         ...
+
+       已配置的备用模型：
+         - deepseek/deepseek-chat
+```
+
+### 10.2 切换模型
+
+```
+用户：切换到 deepseek-chat
+
+机器人：[使用 switch_model 工具，action="switch"，model="deepseek-chat"]
+       已切换到 deepseek/deepseek-chat。
+       之前的模型（moonshot/kimi-2.5）已保留为备用。
+```
+
+```
+用户：改用 GPT-4o
+
+机器人：[使用 switch_model 工具，action="switch"，model="gpt-4o"]
+       已切换到 openai/gpt-4o。
+       之前的模型（moonshot/kimi-2.5）已保留为备用。
+```
+
+### 10.3 故障转移机制
+
+切换模型时，之前的模型自动成为备用：
+- 如果新模型失败（限流、服务器错误），请求自动回退到原始模型
+- 备用机制使用现有的 `ProviderChain` 熔断器（连续 3 次失败触发故障转移）
+- 链始终是扁平的：`[新模型, 原始模型]` — 重复切换不会嵌套
+
+### 10.4 自定义提供商设置
+
+```
+用户：切换到我自定义端点上的模型
+
+机器人：[使用 switch_model，action="switch"，model="my-model"，
+        provider="openai"，base_url="https://my-endpoint.com/v1"，
+        api_key_env="MY_API_KEY"]
+       已切换到 openai/my-model。
+```
+
+### 10.5 持久化
+
+模型切换会持久化到配置文件的 JSON 文件中。gateway 重启时，机器人将使用最后选择的模型启动。
+
+---
+
+## 11. 聊天功能与命令
+
+### 11.1 斜杠命令
+
+| 命令 | 说明 |
+|------|------|
+| `/new` | 分叉对话 — 创建新会话，复制最后 10 条消息 |
+| `/config` | 查看和修改工具配置（见[第 6 节](#6-工具配置)） |
+| `/exit`、`/quit`、`:q` | 退出聊天（仅 CLI 模式） |
+
+### 11.2 会话管理
+
+每个 通道:聊天ID 对维护独立的会话（对话历史）。
+
+- **会话持久化：** `.octos/sessions/` 中的 JSONL 文件
+- **最大历史记录：** 通过 `gateway.max_history` 配置（默认：50 条消息）
+- **会话分叉：** `/new` 创建带有 parent_key 追踪的分支对话
+- **三层上下文压缩（M8.5）：** 工作层 / 冷层 / 归档层。当对话超过 LLM 的上下文窗口时，较旧的消息按首行摘要（工具参数被剥离），最早的消息被推入实体库作为长期记忆。
+- **Sticky `thread_id` 与 `committed_seq`（M8.10）：** 每个会话拥有稳定的 `thread_id`，在首次流式事件之前完成绑定，并在后续 UI Protocol 更新中携带。终态事件还携带 `committed_seq`（最终写入的持久序号），客户端因此能够在断线重连后做确定性回放。详情见 [SESSION_EVENT_ARCHITECTURE.md](./SESSION_EVENT_ARCHITECTURE.md)。
+- **结构化恢复（M8.6）：** 当工作树缺失或子 Agent 失败时，监督者拒绝静默丢弃当前轮次，而是用一个描述失败原因的结构化恢复负载重新驱动 LLM。
+
+### 11.3 记忆系统
+
+智能体跨会话维护长期记忆：
+
+- **`MEMORY.md`** — 持久化笔记，始终加载到上下文中
+- **每日笔记** — `.octos/memory/YYYY-MM-DD.md`，自动创建
+- **近期记忆** — 最近 7 天的每日笔记包含在上下文中
+- **回忆录** — 任务完成摘要存储在 `episodes.redb` 中
+
+```
+用户：记住我偏好用 Python 写脚本，用 Rust 做系统开发。
+
+机器人：我已经记录到记忆中了。
+       [写入 MEMORY.md]
+```
+
+### 11.4 定时任务（Cron）
+
+智能体可以使用 `cron` 工具安排定期任务：
+
+```
+用户：每天北京时间早上 8 点安排一个新闻摘要
+
+机器人：[使用 cron 工具]
+       已创建定时任务"daily-news"，每天亚洲/上海时间 8:00 运行。
+       表达式：0 0 8 * * * *
+```
+
+```
+用户：显示我的定时任务
+
+机器人：[使用 cron 工具，action="list"]
+       活跃的定时任务：
+       1. daily-news — "生成新闻摘要" — 0 0 8 * * * *（Asia/Shanghai）— 已启用
+```
+
+也可以通过 CLI 管理定时任务：
+
+```bash
+octos cron list                              # 列出活跃任务
+octos cron list --all                        # 包含已禁用的
+octos cron add --name "report" --message "生成日报" --cron "0 0 9 * * * *"
+octos cron add --name "check" --message "检查状态" --every 3600
+octos cron remove <job-id>
+octos cron enable <job-id>
+octos cron enable <job-id> --disable
+```
+
+### 11.5 多轮工具使用
+
+智能体可以在单次响应中依序使用多个工具：
+
+```
+用户：找到项目中所有 Python 文件，然后搜索 TODO 注释
+
+机器人：[使用 glob 工具查找 *.py 文件]
+       [使用 grep 工具搜索 TODO]
+       找到 12 个 Python 文件中的 5 条 TODO 注释：
+       - src/main.py:42: # TODO: 添加错误处理
+       ...
+```
+
+### 11.6 文件操作
+
+```
+用户：读取 /etc/nginx/nginx.conf 配置文件
+
+机器人：[使用 read_file 工具]
+       以下是 nginx.conf 的内容：
+       ...
+```
+
+```
+用户：创建一个获取天气数据的 Python 脚本
+
+机器人：[使用 write_file 工具]
+       已创建 weather.py，内容如下...
+```
+
+### 11.7 Shell 命令
+
+```
+用户：运行测试套件
+
+机器人：[使用 shell 工具：cargo test --workspace]
+       所有 464 个测试通过。
+```
+
+### 11.8 网页浏览
+
+```
+用户：打开 https://example.com 并截图
+
+机器人：[使用 browser 工具导航并截图]
+       以下是 example.com 的截图...
+```
+
+### 11.9 子 Agent 与 Swarm
+
+子 Agent 入口共有三种：
+
+| 工具 / API | 形态 | 输出处理 |
+|---|---|---|
+| `spawn` (`mode: "sync"`) | 单子 Agent，父级阻塞 | 同轮次内联返回 |
+| `spawn` (`mode: "background"`) | 单子 Agent，父级继续 | 通过 gateway 以新入站消息回送 |
+| `delegate` | 单个限定子 Agent，父级阻塞 | 内联摘要 + 全文落盘（M8.7 子 Agent 输出路由器） |
+| `/api/swarm/dispatch` | N 个并行子 Agent | 聚合产物、校验器审核、单次调度账本 |
+
+```
+用户：深入研究这个主题，使用子智能体
+
+机器人：[使用 spawn 工具创建子智能体执行研究任务]
+       子智能体发现了以下内容...
+```
+
+子智能体可以通过 `sub_providers` 使用不同的 LLM 模型：
+
+```json
+{
+  "sub_providers": [
+    {
+      "key": "cheap",
+      "provider": "deepseek",
+      "model": "deepseek-chat",
+      "description": "适用于简单任务的快速模型"
+    }
+  ]
+}
+```
+
+**子 Agent 输出路由器（M8.7）**：长子 Agent 文稿由 `AgentSummaryGenerator` 生成精简摘要进入父上下文；完整文稿落盘以便事后查看。即使委派大型研究任务也能保持父上下文紧凑。
+
+**Swarm 调度**：扇出工作请使用 swarm API 而非多次 spawn。单次 swarm 调度将契约扇出到 N 个子 Agent，聚合产物，通过校验器审核，并把成本汇总回父级。状态持久化在 `crates/octos-swarm/src/persistence.rs`，账本在 `crates/octos-swarm/src/ledger.rs`。
+
+**`spawn_only` 技能工具自动转后台**：清单里 `spawn_only: true` 的插件工具会在执行层（`crates/octos-agent/src/agent/execution.rs`）被拦截，无论调用方意图如何都强制后台执行。Agent 立即收到「任务已启动」回执，结果稍后以新入站消息送达。子 Agent 不能再生成更深层子 Agent（`group:delegated` 递归 deny-wins）。
+
+### 11.10 消息队列模式
+
+当用户在智能体处理中发送消息时：
+
+- **`followup`**：排队的消息按 FIFO 逐条处理
+- **`collect`**（默认）：同一会话的消息被拼接后一次性处理
+- **`steer`**：将排队消息作为对进行中轮次的转向/重定向应用
+- **`interrupt`**：取消进行中轮次并启动新轮次
+- **`speculative`**：在进行中轮次执行期间并行运行投机轮次，先完成的胜出
+
+```json
+{
+  "gateway": {
+    "queue_mode": "collect"
+  }
+}
+```
+
+### 11.11 心跳
+
+心跳服务每 30 分钟读取 `.octos/HEARTBEAT.md` 并将其内容发送给智能体。用于后台任务指令：
+
+```markdown
+<!-- .octos/HEARTBEAT.md -->
+检查 GitHub 仓库中的新 issue，汇总所有紧急问题。
+```
+
+### 11.12 后台任务
+
+`spawn_only` 技能工具（长时间研究、深度爬取、音色训练等）作为后台任务在每个配置文件的 `task_supervisor` 下运行。用户可以：
+
+- 通过插件协议 v2 事件（经 UI Protocol 任务/进度更新转发）接收周期性进度
+- 使用 `check_background_tasks` 工具查看待处理后台任务
+- 通过 UI Protocol 会话/任务事件流接收终态：监督者在持久化完成后提交带 `committed_seq` 的终态事件（#629），仪表盘据此确定性更新
+
+**Fleet 稳定性（#610）**：`spawn`、Pipeline 扇出与 swarm 调度共用全局并发上限，避免单个失控 Agent 耗尽运行资源。归属会话已结束的孤立任务由 `task_supervisor` 清理。
+
+**运行时失败恢复（M8.9）**：`spawn_only` 任务失败时，监督者用结构化恢复负载重新驱动 LLM —— 当前轮次不会被静默丢弃。
+
+---
+
+## 12. 内置应用技能
+
+内置应用技能作为编译好的二进制文件随 `octos` 一起发布。Gateway 启动时会写入 `<octos_home>/bundled-app-skills/<name>/`，运维或用户自定义技能安装到当前 profile 的 `~/.octos/profiles/<profile>/data/skills/`，因此重新部署不会覆盖自定义内容。完整列表见 `BUNDLED_APP_SKILLS`（`crates/octos-agent/src/bundled_app_skills.rs`）：
+
+> **自动安装的内置技能：** news、deep-search、deep-crawl、send-email、account-manager、time（二进制名 `clock`）、weather、smart-home、skill-evolve。加上平台技能 `voice`。
+
+下文的 12.8（微信桥接）和 12.11（启动模板）描述的是 `crates/app-skills/` 下**仅在 workspace 中作为示例的 crate**，并未列入 `BUNDLED_APP_SKILLS`。它们以源码形式随仓库分发，作为模板或传输助手，不会被 gateway 自动安装为运行时技能。
+
+### 12.1 新闻获取
+
+**工具名称：** `news_fetch`
+**始终激活：** 是（自动包含在每次对话中）
+
+从 Google News RSS、Hacker News API、Yahoo News、Substack 和 Medium 获取原始新闻标题和全文。工具返回原始数据 — 智能体将其合成为格式化的摘要。
+
+#### 参数
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `categories` | 字符串数组 | 全部 | 要获取的新闻分类 |
+| `language` | `"zh"` / `"en"` | `"zh"` | 输出摘要的语言 |
+
+**可用分类：** `politics`（政治）、`world` / `international`（国际）、`business` / `commerce`（商业）、`technology` / `tech`（科技）、`science`（科学）、`entertainment` / `social`（娱乐）、`health`（健康）、`sports`（体育）
+
+#### 聊天使用示例
+
+```
+用户：给我今天的科技和国际新闻
+
+机器人：[使用 news_fetch，categories=["tech", "world"]，language="zh"]
+       📰 科技新闻：
+       1. AI 初创公司完成 5 亿美元 C 轮融资...
+       2. MIT 量子计算新突破...
+
+       🌍 国际新闻：
+       1. 欧盟通过新数字法规...
+       ...
+```
+
+```
+用户：请生成今日新闻速递
+
+机器人：[使用 news_fetch，language="zh"]
+       📰 今日新闻速递
+
+       🔬 科技：
+       1. OpenAI 发布新模型...
+
+       💼 商业：
+       ...
+```
+
+#### 定时调度
+
+```
+用户：每天上海时间早上 8 点安排新闻摘要
+
+机器人：[创建定时任务]
+       完成！我会每天早上 8:00（Asia/Shanghai）发送新闻摘要。
+```
+
+#### 配置
+
+```
+/config set news_digest.language en          # 英文输出
+/config set news_digest.hn_top_stories 50    # 获取 50 条 HN 故事
+/config set news_digest.max_deep_fetch_total 30  # 深度获取 30 篇文章
+```
+
+---
+
+### 12.2 深度搜索
+
+**工具名称：** `deep_search`
+**超时：** 600 秒（10 分钟）
+
+多轮网络研究工具。执行多角度迭代搜索、并行页面爬取、参考文献追踪，并生成结构化报告。
+
+#### 参数
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `query` | 字符串 | *（必填）* | 研究主题或问题 |
+| `depth` | 1-3 | 2 | 研究深度级别 |
+| `max_results` | 1-10 | 8 | 每轮搜索的结果数 |
+| `search_engine` | 字符串 | 自动 | `perplexity`、`duckduckgo`、`brave`、`you` |
+
+**深度级别：**
+- **1（快速）：** 单轮搜索 + 爬取，约 1 分钟，最多 10 页
+- **2（标准）：** 3 轮搜索 + 参考追踪，约 3 分钟，最多 30 页
+- **3（深入）：** 5 轮搜索 + 积极链接追踪，约 5 分钟，最多 50 页
+
+#### 输出文件
+
+结果保存到 `./research/<查询标识>/`：
+- `_report.md` — 结构化研究报告
+- `_search_results.md` — 合并的原始搜索结果
+- `01_<域名>.md`、`02_<域名>.md` 等 — 每页完整内容
+
+#### 必需的环境变量
+
+至少一个：`PERPLEXITY_API_KEY`（推荐）、`BRAVE_API_KEY` 或 `YDC_API_KEY`。如果都未设置，回退到 DuckDuckGo。
+
+#### 聊天使用示例
+
+```
+用户：研究一下全球 AI 监管的现状
+
+机器人：[使用 deep_search，query="AI regulations worldwide 2026"，depth=2]
+       🔍 深度研究报告：全球 AI 监管
+
+       ## 摘要
+       各地区的 AI 监管差异显著...
+
+       ## 主要发现
+       1. **欧盟 AI 法案** — 2024 年生效...
+       2. **美国行政令** — ...
+       3. **中国的方案** — ...
+
+       ## 来源
+       - [EU AI Act 官方文本](...)
+       - [国会研究服务](...)
+       ...
+
+       完整报告已保存至：./research/ai-regulations-worldwide-2026/
+```
+
+```
+用户：快速搜索 Rust 异步运行时的对比
+
+机器人：[使用 deep_search，query="Rust async runtime comparison tokio vs async-std"，
+        depth=1]
+       快速研究发现：
+       - **Tokio** 是使用最广泛的（生态系统 90%+）...
+```
+
+---
+
+### 12.3 深度爬取
+
+**工具名称：** `deep_crawl`
+**需要：** 系统中安装 Google Chrome/Chromium
+
+使用无头 Chrome 通过 CDP（Chrome DevTools Protocol）递归爬取网站。渲染 JavaScript、通过 BFS 跟踪同源链接、从每个页面提取干净文本。
+
+#### 参数
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `url` | 字符串 | *（必填）* | 起始 URL |
+| `max_depth` | 整数 1-10 | *（必填）* | 最大链接跟踪深度 —— 工具会提示 LLM 在调用前询问用户 |
+| `max_pages` | 整数 1-100 | *（必填）* | 最大爬取页面数 —— 工具会提示 LLM 在调用前询问用户 |
+| `path_prefix` | 字符串 | 无 | 仅跟踪具有此路径前缀的链接 |
+
+#### 输出
+
+爬取的页面保存到 `crawl-<主机名>/` 目录：
+- `000_index.md` — 着陆页
+- `001_docs_install.md` — 第一个发现的页面
+- `002_...` — 等等
+
+#### 聊天使用示例
+
+```
+用户：爬取 docs.rs/tokio 的文档，限制在 guide 部分
+
+机器人：[使用 deep_crawl，url="https://docs.rs/tokio/latest/tokio/"，
+        max_depth=3，max_pages=30，path_prefix="/tokio/"]
+       已爬取 docs.rs/tokio 的 28 个页面：
+
+       站点地图：
+       - /tokio/（索引）
+       - /tokio/runtime/（运行时模块）
+       - /tokio/sync/（同步原语）
+       ...
+
+       完整内容已保存至：crawl-docs.rs/
+```
+
+#### 配置
+
+```
+/config set deep_crawl.page_settle_ms 5000      # 等待 5 秒 JS 渲染
+/config set deep_crawl.max_output_chars 100000   # 更大的输出限制
+```
+
+---
+
+### 12.4 发送邮件
+
+**工具名称：** `send_email`
+
+通过 SMTP 或飞书邮件 API 发送邮件。
+
+#### 参数
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `to` | 字符串 | *（必填）* | 收件人邮箱地址 |
+| `subject` | 字符串 | *（必填）* | 邮件主题 |
+| `body` | 字符串 | *（必填）* | 邮件正文（纯文本或 HTML） |
+| `provider` | `"smtp"` / `"feishu"` | 自动 | 根据可用环境变量自动检测 |
+| `html` | 布尔值 | false | 将正文视为 HTML |
+| `attachments` | 数组 | 无 | 文件附件（仅 SMTP） |
+
+#### SMTP 环境变量
+
+```bash
+export SMTP_HOST="smtp.gmail.com"
+export SMTP_PORT="465"
+export SMTP_USERNAME="your-email@gmail.com"
+export SMTP_PASSWORD="your-app-password"
+export SMTP_FROM="your-email@gmail.com"
+```
+
+#### 飞书邮件环境变量
+
+```bash
+export LARK_APP_ID="cli_..."
+export LARK_APP_SECRET="..."
+export LARK_FROM_ADDRESS="your-feishu-email@company.com"
+# 可选：LARK_REGION="global" 使用 larksuite.com（默认：feishu.cn）
+```
+
+#### 聊天使用示例
+
+```
+用户：发一封邮件给 john@example.com，主题是"会议纪要"，包含今天的会议总结
+
+机器人：[使用 send_email 工具]
+       邮件已发送至 john@example.com，主题为"会议纪要"。
+```
+
+```
+用户：发送 HTML 格式的新闻简报给 newsletter@example.com
+
+机器人：[使用 send_email，html=true]
+       HTML 邮件已发送至 newsletter@example.com。
+```
+
+```
+用户：把 report.pdf 邮件发给团队负责人
+
+机器人：[使用 send_email，attachments=[{path: "/path/to/report.pdf"}]]
+       已将附带 report.pdf 附件的邮件发送至 team-lead@example.com。
+```
+
+---
+
+### 12.5 账户管理器
+
+**工具名称：** `manage_account`
+
+管理当前配置文件下的子账户。详细使用方法和示例请参见[第 9 节](#9-子账户管理)。
+
+#### 操作
+
+| 操作 | 说明 |
+|------|------|
+| `list` | 列出所有子账户 |
+| `create` | 创建新子账户 |
+| `update` | 更新子账户设置 |
+| `delete` | 删除子账户 |
+| `info` | 获取子账户详情 |
+| `start` | 启动子账户的 gateway |
+| `stop` | 停止子账户的 gateway |
+| `restart` | 重启子账户的 gateway |
+
+#### 聊天使用示例
+
+```
+用户：为我的工作团队创建一个子账户，配置 Telegram 机器人
+
+机器人：[使用 manage_account，action="create"，name="work team"，
+        system_prompt="你是工程团队的工作助手。"，
+        telegram_token="123:ABC..."，enable=true]
+       已创建子账户"work team"(mybot--work-team)并启动。
+       Telegram 机器人已激活。
+```
+
+---
+
+### 12.6 时钟
+
+**工具名称：** `get_time`
+**超时：** 5 秒
+**需要网络：** 否
+**上下文触发：** 当对话提到"时间"、"时钟"、"几点"、"现在时间"等关键词时激活
+
+返回任意时区的当前日期、时间、星期几和 UTC 偏移量。
+
+#### 参数
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `timezone` | 字符串 | 服务器本地时间 | IANA 时区名称 |
+
+**常用时区：** `UTC`、`US/Eastern`、`US/Central`、`US/Pacific`、`Europe/London`、`Europe/Paris`、`Europe/Stockholm`、`Europe/Berlin`、`Asia/Shanghai`、`Asia/Tokyo`、`Asia/Seoul`、`Asia/Singapore`、`Australia/Sydney`
+
+#### 聊天使用示例
+
+```
+用户：东京现在几点？
+
+机器人：[使用 get_time，timezone="Asia/Tokyo"]
+       东京现在是 2026 年 3 月 6 日星期四下午 2:30（JST，UTC+9）。
+```
+
+```
+用户：现在纽约几点？
+
+机器人：[使用 get_time，timezone="US/Eastern"]
+       纽约现在是凌晨 12:30，2026 年 3 月 6 日，星期五（EST，UTC-5）。
+```
+
+---
+
+### 12.7 天气
+
+**工具名称：** `get_weather`、`get_forecast`
+**超时：** 15 秒
+**API：** Open-Meteo（免费，无需 API 密钥）
+**上下文触发：** 当对话提到"天气"、"预报"、"气温"等关键词时激活
+
+#### get_weather 参数
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `city` | 字符串 | *（必填）* | 英文城市名，可选择附带国家 |
+
+#### get_forecast 参数
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `city` | 字符串 | *（必填）* | 英文城市名 |
+| `days` | 1-16 | 7 | 预报天数 |
+
+**注意：** 始终使用英文城市名。非英文名称应翻译（如"北京"→"Beijing"）。
+
+#### 聊天使用示例
+
+```
+用户：巴黎现在天气怎么样？
+
+机器人：[使用 get_weather，city="Paris"]
+       巴黎当前天气：
+       🌤 多云转晴，12°C
+       💧 湿度：65%
+       💨 风速：15 km/h 西北风
+```
+
+```
+用户：上海未来一周天气怎么样？
+
+机器人：[使用 get_forecast，city="Shanghai"，days=7]
+       上海未来 7 天天气预报：
+
+       周四 3/6：☁ 8°C / 14°C — 多云
+       周五 3/7：🌧 6°C / 11°C — 小雨
+       周六 3/8：☀ 7°C / 16°C — 晴
+       ...
+```
+
+```
+用户：这周末纽约会下雨吗？
+
+机器人：[使用 get_forecast，city="New York, US"，days=5]
+       纽约天气预报：
+       - 周六：30% 降雨概率，8°C/15°C
+       - 周日：晴朗，10°C/18°C
+       看起来周六可能有些小雨，但周日应该是晴天！
+```
+
+### 12.8 微信桥接（WeChat Bridge）
+
+**二进制：** `wechat-bridge`
+
+为微信个人号提供 WebSocket 桥接 —— 通过 WebSocket 与微信客户端通信并把消息转发给 gateway。
+
+### 12.9 智能家居
+
+**工具名称：** `smart_home_list_devices`、`smart_home_control_device`
+**超时：** 10 秒
+**前置条件：** 需要先为该 profile 配置好桥接（设置 → 智能家居）
+**上下文触发：** 当对话提到"智能家居"、"设备"、"灯"、"空调"、"开灯"、"关灯"、"窗帘"等关键词时激活
+
+通过当前 profile 配置的桥接（如 Home Assistant）列出并控制智能家居设备（灯具、空调、窗帘、音箱等）。直接从 profile 读取桥接 URL 和 token —— 不经过正在运行的 gateway 转发。摄像头视频串流仍然是 octos-web 中面向人类、仅通过 WebSocket 提供的功能，不对 agent 开放。
+
+#### smart_home_list_devices 参数
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `room` | 字符串 | *（无）* | 可选的房间名过滤（不区分大小写） |
+
+#### smart_home_control_device 参数
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `device_id` | 字符串 | *（必填）* | 目标设备 ID，来自 `smart_home_list_devices` 的返回结果 |
+| `params` | 对象 | *（必填）* | 命令字段，如 `{"on": true}`、`{"brightness": 80}`、`{"temperature": 22}` |
+
+#### 聊天使用示例
+
+```
+用户：客厅里有哪些智能设备？
+
+机器人：[使用 smart_home_list_devices，room="客厅"]
+       客厅台灯 (id: lamp_1, light) — on | brightness: 80
+       客厅空调 (id: ac_1, thermostat) — on | temperature: 24
+```
+
+```
+用户：把客厅的灯调暗一点
+
+机器人：[使用 smart_home_control_device，device_id="lamp_1"，params={"brightness": 30}]
+       Sent to lamp_1: brightness=30
+```
+
+### 12.10 Skill Evolve
+
+**二进制：** `skill-evolve`
+**工具：** `skill_evolve`（单一工具，前台运行 —— 并非 `spawn_only`）
+
+管理**技能演进补丁**：当某个插件工具调用失败时，运行时会自动针对其 `SKILL.md` 生成一条建议修改（澄清参数描述、补充触发关键字等）。Agent 调用 `skill_evolve` 来查看与处理待办队列。
+
+`action` 字段选择具体操作：
+
+| action | 作用 |
+|---|---|
+| `list` | 列出所有技能的待处理补丁 |
+| `apply` | 把一条补丁应用到目标 `SKILL.md` |
+| `discard` | 不应用直接丢弃 |
+| `consolidate` | 合并多条相关补丁为一次编辑 |
+
+补丁须经过本工具复核后方才落盘 —— 技能不会静默自我改写。在把启动模板适配到具体部署、或长时间深度搜索任务积累了反复出现的摩擦反馈时，特别有用。
+
+### 12.11 Harness Starter（启动模板）
+
+`crates/app-skills/harness-starter-{audio, coding, generic, report}/` 下的四个启动模板，每个都是一个可工作的 harnessed 技能示例（含合同测试、清单和 SKILL.md），可作为自定义领域技能的起点：
+
+- `harness-starter-generic` —— 适合任意文本任务的最小回声式 harness
+- `harness-starter-coding` —— 与 worktree 集成的代码任务 harness
+- `harness-starter-report` —— 带产物输出的报告生成 harness
+- `harness-starter-audio` —— 带附件校验的音频任务 harness
+
+它们仅为模板 —— 每个 `SKILL.md` 都注明「适配该模板时请替换为真实的 ……」。完整的技能开发指南见 [docs/app-skill-dev-guide-zh.md](./app-skill-dev-guide-zh.md)。
+
+---
+
+## 13. 平台技能 (ASR/TTS)
+
+平台技能是服务器级别的语音工具。语音转录可通过 `ASR_API_URL` 使用独立的批量
+ASR 服务；未配置时保持原有 OminiX 回退。预设音色合成和模型管理仍由 Apple
+Silicon 上的 OminiX 提供。
+
+### 13.1 前提条件
+
+- 使用 OminiX ASR 或本地 TTS 时需要 Apple Silicon Mac
+- ASR：配置了 `ASR_API_URL` 的兼容服务，或者运行 OminiX API 并下载
+  `Qwen3-ASR-1.7B-8bit`
+- 本地 TTS：运行 OminiX API 并下载
+  `Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit`
+
+### 13.2 通过仪表盘管理 OminiX
+
+仪表盘提供以下控制：
+- 启动/停止 OminiX 引擎
+- 查看日志
+- 下载/删除模型
+- 检查服务健康状态
+
+或通过管理 API：
+
+```bash
+# 启动 OminiX
+curl -X POST http://localhost:50080/api/admin/platform-skills/ominix-api/start
+
+# 检查健康状态
+curl http://localhost:50080/api/admin/platform-skills/asr/health
+
+# 下载模型
+curl -X POST http://localhost:50080/api/admin/platform-skills/ominix-api/models/download \
+  -H "Content-Type: application/json" \
+  -d '{"model_id": "Qwen3-ASR-1.7B-8bit"}'
+
+# 查看日志
+curl http://localhost:50080/api/admin/platform-skills/ominix-api/logs?lines=100
+```
+
+### 13.3 语音转录 (`voice_transcribe`)
+
+将音频文件转录为文本。
+
+在启动 `octos serve` 或 `octos gateway` 前，把 `ASR_API_URL` 设置为服务基址，
+即可让 AppUI 语音轮、Gateway 语音消息和 `voice_transcribe` 工具统一走独立 ASR：
+
+```bash
+ASR_API_URL=http://127.0.0.1:8091 octos serve --port 50080
+```
+
+服务必须接受 `POST /v1/audio/transcriptions`，JSON 请求字段为 `file`（base64
+音频）、可选的 `language` 和 `response_format`，并返回包含字符串 `text` 的
+JSON。成功但为空的 `text` 会被视为“未检测到人声”，不会发送给智能体。
+Octos 会通过 `GET /health` 检查 readiness；没有该路由的服务可返回 `404` 或
+`405`。如果 `ASR_API_URL` 未设置或为空，Octos 会继续使用 OminiX ASR。
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `audio_path` | 字符串 | *（必填）* | 音频文件的绝对路径（WAV、OGG、MP3、FLAC、M4A） |
+| `language` | 字符串 | `"Chinese"` | `"Chinese"`、`"English"`、`"Japanese"`、`"Korean"`、`"Cantonese"` |
+
+```
+用户：转录这个音频文件 /tmp/meeting.wav
+
+机器人：[使用 voice_transcribe，audio_path="/tmp/meeting.wav"，language="Chinese"]
+       转录结果：
+       "大家好，今天的会议主要讨论三个议题..."
+```
+
+### 13.4 语音合成 (`voice_synthesize`)
+
+使用预设语音将文本转换为语音。
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `text` | 字符串 | *（必填）* | 要合成的文本 |
+| `output_path` | 字符串 | `/tmp/octos_tts_<ts>.wav` | 输出文件路径 |
+| `language` | 字符串 | `"chinese"` | `"chinese"`、`"english"`、`"japanese"`、`"korean"` |
+| `speaker` | 字符串 | `"vivian"` | 语音预设 |
+
+**可用语音：**
+- **英语/中文：** `vivian`、`serena`、`ryan`、`aiden`、`eric`、`dylan`
+- **仅中文：** `uncle_fu`
+- **日语：** `ono_anna`
+- **韩语：** `sohee`
+
+```
+用户：朗读这段文字："欢迎收听每日简报"
+
+机器人：[使用 voice_synthesize，text="欢迎收听每日简报"，
+        language="chinese"，speaker="vivian"]
+       [发送音频文件给用户]
+```
+
+### 13.5 语音克隆（由 `mofa-fm` 处理，不在平台 voice 技能内）
+
+平台 `voice` 技能（即本节）只暴露预设音色 TTS（`voice_synthesize`）。**音色克隆和自定义音色由独立的 `mofa-fm` 技能通过 `fm_tts` 工具处理** —— 克隆接口请参阅 `mofa-fm` 技能仓库。平台 voice 技能的 manifest 中也明确指出该路由：
+
+> "NOTE: This tool only supports preset voices. For voice cloning or custom voice profiles, use mofa-fm (`fm_tts`)."
+
+若 `voice_synthesize` 被传入非预设音色名称，会返回错误，并提示调用方改用 `fm_tts`。
+
+#### 13.5.1 部署时注册克隆音色（#653）
+
+`fm_tts` 把克隆参考 WAV 输出到 `~/.octos/profiles/<profile>/data/voice_profiles/<name>.wav`。`fm_tts` 在调用前会和 OminiX-API 的音色注册表对照校验；该注册表是进程内内存表，启动时从 `~/.OminiX/models/voices.json` 加载 —— 落盘的 profile WAV **不会被自动发现**。
+
+`scripts/register-fleet-voices.sh` 在远端主机上写入 `voices.json`，让 OminiX-API 的 `/v1/voices` 列出所有已保存的 profile，然后通知守护进程重新加载。该脚本是幂等的（运维手工微调过的 `ref_text` / 别名会被保留）。可作为 `./scripts/deploy.sh` 部署后步骤运行，也可直接修单机：
+
+```bash
+./scripts/register-fleet-voices.sh           # 所有 mini（跳过 mini5）
+./scripts/register-fleet-voices.sh 1         # 仅 mini1
+./scripts/register-fleet-voices.sh user@host --password <pw>
+```
+
+注册完成后，`fm_tts` 引用这些音色名称即可成功调用；未注册时会失败并提示 `"voice 'X' is not registered on ominix-api"`。
+
+### 13.6 播客生成 (`generate_podcast`)
+
+从脚本创建多角色播客音频。
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `script` | 数组 | *（必填）* | `{speaker, voice, text}` 对象数组 |
+| `output_path` | 字符串 | 自动 | 输出文件路径 |
+| `language` | 字符串 | `"chinese"` | 语言 |
+
+```
+用户：生成一期关于 AI 安全的短播客，两个主持人
+
+机器人：[使用 generate_podcast，script=[
+        {speaker: "主持人", voice: "vivian", text: "欢迎收听 AI 周刊..."},
+        {speaker: "嘉宾", voice: "ryan", text: "谢谢邀请..."},
+        ...
+      ]，language="chinese"]
+       已生成播客（时长 2:30）。[发送音频文件]
+```
+
+### 13.7 Gateway 语音配置
+
+消息通道中语音消息的自动转录和自动 TTS：
+
+```json
+{
+  "voice": {
+    "auto_asr": true,
+    "auto_tts": true,
+    "default_voice": "vivian",
+    "asr_language": null
+  }
+}
+```
+
+- **`auto_asr`**：自动转录收到的语音/音频消息后再发送给智能体
+- **`auto_tts`**：当用户发送语音时自动合成语音回复
+- **`default_voice`**：自动 TTS 的语音预设
+- **`asr_language`**：强制转录语言（`null` = 自动检测）
+
+---
+
+## 14. 自定义技能安装
+
+自定义技能通过新的工具和指令扩展智能体的能力。可以从 GitHub 仓库安装或在本地创建。
+
+### 14.1 从 GitHub 安装
+
+```bash
+# 安装仓库中的所有技能
+octos skills install user/repo
+
+# 安装特定的技能子目录
+octos skills install user/repo/skill-name
+
+# 从特定分支安装
+octos skills install user/repo --branch develop
+
+# 强制覆盖已有技能
+octos skills install user/repo --force
+
+# 安装到特定配置文件
+octos skills --profile my-bot install user/repo
+```
+
+`user/repo` 之后的路径相对仓库根目录解析，因此嵌套目录中的技能需写完整路径——例如位于 `skills/my-skill` 的技能用 `octos skills install user/repo/skills/my-skill` 安装。
+
+**安装过程：**
+1. 尝试从技能注册表下载预编译二进制文件（SHA-256 验证）
+2. 如果存在 `Cargo.toml`，回退到 `cargo build --release`
+3. 如果存在 `package.json`，运行 `npm install`
+4. 写入 `.source` 文件用于更新追踪
+
+### 14.2 管理技能
+
+```bash
+# 列出已安装的技能
+octos skills list
+
+# 显示技能详情
+octos skills info skill-name
+
+# 更新特定技能
+octos skills update skill-name
+
+# 更新所有技能
+octos skills update all
+
+# 删除技能
+octos skills remove skill-name
+
+# 搜索在线注册表
+octos skills search "网页抓取"
+```
+
+### 14.3 技能目录结构
+
+技能位于 `.octos/skills/<名称>/`，包含：
+
+```
+.octos/skills/my-skill/
+├── SKILL.md         # 必需：指令 + frontmatter
+├── manifest.json    # 工具技能必需：工具定义
+├── main             # 编译好的二进制文件（或脚本）
+└── .source          # 自动生成：追踪安装来源
+```
+
+### 14.4 SKILL.md 格式
+
+```markdown
+---
+name: my-skill
+version: 1.0.0
+author: 你的名字
+description: 这个技能做什么的简短描述
+always: false
+requires_bins: curl,jq
+requires_env: MY_API_KEY
+---
+
+# 我的技能指令
+
+告诉智能体如何以及何时使用此技能的指令。
+
+## 使用场景
+- 当用户询问关于...时使用此技能
+
+## 工具用法
+`my_tool` 工具接受：
+- `query`（必填）：搜索查询
+- `limit`（可选）：最大结果数（默认：10）
+
+## 示例
+用户："帮我查找关于 X 的信息"
+→ 使用 my_tool，query="X"
+```
+
+**Frontmatter 字段：**
+- **`name`** — 技能标识符（必须与目录名匹配）
+- **`version`** — 语义版本号
+- **`author`** — 技能作者
+- **`description`** — 简短描述
+- **`always`** — 如果为 `true`，技能指令始终包含在系统提示词中。如果为 `false`，智能体可以按需读取。
+- **`requires_bins`** — 逗号分隔的二进制文件名，通过 `which` 检查。任何一个缺失则技能不可用。
+- **`requires_env`** — 逗号分隔的环境变量名。任何一个未设置则技能不可用。
+
+### 14.5 manifest.json 格式
+
+对于提供可执行工具的技能：
+
+```json
+{
+  "name": "my-skill",
+  "version": "1.0.0",
+  "description": "我的自定义技能",
+  "tools": [
+    {
+      "name": "my_tool",
+      "description": "做一些有用的事情",
+      "timeout_secs": 60,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "搜索查询"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "最大结果数",
+            "default": 10
+          }
+        },
+        "required": ["query"]
+      }
+    }
+  ],
+  "entrypoint": "main"
+}
+```
+
+工具二进制文件通过 stdin 接收 JSON 输入，通过 stdout 输出 JSON：
+
+```json
+// 输入（stdin）
+{"query": "test", "limit": 5}
+
+// 输出（stdout）
+{"output": "结果在这里...", "success": true}
+```
+
+### 14.6 技能解析顺序
+
+配置文件 gateway 按以下优先级加载技能：
+
+1. `~/.octos/profiles/<profile>/data/skills/`（配置文件作用域的自定义技能）
+2. `<octos_home>/bundled-app-skills/`（内置：news、deep-search 等）
+3. `<octos_home>/platform-skills/`（管理员加载的平台技能，如 ASR/TTS）
+
+独立项目运行还可以加载 `<project>/.octos/plugins/` 和
+`<project>/.octos/skills/`。旧的 HOME 全局目录 `~/.octos/plugins/` 和
+`~/.octos/skills/` 仅用于迁移，不再属于常规扫描路径。
+
+### 14.7 创建自定义技能
+
+#### 示例：翻译技能（Python）
+
+1. 创建技能目录：
+
+```bash
+mkdir -p .octos/skills/translator
+```
+
+2. 创建 `SKILL.md`：
+
+```markdown
+---
+name: translator
+version: 1.0.0
+description: 使用 DeepL API 在语言之间翻译文本
+always: false
+requires_env: DEEPL_API_KEY
+---
+
+# 翻译技能
+
+当用户要求翻译文本时，使用 `translate` 工具。
+
+## 用法
+- `text`（必填）：要翻译的文本
+- `target_lang`（必填）：目标语言代码（EN、DE、FR、JA、ZH 等）
+- `source_lang`（可选）：源语言代码（省略时自动检测）
+```
+
+3. 创建 `manifest.json`：
+
+```json
+{
+  "name": "translator",
+  "version": "1.0.0",
+  "tools": [
+    {
+      "name": "translate",
+      "description": "使用 DeepL 在语言之间翻译文本",
+      "timeout_secs": 30,
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "text": {"type": "string", "description": "要翻译的文本"},
+          "target_lang": {"type": "string", "description": "目标语言代码"},
+          "source_lang": {"type": "string", "description": "源语言代码"}
+        },
+        "required": ["text", "target_lang"]
+      }
+    }
+  ],
+  "entrypoint": "main"
+}
+```
+
+4. 创建 `main`（可执行脚本）：
+
+```python
+#!/usr/bin/env python3
+import json, sys, os, urllib.request
+
+input_data = json.loads(sys.stdin.read())
+text = input_data["text"]
+target = input_data["target_lang"]
+source = input_data.get("source_lang", "")
+
+api_key = os.environ["DEEPL_API_KEY"]
+data = json.dumps({
+    "text": [text],
+    "target_lang": target,
+    **({"source_lang": source} if source else {})
+}).encode()
+
+req = urllib.request.Request(
+    "https://api-free.deepl.com/v2/translate",
+    data=data,
+    headers={"Authorization": f"DeepL-Auth-Key {api_key}", "Content-Type": "application/json"}
+)
+
+with urllib.request.urlopen(req) as resp:
+    result = json.loads(resp.read())
+    translated = result["translations"][0]["text"]
+    print(json.dumps({"output": translated, "success": True}))
+```
+
+5. 设置可执行权限：
+
+```bash
+chmod +x .octos/skills/translator/main
+```
+
+6. 测试使用：
+
+```
+用户：把"Hello world"翻译成日语
+
+机器人：[使用 translate 工具，text="Hello world"，target_lang="JA"]
+       翻译结果：こんにちは世界
+```
+
+---
+
+## 15. 配置参考
+
+### 15.1 完整配置结构
+
+```json
+{
+  "version": 1,
+
+  // LLM 提供商
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-20250514",
+  "base_url": null,
+  "api_key_env": null,
+  "api_type": null,
+
+  // 故障转移链
+  "fallback_models": [
+    {
+      "provider": "deepseek",
+      "model": "deepseek-chat",
+      "base_url": null,
+      "api_key_env": "DEEPSEEK_API_KEY"
+    }
+  ],
+
+  // 自适应路由
+  "adaptive_routing": {
+    "enabled": false,
+    "latency_threshold_ms": 30000,
+    "error_rate_threshold": 0.3,
+    "probe_probability": 0.1,
+    "probe_interval_secs": 60,
+    "failure_threshold": 3
+  },
+
+  // Gateway
+  "gateway": {
+    "channels": [{"type": "cli"}],
+    "max_history": 50,
+    "system_prompt": null,
+    "queue_mode": "followup",
+    "max_sessions": 1000,
+    "max_concurrent_sessions": 10,
+    "llm_timeout_secs": null,
+    "llm_connect_timeout_secs": null,
+    "tool_timeout_secs": null,
+    "session_timeout_secs": null,
+    "browser_timeout_secs": null
+  },
+
+  // 工具策略
+  "tool_policy": {"allow": [], "deny": []},
+  "tool_policy_by_provider": {},
+  "context_filter": [],
+
+  // 子提供商（用于 spawn 工具）
+  "sub_providers": [
+    {
+      "key": "cheap",
+      "provider": "deepseek",
+      "model": "deepseek-chat",
+      "description": "适用于简单任务的快速模型"
+    }
+  ],
+
+  // 智能体设置
+  "max_iterations": 0, // 交互回合不设硬上限；spawn/MCP 仍有独立上限
+
+  // 嵌入（用于记忆中的向量搜索）。
+  // 远程，OpenAI 兼容：
+  "embedding": {
+    "provider": "openai",
+    "api_key_env": "OPENAI_API_KEY",
+    "base_url": null,
+    "model": null,       // 默认 text-embedding-3-small（1536 维）
+    "dimensions": null   // 模型原生维度不同时，用它固定输出维度
+  },
+  // 或者进程内运行，不需要 API key，通过 llama.cpp 跑任意 GGUF 模型。
+  // 需要用 `--features embed-llama` 编译（加 embed-llama-metal / -cuda
+  // 可以走 GPU），否则用 CPU。换 provider 或换模型会改变向量维度，
+  // 已有索引会失效。切换后要重新生成已存 episode 的向量，否则它们的
+  // 召回会悄悄退化成只有 BM25。
+  // "embedding": {
+  //   "provider": "llamacpp",
+  //   "model_path": "/path/to/embeddinggemma-300M-Q8_0.gguf"
+  // },
+
+  // 语音
+  "voice": {
+    "auto_asr": true,
+    "auto_tts": false,
+    "default_voice": "vivian",
+    "asr_language": null
+  },
+
+  // 钩子
+  "hooks": [],
+
+  // MCP 服务器 — octos 作为客户端接入的外部工具源。
+  // stdio: command + args(可选 env);HTTP: url(可选 headers 或 oauth)。
+  "mcp_servers": [
+    // {
+    //   "command": "/path/to/server",   // stdio 传输
+    //   "args": ["serve", "--root", "/path/to/repo"],
+    //   // stdio 子进程拿到的是消毒后的环境: 只转发此 map 里显式列出的变量,
+    //   // 注入向量(LD_PRELOAD、DYLD_INSERT_LIBRARIES、NODE_OPTIONS …)
+    //   // 即使写在这里也会被剥掉。指望继承环境拿密钥的服务会静默失败——
+    //   // 在这里显式传,或让服务自读它自己的 secrets 文件。
+    //   "env": {},
+    //   // "safe"(默认)并发调用本服务工具;"exclusive" 串行化——适合
+    //   // 单设备驱动等独占资源。未知值按 exclusive 兜底(fail-safe)。
+    //   "concurrency_class": "exclusive"
+    // },
+    // { "url": "https://mcp.example.com/mcp", "oauth": true, "scopes": [] }
+    // 超时: 握手 30s,单次 tools/call 60s——长任务应由服务端 detach 起跑
+    // (返回句柄),再用只读工具轮询结果。
+  ],
+
+  // 沙箱 — 完整说明见 docs/SANDBOX.md。
+  // 后端：bwrap（Linux）、sandbox-exec（macOS）、AppContainer（Windows，
+  // 由 octos-sandbox 辅助 crate 提供）、docker（任意 OS）。auto 按 OS 选择。
+  "sandbox": {
+    "enabled": true,
+    "mode": "auto",
+    "allow_network": false,
+    "read_allow_paths": []        // 仅 macOS：收紧读取范围
+  },
+
+  // 邮件（用于邮件通道）
+  "email": null,
+
+  // 仪表盘认证（仅 serve 模式）
+  "dashboard_auth": null,
+
+  // 监控（仅 serve 模式）
+  "monitor": null
+}
+```
+
+### 15.2 环境变量
+
+| 变量 | 说明 |
+|------|------|
+| **长时间运行回合** | |
+| `OCTOS_CONVERGENCE_LLM_CALLS` | 按 LLM 调用次数触发无工具反思（默认 `20`） |
+| `OCTOS_CONVERGENCE_ACTIVE_TOKENS` | 按非缓存输入 + 输出 token 触发反思（默认 `100000`） |
+| `OCTOS_CONVERGENCE_SECS` | 按经过秒数触发反思（默认 `300`） |
+| `OCTOS_FILE_CHURN_THRESHOLD` | 同一文件成功修改多少次后提前反思；第二次越阈同时请求模型/provider 升级（默认 `5`） |
+| **LLM 提供商** | |
+| `ANTHROPIC_API_KEY` | Anthropic（Claude）API 密钥 |
+| `OPENAI_API_KEY` | OpenAI API 密钥 |
+| `GEMINI_API_KEY` | Google Gemini API 密钥 |
+| `OPENROUTER_API_KEY` | OpenRouter API 密钥 |
+| `DEEPSEEK_API_KEY` | DeepSeek API 密钥 |
+| `GROQ_API_KEY` | Groq API 密钥 |
+| `MOONSHOT_API_KEY` | Moonshot/Kimi API 密钥 |
+| `DASHSCOPE_API_KEY` | 阿里云灵积（通义千问）API 密钥 |
+| `MINIMAX_API_KEY` | MiniMax API 密钥 |
+| `ZHIPU_API_KEY` | 智谱（GLM）API 密钥 |
+| `ZAI_API_KEY` | Z.AI API 密钥 |
+| `NVIDIA_API_KEY` | Nvidia NIM API 密钥 |
+| **搜索** | |
+| `BRAVE_API_KEY` | Brave 搜索 API 密钥 |
+| `PERPLEXITY_API_KEY` | Perplexity Sonar API 密钥 |
+| `YDC_API_KEY` | You.com API 密钥 |
+| **通道** | |
+| `TELEGRAM_BOT_TOKEN` | Telegram 机器人令牌 |
+| `DISCORD_BOT_TOKEN` | Discord 机器人令牌 |
+| `SLACK_BOT_TOKEN` | Slack 机器人令牌 |
+| `SLACK_APP_TOKEN` | Slack 应用级令牌 |
+| `FEISHU_APP_ID` | 飞书应用 ID |
+| `FEISHU_APP_SECRET` | 飞书应用密钥 |
+| `WECOM_CORP_ID` | 企业微信企业 ID |
+| `WECOM_AGENT_SECRET` | 企业微信应用密钥 |
+| `EMAIL_USERNAME` | 邮件账户用户名 |
+| `EMAIL_PASSWORD` | 邮件账户密码 |
+| **邮件（send-email 技能）** | |
+| `SMTP_HOST` | SMTP 服务器主机名 |
+| `SMTP_PORT` | SMTP 服务器端口 |
+| `SMTP_USERNAME` | SMTP 用户名 |
+| `SMTP_PASSWORD` | SMTP 密码 |
+| `SMTP_FROM` | SMTP 发件人地址 |
+| `LARK_APP_ID` | 飞书邮件应用 ID |
+| `LARK_APP_SECRET` | 飞书邮件应用密钥 |
+| `LARK_FROM_ADDRESS` | 飞书邮件发件人地址 |
+| **语音** | |
+| `ASR_API_URL` | 独立批量 ASR 服务基址；设置后转录不再走 OMiniX |
+| `OMINIX_API_URL` | OminiX ASR/TTS API 地址 |
+| **系统** | |
+| `RUST_LOG` | 日志级别（error/warn/info/debug/trace） |
+| `OCTOS_LOG_JSON` | 启用 JSON 格式日志（设置为任意值） |
+
+### 15.3 文件布局
+
+```
+~/.octos/                        # 全局配置目录
+├── auth.json                   # 存储的 API 凭据（权限 0600）
+├── profiles/                   # 每个配置的数据根（serve 模式）
+│   └── <profile-id>/
+│       ├── config.json
+│       └── data/
+│           ├── voice_profiles/  # mofa-fm 克隆参考 WAV（由 scripts/register-fleet-voices.sh 注册到 OminiX-API）
+│           ├── media/           # 持久化的音频/图片附件
+│           └── skills/          # 配置专属技能覆盖
+├── skills/                     # 全局自定义技能
+└── serve.log                   # Serve 模式日志文件
+
+.octos/                          # 项目/配置文件数据目录
+├── config.json                 # 配置
+├── cron.json                   # 定时任务
+├── AGENTS.md                   # 智能体指令
+├── SOUL.md                     # 个性定义
+├── USER.md                     # 用户信息
+├── TOOLS.md                    # 工具特定指南
+├── IDENTITY.md                 # 自定义身份
+├── HEARTBEAT.md                # 后台任务指令
+├── sessions/                   # 对话历史（JSONL，meta 中含 sticky thread_id）
+├── memory/                     # 记忆文件
+│   ├── MEMORY.md               # 长期持久化记忆
+│   └── 2026-04-30.md           # 每日笔记
+├── bundled-app-skills/         # gateway 启动时由 bootstrap 自动安装
+│   │                           #（常量 BUNDLED_APP_SKILLS_DIR = "bundled-app-skills"；
+│   │                           # 内容来自
+│   │                           # crates/octos-agent/src/bundled_app_skills.rs）。
+│   │                           # 重新部署会刷新此目录；用户改动会被覆盖 ——
+│   │                           # 自定义请放到 skills/。
+│   ├── news/                   # news_fetch
+│   ├── deep-search/            # 多步研究（插件协议 v2）
+│   ├── deep-crawl/             # 站点爬取 + 合成（插件协议 v2）
+│   ├── send-email/             # SMTP 发送
+│   ├── account-manager/        # 子账户管理
+│   ├── time/                   # 时间 / 时区（二进制名 "clock"）
+│   ├── weather/                # Open-Meteo 天气
+│   ├── smart-home/             # 通过 profile 桥接列出/控制设备
+│   └── skill-evolve/           # SKILL.md 补丁队列（前台）
+├── skills/                     # 用户安装的自定义技能
+│   │                           #（优先级：项目 > 配置 > 全局；重新部署不覆盖）。
+│   └── my-custom-skill/
+├── platform-skills/            # 平台技能数据（voice ASR/TTS）。
+│                               # 音色克隆由 OminiX-API + mofa-fm/fm_tts 完成；
+│                               # 平台 voice 技能本身只支持预设音色。
+├── episodes.redb               # 回忆录数据库
+├── tool_config.json            # 工具配置覆盖
+└── history/
+    └── chat_history            # Readline 历史（CLI）
+```
+
+> **运行时目录里看不到**：`harness-starter-{audio,coding,generic,report}` 与 `wechat-bridge` 都是仅在 workspace 中的示例/工具 crate，位于 `crates/app-skills/`。它们能被 `cargo build --workspace` 编译，但不在 `BUNDLED_APP_SKILLS` 中，因此 gateway 不会把它们写入 `~/.octos/bundled-app-skills/`。需要看模板请直接打开源码树。
+
+---
+
+## 16. Matrix Appservice（Palpo）
+
+Octos 可以作为 [Matrix Application Service](https://spec.matrix.org/latest/application-service-api/)（应用服务）运行在 Matrix 主服务器后面。本节介绍如何使用 Docker Compose 将 Octos 与 [Palpo](https://github.com/palpo-im/palpo) 一起部署，使用户可以从任何 Matrix 客户端与机器人对话。
+
+### 16.1 工作原理
+
+```
+Matrix 客户端（Element 等）
+       │
+       ▼
+  Palpo（主服务器 :8008）
+       │  通过 Appservice API 推送事件
+       ▼
+  Octos（应用服务监听 :8009）
+       │  通过 Palpo 的 Client-Server API 回复消息
+       ▼
+  Palpo ──► Matrix 客户端
+```
+
+Palpo 在启动时加载一个**注册 YAML 文件**，告诉它哪些用户命名空间属于 Octos，以及将事件转发到哪里。Octos 在专用端口（默认 `8009`）监听这些事件，并通过 Palpo 的 Client-Server API 回复。
+
+### 16.2 目录结构
+
+```
+palpo_with_octos/
+├── compose.yml                        # Docker Compose 文件
+├── palpo.toml                         # Palpo 主服务器配置
+├── appservices/
+│   └── octos-registration.yaml        # 应用服务注册文件
+├── config/
+│   ├── botfather.json                 # Octos 配置文件（Matrix 频道）
+│   └── octos.json                     # Octos 全局配置
+├── data/
+│   ├── pgsql/                         # PostgreSQL 数据
+│   ├── octos/                         # Octos 运行时数据
+│   └── media/                         # Palpo 媒体存储
+└── static/
+    └── index.html                     # Palpo 主页
+```
+
+### 16.3 配置步骤
+
+#### 1. 生成令牌
+
+应用服务注册文件和 Octos 配置文件必须共享两个令牌。只需生成一次：
+
+```bash
+# 生成 as_token 和 hs_token（任意随机十六进制字符串）
+openssl rand -hex 32   # → as_token
+openssl rand -hex 32   # → hs_token
+```
+
+保存好这两个值 — 下面两个文件都需要用到。
+
+#### 2. 创建应用服务注册文件
+
+创建 `appservices/octos-registration.yaml`：
+
+```yaml
+# Matrix 应用服务注册 — octos
+id: octos-matrix-appservice
+
+# Palpo 推送事件到 octos 的 URL（使用 Docker 服务名，不是 localhost）
+url: "http://octos:8009"
+
+# 令牌 — 必须与 config/botfather.json 匹配
+as_token: "<你的-as-token>"
+hs_token: "<你的-hs-token>"
+
+sender_localpart: octosbot
+rate_limited: false
+
+namespaces:
+  users:
+    - exclusive: true
+      regex: "@octosbot_.*:your\\.server\\.name"
+    - exclusive: true
+      regex: "@octosbot:your\\.server\\.name"
+  aliases: []
+  rooms: []
+```
+
+关键字段说明：
+
+| 字段 | 说明 |
+|------|------|
+| `url` | Palpo 发送事件的目标地址。使用 Docker 服务名（如 `http://octos:8009`），不要用 `localhost`。 |
+| `as_token` | Octos 调用 Palpo API 时使用的令牌。 |
+| `hs_token` | Palpo 向 Octos 推送事件时使用的令牌。 |
+| `sender_localpart` | 机器人的 Matrix 本地用户名（最终变为 `@octosbot:your.server.name`）。 |
+| `namespaces.users` | 应用服务管理的用户 ID 正则匹配模式。包含机器人本身和桥接用户前缀。 |
+
+#### 3. 配置 Palpo
+
+在 `palpo.toml` 中，指向包含注册文件的目录：
+
+```toml
+server_name = "your.server.name"
+listen_addr = "0.0.0.0:8008"
+
+allow_registration = true
+allow_federation = true
+
+# Palpo 启动时自动加载此目录下所有 .yaml 文件
+appservice_registration_dir = "/var/palpo/appservices"
+
+[db]
+url = "postgres://palpo:<数据库密码>@palpo_postgres:5432/palpo"
+pool_size = 10
+
+[well_known]
+server = "your.server.name"
+client = "https://your.server.name"
+```
+
+#### 4. 创建 Octos 配置文件
+
+创建 `config/botfather.json`，配置使用相同令牌的 Matrix 频道：
+
+```json
+{
+  "id": "botfather",
+  "name": "BotFather",
+  "enabled": true,
+  "config": {
+    "provider": "deepseek",
+    "model": "deepseek-chat",
+    "api_key_env": "DEEPSEEK_API_KEY",
+    "channels": [
+      {
+        "type": "matrix",
+        "homeserver": "http://palpo:8008",
+        "as_token": "<你的-as-token>",
+        "hs_token": "<你的-hs-token>",
+        "server_name": "your.server.name",
+        "sender_localpart": "octosbot",
+        "user_prefix": "octosbot_",
+        "port": 8009,
+        "mention_only": true,
+        "allowed_senders": ["@alice:your.server.name"]
+      }
+    ],
+    "gateway": {
+      "max_history": 50,
+      "queue_mode": "followup"
+    }
+  }
+}
+```
+
+Matrix 频道字段说明：
+
+| 字段 | 说明 |
+|------|------|
+| `type` | 必须为 `"matrix"`。 |
+| `homeserver` | Palpo 的内部 URL（Docker 服务名）。 |
+| `as_token` / `hs_token` | 必须与注册 YAML 文件匹配。 |
+| `server_name` | Matrix 域名（必须与 `palpo.toml` 一致）。 |
+| `sender_localpart` | 机器人用户名（必须与注册文件一致）。 |
+| `user_prefix` | 此应用服务管理的桥接用户 ID 前缀。 |
+| `port` | Octos 监听来自 Palpo 的应用服务事件的端口。 |
+| `allowed_senders` | 允许与机器人对话的 Matrix 用户 ID。空数组 = 允许所有人。 |
+| `mention_only` | 可选，默认 `true`。在真正的 1:1 私聊之外，机器人只在被显式寻址时才回复（`m.mentions` 条目、MXID pill/提及、或客户端指定的 target）。真正的 1:1 私聊——1 个人类 + 该应用服务在此房间仅管理 1 个机器人（以应用服务自己的房间映射为准）——始终回复。多机器人房间即使只有 1 个人类也要求提及，避免所有机器人同时应答。设为 `false` 则在所有房间回复每条消息（带 `org.octos.explicit_room` 标记的消息仍走门控）。 |
+
+#### 5. Docker Compose
+
+```yaml
+services:
+  palpo_postgres:
+    image: postgres:17
+    restart: always
+    volumes:
+      - ./data/pgsql:/var/lib/postgresql/data
+    environment:
+      POSTGRES_PASSWORD: <数据库密码>
+      POSTGRES_USER: palpo
+      POSTGRES_DB: palpo
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U palpo"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - internal
+
+  palpo:
+    image: ghcr.io/palpo-im/palpo:latest
+    restart: unless-stopped
+    ports:
+      - 8128:8008     # Client-Server API
+      - 8348:8448     # Federation API
+    environment:
+      PALPO_CONFIG: "/var/palpo/palpo.toml"
+    volumes:
+      - ./palpo.toml:/var/palpo/palpo.toml:ro
+      - ./appservices:/var/palpo/appservices:ro
+      - ./data/media:/var/palpo/media
+      - ./static:/var/palpo/static:ro
+    depends_on:
+      palpo_postgres:
+        condition: service_healthy
+    networks:
+      - internal
+
+  octos:
+    build:
+      context: /path/to/octos       # Octos 源码仓库路径
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - 8009:8009     # 应用服务监听（接收 Palpo 推送的事件）
+      - 8010:8080     # Octos 仪表盘 / 管理 API
+    environment:
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
+      RUST_LOG: octos=debug,info
+    volumes:
+      - ./data/octos:/root/.octos
+      - ./config/botfather.json:/root/.octos/profiles/botfather.json:ro
+      - ./config/octos.json:/config/octos.json:ro
+    command: ["serve", "--host", "0.0.0.0", "--port", "8080", "--config", "/config/octos.json"]
+    depends_on:
+      - palpo
+    networks:
+      - internal
+
+networks:
+  internal:
+    attachable: true
+```
+
+#### 6. 启动所有服务
+
+```bash
+docker compose up -d
+```
+
+Palpo 在启动时读取 `appservices/octos-registration.yaml`。当 Matrix 用户在机器人所在的房间发送消息时，Palpo 将事件推送到 `http://octos:8009`，Octos 通过智能体循环处理消息，并通过 Palpo 的 Client-Server API 回复。
+
+### 16.4 令牌匹配检查清单
+
+最常见的配置错误是令牌不匹配。以下三处必须一致：
+
+| 值 | `octos-registration.yaml` | `botfather.json` |
+|----|--------------------------|-------------------|
+| `as_token` | `as_token: "abc..."` | `"as_token": "abc..."` |
+| `hs_token` | `hs_token: "def..."` | `"hs_token": "def..."` |
+| `sender_localpart` | `sender_localpart: octosbot` | `"sender_localpart": "octosbot"` |
+| server name | `regex: "@octosbot:your\\.server\\.name"` | `"server_name": "your.server.name"` |
+
+### 16.5 故障排除
+
+| 症状 | 原因 | 解决方法 |
+|------|------|----------|
+| 机器人无响应 | 注册文件与配置文件之间令牌不匹配 | 检查[令牌匹配清单](#164-令牌匹配检查清单) |
+| Palpo 日志中出现 `Connection refused` | Octos 未运行或注册文件中 `url` 错误 | 确保 Octos 已启动；使用 Docker 服务名（`http://octos:8009`），不要用 `localhost` |
+| `User ID not in namespace` | `sender_localpart` 与注册文件 `namespaces.users` 正则不匹配 | 更新正则以包含机器人的完整用户 ID |
+| 未授权用户的消息被忽略 | `allowed_senders` 过滤 | 将用户的 Matrix ID 添加到数组中，或设置为 `[]` 以允许所有人 |
+
+---
+
+*本指南反映 M8.10 之后的状态（2026 年 4 月）。最新更新请参阅仓库 [github.com/octos-org/octos](https://github.com/octos-org/octos)。*

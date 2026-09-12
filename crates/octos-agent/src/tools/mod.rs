@@ -1,0 +1,2725 @@
+//! Tool framework for agent tool execution.
+//!
+//! # Typed `ToolContext` migration (M8.1)
+//!
+//! Tools receive execution context through [`ToolContext`]. Historically the
+//! context was delivered indirectly via the [`TOOL_CTX`] task-local, which the
+//! executor populated before calling each tool's [`Tool::execute`]. That works
+//! but makes the carrier invisible at the trait surface, so tools that want a
+//! field must either read the task-local or reach into globals.
+//!
+//! M8.1 introduces [`Tool::execute_with_context`], a typed entry point that
+//! threads `&ToolContext` explicitly. To keep the migration additive:
+//!
+//! - The trait's default implementation of `execute_with_context` falls back
+//!   to the legacy [`Tool::execute`]. Existing tools keep working unchanged.
+//! - Migrated tools override `execute_with_context` and use the typed record.
+//!   Their `execute` impl simply re-enters `execute_with_context` with a
+//!   zero-value context so out-of-band callers (tests, integrations that have
+//!   not been updated) still get predictable behaviour.
+//! - [`ToolContext`] carries the legacy fields *plus* placeholder stubs for
+//!   future milestones: [`AgentDefinitions`], [`ToolPermissions`],
+//!   [`FileStateCache`] (populated in M8.4), [`Notifications`], and
+//!   [`AppStateHandle`]. Each stub is annotated with the future issue that
+//!   will populate it. They all have cheap zero-value constructors so today's
+//!   executor can build a context without wiring.
+//!
+//! The executor still sets [`TOOL_CTX`] for legacy plugin tools that rely on
+//! the task-local read path (see `plugins/tool.rs`). Once every tool is
+//! migrated the task-local becomes redundant and can be retired, but that
+//! clean-up is out of scope for M8.1.
+
+mod build_cache_usage;
+pub use build_cache_usage::{BuildCacheUsage, BuildCacheUseGuard};
+
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use eyre::Result;
+use octos_core::TokenUsage;
+
+use crate::progress::ProgressReporter;
+use octos_core::{PathClassification, SessionScope};
+
+/// Error a tool returns when the MODEL supplied malformed arguments — a schema
+/// / deserialize failure, as opposed to a genuine execution error. Such
+/// failures have no side effects, so the serial-batch (M8.8) scheduler treats
+/// them as NON-cascading: one malformed call must not cancel its well-formed
+/// siblings (#1690). The `Display` text is delivered verbatim to the model, so
+/// callers should include the underlying detail plus a schema hint the model
+/// can use to self-repair on the next turn.
+#[derive(Debug, Clone)]
+pub struct ToolInputError(String);
+
+/// Upper bound on a [`ToolInputError`]'s model-facing message. The message can
+/// embed caller-controlled content (unknown parameter names), so it is bounded
+/// at construction — well under every tool's output limit (`tool_output_limit`
+/// min is 20_000) — so an armed tool's `Err` can never exceed the cap and be
+/// mangled by the execution loop's blind head/tail cut (#2193 R4). Real
+/// validation messages are a few hundred bytes.
+pub(crate) const TOOL_INPUT_ERROR_MAX_BYTES: usize = 4096;
+
+impl ToolInputError {
+    /// Build an input-validation error from a model-facing message, bounded to
+    /// [`TOOL_INPUT_ERROR_MAX_BYTES`] so caller-supplied content (e.g. a
+    /// pathological unknown-parameter name) cannot make the error exceed the
+    /// tool-output cap.
+    pub fn new(message: impl Into<String>) -> Self {
+        let mut message = message.into();
+        octos_core::truncate_utf8(&mut message, TOOL_INPUT_ERROR_MAX_BYTES, "…[truncated]");
+        Self(message)
+    }
+}
+
+impl std::fmt::Display for ToolInputError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ToolInputError {}
+
+/// Registry of [`AgentDefinition`]-style manifests available to tools.
+///
+/// Re-exported from [`crate::agents`] where the schema and loader live. M8.2
+/// filled in the stub shipped by M8.1: the registry now carries real
+/// [`crate::agents::AgentDefinition`] records by id. `ToolContext` keeps its
+/// M8.1 signature (`Arc<AgentDefinitions>`), so consumers of the field do
+/// not need to change.
+pub use crate::agents::AgentDefinitions;
+
+/// Per-tool permission facts consulted before each execution.
+///
+/// M8 fix-first item 8 (gap 4b): the M8.1 stub was always allow-all; the
+/// agent's recorded [`crate::profile::ProfileDefinition`] envelope was never
+/// consulted at the tool boundary even when the profile declared an explicit
+/// allow- or deny-list. The struct now carries the resolved policy:
+///
+/// - [`ToolPermissions::allow_all`] / [`ToolPermissions::default`] preserve
+///   the pre-M8.3 status quo (no restrictions).
+/// - [`ToolPermissions::from_profile`] derives the deny / allow lists from the
+///   profile's `tools` filter, expanding `group:*` references through
+///   [`crate::tools::policy::TOOL_GROUPS`] and the user-provided
+///   [`crate::profile::PermissionMode`]. Tools not on the allow list (when
+///   one is configured) are blocked, and tools on the deny list always lose.
+///
+/// Permission is evaluated by [`ToolPermissions::is_tool_allowed`] — the same
+/// hook the existing tools (e.g. `read_file`) consult before executing.
+#[derive(Clone, Debug)]
+pub struct ToolPermissions {
+    /// Coarse permission tier from the profile envelope. Reserved for future
+    /// per-tier rules; today the variant is informational so callers can log
+    /// it without changing semantics.
+    mode: crate::profile::PermissionMode,
+    /// Tools the active profile explicitly forbids. Always wins over the
+    /// allow list (deny-wins semantics, mirroring [`ToolPolicy`]).
+    denied_tools: HashSet<String>,
+    /// Optional explicit allow list. When `Some`, only tools whose names are
+    /// in the set are permitted. When `None`, no allow-list filter applies
+    /// (default behaviour).
+    allowed_tools: Option<HashSet<String>>,
+}
+
+impl Default for ToolPermissions {
+    fn default() -> Self {
+        Self::allow_all()
+    }
+}
+
+impl ToolPermissions {
+    /// Allow-all permissions — the zero-value default carried by the context.
+    pub fn allow_all() -> Self {
+        Self {
+            mode: crate::profile::PermissionMode::Default,
+            denied_tools: HashSet::new(),
+            allowed_tools: None,
+        }
+    }
+
+    /// Derive a [`ToolPermissions`] envelope from a resolved
+    /// [`crate::profile::ProfileDefinition`].
+    ///
+    /// `group:*` references in the profile's tool filter are expanded
+    /// against [`crate::tools::policy::TOOL_GROUPS`] so the runtime gate
+    /// matches the registry filter from M8.3. The resulting record is
+    /// consulted at every tool boundary (see
+    /// [`ToolPermissions::is_tool_allowed`]).
+    pub fn from_profile(profile: &crate::profile::ProfileDefinition) -> Self {
+        use crate::profile::ProfileTools;
+        let mut denied: HashSet<String> = HashSet::new();
+        let mut allowed: Option<HashSet<String>> = None;
+        match &profile.tools {
+            ProfileTools::Default => {}
+            ProfileTools::AllowList { tools } => {
+                if !tools.is_empty() {
+                    allowed = Some(expand_profile_tool_entries(tools));
+                }
+            }
+            ProfileTools::DenyList { tools } => {
+                denied = expand_profile_tool_entries(tools);
+            }
+        }
+        Self {
+            mode: profile.permissions,
+            denied_tools: denied,
+            allowed_tools: allowed,
+        }
+    }
+
+    /// Permission tier carried by the envelope. Reserved for future
+    /// per-tier rules; today purely informational.
+    pub fn mode(&self) -> crate::profile::PermissionMode {
+        self.mode
+    }
+
+    /// Check whether the named tool is currently permitted.
+    ///
+    /// Returns `false` when:
+    /// - the tool is on the profile's deny list, or
+    /// - the profile carries an allow list and the tool is not in it.
+    pub fn is_tool_allowed(&self, tool: &str) -> bool {
+        if self.denied_tools.contains(tool) {
+            return false;
+        }
+        match &self.allowed_tools {
+            Some(allow) => allow.contains(tool),
+            None => true,
+        }
+    }
+}
+
+/// Expand a profile-tool list (which may contain `group:*` references) into
+/// a flat set of tool names.
+fn expand_profile_tool_entries(entries: &[String]) -> HashSet<String> {
+    let mut out: HashSet<String> = HashSet::new();
+    for entry in entries {
+        if let Some(group) = crate::tools::policy::tool_group_info(entry) {
+            for t in group.tools {
+                out.insert((*t).to_string());
+            }
+        } else {
+            out.insert(entry.clone());
+        }
+    }
+    out
+}
+
+/// File-state cache re-export (M8.4).
+///
+/// The concrete LRU + mtime/hash implementation lives in
+/// [`crate::file_state_cache`]; this re-export keeps the historical public
+/// path (`crate::tools::FileStateCache`) stable for downstream users while
+/// the ToolContext carries a shared handle.
+pub use crate::file_state_cache::FileStateCache;
+
+/// Inbox of in-flight notifications surfaced to tools and the agent loop.
+///
+/// M8.2/M8.3 will route real notifications (e.g. permission prompts, gate
+/// state) through this handle. Today it is a zero-length inbox.
+#[derive(Clone, Debug, Default)]
+pub struct Notifications {
+    // M8.2/M8.3 will add the notification queue and backpressure state here.
+}
+
+impl Notifications {
+    /// Create an empty notifications inbox.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether the inbox is empty (no pending notifications). Always `true`
+    /// until M8.2/M8.3 start enqueueing notifications.
+    pub fn is_empty(&self) -> bool {
+        true
+    }
+}
+
+/// Handle to the ambient app state shared across tools.
+///
+/// M8.3 will use this to expose profile/app state that tools may read (e.g.
+/// the active profile name, locale, workspace contract root). Today it is an
+/// empty handle that tools can carry without wiring.
+#[derive(Clone, Debug, Default)]
+pub struct AppStateHandle {
+    // M8.3 will add the shared state handle (Arc<ProfileState>) here.
+}
+
+impl AppStateHandle {
+    /// Create an empty app-state handle.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Execution context available to tools.
+///
+/// The legacy fields (`tool_id`, `reporter`, `harness_event_sink`, three
+/// attachment lists) carry today's behaviour. The trailing fields are M8.x
+/// placeholders — see each field's doc comment for the issue that will wire
+/// it up. Building a zero-value context is cheap: all placeholders implement
+/// `Default` and the required handles are backed by `Arc` so cloning is O(1).
+#[derive(Clone)]
+pub struct ToolContext {
+    pub tool_id: String,
+    pub reporter: Arc<dyn ProgressReporter>,
+    /// Local newline-delimited JSON sink for structured harness progress.
+    pub harness_event_sink: Option<String>,
+    pub attachment_paths: Vec<String>,
+    pub audio_attachment_paths: Vec<String>,
+    pub file_attachment_paths: Vec<String>,
+    /// Agent manifests available to tools. M8.2 will populate this.
+    pub agent_definitions: Arc<AgentDefinitions>,
+    /// Per-tool permission facts. M8.3 will populate this.
+    pub permissions: ToolPermissions,
+    /// File-state cache shared across tools in a turn (M8.4).
+    ///
+    /// File tools consult this cache on read and invalidate it on write. When
+    /// `None`, tools behave as they did pre-M8.4 (no cache, no stub). The
+    /// cache is wrapped in `Arc` so it can be cloned cheaply into subagents;
+    /// use [`FileStateCache::clone_for_subagent`] when a delegate should
+    /// receive an independent copy instead of a shared handle.
+    pub file_state_cache: Option<Arc<FileStateCache>>,
+    /// Notification inbox surfaced to tools. M8.2/M8.3 will populate this.
+    pub notifications: Arc<Notifications>,
+    /// Handle to the ambient app state. M8.3 will populate this.
+    pub app_state: AppStateHandle,
+    /// M8 parity (W1.A1): shared sub-agent output router from the
+    /// session actor. Background sub-agents (pipeline workers, spawn
+    /// children) clone this `Arc` so their output lands in the same
+    /// disk-backed router the parent session uses for dashboards.
+    pub subagent_output_router: Option<Arc<crate::subagent_output::SubAgentOutputRouter>>,
+    /// M8 parity (W1.A1): shared sub-agent summary generator. Pipeline
+    /// workers clone this so periodic LLM summaries fire for their
+    /// background tasks just like top-level spawn children.
+    pub subagent_summary_generator: Option<Arc<crate::subagent_summary::AgentSummaryGenerator>>,
+    /// LLM provider for tools that need to make independent model calls
+    /// (e.g., goal completion verifier). Populated by the session runtime.
+    pub llm_provider: Arc<dyn octos_llm::LlmProvider>,
+    /// M8 parity (W1.A3): per-session task supervisor. Pipeline node
+    /// workers register a child task in this supervisor so the admin
+    /// dashboard sees the substructure under the parent run_pipeline
+    /// invocation.
+    pub task_supervisor: Option<Arc<crate::task_supervisor::TaskSupervisor>>,
+    /// M8 parity (W1.A4): shared cost accountant. Pipeline workers
+    /// open a per-node `CostReservationHandle` against the same
+    /// accountant the session uses so spend is unified under the
+    /// parent contract.
+    pub cost_accountant: Option<Arc<crate::cost_ledger::CostAccountant>>,
+    /// M8 parity: parent session key when the tool is invoked from a
+    /// session actor. Pipeline workers and spawn children carry this so
+    /// background-task registration links to the owning session.
+    pub parent_session_key: Option<String>,
+    /// Guard C (issue #607): nesting depth for `spawn`-within-`spawn`
+    /// invocations. Top-level tool calls ride at depth 0; the spawn
+    /// tool increments this when dispatching a child agent so the
+    /// child's own `spawn` calls see the higher value via `TOOL_CTX`.
+    /// Beyond [`crate::tools::spawn::MAX_SPAWN_DEPTH`] the spawn tool
+    /// refuses further nesting to bound mutual-recursion blowups.
+    pub spawn_depth: u8,
+    /// Phase 1 of the [`SessionScope`] migration (PR #1198 follow-up):
+    /// the single filesystem contract for this session. Constructed at
+    /// the host entry point (`chat.rs` for solo, `serve.rs` /
+    /// `runtime/session.rs` for multi-tenant) and threaded through
+    /// `TOOL_CTX` so any tool can derive its CWD and validate paths
+    /// against the same scope.
+    ///
+    /// `Optional` because Phase 1 is additive — no consumer reads this
+    /// yet. Phase 2 PRs will migrate `RunPipelineTool.working_dir`,
+    /// plugin tool `work_dir`, file tools, shell, etc. to read from
+    /// this field; Phase 3 will retire bespoke validators like
+    /// `api_session_workspace_dirs` in favour of
+    /// [`SessionScope::workspace`]. See `octos_core::session_scope`
+    /// for the contract and migration notes.
+    pub session_scope: Option<Arc<SessionScope>>,
+    /// Goal ID this tool call is working under (peer-agent-based goal).
+    /// Populated from `Agent::goal_id` at tool dispatch when the agent runs
+    /// inside a peer staged with a `goal` file. Read by the `goal_*` tool
+    /// family to scope reads/writes to the goal without requiring the model
+    /// to repeat the id on every call.
+    pub goal_id: Option<String>,
+    /// Task ID within the goal (peer-agent-based goal). Populated from
+    /// `Agent::task_id`. May be `None` even when `goal_id` is set (the peer
+    /// is goal-scoped but not task-scoped).
+    pub task_id: Option<String>,
+    /// The session that staged this peer (peer-agent-based goal). Captured
+    /// at peer boot from `peers/<slug>/originator` and threaded through so
+    /// goal-aware tools (`goal_get` by-id, `model_goal_record_peer_finding`)
+    /// can enforce the goal-binding check WITHOUT re-reading the originator
+    /// file on every call. `None` for non-peer sessions.
+    pub originator_session: Option<String>,
+    /// Build-cache pool slot this peer's CURRENT turn holds (outer-loop #4,
+    /// design docs/build-cache-pool.md §7.4). Populated from
+    /// `Agent::build_cache_slot` at tool dispatch, exactly like
+    /// `goal_id`/`task_id` above. Read by the shell tool to inject
+    /// `CARGO_TARGET_DIR=<slot>/target` + `CARGO_INCREMENTAL=0` PER TOOL
+    /// CALL — never via `std::env::set_var`, because on the serve path a
+    /// peer shares the process with the master and every other peer.
+    /// `None` for non-peer sessions and a peer turn that failed to acquire
+    /// a slot (it still runs, just with cargo's default target dir).
+    pub build_cache_slot: Option<std::path::PathBuf>,
+    /// Shared child lifetime accounting for this cache claim.
+    pub build_cache_usage: Option<BuildCacheUsage>,
+    /// Post-edit formatting (issue #1774): when true, a successful
+    /// `edit_file` / `write_file` / `diff_edit` runs the language formatter
+    /// for the file (rustfmt / prettier / black / gofmt — see
+    /// [`crate::format`]) and echoes the formatted content back in the tool
+    /// result. OFF by default; threaded from
+    /// [`crate::AgentConfig::format_after_edit`].
+    pub format_after_edit: bool,
+}
+
+impl ToolContext {
+    /// Zero-value context suitable for unit tests and tools that do not need
+    /// live executor wiring. Uses a [`crate::progress::SilentReporter`] and
+    /// leaves every M8.x placeholder at its default.
+    pub fn zero() -> Self {
+        // Noop provider for zero context (always fails, tools should not use it)
+        struct NoopProvider;
+        #[async_trait::async_trait]
+        impl octos_llm::LlmProvider for NoopProvider {
+            async fn chat(
+                &self,
+                _messages: &[octos_core::Message],
+                _tools: &[octos_llm::ToolSpec],
+                _config: &octos_llm::ChatConfig,
+            ) -> eyre::Result<octos_llm::ChatResponse> {
+                eyre::bail!("ToolContext::zero() has no real provider")
+            }
+            fn model_id(&self) -> &str {
+                "noop"
+            }
+            fn provider_name(&self) -> &str {
+                "noop"
+            }
+        }
+
+        Self {
+            tool_id: String::new(),
+            reporter: Arc::new(crate::progress::SilentReporter),
+            harness_event_sink: None,
+            attachment_paths: Vec::new(),
+            audio_attachment_paths: Vec::new(),
+            file_attachment_paths: Vec::new(),
+            agent_definitions: Arc::new(AgentDefinitions::new()),
+            permissions: ToolPermissions::default(),
+            file_state_cache: None,
+            notifications: Arc::new(Notifications::new()),
+            app_state: AppStateHandle::new(),
+            subagent_output_router: None,
+            subagent_summary_generator: None,
+            llm_provider: Arc::new(NoopProvider),
+            task_supervisor: None,
+            cost_accountant: None,
+            parent_session_key: None,
+            spawn_depth: 0,
+            session_scope: None,
+            goal_id: None,
+            task_id: None,
+            originator_session: None,
+            build_cache_slot: None,
+            build_cache_usage: None,
+            format_after_edit: false,
+        }
+    }
+}
+
+tokio::task_local! {
+    /// Task-local tool context, scoped per tool invocation in agent.rs.
+    pub static TOOL_CTX: ToolContext;
+}
+
+/// Request emitted by a tool when runtime policy requires user approval.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolApprovalRequest {
+    pub tool_id: String,
+    pub tool_name: String,
+    pub title: String,
+    pub body: String,
+    pub command: Option<String>,
+    pub cwd: Option<String>,
+}
+
+/// Decision returned to a blocked tool after client approval handling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolApprovalDecision {
+    Approve,
+    Deny,
+}
+
+/// Async approval bridge provided by clients that support interactive approval.
+#[async_trait]
+pub trait ToolApprovalRequester: Send + Sync {
+    async fn request_approval(&self, request: ToolApprovalRequest) -> ToolApprovalDecision;
+}
+
+tokio::task_local! {
+    /// Optional task-local approval bridge scoped around a turn by interactive clients.
+    pub static TOOL_APPROVAL_CTX: Arc<dyn ToolApprovalRequester>;
+}
+
+/// Request emitted by the `ask_user_question` tool when it asks the user a
+/// structured multiple-choice question mid-turn (UPCR-2026-023).
+///
+/// Mirrors [`ToolApprovalRequest`]: a typed payload the
+/// [`UserQuestionRequester`] surfaces to the attached client, blocking the
+/// tool on a oneshot until the client answers. `questions` is already
+/// validated (1..=4 questions, 2..=4 options each); `title`/`body` are the
+/// mandatory generic fallback text a non-structured client renders.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserQuestionRequest {
+    pub questions: Vec<octos_core::ui_protocol::UserQuestion>,
+    pub title: String,
+    pub body: String,
+}
+
+/// Outcome returned to the blocked `ask_user_question` tool after client
+/// handling (UPCR-2026-023). Mirrors [`ToolApprovalDecision`] but carries the
+/// structured per-question answers and distinguishes a cancelled turn from an
+/// unsupported client.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UserQuestionOutcome {
+    /// The client answered; one entry per question, in question order.
+    Answered(Vec<octos_core::ui_protocol::UserQuestionAnswer>),
+    /// The turn was interrupted / the pending question drained before an
+    /// answer arrived. The tool returns a cancelled result.
+    Cancelled,
+    /// No capable client was attached for this turn; the tool degrades to the
+    /// structured-metadata fallback (§4.4).
+    Unsupported,
+}
+
+/// Async user-question bridge provided by clients that negotiated
+/// `user_question.v1` (UPCR-2026-023). Mirrors [`ToolApprovalRequester`]:
+/// scoped per-turn via [`USER_QUESTION_CTX`] so the `ask_user_question` tool
+/// can block on a oneshot until `user_question/respond` resolves it.
+#[async_trait]
+pub trait UserQuestionRequester: Send + Sync {
+    async fn request_user_question(&self, request: UserQuestionRequest) -> UserQuestionOutcome;
+}
+
+tokio::task_local! {
+    /// Optional task-local user-question bridge scoped around a turn by
+    /// interactive clients that negotiated `user_question.v1`. When unset the
+    /// `ask_user_question` tool degrades gracefully (no hard block).
+    pub static USER_QUESTION_CTX: Arc<dyn UserQuestionRequester>;
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TurnAttachmentContext {
+    pub attachment_paths: Vec<String>,
+    pub audio_attachment_paths: Vec<String>,
+    pub file_attachment_paths: Vec<String>,
+    pub prompt_summary: Option<String>,
+    /// Explicit live-video signal for this turn, set by the ingress from the
+    /// client (`InboundMessage.metadata.live_video`) — NOT inferred from
+    /// attachment types. True only when the turn is a real-time video call
+    /// whose attached image is the user's current camera frame; drives the
+    /// agent loop's video-call note. Defaults false (no auto-detection): a
+    /// voice note plus an uploaded image is not a camera frame.
+    pub live_video: bool,
+}
+
+tokio::task_local! {
+    /// Task-local per-turn attachment context, scoped to the current agent run.
+    pub static TURN_ATTACHMENT_CTX: TurnAttachmentContext;
+}
+
+/// Progress update from a long-running tool execution.
+#[derive(Debug, Clone)]
+pub enum ToolProgress {
+    /// Status text update (e.g., "Searching 3 of 10 sources...").
+    Status(String),
+    /// Percentage completion (0..100).
+    Percent(u8),
+    /// Intermediate result available (e.g., partial research findings).
+    Intermediate { summary: String },
+}
+
+/// Concurrency class of a tool — controls how the executor admits tool calls
+/// into a parallel batch (M8.8).
+///
+/// The executor unconditionally ran every tool call in parallel before M8.8.
+/// This was unsafe in the presence of mutating tools: a `shell && rm foo`
+/// dispatched concurrently with `read_file foo/x` could race and return
+/// inconsistent observations to the LLM. Claude Code's
+/// `StreamingToolExecutor.ts` classifies tools via `isConcurrencySafe()` —
+/// this mirrors that pattern at the trait surface.
+///
+/// Admission policy (implemented in `agent::execution`):
+/// - If every call in the batch is [`ConcurrencyClass::Safe`], the batch
+///   dispatches in parallel.
+/// - If every call is [`ConcurrencyClass::Exclusive`], the batch runs
+///   serially in call order. A single error from an exclusive call cancels
+///   the remaining peers so the LLM sees the cascade instead of continuing
+///   to mutate state on a doomed path.
+/// - Mixed batches (#1766) run the Safe calls in parallel first, then the
+///   Exclusive calls serially in call order; results are reassembled in the
+///   original call order. See the `agent::execution` module doc for the
+///   pinned visibility and cascade semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConcurrencyClass {
+    /// Read-only / side-effect-free. Can run in parallel with any other
+    /// `Safe` tool call without observable interference.
+    #[default]
+    Safe,
+    /// Mutating or stateful (writes files, spawns shells, updates memory).
+    /// Must run serialized: no other tool call runs concurrently while an
+    /// `Exclusive` call is in-flight.
+    Exclusive,
+}
+
+/// Result of executing a tool.
+#[derive(Default)]
+pub struct ToolResult {
+    /// Output to return to the LLM.
+    pub output: String,
+    /// Whether the tool execution succeeded.
+    pub success: bool,
+    /// File modified by this tool (if any).
+    pub file_modified: Option<PathBuf>,
+    /// Files to automatically send to the user via the chat channel.
+    /// Plugins set this via `"files_to_send": ["/path/to/file.mp3"]` in JSON output.
+    /// The agent loop sends these files after the tool completes, without requiring
+    /// an extra LLM call to invoke send_file.
+    pub files_to_send: Vec<PathBuf>,
+    /// Tokens used by this tool (for subagent tools).
+    pub tokens_used: Option<TokenUsage>,
+    /// Optional structured side-channel for tool-specific metadata the host
+    /// wants to surface beyond plain output text. Used today for per-node
+    /// cost rows from `run_pipeline` (`{"node_costs": [...]}`); the session
+    /// actor pulls this back into the SSE `done` event so the W1.G4 cost
+    /// panel can render real per-node attribution. Absent (`None`) for
+    /// every tool that does not opt in — keeps legacy callers byte-identical.
+    pub structured_metadata: Option<serde_json::Value>,
+    /// Optional named outputs the tool wants the contract layer to read.
+    /// spawn_only plugin tools emit this via `"named_outputs": {"key": "value"}`
+    /// in their stdout JSON envelope. The contract layer forwards each entry
+    /// to validators so `${output.<key>}` interpolation can resolve against
+    /// tool-emitted values (e.g. `mofa_publish` emitting `deploy_url`).
+    /// Values are restricted to strings in v1; key shape must match
+    /// `[a-z][a-z0-9_]*`. Absent (`None`) when the tool emits nothing.
+    pub named_outputs: Option<std::collections::HashMap<String, String>>,
+}
+
+/// Trait for implementing tools.
+///
+/// # Context threading
+///
+/// Tools get their execution context through one of two entry points:
+///
+/// - [`Tool::execute`] — the legacy argument-only entry point. Kept as the
+///   primary signature so unmigrated tools, tests, and external callers do
+///   not need to thread a [`ToolContext`]. The default implementation of
+///   `execute_with_context` delegates here, so implementors who override
+///   only `execute` keep working.
+/// - [`Tool::execute_with_context`] — the typed entry point introduced by
+///   M8.1. Migrated tools override this and may read any field on the
+///   [`ToolContext`]. The default body re-enters the legacy [`Tool::execute`]
+///   so unmigrated tools keep working.
+///
+/// A tool should override at most one of the two. Overriding both produces
+/// two independent entry paths that the executor cannot reconcile.
+#[async_trait]
+pub trait Tool: Send + Sync {
+    /// Tool name (must be unique).
+    fn name(&self) -> &str;
+
+    /// Description for the LLM.
+    fn description(&self) -> &str;
+
+    /// JSON Schema for input parameters.
+    fn input_schema(&self) -> serde_json::Value;
+
+    /// Semantic tags for capability-based filtering (e.g. "code", "web", "gateway").
+    /// Default: empty (tool passes all tag filters).
+    fn tags(&self) -> &[&str] {
+        &[]
+    }
+
+    /// Model contexts in which this tool may be advertised.
+    ///
+    /// An empty list keeps the existing behavior: the tool is visible in
+    /// every context. A non-empty list requires an exact match with the
+    /// active per-turn context.
+    fn contexts(&self) -> &[String] {
+        &[]
+    }
+
+    /// Execute the tool with the given arguments.
+    ///
+    /// Kept as the primary entry point so existing tools, tests, and
+    /// integrations do not need to construct a [`ToolContext`]. Migrated
+    /// tools re-enter this via [`Tool::execute_with_context`]; to avoid
+    /// infinite recursion implementors that override `execute_with_context`
+    /// must also override `execute` to call
+    /// `self.execute_with_context(&ToolContext::zero(), args).await`.
+    async fn execute(&self, args: &serde_json::Value) -> Result<ToolResult>;
+
+    /// Execute the tool with typed execution context.
+    ///
+    /// How the model can retrieve output the harness had to truncate.
+    ///
+    /// Returns the advice to append when this tool's result exceeded
+    /// [`octos_core::tool_output_limit`] and was cut. `None` (the default)
+    /// means the tool has no resume path, so no advice is offered rather than
+    /// inventing one.
+    ///
+    /// ## Why this lives on the tool
+    ///
+    /// Truncation happens in the execution loop, at the one point every tool's
+    /// output funnels through — which is also the point that knows the least.
+    /// By then the result is a plain `String`: the helper doing the cutting
+    /// (`truncate_head_tail_report(s, max_len, head_ratio)`) receives a string and a
+    /// number and cannot know which tool produced it, whether that tool paginates,
+    /// or what the parameter is called.
+    ///
+    /// So the loop knows it truncated but not how to resume; the tool knows how
+    /// to resume but not that it was truncated. This hook is the missing half.
+    ///
+    /// Without it the model is told only `... [47000 bytes omitted] ...` — a
+    /// dead end whose only recovery is re-running the call, which returns the
+    /// same output cut the same way and spends the tokens the cap was meant to
+    /// save.
+    ///
+    /// # Arguments
+    /// * `args` - the arguments this call was made with, so advice can name a
+    ///   concrete next call rather than a generic one.
+    /// * `omitted_bytes` - how much was dropped.
+    fn truncation_recovery(
+        &self,
+        args: &serde_json::Value,
+        omitted_bytes: usize,
+    ) -> Option<String> {
+        let _ = (args, omitted_bytes);
+        None
+    }
+
+    /// The default implementation delegates to [`Tool::execute`], discarding
+    /// the context. Tools that want to read [`ToolContext`] fields override
+    /// this and ignore `execute`'s default path. See the module-level doc
+    /// comment for the migration pattern.
+    async fn execute_with_context(
+        &self,
+        _ctx: &ToolContext,
+        args: &serde_json::Value,
+    ) -> Result<ToolResult> {
+        self.execute(args).await
+    }
+
+    /// Pre-flight argument validation that runs synchronously in the
+    /// foreground before the `spawn_only` intercept dispatches the tool to
+    /// the background.
+    ///
+    /// Returning `Err(msg)` causes the spawn_only intercept to surface the
+    /// error as a normal tool_result `Message` (mirroring the policy-deny
+    /// path) so the LLM sees the failure in its next iteration and can
+    /// retry with corrected arguments. Without this, an LLM-generated bad
+    /// argument (e.g. a structurally invalid DOT graph for `run_pipeline`)
+    /// fails inside the background task with no chance for the agent to
+    /// re-engage — the user sees an error bubble but the LLM thinks it
+    /// succeeded.
+    ///
+    /// Default: no pre-flight check (returns `Ok`). Override in tools whose
+    /// arguments are LLM-generated and cheap to validate, where catching
+    /// malformed input synchronously avoids a wasted background round-trip.
+    /// Keep the check fast (parse + structural validation, no network /
+    /// long-running work) since it blocks the agent's foreground turn.
+    async fn pre_flight_validate(&self, _args: &serde_json::Value) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Downcast support for concrete tool access (e.g. mofa-make dispatcher wiring).
+    fn as_any(&self) -> &dyn std::any::Any {
+        // Default: no downcasting. Override in tools that need it.
+        &()
+    }
+
+    /// Concurrency class for parallel-batch admission (M8.8).
+    ///
+    /// The default is [`ConcurrencyClass::Safe`] so pre-M8.8 tools keep their
+    /// parallel-friendly behaviour. Mutating or stateful tools override this
+    /// and return [`ConcurrencyClass::Exclusive`] — see each tool's doc for
+    /// rationale. The executor (in `agent::execution`) uses the class to
+    /// decide whether a batch may fan out in parallel or must serialize.
+    fn concurrency_class(&self) -> ConcurrencyClass {
+        ConcurrencyClass::Safe
+    }
+
+    /// Per-tool execution timeout (seconds) enforced at the registry dispatch
+    /// boundary (Gap 3.3). `None` (the default) means "use the registry's
+    /// global backstop" (`ToolRegistry::set_tool_timeout_secs`, default
+    /// 1800s). A tool that returns `Some(n)` caps its own foreground
+    /// execution at `n` seconds regardless of the registry default.
+    ///
+    /// This is the LAST line of defence against a hung foreground tool
+    /// wedging the session-actor turn forever: even direct registry callers
+    /// (e.g. the serve/API tool path, workspace-contract auto-send) that do
+    /// not run inside the agent loop's per-batch timeout get bounded here.
+    /// It composes with — and is independent of — the agent loop's
+    /// fast/long batch timeout in `agent::execution`, which fires first on
+    /// that path; this guard catches the unprotected direct-caller paths.
+    ///
+    /// `spawn_only` tools are intercepted and backgrounded BEFORE the
+    /// foreground dispatch path, so they never hit this timeout. Genuinely
+    /// long-running foreground tools (`web_fetch`, `web_search`, `browser`,
+    /// deep research/crawl) inherit the generous 1800s backstop by leaving
+    /// this `None`; the `shell` tool already clamps its own internal timeout
+    /// to [1, 600]s, well under the backstop, so it is not double-killed.
+    ///
+    /// Default: `None` (inherit the registry backstop). Keep any override
+    /// generous — this is a safety net, not a tuning knob for normal work.
+    fn execution_timeout_secs(&self) -> Option<u64> {
+        None
+    }
+
+    /// Whether this tool BLOCKS on human input (e.g. `ask_user_question`
+    /// awaits the [`USER_QUESTION_CTX`] requester until the client answers,
+    /// exactly as the approval gate blocks on [`TOOL_APPROVAL_CTX`]). Such a
+    /// tool must be EXEMPT from the dispatch-boundary timeout in
+    /// [`ToolRegistry::execute_with_context`]: a human may legitimately take
+    /// longer than any finite tool timeout, and firing the timeout would drop
+    /// the requester's receiver and leak the pending question/approval store
+    /// entry forever (Gap-3.3 interaction). The waiting future is instead
+    /// cancelled the right way — when the turn is interrupted the pending
+    /// store drains the entry and resolves the waiter as `Cancelled`.
+    ///
+    /// Returning `true` here makes the registry skip wrapping the call in the
+    /// dispatch timeout entirely (it still composes with the agent loop's
+    /// per-turn lifecycle and the turn-interrupt drain). Default: `false`.
+    fn blocks_on_human_input(&self) -> bool {
+        false
+    }
+}
+
+// Tool registry (extracted to its own module)
+/// Observe-only probe for the read-paging decision (changes no behaviour).
+pub(crate) mod read_paging_probe;
+pub(crate) mod read_window;
+mod registry;
+pub use registry::ToolRegistry;
+
+// Tool policy
+pub mod policy;
+pub use policy::{PolicyDecision, ToolPolicy, keep_tool_in_slides_session};
+
+// Shared dispatch-policy gate (#714 / #713) re-exported from the
+// crate root so [`SpawnTool::with_dispatch_policy`] callers can pull
+// the type alongside the other `tools::*` re-exports.
+pub use crate::dispatch_policy::{
+    DispatchBackendMetadata, DispatchPolicy, DispatchTarget, GateDenial, enforce_dispatch_gates,
+    enforce_dispatch_gates_for_backend,
+};
+
+// Robot safety-tier groups consulted by ToolPolicy evaluation.
+pub mod robot_groups;
+pub use robot_groups::{RobotToolRegistry, install_registry as install_robot_registry};
+
+// Shared SSRF protection
+pub mod ssrf;
+
+// #1770: structured, model-facing tool-argument validation.
+pub mod args;
+
+// Built-in tools
+pub mod apply_patch;
+pub mod ask_user_question;
+pub mod coding_tools;
+pub mod deep_search;
+pub mod delegate;
+pub mod diff_edit;
+pub mod dora_bridge;
+pub mod edit_file;
+pub mod glob_tool;
+pub mod grep_tool;
+pub mod http;
+pub mod list_dir;
+pub mod manage_skills;
+pub mod mcp_agent;
+pub mod memory_note;
+pub mod message;
+pub mod peer_close;
+pub mod peer_gather;
+pub mod peer_handoff;
+pub mod peer_list;
+pub mod peer_respond;
+pub mod peer_send_input;
+pub mod read_file;
+pub mod read_task_output;
+pub mod recall;
+pub mod recall_memory;
+pub mod record_memory_use;
+pub(crate) mod replacer;
+pub mod research_utils;
+pub mod save_memory;
+pub mod send_app_card;
+pub mod send_file;
+pub mod shell;
+#[allow(dead_code)]
+pub(crate) mod site_crawl;
+pub mod spawn;
+pub mod synthesize_research;
+pub mod web_fetch;
+pub mod web_search;
+pub mod write_file;
+pub mod write_grant;
+
+pub mod admin;
+pub mod browser;
+pub mod check;
+pub mod check_background_tasks;
+pub mod check_workspace_contract;
+pub mod mofa_make;
+pub mod tool_config;
+pub mod workspace_history;
+
+#[cfg(feature = "git")]
+pub mod git;
+
+#[cfg(feature = "ast")]
+pub mod code_structure;
+
+pub use apply_patch::ApplyPatchTool;
+pub use ask_user_question::AskUserQuestionTool;
+pub use coding_tools::{
+    BashTool, CloseAgentTool, DelegateAliasTool, ExecCommandTool, ImageGenerationTool,
+    RequestUserInputTool, ResumeAgentTool, SendInputTool, SpawnAgentTool, ToolCatalogEntry,
+    ToolSearchTool, ToolSuggestTool, UpdatePlanTool, ViewImageTool, WaitAgentTool, WriteStdinTool,
+};
+pub use deep_search::DeepSearchTool;
+pub use delegate::{
+    DELEGATED_DENY_GROUP, DELEGATION_METRIC, DelegateTool, DelegationEvent, DelegationOutcome,
+    DepthBudget, MAX_DEPTH, build_delegated_child_policy,
+};
+pub use diff_edit::DiffEditTool;
+pub use edit_file::EditFileTool;
+pub use glob_tool::GlobTool;
+pub use grep_tool::GrepTool;
+pub use http::HttpTool;
+pub use list_dir::ListDirTool;
+pub use manage_skills::ManageSkillsTool;
+pub use mcp_agent::{
+    DEFAULT_DISPATCH_TIMEOUT_SECS, DEFAULT_HTTP_CONNECT_TIMEOUT_SECS,
+    DEFAULT_HTTP_READ_TIMEOUT_SECS, DispatchContextContract, DispatchOutcome, DispatchRequest,
+    DispatchResponse, HttpMcpAgent, McpAgentBackend, McpAgentBackendConfig, SharedBackend,
+    StdioMcpAgent, build_backend_from_config, build_dispatch_event_payload, dispatch_with_metrics,
+    record_dispatch,
+};
+pub use memory_note::MemoryNoteTool;
+pub use message::MessageTool;
+pub use peer_close::{PeerCloseCallback, PeerCloseTool};
+pub use peer_gather::{PeerGatherCallback, PeerGatherTool};
+pub use peer_handoff::{
+    PeerHandoffCallback, PeerHandoffRequest, PeerHandoffStaged, PeerHandoffTool,
+};
+pub use peer_list::{PeerListCallback, PeerListTool};
+pub use peer_respond::{
+    PeerRespondAnswer, PeerRespondCallback, PeerRespondRequest, PeerRespondTool,
+};
+pub use peer_send_input::{PeerSendInputCallback, PeerSendInputRequest, PeerSendInputTool};
+pub use read_file::ReadFileTool;
+pub use read_task_output::ReadTaskOutputTool;
+pub use recall::{RecallTool, ToolOutputLedger};
+pub use recall_memory::RecallMemoryTool;
+pub use record_memory_use::RecordMemoryUseTool;
+pub use save_memory::SaveMemoryTool;
+pub use send_app_card::SendAppCardTool;
+pub use send_file::SendFileTool;
+pub use shell::ShellTool;
+pub use spawn::{BackgroundResultKind, BackgroundResultPayload, SpawnTool};
+pub use synthesize_research::SynthesizeResearchTool;
+pub use web_fetch::WebFetchTool;
+pub use web_search::WebSearchTool;
+pub use write_file::WriteFileTool;
+pub use write_grant::{
+    DENIED_MARKER, WriteGrantViolation, WriteGrantViolationSink, WritePathGrant,
+};
+
+pub use browser::BrowserTool;
+pub use check::CheckTool;
+pub use check_background_tasks::CheckBackgroundTasksTool;
+pub use check_workspace_contract::CheckWorkspaceContractTool;
+pub use mofa_make::{
+    MakeTypeEntry, MofaDescribeContentTypeTool, MofaMakeTool, make_dispatcher_with_entries,
+};
+pub use tool_config::{ConfigureToolTool, ToolConfigStore};
+pub use workspace_history::{WorkspaceDiffTool, WorkspaceLogTool, WorkspaceShowTool};
+
+#[cfg(feature = "git")]
+pub use git::GitTool;
+
+#[cfg(feature = "ast")]
+pub use code_structure::CodeStructureTool;
+
+use std::path::{Component, Path};
+
+use crate::policy::FilesystemScope;
+
+/// Resolve a user-provided tool-argument path, ensuring it stays within
+/// `base_dir` **or** inside the authenticated upload tmpdir.
+///
+/// This is a thin compatibility wrapper around
+/// [`octos_bus::file_handle::resolve_tool_path`] — the unified resolver
+/// introduced by `refactor: unified file-path resolver`. The wrapper
+/// preserves the historical signature (`(base_dir, user_path) ->
+/// Result<PathBuf>`) so existing tool implementations keep compiling,
+/// but the actual policy now lives in `octos-bus` so every entry point
+/// (read_file/write_file/edit_file/glob/grep/list_dir, plugin tools,
+/// `send_file`, `read_task_output`) follows the same resolution table:
+///
+/// - `up/<base64>` / `up/<base64>/<display>` upload-handle short-circuit
+/// - `pf/<base64>` / `pf/<base64>/<display>` profile-handle short-circuit
+///   (only honoured when the call site supplies a profile root)
+/// - absolute paths inside upload tmpdir, workspace, or profile root
+/// - bare basenames that exist under the upload tmpdir
+/// - workspace-relative paths (with `..` traversal rejected)
+///
+/// Symlink rejection is the caller's responsibility — use
+/// `read_no_follow` / `write_no_follow` on the returned path. The
+/// resolver only checks containment; the open-time `O_NOFOLLOW` is
+/// what closes the symlink-redirect class of escape.
+///
+/// Callers that need to know whether the resolved file lives inside
+/// the upload tmpdir vs the workspace (e.g. for read-only enforcement
+/// on profile files) should call
+/// [`octos_bus::file_handle::resolve_tool_path`] directly and inspect
+/// the [`octos_bus::file_handle::ToolPathScope`].
+pub fn resolve_path(base_dir: &Path, user_path: &str) -> Result<PathBuf> {
+    match octos_bus::file_handle::resolve_tool_path(base_dir, None, user_path) {
+        Ok(resolved) => Ok(resolved.absolute),
+        Err(octos_bus::file_handle::ToolPathError::Traversal) => {
+            eyre::bail!("path outside working directory: {}", user_path)
+        }
+        Err(octos_bus::file_handle::ToolPathError::OutsideAllowedRoots) => {
+            // Preserve the legacy error text — call sites and tests
+            // string-match on "absolute paths are not allowed" to
+            // identify the upload-tmpdir-only escape rejection.
+            eyre::bail!(
+                "absolute paths are not allowed outside the upload tmpdir: {}",
+                user_path
+            )
+        }
+        Err(octos_bus::file_handle::ToolPathError::DecodeFailed) => {
+            // Should not happen for callers that pass `profile_root =
+            // None` (only `pf/...` handles produce `DecodeFailed`). If
+            // we ever do see one, surface it as the closest matching
+            // legacy message rather than silently swallowing it.
+            eyre::bail!("path outside working directory: {}", user_path)
+        }
+    }
+}
+
+// Note: lexical-normalisation and lossy-canonicalisation now live in
+// `octos_bus::file_handle::resolve_tool_path` so every entry point (file
+// tools, plugin tools, send_file, read_task_output) shares the same
+// machinery. The previously-inline helpers were retired with that
+// unification.
+
+/// Resolve a user-provided path under an explicit filesystem scope.
+///
+/// [`FilesystemScope::Workspace`] (default) preserves the historical
+/// workspace fence and delegates to [`resolve_path`] (unified resolver).
+///
+/// [`FilesystemScope::Host`] is used only by the explicit
+/// `DangerFullAccess` permission profile (solo-runtime only). It accepts
+/// absolute paths anywhere on disk after syntactic normalization and
+/// resolves relative paths against `base_dir`. The workspace fence is
+/// explicitly bypassed — the safety guarantee comes from the gating on
+/// `PermissionProfile::DangerFullAccess` + `RuntimeMode::Solo`.
+pub fn resolve_path_with_scope(
+    base_dir: &Path,
+    user_path: &str,
+    filesystem_scope: FilesystemScope,
+) -> Result<PathBuf> {
+    if filesystem_scope.is_host() {
+        let candidate = PathBuf::from(user_path);
+        if candidate.is_absolute() {
+            return Ok(normalize_lexical(&candidate));
+        }
+        return Ok(normalize_lexical(&base_dir.join(user_path)));
+    }
+    resolve_path(base_dir, user_path)
+}
+
+/// Resolve and classify a user-supplied path against a [`SessionScope`]
+/// for Phase 2-C file tools. Relative paths anchor at
+/// `scope.workspace()`; absolute paths are accepted but must classify
+/// inside one of the scope's zones.
+///
+/// **Symlink containment.** [`SessionScope::classify_lexical_path`] is
+/// intentionally lexical-only — a candidate like
+/// `<workspace>/symlink/out`, where `symlink` is a symbolic link
+/// pointing outside the workspace, would classify as `InWorkspace`
+/// even though the actual on-disk location is elsewhere. `O_NOFOLLOW`
+/// (applied in [`read_no_follow`] / [`write_no_follow`]) only protects
+/// the FINAL component, not symlinked ancestors. To close that gap
+/// before classification we canonicalize both the candidate and each
+/// zone root via [`canonicalize_lossy`], matching the containment
+/// guarantee `octos_bus::file_handle::resolve_tool_path` gave the
+/// pre-Phase-2C path. See PR #1201 codex review for the precise
+/// scenario (`<workspace>/link/out`).
+///
+/// Returns the (lexically-normalised, NOT canonicalized) absolute path
+/// the file tool should open. We deliberately return the lexical form
+/// so callers can pass it back to `read_no_follow`/`write_no_follow`
+/// without re-resolving — the canonicalization here is for
+/// classification only.
+pub fn resolve_path_for_session_scope_read(
+    scope: &SessionScope,
+    user_path: &str,
+) -> Result<PathBuf, &'static str> {
+    resolve_for_scope(scope, user_path, /*for_write=*/ false)
+}
+
+/// Same as [`resolve_path_for_session_scope_read`] but with the
+/// write-side policy: `InSharedZone` is refused.
+pub fn resolve_path_for_session_scope_write(
+    scope: &SessionScope,
+    user_path: &str,
+) -> Result<PathBuf, &'static str> {
+    resolve_for_scope(scope, user_path, /*for_write=*/ true)
+}
+
+fn resolve_for_scope(
+    scope: &SessionScope,
+    user_path: &str,
+    for_write: bool,
+) -> Result<PathBuf, &'static str> {
+    // Upload handles (`up/<base64>/<name>`) are opaque references to a file in
+    // the authenticated upload tmpdir — NOT workspace-relative paths. Without
+    // this short-circuit the join+classify logic below treats them as
+    // `<workspace>/up/<base64>/<name>` (lexically InWorkspace) and the file is
+    // never found, so every scoped (SPA web-/slides-/site-) session is unable
+    // to read ANY uploaded file. Decode via the unified resolver (which
+    // canonicalizes under the upload root, firmlink-safe), matching the legacy
+    // `resolve_path`.
+    //
+    // SECURITY: only trust this short-circuit when the resolver actually
+    // landed in the upload tmpdir (`ToolPathScope::UploadTmpdir`). A path that
+    // merely *starts with* `up/` but is not a valid handle (e.g.
+    // `up/link/secret.txt`) decode-fails and `resolve_tool_path` falls back to
+    // `ToolPathScope::Workspace`, returning the LEXICAL `<workspace>/up/...`
+    // form. Returning that here would skip the canonical ancestor-symlink guard
+    // in `classify_canonical_path` below — and `read_no_follow` only protects
+    // the leaf component, so a symlinked `workspace/up` would reopen a scoped
+    // read escape. Such paths therefore fall through to the normal resolver.
+    // Uploads are read sources, so writes to a resolved upload handle are
+    // refused. The `pf/` profile handle needs a profile root that
+    // `SessionScope` does not currently expose; tracked as a follow-up
+    // (issue #1367).
+    if user_path.starts_with("up/") {
+        // #1377 tenant isolation: in a multi-tenant (scoped) session, uploads
+        // are materialized into `<workspace>/uploads/` at turn start and read
+        // by that workspace path. Refuse global `up/` handle resolution here so
+        // a scoped session cannot reach the process-global upload tmpdir (and
+        // thus another tenant's uploads) by handle. Solo sessions (CLI
+        // `octos chat`) keep resolving handles for back-compat.
+        if scope.tenant_id().is_some()
+            && matches!(
+                octos_bus::file_handle::decode_file_handle(user_path),
+                Some(octos_bus::file_handle::FileHandleScope::TempUpload(_))
+            )
+        {
+            return Err(
+                "Uploaded file not found; uploaded files are under uploads/ — \
+                 read with read_file(\"uploads/<name>\")",
+            );
+        }
+        match octos_bus::file_handle::resolve_tool_path(scope.workspace(), None, user_path) {
+            Ok(resolved)
+                if resolved.scope == octos_bus::file_handle::ToolPathScope::UploadTmpdir =>
+            {
+                return if for_write {
+                    Err("Writes to uploaded files are not permitted")
+                } else {
+                    Ok(resolved.absolute)
+                };
+            }
+            _ => {
+                // If the value DECODES as an upload handle it is unambiguously an
+                // upload reference: never fall through to the workspace resolver
+                // (which would let `write_file` create `<workspace>/up/<payload>/
+                // <name>`, or a read silently hit an unrelated workspace file with
+                // the same literal path). The temp file may have been deleted or
+                // no longer canonicalises under the upload root — report it as a
+                // missing upload rather than masking it as a workspace path.
+                if matches!(
+                    octos_bus::file_handle::decode_file_handle(user_path),
+                    Some(octos_bus::file_handle::FileHandleScope::TempUpload(_))
+                ) {
+                    return Err("Uploaded file not found");
+                }
+                // A value that merely starts with `up/` but does NOT decode as a
+                // handle (e.g. a real workspace path) falls through to the scoped
+                // resolver, where the canonical containment guard still applies.
+            }
+        }
+    }
+    let candidate = PathBuf::from(user_path);
+    let absolute = if candidate.is_absolute() {
+        candidate
+    } else {
+        scope.workspace().join(candidate)
+    };
+    // Refuse `..` lexically first so the subsequent canonicalize walk
+    // cannot accidentally surface inside a zone after climbing out.
+    let lex_normalised = match lexical_normalise_strict(&absolute) {
+        Some(p) => p,
+        None => return Err("Path outside session scope"),
+    };
+    // PR-A round-2 (codex BLOCKER 1 follow-up): delegate the canonical
+    // containment guard to `SessionScope::classify_canonical_path` so
+    // every consumer (file tools here, plugin tools in
+    // `plugins/tool.rs`) shares one implementation. The helper lives in
+    // `octos-core` next to `classify_lexical_path` because it has no
+    // dependency on tool-side state.
+    match scope.classify_canonical_path(&lex_normalised) {
+        PathClassification::InWorkspace => Ok(lex_normalised),
+        PathClassification::InGrantedDir { .. } => Ok(lex_normalised),
+        PathClassification::InSharedZone { .. } => {
+            if for_write {
+                Err("Writes to shared zones are not permitted")
+            } else {
+                Ok(lex_normalised)
+            }
+        }
+        // PR-A: read-only plugin skill dirs. Mirror the
+        // `InSharedZone` policy — reads pass through, writes refuse.
+        // The SKILL.md auto-inject teaches the agent to read files
+        // under the plugin's install directory but never write back.
+        PathClassification::InSkillDir { .. } => {
+            if for_write {
+                Err("Writes to plugin skill directories are not permitted")
+            } else {
+                Ok(lex_normalised)
+            }
+        }
+        PathClassification::OutOfScope => Err("Path outside session scope"),
+    }
+}
+
+/// Interim mitigation (#1378, superseded by #1377): `up/<base64>/<name>` is an
+/// opaque UPLOAD HANDLE, not a browsable directory — and uploaded files live in
+/// a tmpdir *outside* the session workspace, so `list_dir`/`glob` can never
+/// enumerate the `up/` namespace. They returned a bare "Directory not found",
+/// which was observed to make models (deepseek-chat in prod, and gemini-2.5-pro
+/// on replay) wrongly conclude the upload is missing and ask the user to
+/// re-upload — even after a successful `read_file` of the same handle.
+///
+/// Returns guidance to redirect the model when a directory-listing tool is
+/// pointed at the upload-handle namespace (`up` or `up/...`). Matches the EXACT
+/// spelling `read_file`/`resolve_for_scope` accept as a handle (`up/` prefix);
+/// it deliberately does NOT normalise `./up/...` or trim whitespace, because the
+/// read path doesn't either — guiding the model to `read_file("./up/...")` would
+/// just fail there too (codex #1378 round 6). This is a band-aid; the real fix
+/// (#1377) materialises uploads into `<workspace>/uploads/`.
+pub(crate) fn upload_handle_namespace_guidance(path: &str) -> Option<&'static str> {
+    if path == "up" || path.starts_with("up/") {
+        Some(
+            "`up/…` is an opaque upload handle, not a directory — uploaded files \
+             are NOT browsable via list_dir or glob. Read the file directly with \
+             read_file using the exact `up/…` handle from the attachment (you may \
+             already have its contents from a prior read).",
+        )
+    } else {
+        None
+    }
+}
+
+/// Whether a `list_dir`/`glob` failure for `path` should be replaced with
+/// upload guidance, given the session's `workspace_root`. Centralises the gate
+/// so the two tools cannot diverge (codex #1378): redirect iff `path` targets
+/// the `up/` namespace AND it either decodes as a real upload handle OR there is
+/// no real browsable `up/` directory in the workspace. Uses the path verbatim
+/// (no `./`/whitespace normalisation) so the redirect decision matches exactly
+/// what `read_file` would accept as a handle.
+pub(crate) fn upload_namespace_redirect(path: &str, workspace_root: &Path) -> Option<&'static str> {
+    let guidance = upload_handle_namespace_guidance(path)?;
+    let decodes_as_upload = matches!(
+        octos_bus::file_handle::decode_file_handle(path),
+        Some(octos_bus::file_handle::FileHandleScope::TempUpload(_))
+    );
+    if decodes_as_upload || !workspace_root.join("up").is_dir() {
+        Some(guidance)
+    } else {
+        None
+    }
+}
+
+/// Lexical normalise (collapse `.`, refuse `..`). Mirrors the helper
+/// inside `octos_core::session_scope` so the canonicalize walk above
+/// can't absorb a traversal escape.
+pub(crate) fn lexical_normalise_strict(path: &Path) -> Option<PathBuf> {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => out.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => return None,
+            Component::Normal(part) => out.push(part),
+        }
+    }
+    Some(out)
+}
+
+/// Syntactic path normalization (no filesystem access). Collapses `.`
+/// components and resolves `..` against in-memory parents without
+/// canonicalising symlinks. Used by the Host-scope branch above where
+/// the workspace fence is intentionally absent.
+fn normalize_lexical(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(p) => normalized.push(p.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    normalized.push("..");
+                }
+            }
+            Component::Normal(name) => normalized.push(name),
+        }
+    }
+    normalized
+}
+
+/// Check that a path is not a symlink. Returns error message if it is.
+///
+/// Call AFTER `resolve_path` and before any filesystem read/write.
+/// Prevents symlink-based escapes where a link inside base_dir points outside.
+///
+/// NOTE: For file read/write operations, prefer `read_no_follow` / `write_no_follow`
+/// which atomically reject symlinks via O_NOFOLLOW (no TOCTOU race).
+/// This function is still useful for directory operations (e.g. list_dir).
+pub async fn reject_symlink(path: &Path) -> Option<ToolResult> {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(meta) if meta.is_symlink() => Some(ToolResult {
+            output: "Symlinks are not allowed".to_string(),
+            success: false,
+            ..Default::default()
+        }),
+        _ => None,
+    }
+}
+
+/// Check if an I/O error indicates a symlink was rejected (ELOOP from O_NOFOLLOW).
+pub fn is_symlink_error(e: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        e.raw_os_error() == Some(libc::ELOOP)
+    }
+    #[cfg(not(unix))]
+    {
+        // Non-Unix fallback: detect our synthetic error from read/write_no_follow
+        e.kind() == std::io::ErrorKind::PermissionDenied
+    }
+}
+
+/// Read file contents, atomically rejecting symlinks via O_NOFOLLOW on Unix.
+///
+/// Eliminates the TOCTOU race between `reject_symlink` and `tokio::fs::read_to_string`.
+pub async fn read_no_follow(path: &Path) -> std::io::Result<String> {
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut opts = std::fs::OpenOptions::new();
+        opts.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.custom_flags(libc::O_NOFOLLOW);
+        }
+        #[cfg(not(unix))]
+        {
+            if path.symlink_metadata().is_ok_and(|m| m.is_symlink()) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "symlink rejected",
+                ));
+            }
+        }
+        let mut file = opts.open(&path)?;
+
+        // Peek the first 5 bytes to detect a PDF (`%PDF-`). PDF content is
+        // binary so `read_to_string` would fail with a UTF-8 error — for
+        // those we route through `pdf-extract` to recover plain text. Pinned
+        // by the mini5 invoice upload regression (2026-05-12).
+        //
+        // Both branches read the REST from the SAME O_NOFOLLOW file
+        // descriptor (seek back to 0), never by re-opening the path. The
+        // previous PDF branch did `std::fs::read(&path)`, which follows
+        // symlinks and does no symlink re-check — a leaf swapped between the
+        // O_NOFOLLOW open (time-of-check) and that read (time-of-use) was
+        // followed, so an attacker could redirect the read to `/etc/passwd`
+        // or any file and feed its contents to the LLM. Reading from the
+        // held fd binds every byte to the inode we already validated.
+        let mut magic = [0u8; 5];
+        let n = file.read(&mut magic)?;
+        file.seek(SeekFrom::Start(0))?;
+        if n >= 5 && &magic == b"%PDF-" {
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)?;
+            match pdf_extract::extract_text_from_mem(&bytes) {
+                Ok(text) => Ok(text),
+                Err(err) => Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("pdf extraction failed: {err}"),
+                )),
+            }
+        } else {
+            let mut content = String::with_capacity(n);
+            file.read_to_string(&mut content)?;
+            Ok(content)
+        }
+    })
+    .await
+    .unwrap_or_else(|e| Err(std::io::Error::other(e)))
+}
+
+/// Open a file read-only, atomically rejecting symlinks (O_NOFOLLOW on Unix).
+///
+/// SECURITY: the flags here MUST match [`read_no_follow`]'s open exactly.
+#[cfg(unix)]
+fn open_no_follow_ro(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_no_follow_ro(path: &Path) -> std::io::Result<std::fs::File> {
+    if path.symlink_metadata().is_ok_and(|m| m.is_symlink()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "symlink rejected",
+        ));
+    }
+    std::fs::OpenOptions::new().read(true).open(path)
+}
+
+/// The descriptor-derived facts an armed windowed read needs beyond the bytes.
+pub(crate) struct ReadMeta {
+    /// [`crate::tools::read_window::ViewEpoch`] taken from the SAME descriptor
+    /// the bytes came from — not a separate path stat — so it describes the
+    /// exact inode whose bytes were shown (#2193 R4, read-side TOCTOU).
+    /// `None` only if the descriptor's metadata was unavailable, which never
+    /// authorizes a write.
+    pub epoch: Option<crate::tools::read_window::ViewEpoch>,
+    /// The returned content is a DECODE of the on-disk bytes (PDF text
+    /// extraction), not the bytes themselves — so a whole-file rewrite
+    /// reconstructed from it can never be faithful, and the view must never be
+    /// allowed to reach COMPLETE (#2193 R4, PDF false-COMPLETE).
+    pub transformed: bool,
+}
+
+/// Like [`read_no_follow`] but also returns the [`ReadMeta`] the armed
+/// windowed-read ledger needs. Kept as a distinct entry point so the many
+/// non-armed `read_no_follow` callers pay nothing for the extra `fstat`.
+pub(crate) async fn read_no_follow_with_meta(path: &Path) -> std::io::Result<(String, ReadMeta)> {
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file = open_no_follow_ro(&path)?;
+        // fstat the DESCRIPTOR (not a re-resolution of the path): binds the
+        // epoch to the exact inode these bytes are read from.
+        let epoch = file
+            .metadata()
+            .ok()
+            .and_then(|m| crate::tools::read_window::ViewEpoch::from_metadata(&m));
+        // Same PDF handling as read_no_follow, reading the rest from the SAME
+        // O_NOFOLLOW descriptor (seek back to 0), never by re-opening the path.
+        let mut magic = [0u8; 5];
+        let n = file.read(&mut magic)?;
+        file.seek(SeekFrom::Start(0))?;
+        if n >= 5 && &magic == b"%PDF-" {
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)?;
+            match pdf_extract::extract_text_from_mem(&bytes) {
+                Ok(text) => Ok((
+                    text,
+                    ReadMeta {
+                        epoch,
+                        transformed: true,
+                    },
+                )),
+                Err(err) => Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("pdf extraction failed: {err}"),
+                )),
+            }
+        } else {
+            let mut content = String::with_capacity(n);
+            file.read_to_string(&mut content)?;
+            Ok((
+                content,
+                ReadMeta {
+                    epoch,
+                    transformed: false,
+                },
+            ))
+        }
+    })
+    .await
+    .unwrap_or_else(|e| Err(std::io::Error::other(e)))
+}
+
+/// Write content to a file, atomically rejecting symlinks via O_NOFOLLOW on Unix.
+///
+/// Eliminates the TOCTOU race between `reject_symlink` and `tokio::fs::write`.
+pub async fn write_no_follow(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    let path = path.to_owned();
+    let content = content.to_owned();
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.custom_flags(libc::O_NOFOLLOW);
+        }
+        #[cfg(not(unix))]
+        {
+            if path.symlink_metadata().is_ok_and(|m| m.is_symlink()) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "symlink rejected",
+                ));
+            }
+        }
+        let mut file = opts.open(&path)?;
+        file.write_all(&content)?;
+        Ok(())
+    })
+    .await
+    .unwrap_or_else(|e| Err(std::io::Error::other(e)))
+}
+
+/// Outcome of an epoch-bound overwrite ([`write_no_follow_checked`]).
+#[derive(Debug)]
+pub(crate) enum CheckedWrite {
+    /// The opened descriptor matched the authorizing epoch and was truncated
+    /// and rewritten.
+    Written,
+    /// The opened descriptor's epoch (mtime/size/ctime/inode) no longer
+    /// matched what authorized the write — nothing was written.
+    EpochChanged {
+        /// The descriptor's actual epoch at open time.
+        found: crate::tools::read_window::ViewEpoch,
+    },
+}
+
+/// Overwrite an EXISTING file, but only if the descriptor we open still
+/// matches `expected` (#1638 R1 — TOCTOU).
+///
+/// The armed write guard authorizes an overwrite against a *stat of the path*.
+/// A plain `write_no_follow` then opens the path AGAIN and truncates whatever
+/// it resolves to — so an external replacement in that narrow authorize→open
+/// window is silently clobbered. This binds the authorization to the exact
+/// opened inode: it opens WITHOUT `O_TRUNC`, `fstat`s the descriptor, and only
+/// truncates + writes when that descriptor's `(mtime, size)` still equals the
+/// epoch that authorized the write. `O_NOFOLLOW` still rejects a symlink swap;
+/// operating on the validated descriptor (not a re-resolved path) closes the
+/// race even against a same-name inode swap after validation.
+pub(crate) async fn write_no_follow_checked(
+    path: &Path,
+    content: &[u8],
+    expected: crate::tools::read_window::ViewEpoch,
+) -> std::io::Result<CheckedWrite> {
+    let path = path.to_owned();
+    let content = content.to_owned();
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        let mut opts = std::fs::OpenOptions::new();
+        // No create, no truncate — we must inspect the descriptor before
+        // destroying its contents.
+        opts.write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.custom_flags(libc::O_NOFOLLOW);
+        }
+        #[cfg(not(unix))]
+        {
+            if path.symlink_metadata().is_ok_and(|m| m.is_symlink()) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "symlink rejected",
+                ));
+            }
+        }
+        let mut file = opts.open(&path)?;
+        // fstat the DESCRIPTOR itself (not a re-resolution of the path). The
+        // epoch binds mtime/size/ctime/inode, so a same-size replacement that
+        // forged mtime is caught by the ctime (or inode) mismatch.
+        let meta = file.metadata()?;
+        let found = crate::tools::read_window::ViewEpoch::from_metadata(&meta)
+            .ok_or_else(|| std::io::Error::other("descriptor metadata unavailable"))?;
+        if found != expected {
+            return Ok(CheckedWrite::EpochChanged { found });
+        }
+        // The validated descriptor is the one we truncate and rewrite.
+        file.set_len(0)?;
+        file.write_all(&content)?;
+        Ok(CheckedWrite::Written)
+    })
+    .await
+    .unwrap_or_else(|e| Err(std::io::Error::other(e)))
+}
+
+// #1976 note: `create_only` (`O_CREAT|O_EXCL`) enforcement moved into the
+// component-wise confined `openat` walk in `tools::write_grant::open_confined`
+// (which also closes the ancestor-symlink TOCTOU a whole-path lexical open
+// cannot). A standalone leaf-only exclusive writer would re-introduce that
+// divergence, so it is intentionally absent here.
+
+/// Convert a file I/O error to a ToolResult, handling symlink and not-found cases.
+pub fn file_io_error(e: std::io::Error, display_path: &str) -> ToolResult {
+    if is_symlink_error(&e) {
+        ToolResult {
+            output: "Symlinks are not allowed".to_string(),
+            success: false,
+            ..Default::default()
+        }
+    } else if e.kind() == std::io::ErrorKind::NotFound {
+        ToolResult {
+            output: format!("File not found: {display_path}"),
+            success: false,
+            ..Default::default()
+        }
+    } else {
+        ToolResult {
+            output: format!("Failed to access {display_path}: {e}"),
+            success: false,
+            ..Default::default()
+        }
+    }
+}
+
+#[cfg(test)]
+mod nofollow_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_read_no_follow_regular_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "hello").unwrap();
+
+        let content = read_no_follow(&file).await.unwrap();
+        assert_eq!(content, "hello");
+    }
+
+    // R1 (#1638): the epoch-bound writer closes the TOCTOU between the write
+    // guard's authorizing stat and the truncating open. It fstat's the
+    // descriptor it is about to truncate and refuses if that inode's
+    // (mtime, size) no longer matches what authorized the write — so an
+    // external replacement in the narrow authorize→truncate window is caught
+    // on the exact opened object, not a re-resolved path.
+    // Unix-only: off-Unix the epoch has no ctime, so the documented weaker
+    // (mtime,size) fallback cannot detect a same-size/same-mtime swap.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn checked_write_refuses_a_same_size_same_mtime_content_swap() {
+        // #2193 R4 (codex H2): the (mtime,size)-only epoch authorized an
+        // overwrite of content the model never saw when a replacement kept the
+        // size and FORGED the mtime back. The epoch now also binds ctime, and
+        // forging mtime with `set_modified` is itself what bumps ctime — so the
+        // swap is caught. Under the old epoch this returned `Written` (RED).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        std::fs::write(&path, b"AAAAAAAAAA").unwrap(); // 10 bytes
+        let meta = std::fs::metadata(&path).unwrap();
+        let mtime = meta.modified().unwrap();
+        let authorized = crate::tools::read_window::ViewEpoch::from_metadata(&meta).unwrap();
+
+        std::fs::write(&path, b"BBBBBBBBBB").unwrap(); // same size, new content
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+        let now = std::fs::metadata(&path).unwrap();
+        assert_eq!(now.len(), authorized.size, "size still matches");
+        assert_eq!(now.modified().unwrap(), mtime, "mtime forged back to match");
+
+        let result = write_no_follow_checked(&path, b"CCCCCCCCCC", authorized)
+            .await
+            .unwrap();
+        assert!(
+            matches!(result, CheckedWrite::EpochChanged { .. }),
+            "same-size, same-mtime content swap must be refused (ctime binding)",
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"BBBBBBBBBB",
+            "the swapped-in bytes must be intact — never blind-clobbered",
+        );
+    }
+
+    #[tokio::test]
+    async fn read_with_meta_reports_untransformed_epoch_from_the_read_fd() {
+        // #2193 R4 (codex H2b/H6): the armed ledger needs the epoch taken from
+        // the READ descriptor (not a separate path stat), and transformed=false
+        // for ordinary text.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hello.txt");
+        std::fs::write(&path, b"hello world\n").unwrap();
+        let (content, meta) = read_no_follow_with_meta(&path).await.unwrap();
+        assert_eq!(content, "hello world\n");
+        assert!(!meta.transformed, "plain text is not a transform");
+        let epoch = meta.epoch.expect("descriptor epoch");
+        assert_eq!(epoch.size, 12);
+        let independent =
+            crate::tools::read_window::ViewEpoch::from_metadata(&std::fs::metadata(&path).unwrap())
+                .unwrap();
+        assert_eq!(epoch, independent, "epoch describes the exact inode read");
+    }
+
+    #[tokio::test]
+    async fn write_no_follow_checked_writes_when_epoch_matches() {
+        use crate::tools::read_window::ViewEpoch;
+        let dir = tempfile::TempDir::new().unwrap();
+        let file = dir.path().join("f.txt");
+        std::fs::write(&file, "original").unwrap();
+        let meta = std::fs::metadata(&file).unwrap();
+        let epoch = ViewEpoch::from_metadata(&meta).unwrap();
+
+        let outcome = write_no_follow_checked(&file, b"rebuilt", epoch)
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome, CheckedWrite::Written),
+            "a matching epoch must write"
+        );
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "rebuilt");
+    }
+
+    #[tokio::test]
+    async fn write_no_follow_checked_refuses_a_replaced_inode() {
+        use crate::tools::read_window::ViewEpoch;
+        let dir = tempfile::TempDir::new().unwrap();
+        let file = dir.path().join("f.txt");
+        std::fs::write(&file, "original small").unwrap();
+        let meta = std::fs::metadata(&file).unwrap();
+        let authorized = ViewEpoch::from_metadata(&meta).unwrap();
+
+        // The file is replaced (new size ⇒ new epoch) in the window between
+        // the guard authorizing against `authorized` and this write opening
+        // the descriptor.
+        std::fs::write(&file, "REPLACED with different, important, longer content").unwrap();
+
+        let outcome = write_no_follow_checked(&file, b"model rebuild", authorized)
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome, CheckedWrite::EpochChanged { .. }),
+            "a replaced inode must be refused, not truncated"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "REPLACED with different, important, longer content",
+            "the descriptor the guard did not authorize must be left intact"
+        );
+    }
+
+    /// Pins the PDF auto-extract path (mini5 invoice regression
+    /// 2026-05-12 PT): files whose first 5 bytes are `%PDF-` must be
+    /// routed through `pdf-extract` instead of `read_to_string`. We
+    /// don't ship a real PDF in tests, but feeding a malformed PDF
+    /// proves the route is taken — without the route we'd get a UTF-8
+    /// error; with it we get an `InvalidData("pdf extraction failed:
+    /// ...")` from pdf-extract.
+    #[tokio::test]
+    async fn test_read_no_follow_routes_pdf_through_extractor() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let pdf = dir.path().join("invalid.pdf");
+        // Real PDF magic; body is garbage so pdf-extract should fail
+        // with a parse error (NOT a UTF-8 error). The point is to prove
+        // the dispatch happened, not that we can parse this junk.
+        std::fs::write(&pdf, b"%PDF-1.4\nthis is not a valid pdf body").unwrap();
+
+        let err = read_no_follow(&pdf).await.unwrap_err();
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::InvalidData,
+            "pdf-extract failures must surface as InvalidData, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("pdf extraction failed"),
+            "error should identify the extractor, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_read_no_follow_not_found() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let file = dir.path().join("nonexistent.txt");
+
+        let err = read_no_follow(&file).await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_read_no_follow_rejects_symlink() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("target.txt");
+        std::fs::write(&target, "secret").unwrap();
+        let link = dir.path().join("link.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let err = read_no_follow(&link).await.unwrap_err();
+        assert!(is_symlink_error(&err), "expected ELOOP, got: {err}");
+    }
+
+    #[tokio::test]
+    async fn test_read_no_follow_reads_full_content_from_held_fd() {
+        // P2 (tri-repo #1529): both branches now read the rest of the file
+        // from the ALREADY-OPEN O_NOFOLLOW fd (seek back to 0) instead of
+        // re-opening the path. This guards the seek: after the 5-byte magic
+        // peek, the full content — INCLUDING the first 5 bytes — must be
+        // returned. A missing `seek(0)` would drop the leading 5 bytes.
+        let dir = tempfile::TempDir::new().unwrap();
+        let file = dir.path().join("plain.txt");
+        let content = "HELLO, this plaintext must round-trip in full.";
+        std::fs::write(&file, content).unwrap();
+
+        let read = read_no_follow(&file).await.unwrap();
+        assert_eq!(read, content, "full content must be read from the held fd");
+    }
+
+    #[tokio::test]
+    async fn test_read_no_follow_pdf_reads_whole_file_from_fd_not_path() {
+        // The PDF branch previously did `std::fs::read(&path)` — a re-open by
+        // path that follows a symlink swapped in after the O_NOFOLLOW open
+        // (TOCTOU). It now reads the whole file (magic + body) from the held
+        // fd. A PDF whose body extends well past the 5-byte magic must reach
+        // the extractor in full: pdf-extract fails on this junk body with
+        // InvalidData (proving the whole buffer, not a 5-byte truncation, was
+        // handed over — an empty/short buffer would surface differently).
+        let dir = tempfile::TempDir::new().unwrap();
+        let pdf = dir.path().join("doc.pdf");
+        let mut bytes = b"%PDF-1.7\n".to_vec();
+        bytes.extend(std::iter::repeat_n(b'X', 4096));
+        std::fs::write(&pdf, &bytes).unwrap();
+
+        let err = read_no_follow(&pdf).await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string().contains("pdf extraction failed"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_write_no_follow_regular_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let file = dir.path().join("out.txt");
+
+        write_no_follow(&file, b"written").await.unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "written");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_write_no_follow_rejects_symlink() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("target.txt");
+        std::fs::write(&target, "original").unwrap();
+        let link = dir.path().join("link.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let err = write_no_follow(&link, b"evil").await.unwrap_err();
+        assert!(is_symlink_error(&err), "expected ELOOP, got: {err}");
+        // Target must not be modified
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "original");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_file_io_error_symlink() {
+        let err = std::io::Error::from_raw_os_error(libc::ELOOP);
+        let result = file_io_error(err, "test.txt");
+        assert!(!result.success);
+        assert!(result.output.contains("Symlinks"));
+    }
+
+    #[test]
+    fn test_file_io_error_not_found() {
+        let err = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
+        let result = file_io_error(err, "missing.txt");
+        assert!(!result.success);
+        assert!(result.output.contains("File not found"));
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn test_resolve_rejects_absolute_path() {
+        let base = Path::new("/home/user/project");
+        assert!(resolve_path(base, "/etc/passwd").is_err());
+        assert!(resolve_path(base, "/home/user/project/../../../etc/shadow").is_err());
+    }
+
+    /// Authenticated upload tmpdir is whitelisted — uploaded files
+    /// land outside the workspace, so `read_file(<absolute upload path>)`
+    /// must succeed (pinned by the mini5 redbank.md regression,
+    /// 2026-05-12: WS upload handles now resolve to absolute tmpdir
+    /// paths, but the LLM hit "absolute paths are not allowed" before
+    /// this fix).
+    ///
+    /// Post-`resolve_tool_path` migration: the resolver now always
+    /// returns the canonical form (firmlinks collapsed via
+    /// `canonicalize_lossy`), so the containment check uses the
+    /// canonicalised upload root instead of the un-prefixed one — the
+    /// macOS firmlink companion test already uses this same shape.
+    #[test]
+    fn test_resolve_allows_absolute_path_inside_upload_root() {
+        let upload_root = octos_bus::file_handle::temp_upload_root();
+        // Ensure the upload root exists so canonicalize succeeds even on
+        // pristine Linux CI runners that haven't touched the tmpdir yet.
+        std::fs::create_dir_all(&upload_root).expect("upload tmpdir creatable");
+        let abs = upload_root.join("abc-redbank-proposal.md");
+        let resolved = resolve_path(Path::new("/home/user/project"), &abs.to_string_lossy())
+            .expect("upload-tmpdir absolute paths must be accepted");
+        let canonical_upload_root = std::fs::canonicalize(&upload_root).unwrap_or(upload_root);
+        assert!(
+            resolved.starts_with(&canonical_upload_root),
+            "resolved path {} should canonicalise under {}",
+            resolved.display(),
+            canonical_upload_root.display()
+        );
+    }
+
+    /// Pins the mini5 redbank.md regression (2026-05-12 PT). On macOS,
+    /// `resolve_upload_reference` canonicalizes via `std::fs::canonicalize`,
+    /// returning the firmlink-resolved form `/private/var/folders/...`. But
+    /// `temp_upload_root()` returns the un-prefixed `/var/folders/...`. A
+    /// purely-syntactic `starts_with` check rejected the canonicalized path
+    /// and `read_file` errored with "absolute paths are not allowed". This
+    /// test exercises the firmlink path: it creates a real file inside the
+    /// upload tmpdir, hands `resolve_path` the canonical (post-firmlink)
+    /// absolute path, and asserts acceptance.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_resolve_macos_firmlink_form_inside_upload_root() {
+        let upload_root = octos_bus::file_handle::temp_upload_root();
+        std::fs::create_dir_all(&upload_root).expect("upload tmpdir must be creatable");
+        let probe = upload_root.join(format!("probe-firmlink-{}.txt", std::process::id()));
+        std::fs::write(&probe, b"hi").unwrap();
+        let canonical = std::fs::canonicalize(&probe).expect("canonicalize uploaded file");
+        // Sanity: macOS firmlinks should give us a /private/ prefix when
+        // probing real tmpdir paths. If this ever fails it means the
+        // platform changed; the test still proves the whitelist works.
+        let canonical_str = canonical.to_string_lossy();
+        assert!(
+            canonical_str.starts_with("/private/var/") || canonical_str.starts_with("/var/"),
+            "expected macOS tmpdir under /var/folders/, got {canonical_str}"
+        );
+        let resolved = resolve_path(
+            Path::new("/home/user/project"),
+            &canonical.to_string_lossy(),
+        )
+        .expect("firmlink-canonical upload path must be accepted");
+        assert!(
+            resolved.starts_with(std::fs::canonicalize(&upload_root).unwrap()),
+            "resolved path {} must canonicalize under upload root",
+            resolved.display()
+        );
+        let _ = std::fs::remove_file(&probe);
+    }
+
+    /// Absolute paths outside the upload tmpdir stay rejected — the
+    /// whitelist is narrow, not a general "absolute is OK" loophole.
+    #[test]
+    fn test_resolve_rejects_absolute_path_outside_upload_root() {
+        let base = Path::new("/home/user/project");
+        let upload_root = octos_bus::file_handle::temp_upload_root();
+        let parent = upload_root.parent().unwrap_or_else(|| Path::new("/"));
+        let sneaky = parent.join("not-uploads/secret.txt");
+        let err = resolve_path(base, &sneaky.to_string_lossy())
+            .expect_err("paths outside both base_dir and upload_root must be rejected");
+        assert!(
+            err.to_string().contains("absolute paths are not allowed"),
+            "expected upload-root rejection message, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_blocks_parent_traversal() {
+        let base = Path::new("/home/user/project");
+        assert!(resolve_path(base, "../../../etc/passwd").is_err());
+        assert!(resolve_path(base, "subdir/../../..").is_err());
+        assert!(resolve_path(base, "foo/../../../secret").is_err());
+    }
+
+    #[test]
+    fn test_resolve_allows_valid_relative() {
+        let base = Path::new("/home/user/project");
+        let p = resolve_path(base, "src/main.rs").unwrap();
+        assert_eq!(p, PathBuf::from("/home/user/project/src/main.rs"));
+    }
+
+    #[test]
+    fn test_resolve_allows_dot_segments_within_base() {
+        let base = Path::new("/home/user/project");
+        let p = resolve_path(base, "src/../src/lib.rs").unwrap();
+        assert_eq!(p, PathBuf::from("/home/user/project/src/lib.rs"));
+    }
+
+    #[test]
+    fn test_resolve_allows_current_dir() {
+        let base = Path::new("/home/user/project");
+        let p = resolve_path(base, "./README.md").unwrap();
+        assert_eq!(p, PathBuf::from("/home/user/project/README.md"));
+    }
+
+    #[test]
+    fn test_resolve_allows_deeply_nested() {
+        let base = Path::new("/home/user/project");
+        let p = resolve_path(base, "a/b/c/d/e/f.rs").unwrap();
+        assert_eq!(p, PathBuf::from("/home/user/project/a/b/c/d/e/f.rs"));
+    }
+
+    // Note: `test_normalize_handles_complex_paths` retired with the
+    // `normalize_path` helper. Lexical normalisation now lives in
+    // `octos_bus::file_handle::normalize_lexical` and is covered by the
+    // resolver's own `Traversal` rejection tests (see
+    // `crates/octos-bus/tests/file_handle_resolve_tool_path.rs`).
+
+    /// Per-profile CWD isolation: when cwd is narrowed to a profile's data_dir,
+    /// resolve_path must block access to other profiles' directories.
+    #[test]
+    fn test_resolve_blocks_cross_profile_access() {
+        let base = Path::new("/home/user/.octos/profiles/alice/data");
+
+        assert!(resolve_path(base, "../../bob/data/sessions/secret").is_err());
+        assert!(resolve_path(base, "../../../profiles/bob/data/episodes.db").is_err());
+        assert!(resolve_path(base, "../../../skills/evil-skill/main").is_err());
+
+        assert!(resolve_path(base, "skills/my-skill/main").is_ok());
+        assert!(resolve_path(base, "sessions/chat-123.json").is_ok());
+        assert!(resolve_path(base, "skill-output/report.pdf").is_ok());
+    }
+
+    #[test]
+    fn test_resolve_rejects_empty_path() {
+        let base = Path::new("/home/user/project");
+        let result = resolve_path(base, "");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), PathBuf::from("/home/user/project"));
+    }
+
+    #[test]
+    fn test_resolve_rejects_null_byte() {
+        let base = Path::new("/home/user/project");
+        let result = resolve_path(base, "file\0.txt");
+        if let Ok(p) = &result {
+            assert!(p.starts_with(base));
+        }
+    }
+
+    #[test]
+    fn test_resolve_rejects_windows_separators() {
+        let base = Path::new("/home/user/project");
+        let result = resolve_path(base, "..\\..\\etc\\passwd");
+        if let Ok(p) = &result {
+            assert!(p.starts_with(base));
+        }
+    }
+
+    /// Codex review P1 pin (2026-05-13): the unified resolver MUST NOT
+    /// follow symlinks for workspace-relative paths. File tools layer
+    /// `O_NOFOLLOW` over the resolved path; if the resolver
+    /// canonicalised first, a symlink `workspace/secret -> /etc/passwd`
+    /// would become a plain `/etc/passwd` open and the leaf gate would
+    /// have nothing left to refuse.
+    #[cfg(unix)]
+    #[test]
+    fn test_resolve_workspace_relative_does_not_follow_symlinks() {
+        let workspace = tempfile::tempdir().expect("workspace tmpdir");
+        let outside = tempfile::tempdir().expect("outside tmpdir");
+        let target = outside.path().join("passwd");
+        std::fs::write(&target, b"root:x:0:0").unwrap();
+        let link = workspace.path().join("secret");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let resolved = resolve_path(workspace.path(), "secret")
+            .expect("workspace symlink path must resolve (the leaf-open gate refuses it)");
+        // The resolver returned the LEXICAL workspace path, not the
+        // canonical target outside the workspace.
+        assert_eq!(resolved, workspace.path().join("secret"));
+        assert_ne!(resolved, target);
+    }
+
+    // -------- PR-A: skill_read_zones resolve-for-scope behaviour --------
+
+    /// Reads from a registered skill_dir succeed via the read-side
+    /// resolver. The classifier (canonicalize-both-sides path)
+    /// reports `InSkillDir` and `for_write=false` accepts it.
+    #[test]
+    fn read_file_from_skill_dir_resolves_under_skill_read_zone() {
+        let workspace = tempfile::tempdir().expect("workspace tmpdir");
+        let skill = tempfile::tempdir().expect("skill tmpdir");
+        let skill_file = skill.path().join("SKILL.md");
+        std::fs::write(&skill_file, b"# skill").unwrap();
+
+        let scope = SessionScope::solo(workspace.path().to_path_buf(), vec![])
+            .unwrap()
+            .with_skill_read_zones(vec![skill.path().to_path_buf()])
+            .expect("skill_dir is absolute");
+
+        let resolved = resolve_path_for_session_scope_read(&scope, &skill_file.to_string_lossy())
+            .expect("read inside skill_dir must succeed");
+        // The lexical absolute form passes through unchanged
+        // (canonicalisation is only used for classification).
+        assert_eq!(resolved, skill_file);
+    }
+
+    /// Regression (issue #1367): a SCOPED session must resolve an
+    /// `up/<base64>/<name>` upload handle to the real file under the upload
+    /// tmpdir — NOT treat it as a workspace-relative `<workspace>/up/...`
+    /// path. Every SPA (web-/slides-/site-) session is scoped, so before this
+    /// fix uploaded attachments were unreadable ("File not found: up/...").
+    /// The pre-existing scope tests never exercised a handle — that gap is
+    /// what let the bug ship.
+    #[test]
+    fn scoped_session_resolves_upload_handle_to_tmpdir_not_workspace() {
+        let upload_root = octos_bus::file_handle::temp_upload_root();
+        std::fs::create_dir_all(&upload_root).expect("upload tmpdir creatable");
+        let uploaded = upload_root.join(format!("u-{}-report.md", std::process::id()));
+        std::fs::write(&uploaded, b"# strategy insight report\n").unwrap();
+        let handle = octos_bus::file_handle::encode_tmp_upload_handle(&uploaded, Some("report.md"))
+            .expect("encode upload handle");
+        assert!(
+            handle.starts_with("up/"),
+            "expected an up/ handle, got {handle}"
+        );
+
+        let workspace = tempfile::tempdir().expect("workspace tmpdir");
+        let scope = SessionScope::solo(workspace.path().to_path_buf(), vec![]).unwrap();
+
+        // READ resolves to the real upload file (under the canonical upload
+        // root), NOT under the workspace.
+        let resolved = resolve_path_for_session_scope_read(&scope, &handle)
+            .expect("scoped session must resolve an up/ upload handle");
+        let canon_root = std::fs::canonicalize(&upload_root).unwrap_or(upload_root.clone());
+        assert!(
+            resolved.starts_with(&canon_root),
+            "resolved {} must be under the upload root {}, not joined onto the workspace",
+            resolved.display(),
+            canon_root.display()
+        );
+        assert!(
+            !resolved.starts_with(workspace.path()),
+            "must NOT resolve the upload handle under the workspace"
+        );
+
+        // Uploads are read sources — writes via the handle are refused.
+        assert!(
+            resolve_path_for_session_scope_write(&scope, &handle).is_err(),
+            "writes to an upload handle must be refused"
+        );
+
+        let _ = std::fs::remove_file(&uploaded);
+    }
+
+    /// SECURITY (codex #1367 P1): a path that merely *starts with* `up/` but
+    /// is NOT a valid upload handle must NOT bypass the canonical
+    /// ancestor-symlink guard. `up/secret.txt` ("secret.txt" isn't valid
+    /// base64 → decode fails → `resolve_tool_path` falls back to
+    /// `ToolPathScope::Workspace`, returning the LEXICAL `<workspace>/up/...`).
+    /// The short-circuit must reject the Workspace fallback and let the path
+    /// fall through to `classify_canonical_path`, which canonicalises through
+    /// the `up` symlink and refuses the escape — instead of leaking a lexical
+    /// path whose only protection (`O_NOFOLLOW`) guards the leaf, not the `up`
+    /// ancestor.
+    #[test]
+    #[cfg(unix)]
+    fn scoped_session_does_not_trust_non_handle_up_prefix_via_symlink() {
+        let workspace = tempfile::tempdir().expect("workspace tmpdir");
+        let outside = tempfile::tempdir().expect("out-of-scope tmpdir");
+        std::fs::write(outside.path().join("secret.txt"), b"top secret\n").unwrap();
+        // workspace/up -> <outside>: an ancestor symlink escaping the scope.
+        std::os::unix::fs::symlink(outside.path(), workspace.path().join("up")).unwrap();
+
+        let scope = SessionScope::solo(workspace.path().to_path_buf(), vec![]).unwrap();
+
+        let resolved = resolve_path_for_session_scope_read(&scope, "up/secret.txt");
+        assert!(
+            resolved.is_err(),
+            "a non-handle up/ path through an ancestor symlink must be refused, got {resolved:?}"
+        );
+    }
+
+    /// codex #1367 round-4 P2: a value that DECODES as an upload handle but
+    /// whose temp file is gone (deleted / no longer canonicalises under the
+    /// upload root) must report a missing upload — NOT fall through to the
+    /// workspace resolver, which would let `write_file` create
+    /// `<workspace>/up/<payload>/<name>` or a read silently hit an unrelated
+    /// same-named workspace file.
+    #[test]
+    fn scoped_session_rejects_decoded_but_missing_upload_handle() {
+        let upload_root = octos_bus::file_handle::temp_upload_root();
+        std::fs::create_dir_all(&upload_root).unwrap();
+        let uploaded = upload_root.join(format!("m-{}-gone.md", std::process::id()));
+        std::fs::write(&uploaded, b"temp\n").unwrap();
+        let handle = octos_bus::file_handle::encode_tmp_upload_handle(&uploaded, Some("gone.md"))
+            .expect("encode upload handle");
+        // Delete the upload so the handle still DECODES but no longer resolves.
+        std::fs::remove_file(&uploaded).unwrap();
+
+        let workspace = tempfile::tempdir().expect("workspace tmpdir");
+        let scope = SessionScope::solo(workspace.path().to_path_buf(), vec![]).unwrap();
+
+        assert!(
+            resolve_path_for_session_scope_read(&scope, &handle).is_err(),
+            "a decoded-but-missing upload handle must error, not resolve to a workspace path"
+        );
+        assert!(
+            resolve_path_for_session_scope_write(&scope, &handle).is_err(),
+            "write to a missing upload handle must error"
+        );
+    }
+
+    /// #1377 tenant isolation: a multi-tenant (scoped) session must NOT resolve
+    /// a global `up/` upload handle — uploads are materialized into `uploads/`
+    /// and read by that workspace path. (Solo sessions keep resolving handles;
+    /// covered by `scoped_session_resolves_upload_handle_to_tmpdir_not_workspace`.)
+    #[test]
+    fn multi_tenant_session_refuses_global_up_handle_but_reads_uploads_dir() {
+        let data = tempfile::tempdir().expect("profile data dir");
+        let scope = SessionScope::multi_tenant_with_default_zones(
+            data.path().to_path_buf(),
+            "tenant-a".into(),
+            "web-x".into(),
+        )
+        .unwrap();
+        // Create the workspace so canonicalize is firmlink-consistent on macOS.
+        std::fs::create_dir_all(scope.workspace()).unwrap();
+
+        // A valid up/ handle (which a solo session WOULD resolve under the
+        // global tmpdir) is refused for a multi-tenant session.
+        let upload_root = octos_bus::file_handle::temp_upload_root();
+        std::fs::create_dir_all(&upload_root).unwrap();
+        let uploaded = upload_root.join(format!("mt-{}-secret.md", std::process::id()));
+        std::fs::write(&uploaded, b"tenant secret\n").unwrap();
+        let handle =
+            octos_bus::file_handle::encode_tmp_upload_handle(&uploaded, Some("secret.md")).unwrap();
+        let resolved = resolve_path_for_session_scope_read(&scope, &handle);
+        let _ = std::fs::remove_file(&uploaded);
+        assert!(
+            resolved.is_err(),
+            "a multi-tenant session must refuse a global up/ handle, got {resolved:?}"
+        );
+
+        // ...but the materialized workspace path resolves InWorkspace.
+        let ok = resolve_path_for_session_scope_read(&scope, "uploads/secret.md")
+            .expect("uploads/<name> must resolve in the workspace");
+        assert!(ok.starts_with(scope.workspace().join("uploads")));
+    }
+
+    /// Interim guard (#1378): the upload-handle namespace is detected for
+    /// directory-listing tools, and ONLY that namespace — a normal path or a
+    /// directory whose name merely starts with "up" must not be hijacked.
+    #[test]
+    fn upload_handle_namespace_guidance_matches_only_the_up_namespace() {
+        for p in ["up", "up/", "up/abc123/file.md"] {
+            assert!(
+                super::upload_handle_namespace_guidance(p).is_some(),
+                "expected guidance for upload-namespace path {p:?}"
+            );
+        }
+        // Verbatim match (codex round-6): `./up/...` and whitespace variants are
+        // NOT hijacked, because the read path doesn't accept those spellings as
+        // handles either — staying consistent avoids guiding to a failing read.
+        for p in [
+            "uploads/x",
+            "up2/x",
+            "upstream/x",
+            "report.md",
+            "slides/untitled/script.js",
+            "",
+            "/etc/passwd",
+            "./up/abc/file.md",
+            "  up/x  ",
+        ] {
+            assert!(
+                super::upload_handle_namespace_guidance(p).is_none(),
+                "must NOT hijack non-upload-namespace path {p:?}"
+            );
+        }
+        assert!(
+            super::upload_handle_namespace_guidance("up/x")
+                .unwrap()
+                .contains("read_file"),
+            "guidance should point the model at read_file"
+        );
+    }
+
+    /// The centralised gate (#1378): a bare valid handle redirects even beside a
+    /// real `up/` dir (decode precedence); a non-handle `up/...` beside a real
+    /// `up/` dir does NOT (normal workspace path); and `./`-prefixed spellings
+    /// are NOT redirected — the read path doesn't accept them either, so the
+    /// guard stays consistent rather than guiding to a failing read (round-6).
+    #[test]
+    fn upload_namespace_redirect_matches_readfile_acceptance() {
+        let ws = tempfile::tempdir().expect("ws");
+        std::fs::create_dir(ws.path().join("up")).unwrap(); // a REAL up/ dir
+        let handle = octos_bus::file_handle::encode_tmp_upload_handle(
+            &octos_bus::file_handle::temp_upload_root().join("u-x-report.md"),
+            Some("report.md"),
+        )
+        .expect("encode handle");
+
+        // A bare valid handle decodes → redirect even though a real `up/` dir
+        // exists (decode precedence, consistent with read_file).
+        assert!(
+            super::upload_namespace_redirect(&handle, ws.path()).is_some(),
+            "the bare valid handle must redirect even beside a real up/ dir"
+        );
+        // `./`-prefixed: read_file would NOT treat this as a handle, so neither
+        // do we (no guiding the model to a read that fails).
+        assert!(
+            super::upload_namespace_redirect(&format!("./{handle}"), ws.path()).is_none(),
+            "a ./-prefixed handle must NOT redirect (matches read_file acceptance)"
+        );
+        // Non-handle `up/...` beside a real up/ dir → normal workspace path.
+        assert!(
+            super::upload_namespace_redirect("up/keep.txt", ws.path()).is_none(),
+            "non-handle up/ path beside a real up/ dir must NOT redirect"
+        );
+        assert!(
+            super::upload_namespace_redirect("up", ws.path()).is_none(),
+            "listing the real up/ dir itself must NOT redirect"
+        );
+        // No real up/ dir → any up-namespace path redirects.
+        let empty = tempfile::tempdir().expect("empty ws");
+        assert!(super::upload_namespace_redirect("up", empty.path()).is_some());
+        assert!(super::upload_namespace_redirect("up/x", empty.path()).is_some());
+        assert!(super::upload_namespace_redirect("uploads/x", empty.path()).is_none());
+    }
+
+    /// PR-A core invariant: write attempts inside a registered
+    /// skill_dir are refused even though reads succeed.
+    /// `for_write=true` (the write-side resolver) must take the
+    /// `InSkillDir` branch and bail with the read-only message.
+    #[test]
+    fn write_file_to_skill_dir_classifies_in_skill_dir_but_resolve_for_write_refuses() {
+        let workspace = tempfile::tempdir().expect("workspace tmpdir");
+        let skill = tempfile::tempdir().expect("skill tmpdir");
+        let skill_file = skill.path().join("SKILL.md");
+        std::fs::write(&skill_file, b"# skill").unwrap();
+
+        let scope = SessionScope::solo(workspace.path().to_path_buf(), vec![])
+            .unwrap()
+            .with_skill_read_zones(vec![skill.path().to_path_buf()])
+            .expect("skill_dir is absolute");
+
+        // Read side: accept.
+        let read_ok = resolve_path_for_session_scope_read(&scope, &skill_file.to_string_lossy());
+        assert!(read_ok.is_ok(), "read must succeed inside skill_dir");
+
+        // Write side: refuse. The error text comes from the
+        // `InSkillDir` arm of `resolve_for_scope`.
+        let write_err = resolve_path_for_session_scope_write(&scope, &skill_file.to_string_lossy())
+            .expect_err("write must refuse inside skill_dir");
+        assert!(
+            write_err.contains("Writes to plugin skill directories are not permitted"),
+            "expected skill-dir read-only message, got: {write_err}"
+        );
+    }
+
+    /// Writes inside the workspace still succeed when skill_read_zones
+    /// are configured (additive — no regression to existing tools).
+    #[test]
+    fn write_to_workspace_still_works_when_skill_read_zones_configured() {
+        let workspace = tempfile::tempdir().expect("workspace tmpdir");
+        let skill = tempfile::tempdir().expect("skill tmpdir");
+        let scope = SessionScope::solo(workspace.path().to_path_buf(), vec![])
+            .unwrap()
+            .with_skill_read_zones(vec![skill.path().to_path_buf()])
+            .unwrap();
+        let target = workspace.path().join("out.txt");
+        let resolved = resolve_path_for_session_scope_write(&scope, &target.to_string_lossy())
+            .expect("writes inside workspace must succeed");
+        assert_eq!(resolved, target);
+    }
+
+    /// Reads outside any registered zone still refuse after
+    /// skill_read_zones land. Pre-PR-A out-of-scope paths must keep
+    /// failing.
+    #[test]
+    fn read_outside_skill_dir_and_workspace_still_refused() {
+        let workspace = tempfile::tempdir().expect("workspace tmpdir");
+        let skill = tempfile::tempdir().expect("skill tmpdir");
+        let outside = tempfile::tempdir().expect("outside tmpdir");
+        std::fs::write(outside.path().join("secret"), b"x").unwrap();
+
+        let scope = SessionScope::solo(workspace.path().to_path_buf(), vec![])
+            .unwrap()
+            .with_skill_read_zones(vec![skill.path().to_path_buf()])
+            .unwrap();
+
+        let target = outside.path().join("secret");
+        let err = resolve_path_for_session_scope_read(&scope, &target.to_string_lossy())
+            .expect_err("path outside scope must be refused");
+        assert!(
+            err.contains("Path outside session scope"),
+            "expected out-of-scope refusal, got: {err}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tool_context_tests {
+    //! M8.1 tests — typed `ToolContext` + `execute_with_context` scaffolding.
+
+    use super::*;
+    use async_trait::async_trait;
+    use serde_json::Value;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Tool whose legacy `execute` records how many times it was called.
+    /// Overrides *only* `execute`; the default `execute_with_context` impl
+    /// must delegate here.
+    struct LegacyTool {
+        execute_calls: AtomicUsize,
+    }
+
+    impl LegacyTool {
+        fn new() -> Self {
+            Self {
+                execute_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Tool for LegacyTool {
+        fn name(&self) -> &str {
+            "legacy"
+        }
+        fn description(&self) -> &str {
+            "legacy"
+        }
+        fn input_schema(&self) -> Value {
+            serde_json::json!({})
+        }
+        async fn execute(&self, _args: &Value) -> Result<ToolResult> {
+            self.execute_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(ToolResult {
+                output: "legacy output".to_string(),
+                success: true,
+                ..Default::default()
+            })
+        }
+    }
+
+    /// Tool that consumes the typed `ToolContext` — overrides
+    /// `execute_with_context` and re-enters via zero-value context from
+    /// `execute`.
+    struct ContextAwareTool {
+        with_ctx_calls: AtomicUsize,
+    }
+
+    impl ContextAwareTool {
+        fn new() -> Self {
+            Self {
+                with_ctx_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Tool for ContextAwareTool {
+        fn name(&self) -> &str {
+            "ctx_aware"
+        }
+        fn description(&self) -> &str {
+            "ctx"
+        }
+        fn input_schema(&self) -> Value {
+            serde_json::json!({})
+        }
+        async fn execute(&self, args: &Value) -> Result<ToolResult> {
+            // Re-enter the typed path with the zero context so callers that
+            // still use the legacy entry point see identical behaviour.
+            self.execute_with_context(&ToolContext::zero(), args).await
+        }
+        async fn execute_with_context(
+            &self,
+            ctx: &ToolContext,
+            _args: &Value,
+        ) -> Result<ToolResult> {
+            self.with_ctx_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(ToolResult {
+                output: format!(
+                    "tool_id={};allow_all={};defs_empty={}",
+                    ctx.tool_id,
+                    ctx.permissions.is_tool_allowed("anything"),
+                    ctx.agent_definitions.is_empty(),
+                ),
+                success: true,
+                ..Default::default()
+            })
+        }
+    }
+
+    #[test]
+    fn should_construct_zero_value_tool_context() {
+        let ctx = ToolContext::zero();
+        assert!(ctx.tool_id.is_empty());
+        assert!(ctx.harness_event_sink.is_none());
+        assert!(ctx.attachment_paths.is_empty());
+        assert!(ctx.audio_attachment_paths.is_empty());
+        assert!(ctx.file_attachment_paths.is_empty());
+        // M8.x placeholders — zero-value but constructible without panic.
+        assert!(ctx.agent_definitions.is_empty());
+        assert!(ctx.permissions.is_tool_allowed("any_tool"));
+        assert!(ctx.file_state_cache.is_none());
+        assert!(ctx.notifications.is_empty());
+        // AppStateHandle has no introspection beyond Default; just ensure
+        // it cloned cheaply.
+        let _cloned = ctx.app_state.clone();
+    }
+
+    #[tokio::test]
+    async fn should_delegate_execute_to_execute_with_context() {
+        // Legacy tool: override only `execute`. The default impl of
+        // `execute_with_context` must route to it.
+        let tool = LegacyTool::new();
+        let ctx = ToolContext::zero();
+        let result = tool
+            .execute_with_context(&ctx, &serde_json::json!({}))
+            .await
+            .expect("legacy tool must succeed via default delegation");
+        assert!(result.success);
+        assert_eq!(result.output, "legacy output");
+        assert_eq!(tool.execute_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn should_invoke_execute_with_context_for_migrated_tool() {
+        let tool = ContextAwareTool::new();
+        let mut ctx = ToolContext::zero();
+        ctx.tool_id = "call-42".to_string();
+        let result = tool
+            .execute_with_context(&ctx, &serde_json::json!({}))
+            .await
+            .expect("ctx-aware tool must succeed");
+        assert!(result.success);
+        assert!(result.output.contains("tool_id=call-42"));
+        assert!(result.output.contains("allow_all=true"));
+        assert!(result.output.contains("defs_empty=true"));
+        assert_eq!(tool.with_ctx_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn should_route_migrated_tool_execute_back_through_context_path() {
+        // When a migrated tool is called via the legacy `execute` entry
+        // point, it must still take its ctx-aware branch (invoked with
+        // the zero-value context so out-of-band callers keep working).
+        let tool = ContextAwareTool::new();
+        let result = tool
+            .execute(&serde_json::json!({}))
+            .await
+            .expect("migrated tool's legacy execute must succeed");
+        assert!(result.success);
+        // tool_id is empty because ToolContext::zero() carries no id.
+        assert!(result.output.starts_with("tool_id=;"));
+        assert_eq!(tool.with_ctx_calls.load(Ordering::SeqCst), 1);
+    }
+
+    // ---------- M8.8 concurrency-class tests ----------
+
+    struct ExclusiveStubTool;
+
+    #[async_trait]
+    impl Tool for ExclusiveStubTool {
+        fn name(&self) -> &str {
+            "exclusive_stub"
+        }
+        fn description(&self) -> &str {
+            "stub"
+        }
+        fn input_schema(&self) -> Value {
+            serde_json::json!({})
+        }
+        async fn execute(&self, _args: &Value) -> Result<ToolResult> {
+            Ok(ToolResult::default())
+        }
+        fn concurrency_class(&self) -> ConcurrencyClass {
+            ConcurrencyClass::Exclusive
+        }
+    }
+
+    #[test]
+    fn default_concurrency_class_is_safe() {
+        // A tool that does not override the default must report Safe so that
+        // unmigrated tools keep pre-M8.8 parallel-friendly behaviour.
+        let tool = LegacyTool::new();
+        assert_eq!(tool.concurrency_class(), ConcurrencyClass::Safe);
+        let ctx_tool = ContextAwareTool::new();
+        assert_eq!(ctx_tool.concurrency_class(), ConcurrencyClass::Safe);
+    }
+
+    #[test]
+    fn override_returns_exclusive() {
+        // A tool that opts into Exclusive must be reported as Exclusive.
+        let tool = ExclusiveStubTool;
+        assert_eq!(tool.concurrency_class(), ConcurrencyClass::Exclusive);
+    }
+
+    #[test]
+    fn concurrency_class_is_copy_eq_default() {
+        // The enum exposes Copy + Eq + Default as contracted by the M8.8 spec.
+        let a: ConcurrencyClass = ConcurrencyClass::default();
+        let b = a; // Copy
+        assert_eq!(a, b);
+        assert_eq!(ConcurrencyClass::default(), ConcurrencyClass::Safe);
+    }
+
+    // ---------- M8 fix-first item 8 (gap 4b) — ToolPermissions::from_profile ----------
+
+    use crate::profile::{PROFILE_SCHEMA_VERSION, PermissionMode, ProfileDefinition, ProfileTools};
+
+    fn make_profile(name: &str, tools: ProfileTools) -> ProfileDefinition {
+        ProfileDefinition {
+            name: name.to_string(),
+            version: PROFILE_SCHEMA_VERSION,
+            tools,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn should_allow_all_tools_when_profile_uses_default_filter() {
+        // Default profile filter must remain pass-through so today's
+        // `coding` profile path keeps allowing every registered tool.
+        let profile = make_profile("default", ProfileTools::Default);
+        let permissions = ToolPermissions::from_profile(&profile);
+        assert!(permissions.is_tool_allowed("read_file"));
+        assert!(permissions.is_tool_allowed("shell"));
+        assert!(permissions.is_tool_allowed("anything_else"));
+    }
+
+    #[test]
+    fn should_deny_listed_tools_when_profile_uses_deny_list() {
+        // DenyList must block the named tools while leaving everything else
+        // permitted. Plain tool names match exactly.
+        let profile = make_profile(
+            "no-shell",
+            ProfileTools::DenyList {
+                tools: vec!["shell".to_string()],
+            },
+        );
+        let permissions = ToolPermissions::from_profile(&profile);
+        assert!(
+            !permissions.is_tool_allowed("shell"),
+            "shell must be denied"
+        );
+        assert!(permissions.is_tool_allowed("read_file"));
+    }
+
+    #[test]
+    fn should_only_allow_listed_tools_when_profile_uses_allow_list() {
+        // AllowList must restrict to only the named tools (everything else
+        // becomes implicitly denied). Tools outside the list lose.
+        let profile = make_profile(
+            "ro",
+            ProfileTools::AllowList {
+                tools: vec!["read_file".to_string()],
+            },
+        );
+        let permissions = ToolPermissions::from_profile(&profile);
+        assert!(permissions.is_tool_allowed("read_file"));
+        assert!(
+            !permissions.is_tool_allowed("shell"),
+            "non-allow-listed tools must be denied"
+        );
+        assert!(!permissions.is_tool_allowed("write_file"));
+    }
+
+    #[test]
+    fn should_expand_group_references_in_deny_list() {
+        // `group:fs` references must expand to read_file / write_file /
+        // edit_file / diff_edit per crate::tools::policy::TOOL_GROUPS so
+        // the runtime gate matches the registry filter.
+        let profile = make_profile(
+            "no-fs",
+            ProfileTools::DenyList {
+                tools: vec!["group:fs".to_string()],
+            },
+        );
+        let permissions = ToolPermissions::from_profile(&profile);
+        assert!(!permissions.is_tool_allowed("read_file"));
+        assert!(!permissions.is_tool_allowed("write_file"));
+        assert!(!permissions.is_tool_allowed("edit_file"));
+        assert!(!permissions.is_tool_allowed("diff_edit"));
+        // Non-fs tools still permitted.
+        assert!(permissions.is_tool_allowed("shell"));
+    }
+
+    #[test]
+    fn should_expand_group_references_in_allow_list() {
+        // `group:search` allows glob/grep/list_dir; everything else is
+        // implicitly denied.
+        let profile = make_profile(
+            "search-only",
+            ProfileTools::AllowList {
+                tools: vec!["group:search".to_string()],
+            },
+        );
+        let permissions = ToolPermissions::from_profile(&profile);
+        assert!(permissions.is_tool_allowed("glob"));
+        assert!(permissions.is_tool_allowed("grep"));
+        assert!(permissions.is_tool_allowed("list_dir"));
+        assert!(!permissions.is_tool_allowed("shell"));
+        assert!(!permissions.is_tool_allowed("read_file"));
+    }
+
+    #[test]
+    fn should_pass_through_when_allow_list_is_empty() {
+        // Empty allow list mirrors the registry filter behaviour: an empty
+        // allow list is a degenerate case that we treat as "no filter" (the
+        // explicit deny list is the right tool to disable everything).
+        let profile = make_profile("empty-allow", ProfileTools::AllowList { tools: Vec::new() });
+        let permissions = ToolPermissions::from_profile(&profile);
+        assert!(permissions.is_tool_allowed("anything"));
+    }
+
+    #[test]
+    fn should_record_permission_mode_from_profile() {
+        // The mode field is informational today; verify it survives the
+        // from_profile boundary so future tier rules can read it.
+        let profile = ProfileDefinition {
+            name: "restricted".to_string(),
+            version: PROFILE_SCHEMA_VERSION,
+            permissions: PermissionMode::Restricted,
+            ..Default::default()
+        };
+        let permissions = ToolPermissions::from_profile(&profile);
+        assert_eq!(permissions.mode(), PermissionMode::Restricted);
+    }
+
+    #[test]
+    fn default_tool_permissions_remain_allow_all() {
+        // Ensure the existing zero-value default keeps its allow-all
+        // semantics so unrelated tests/contexts do not regress.
+        let permissions = ToolPermissions::default();
+        assert!(permissions.is_tool_allowed("anything"));
+        assert!(permissions.is_tool_allowed("shell"));
+    }
+}

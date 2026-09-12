@@ -1,0 +1,74 @@
+{
+  "name": "deep-search",
+  "version": "2.0.0",
+  "author": "octos",
+  "description": "Deep multi-round web research: iterative search across multiple angles, parallel page crawling, reference chasing, and structured report generation.",
+  "timeout_secs": 600,
+  "tools": [
+    {
+      "name": "search",
+      "description": "Single-binary research pipeline (one synthesis model, fixed flow): searches a focused topic from multiple angles, fetches pages in parallel, chases references, and writes one structured report.\n\nWHEN TO USE: focused single-topic lookups where one report suffices and you don't need parallel sub-queries or per-node model control.\n\nWHEN TO USE `run_pipeline` INSTEAD (PREFERRED for 深度研究 / deep research / comprehensive analysis): the user asks for multi-perspective research, comparative analysis across topics, or any query phrased as 深度研究/深入调研/深度分析/comprehensive/thorough — write an inline DOT graph with `run_pipeline` so each perspective gets its own search node (run in parallel), its own analysis node, and a final synthesis node. This gives you parallel fan-out, per-node model selection (cheap models for search, strong models for synthesis), and a much richer output than this single-binary tool.\n\nReport file path is printed at end of output.",
+      "concurrency_class": "exclusive",
+      "entrypoint": "target/release/deep-search",
+      "env": [
+        "SERPER_API_KEY",
+        "TAVILY_API_KEY",
+        "PERPLEXITY_API_KEY",
+        "BRAVE_API_KEY",
+        "YDC_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "KIMI_API_KEY",
+        "MOONSHOT_API_KEY",
+        "DASHSCOPE_API_KEY",
+        "OPENAI_API_KEY",
+        "DEEP_SEARCH_SYNTHESIS_MODEL",
+        "DEEP_SEARCH_MAX_BROWSERS"
+      ],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "The research topic or question to investigate"
+          },
+          "depth": {
+            "type": "integer",
+            "description": "Research depth: 1=quick (single search + crawl, ~1min), 2=standard (3 search rounds + reference chasing, ~3min), 3=thorough (5 search rounds + aggressive link chasing, ~5min). Default: 2"
+          },
+          "max_results": {
+            "type": "integer",
+            "description": "Number of search results per round (1-10, default: 8)"
+          },
+          "search_engine": {
+            "type": "string",
+            "description": "Preferred search engine: perplexity, duckduckgo, brave, you (default: auto-detect, prefers perplexity)"
+          },
+          "synthesis_config": {
+            "type": "object",
+            "description": "Synthesis LLM provider config injected by the host. When all four fields are populated, takes precedence over the legacy DEEPSEEK_API_KEY/etc env-var path. Operators should not set this directly — the host populates it from the agent's configured provider.",
+            "properties": {
+              "endpoint": {
+                "type": "string",
+                "description": "OpenAI-compatible base URL, e.g. https://api.deepseek.com/v1"
+              },
+              "api_key": {
+                "type": "string",
+                "description": "Bearer token for the synthesis provider. Never logged."
+              },
+              "model": {
+                "type": "string",
+                "description": "Model id to request (e.g. deepseek-chat). Overridable via DEEP_SEARCH_SYNTHESIS_MODEL env."
+              },
+              "provider": {
+                "type": "string",
+                "description": "Provider label used by the v2 cost envelope (e.g. deepseek)."
+              }
+            }
+          }
+        },
+        "required": ["query"],
+        "x-octos-host-config-keys": ["synthesis_config"]
+      }
+    }
+  ]
+}

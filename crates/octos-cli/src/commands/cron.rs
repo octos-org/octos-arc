@@ -1,0 +1,389 @@
+//! Cron CLI subcommands for managing scheduled jobs.
+
+use std::path::PathBuf;
+
+use chrono::{DateTime, Utc};
+use clap::{Args, Subcommand};
+use colored::Colorize;
+use eyre::{Result, WrapErr};
+use octos_bus::cron_types::{CronJob, CronPayload, CronSchedule, CronStore};
+
+use super::Executable;
+
+/// Manage scheduled cron jobs.
+#[derive(Debug, Args)]
+pub struct CronCommand {
+    /// Working directory (defaults to current directory).
+    #[arg(short, long)]
+    pub cwd: Option<PathBuf>,
+
+    #[command(subcommand)]
+    pub subcommand: CronSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CronSubcommand {
+    /// List scheduled jobs.
+    List {
+        /// Include disabled jobs.
+        #[arg(short, long)]
+        all: bool,
+    },
+    /// Add a new scheduled job.
+    Add {
+        /// Job name.
+        #[arg(short, long)]
+        name: String,
+        /// Message to send when the job fires.
+        #[arg(short, long)]
+        message: String,
+        /// Run every N seconds (recurring).
+        #[arg(long)]
+        every: Option<i64>,
+        /// Cron expression (e.g. "0 0 9 * * * *").
+        #[arg(long)]
+        cron: Option<String>,
+        /// Run once at this ISO timestamp.
+        #[arg(long)]
+        at: Option<String>,
+        /// Deliver response to channel.
+        #[arg(short, long)]
+        deliver: bool,
+        /// Target channel name.
+        #[arg(long)]
+        channel: Option<String>,
+        /// Target chat ID.
+        #[arg(long)]
+        to: Option<String>,
+    },
+    /// Remove a scheduled job.
+    Remove {
+        /// Job ID to remove.
+        job_id: String,
+    },
+    /// Enable or disable a job.
+    Enable {
+        /// Job ID.
+        job_id: String,
+        /// Disable instead of enable.
+        #[arg(long)]
+        disable: bool,
+    },
+}
+
+impl Executable for CronCommand {
+    fn execute(self) -> Result<()> {
+        let cwd = match self.cwd {
+            Some(p) => p,
+            None => std::env::current_dir().wrap_err("failed to get current directory")?,
+        };
+        let store_path = cwd.join(".octos").join("cron.json");
+
+        match self.subcommand {
+            CronSubcommand::List { all } => cmd_list(&store_path, all),
+            CronSubcommand::Add {
+                name,
+                message,
+                every,
+                cron,
+                at,
+                deliver,
+                channel,
+                to,
+            } => cmd_add(
+                &store_path,
+                name,
+                message,
+                every,
+                cron,
+                at,
+                deliver,
+                channel,
+                to,
+            ),
+            CronSubcommand::Remove { job_id } => cmd_remove(&store_path, &job_id),
+            CronSubcommand::Enable { job_id, disable } => {
+                cmd_enable(&store_path, &job_id, !disable)
+            }
+        }
+    }
+}
+
+fn load_store(path: &std::path::Path) -> CronStore {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|data| serde_json::from_str(&data).ok())
+        .unwrap_or_default()
+}
+
+fn save_store(path: &std::path::Path, store: &CronStore) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let json = serde_json::to_string_pretty(store).wrap_err("failed to serialize cron store")?;
+    std::fs::write(path, json).wrap_err("failed to write cron store")?;
+    Ok(())
+}
+
+fn format_schedule(schedule: &CronSchedule) -> String {
+    match schedule {
+        CronSchedule::At { .. } => "one-time".into(),
+        CronSchedule::Every { every_ms } => format!("every {}s", every_ms / 1000),
+        CronSchedule::Cron { expr } => expr.clone(),
+    }
+}
+
+fn format_next_run(ms: Option<i64>) -> String {
+    match ms {
+        Some(ts) => {
+            let dt = DateTime::<Utc>::from_timestamp_millis(ts);
+            dt.map(|d| d.format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_else(|| "-".into())
+        }
+        None => "-".into(),
+    }
+}
+
+fn cmd_list(store_path: &std::path::Path, include_disabled: bool) -> Result<()> {
+    let store = load_store(store_path);
+
+    let jobs: Vec<&CronJob> = if include_disabled {
+        store.jobs.iter().collect()
+    } else {
+        store.jobs.iter().filter(|j| j.enabled).collect()
+    };
+
+    if jobs.is_empty() {
+        println!("No scheduled jobs.");
+        return Ok(());
+    }
+
+    println!(
+        "{:<10} {:<20} {:<22} {:<10} {:<18}",
+        "ID".bold(),
+        "Name".bold(),
+        "Schedule".bold(),
+        "Status".bold(),
+        "Next Run".bold()
+    );
+    println!("{}", "-".repeat(80));
+
+    for job in &jobs {
+        let status = if job.enabled {
+            "enabled".green().to_string()
+        } else {
+            "disabled".dimmed().to_string()
+        };
+        println!(
+            "{:<10} {:<20} {:<22} {:<10} {:<18}",
+            job.id.cyan(),
+            truncate(&job.name, 18),
+            truncate(&format_schedule(&job.schedule), 20),
+            status,
+            format_next_run(job.state.next_run_at_ms),
+        );
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_add(
+    store_path: &std::path::Path,
+    name: String,
+    message: String,
+    every: Option<i64>,
+    cron: Option<String>,
+    at: Option<String>,
+    deliver: bool,
+    channel: Option<String>,
+    to: Option<String>,
+) -> Result<()> {
+    // Capture a single `now` and reuse it for overflow validation, creation, and
+    // scheduling — otherwise a boundary-sized interval can pass a check taken at
+    // one instant and then overflow the addition taken a moment later.
+    let now_ms = Utc::now().timestamp_millis();
+
+    let schedule = if let Some(secs) = every {
+        if secs <= 0 {
+            eyre::bail!("--every must be a positive number of seconds (got {secs})");
+        }
+        let every_ms = secs.checked_mul(1000).ok_or_else(|| {
+            eyre::eyre!("--every is too large: {secs} seconds overflows the millisecond interval")
+        })?;
+        // `compute_next_run` adds `every_ms` to `now_ms`; reject a value so large
+        // that the addition would overflow i64 (which panics in debug and wraps
+        // to a negative, immediately-due time). Uses the SAME `now_ms` that
+        // scheduling will use below.
+        if now_ms.checked_add(every_ms).is_none() {
+            eyre::bail!("--every is too large: {secs} seconds overflows the next-run timestamp");
+        }
+        CronSchedule::Every { every_ms }
+    } else if let Some(expr) = cron {
+        CronSchedule::Cron { expr }
+    } else if let Some(at_str) = at {
+        let dt = chrono::DateTime::parse_from_rfc3339(&at_str)
+            .or_else(|_| {
+                chrono::NaiveDateTime::parse_from_str(&at_str, "%Y-%m-%dT%H:%M:%S")
+                    .map(|naive| naive.and_utc().fixed_offset())
+            })
+            .wrap_err("invalid timestamp format (use ISO 8601)")?;
+        CronSchedule::At {
+            at_ms: dt.timestamp_millis(),
+        }
+    } else {
+        eyre::bail!("must specify --every, --cron, or --at");
+    };
+
+    let delete_after_run = matches!(schedule, CronSchedule::At { .. });
+    let id = short_id();
+
+    let mut job = CronJob {
+        id: id.clone(),
+        name: name.clone(),
+        enabled: true,
+        schedule,
+        payload: CronPayload {
+            message,
+            deliver,
+            channel,
+            chat_id: to,
+            mode: Default::default(),
+        },
+        state: Default::default(),
+        created_at_ms: now_ms,
+        delete_after_run,
+        timezone: None,
+        // Made from the CLI by a person, so there is no loop to attribute it to
+        // and nothing should ever reap it automatically.
+        origin: Default::default(),
+    };
+    job.compute_next_run(now_ms);
+
+    let mut store = load_store(store_path);
+    store.jobs.push(job);
+    save_store(store_path, &store)?;
+
+    println!("{} Added job '{}' ({})", "OK".green(), name, id.cyan());
+    Ok(())
+}
+
+fn cmd_remove(store_path: &std::path::Path, job_id: &str) -> Result<()> {
+    let mut store = load_store(store_path);
+    let before = store.jobs.len();
+    store.jobs.retain(|j| j.id != job_id);
+
+    if store.jobs.len() < before {
+        save_store(store_path, &store)?;
+        println!("{} Removed job {}", "OK".green(), job_id.cyan());
+        Ok(())
+    } else {
+        eyre::bail!("Job {job_id} not found.");
+    }
+}
+
+fn cmd_enable(store_path: &std::path::Path, job_id: &str, enabled: bool) -> Result<()> {
+    let mut store = load_store(store_path);
+    let now_ms = Utc::now().timestamp_millis();
+
+    if let Some(job) = store.jobs.iter_mut().find(|j| j.id == job_id) {
+        job.enabled = enabled;
+        if enabled {
+            job.compute_next_run(now_ms);
+        } else {
+            job.state.next_run_at_ms = None;
+        }
+        let name = job.name.clone();
+        save_store(store_path, &store)?;
+
+        let action = if enabled { "Enabled" } else { "Disabled" };
+        println!(
+            "{} {} job '{}' ({})",
+            "OK".green(),
+            action,
+            name,
+            job_id.cyan()
+        );
+        Ok(())
+    } else {
+        eyre::bail!("Job {job_id} not found.");
+    }
+}
+
+fn short_id() -> String {
+    let id = uuid::Uuid::now_v7();
+    format!("{:x}", id.as_u128())[..8].to_string()
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let end: String = s.chars().take(max.saturating_sub(3)).collect();
+        format!("{end}...")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn add(store: &std::path::Path, every: Option<i64>) -> Result<()> {
+        cmd_add(
+            store,
+            "t".into(),
+            "ping".into(),
+            every,
+            None,
+            None,
+            false,
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn should_reject_nonpositive_every() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("cron.json");
+        assert!(add(&store, Some(0)).is_err());
+        assert!(add(&store, Some(-5)).is_err());
+    }
+
+    #[test]
+    fn should_reject_every_that_overflows_milliseconds() {
+        // Regression: `secs * 1000` overflowed i64 for very large values,
+        // panicking in debug and wrapping to a negative (immediately-due)
+        // interval in release. Must be rejected, not silently wrapped.
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("cron.json");
+        assert!(add(&store, Some(i64::MAX)).is_err());
+    }
+
+    #[test]
+    fn should_reject_every_that_overflows_next_run_timestamp() {
+        // Regression (codex P2): a value that passes `checked_mul(1000)` can
+        // still overflow `now_ms + every_ms` inside compute_next_run. i64::MAX/1000
+        // multiplies cleanly but the timestamp add overflows — must be rejected.
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("cron.json");
+        assert!(add(&store, Some(i64::MAX / 1000)).is_err());
+    }
+
+    #[test]
+    fn should_accept_valid_every() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("cron.json");
+        assert!(add(&store, Some(60)).is_ok());
+    }
+
+    #[test]
+    fn should_error_when_removing_or_enabling_unknown_job() {
+        // Regression: remove/enable on an unknown id used to print red and exit
+        // 0; they must now return Err so scripts can detect failure.
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("cron.json");
+        assert!(cmd_remove(&store, "nope").is_err());
+        assert!(cmd_enable(&store, "nope", true).is_err());
+    }
+}

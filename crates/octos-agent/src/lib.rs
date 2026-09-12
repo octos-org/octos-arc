@@ -1,0 +1,609 @@
+//! Agent runtime, tool execution, and coordination for octos.
+//!
+//! This crate provides:
+//! - Agent struct that runs the agent loop
+//! - Tool router for dispatching tool calls
+//! - Command policy for approval before execution
+//! - Progress reporting for real-time updates
+//! - Integration with codex sandboxing (when enabled)
+
+pub mod abi_schema;
+mod agent;
+pub use agent::result_md_owner_content_is_peer;
+pub mod agents;
+pub mod approval;
+pub mod arc_task;
+pub mod behaviour;
+pub mod bootstrap;
+pub mod bridge;
+pub mod builtin_skills;
+pub mod bundled_app_skills;
+pub mod bundled_pipelines;
+pub mod compaction;
+pub mod compaction_tiered;
+pub mod cost_ledger;
+pub mod dispatch_policy;
+pub mod event_bus;
+pub mod exec_env;
+pub mod file_state_cache;
+pub mod format;
+pub mod harness_errors;
+pub mod harness_events;
+pub mod hooks;
+pub mod loop_detect;
+pub mod mcp;
+pub mod mcp_auth;
+pub mod mcp_server;
+pub mod memory_segment;
+pub mod permissions;
+pub mod plugins;
+pub mod policy;
+pub mod profile;
+pub mod progress;
+pub mod prompt_context;
+pub mod prompt_guard;
+pub mod prompt_layer;
+pub mod provider_tools;
+pub mod recorder;
+pub mod role_template;
+pub mod sandbox;
+mod sanitize;
+pub mod session;
+pub mod session_usage;
+mod shell_analysis;
+pub mod skills;
+pub mod snapshot;
+pub mod steering;
+pub mod subagent_output;
+pub mod subagent_summary;
+mod subprocess_env;
+pub use subprocess_env::{register_secret_env_names, sanitize_default_subprocess_env};
+pub mod summarizer;
+pub mod swarm;
+pub mod task_supervisor;
+pub mod tools;
+pub mod turn;
+pub mod validators;
+pub mod workspace_contract;
+pub mod workspace_git;
+pub mod workspace_policy;
+/// #48b — stable prefix marking that a turn terminated because the
+/// malformed tool-call self-correction budget was exhausted. The CLI's
+/// terminal-error path `starts_with` this marker to emit the
+/// `malformed_exhausted` OLP event INSTEAD of a generic turn_error row.
+pub const MALFORMED_TOOLCALL_EXHAUSTED_MARKER: &str =
+    "malformed tool-call feedback budget exhausted";
+
+pub use abi_schema::{
+    COMPACTION_POLICY_SCHEMA_VERSION, COST_ATTRIBUTION_SCHEMA_VERSION,
+    CREDENTIAL_POOL_CONFIG_SCHEMA_VERSION, HARNESS_ERROR_SCHEMA_VERSION,
+    HARNESS_PROGRESS_EVENT_SCHEMA_VERSION, HOOK_PAYLOAD_SCHEMA_VERSION,
+    PROGRESS_EVENT_SCHEMA_VERSION, SESSION_SUMMARY_SCHEMA_VERSION,
+    SUB_AGENT_DISPATCH_SCHEMA_VERSION, SWARM_DISPATCH_SCHEMA_VERSION,
+    SWARM_REVIEW_DECISION_SCHEMA_VERSION, SWARM_SUPERVISOR_CONFIG_SCHEMA_VERSION,
+    TASK_RESULT_SCHEMA_VERSION, UnsupportedSchemaVersionError, WORKSPACE_POLICY_SCHEMA_VERSION,
+    check_supported, default_credential_pool_config_schema_version,
+};
+pub use agent::{
+    Agent, AgentConfig, AssistantSegmentProvenance, ConversationResponse,
+    DEFAULT_SESSION_TIMEOUT_SECS, DEFAULT_TOOL_TIMEOUT_SECS, DEFAULT_WORKER_PROMPT,
+    IncompleteResponseError, MAX_TOOL_TIMEOUT_SECS, PartialTurnUsage, PromptSegmentProvider,
+    RealtimeController, TASK_REPORTER, TokenTracker,
+    loop_state::{
+        LoopDecision, LoopRetryCounters, LoopRetryLimits, LoopRetryState, OCTOS_LOOP_RETRY_TOTAL,
+        SHELL_SPIRAL_VARIANT,
+    },
+    memory::MIN_EPISODE_SIMILARITY,
+    normalize_tool_call_id,
+    realtime::{
+        AgentError, Heartbeat, HeartbeatState, RealtimeConfig, RealtimeHookEnricher,
+        SensorContextInjector, SensorSnapshot, SensorSource,
+    },
+    rich_output,
+    turn_failure::{TurnFailure, is_voice_empty_response},
+    verifier::{
+        AgentVerifierConfig, ErrorClass, TURN_LEDGER_SCHEMA_VERSION, TurnLedgerEntry, TurnOutcome,
+        VerifierVerdict,
+    },
+};
+pub use approval::{
+    ApprovalDecision, ApprovalRequestEnvelope, ApprovalRequestSpec, ApprovalResponsePayload,
+    ApprovalRiskLevel, ApprovalRule, ApprovalTimeoutBehavior, ApprovalValidationError,
+    HumanApprovalRules, PendingApproval, PendingApprovalDraft,
+    PendingApprovalStore as HumanPendingApprovalStore, digest_tool_args,
+};
+pub use compaction_tiered::{
+    ApiMicroCompactionConfig, DEFAULT_TIER1_MAX_AGE_TURNS, DEFAULT_TIER1_MAX_SIZE_BYTES_PER_RESULT,
+    DEFAULT_TIER2_KEEP_LAST_N_TURNS, FullCompactor, MicroCompactionPolicy, Tier1Report,
+    Tier3Report, TieredCompactionRunner, is_anthropic_provider,
+};
+pub use cost_ledger::{
+    BudgetProjection, BudgetRejectionReason, COST_ATTRIBUTION_COUNTER, COST_LEDGER_FILE,
+    COST_USD_HISTOGRAM, ContractCostRollup, CostAccountant, CostAttributionEvent, CostBudgetPolicy,
+    CostLedger, PersistentCostLedger, project_cost_usd,
+};
+pub use dispatch_policy::{
+    DispatchBackendMetadata, DispatchPolicy, DispatchTarget, GateDenial, enforce_dispatch_gates,
+    enforce_dispatch_gates_for_backend,
+};
+pub use event_bus::{EventBus, EventSubscriber};
+pub use exec_env::{DockerEnvironment, ExecEnvironment, ExecOutput, LocalEnvironment};
+pub use file_state_cache::{
+    CacheEntry as FileCacheEntry, DEFAULT_MAX_ENTRIES as FILE_CACHE_DEFAULT_MAX_ENTRIES,
+    DEFAULT_MAX_TOTAL_BYTES as FILE_CACHE_DEFAULT_MAX_TOTAL_BYTES, FILE_UNCHANGED_STUB_PREFIX,
+    FileStateCache, FileStateCacheBuilder, format_file_unchanged_stub,
+};
+pub use harness_errors::{HarnessError, HarnessErrorEvent, OCTOS_LOOP_ERROR_TOTAL, RecoveryHint};
+pub use harness_events::{
+    HARNESS_EVENT_SCHEMA_V1, HarnessArtifactEvent, HarnessCostAttributionEvent,
+    HarnessCredentialRotationEvent, HarnessCredentialRotationSink, HarnessEvent, HarnessEventError,
+    HarnessEventPayload, HarnessEventSink, HarnessFailureEvent, HarnessMcpServerCallEvent,
+    HarnessPhaseEvent, HarnessProgressEvent, HarnessRetryEvent, HarnessSessionSanitizedEvent,
+    HarnessSubAgentDispatchEvent, HarnessSubagentProgressEvent, HarnessSwarmDispatchEvent,
+    HarnessSwarmReviewDecisionEvent, HarnessValidatorResultEvent, MAX_HARNESS_EVENT_LINE_BYTES,
+    emit_registered_credential_rotation_event,
+};
+pub use hooks::{
+    HookConfig, HookContext, HookDeniedError, HookEvent, HookExecutor, HookPayload,
+    HookPayloadEnricher, HookResult,
+};
+pub use mcp::{McpClient, McpServerConfig};
+pub use memory_segment::{
+    MEMORY_CAPTURE_POLICY, MEMORY_SEGMENT_NAME, MemorySegmentProvider, compose_memory_segment,
+    stable_memory_instructions, volatile_memory_content,
+};
+pub use permissions::{InvalidSafetyTier, SafetyTier};
+pub use plugins::{
+    PluginLoadError, PluginLoadOptions, PluginLoadResult, PluginLoader, SynthesisConfig,
+};
+pub use policy::{
+    ApprovalPolicy, EffectivePermissions, FileAccessMode, FilesystemScope, NetworkPolicy,
+    PermissionProfile, PermissionProfileError, RuntimeMode,
+};
+pub use progress::{ConsoleReporter, ProgressEvent, ProgressReporter, SilentReporter};
+pub use prompt_context::{
+    PromptContextManager, PromptContextPhase, PromptContextReport, PromptContextRequest,
+};
+pub use prompt_layer::PromptLayerBuilder;
+pub use provider_tools::{ProviderToolsets, ToolAdjustment};
+pub use recorder::{BlackBoxRecorder, RecordEntry};
+pub use role_template::{
+    APPROVAL_ASK, APPROVAL_NEVER, ModelPreference, ROLE_EXPLORER, ROLE_IMPLEMENTER, ROLE_REVIEWER,
+    ROLE_TEST_WORKER, RoleTemplate, RoleTemplateSummary, SANDBOX_AUTO, SANDBOX_NONE,
+    UnknownModelPreference,
+};
+pub use sandbox::{Sandbox, SandboxConfig, SandboxMode, create_sandbox};
+pub use session::{SessionLimits, SessionState, SessionStateHandle, SessionUsage};
+pub use session_usage::{SessionUsageHandle, SessionUsageSnapshot, SharedSessionUsage};
+pub use skills::{SkillFilter, SkillInfo, SkillsLoader};
+pub use snapshot::{
+    DEFAULT_SNAPSHOT_KEEP_LAST, SnapshotConfig, SnapshotId, SnapshotInfo, SnapshotManager,
+};
+pub use steering::{
+    SharedSteerBuffer, SteerBuffer, SteerDrainedCallback, SteeringMessage, SteeringReceiver,
+    SteeringSender,
+};
+pub use subagent_output::{
+    AppendResult, DEFAULT_GC_AGE, DEFAULT_MAX_BYTES_PER_TASK, DEFAULT_MAX_BYTES_TOTAL,
+    DEFAULT_PREVIEW_BYTES, SubAgentOutputRouter,
+};
+pub use subagent_summary::{
+    AgentSummaryGenerator, DEFAULT_SUBAGENT_SUMMARY_MIN_RUNTIME, DEFAULT_SUBAGENT_SUMMARY_TICK,
+    DEFAULT_SUBAGENT_SUMMARY_WINDOW, SubAgentSummaryRegistry, SubAgentSummaryWatcher,
+};
+pub use summarizer::{ExtractiveSummarizer, Summarizer};
+pub use swarm::{
+    FileMailbox, InProcessMailbox, MAILBOX_SCHEMA_VERSION, MailboxBackend, MailboxEnvelope,
+    MailboxMessage, MailboxRecovery,
+};
+pub use task_supervisor::{
+    BackgroundTask, RegisterTaskError, RelaunchOpts, RelaunchRequest, SpawnOnlyFailureSignal,
+    TaskCancelError, TaskCancelToken, TaskLifecycleState, TaskLivenessLease, TaskRelaunchError,
+    TaskRuntimeState, TaskStatus, TaskSupervisor, TaskTerminalGuard, TerminalEvent,
+    TerminalOutcome, parse_alternatives, task_is_live,
+};
+pub use tools::{
+    AskUserQuestionTool, BackgroundResultKind, BackgroundResultPayload, BrowserTool,
+    CheckBackgroundTasksTool, CheckWorkspaceContractTool, ConcurrencyClass, ConfigureToolTool,
+    DEFAULT_DISPATCH_TIMEOUT_SECS, DEFAULT_HTTP_CONNECT_TIMEOUT_SECS,
+    DEFAULT_HTTP_READ_TIMEOUT_SECS, DELEGATED_DENY_GROUP, DELEGATION_METRIC, DeepSearchTool,
+    DelegateTool, DelegationEvent, DelegationOutcome, DepthBudget, DiffEditTool,
+    DispatchContextContract, DispatchOutcome, DispatchRequest, DispatchResponse, EditFileTool,
+    GlobTool, GrepTool, HttpMcpAgent, ListDirTool, MAX_DEPTH, MakeTypeEntry, ManageSkillsTool,
+    McpAgentBackend, McpAgentBackendConfig, MemoryNoteTool, MessageTool,
+    MofaDescribeContentTypeTool, MofaMakeTool, PeerCloseCallback, PeerCloseTool,
+    PeerGatherCallback, PeerGatherTool, PeerHandoffCallback, PeerHandoffRequest, PeerHandoffStaged,
+    PeerHandoffTool, PeerListCallback, PeerListTool, PeerRespondAnswer, PeerRespondCallback,
+    PeerRespondRequest, PeerRespondTool, PeerSendInputCallback, PeerSendInputRequest,
+    PeerSendInputTool, PolicyDecision, ReadFileTool, ReadTaskOutputTool, RecallMemoryTool,
+    RecordMemoryUseTool, RobotToolRegistry, SaveMemoryTool, SendAppCardTool, SendFileTool,
+    SharedBackend, ShellTool, SpawnTool, StdioMcpAgent, SynthesizeResearchTool, Tool,
+    ToolApprovalDecision, ToolApprovalRequest, ToolApprovalRequester, ToolConfigStore, ToolPolicy,
+    ToolRegistry, ToolResult, TurnAttachmentContext, UserQuestionOutcome, UserQuestionRequest,
+    UserQuestionRequester, WebFetchTool, WebSearchTool, WriteFileTool,
+    admin::{AdminApiContext, register_admin_api_tools},
+    build_backend_from_config, build_delegated_child_policy, build_dispatch_event_payload,
+    dispatch_with_metrics, install_robot_registry, keep_tool_in_slides_session,
+    make_dispatcher_with_entries, record_dispatch,
+};
+pub use turn::{Turn, TurnKind, turns_to_messages};
+pub use validators::{
+    VALIDATOR_RESULT_SCHEMA_VERSION, ValidatorInvocation, ValidatorLedger, ValidatorOutcome,
+    ValidatorPhase, ValidatorRunner, ValidatorStatus, kill_child_process, run_workspace_validators,
+};
+pub use workspace_git::{
+    WorkspaceArtifactStatus, WorkspaceCheckStatus, WorkspaceContractStatus, WorkspaceProjectKind,
+    WorkspaceValidationFailure, WorkspaceValidationPhase, commit_all_if_dirty,
+    detect_workspace_repo, init_workspace_repo, initialize_and_commit, inspect_workspace_contract,
+    inspect_workspace_contract_at_root, inspect_workspace_contracts, list_workspace_repos,
+    snapshot_workspace_change, snapshot_workspace_turn,
+};
+pub use workspace_policy::{
+    CompactionPolicy, CompactionSummarizerKind, ValidationPolicy, Validator, ValidatorPhaseKind,
+    ValidatorSpec, WORKSPACE_POLICY_FILE, WorkspaceArtifactsPolicy, WorkspacePolicy,
+    WorkspacePolicyKind, WorkspaceSnapshotTrigger, WorkspaceSpawnTaskPolicy,
+    WorkspaceTrackingPolicy, WorkspaceVersionControlPolicy, WorkspaceVersionControlProvider,
+    read_workspace_policy, upgrade_workspace_policy_if_legacy, workspace_policy_path,
+    write_workspace_policy,
+};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn setup_test_dir() -> TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("test.rs"),
+            "fn main() {\n    println!(\"hello\");\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n",
+        )
+        .unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(
+            dir.path().join("src/module.rs"),
+            "// Module\npub struct Foo;\n",
+        )
+        .unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn test_glob_tool() {
+        let dir = setup_test_dir();
+        let tool = GlobTool::new(dir.path());
+
+        let result = tool
+            .execute(&serde_json::json!({"pattern": "*.rs"}))
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        assert!(result.output.contains("test.rs"));
+        assert!(result.output.contains("lib.rs"));
+    }
+
+    #[tokio::test]
+    async fn test_glob_recursive() {
+        let dir = setup_test_dir();
+        let tool = GlobTool::new(dir.path());
+
+        let result = tool
+            .execute(&serde_json::json!({"pattern": "**/*.rs"}))
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        assert!(
+            result.output.contains("src/module.rs") || result.output.contains("src\\module.rs")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_grep_tool() {
+        let dir = setup_test_dir();
+        let tool = GrepTool::new(dir.path());
+
+        let result = tool
+            .execute(&serde_json::json!({"pattern": "println"}))
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        assert!(result.output.contains("test.rs"));
+        assert!(result.output.contains("println"));
+    }
+
+    #[tokio::test]
+    async fn test_grep_with_context() {
+        let dir = setup_test_dir();
+        let tool = GrepTool::new(dir.path());
+
+        let result = tool
+            .execute(&serde_json::json!({"pattern": "add", "context": 1}))
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        // Should include surrounding lines
+        assert!(result.output.contains("pub fn"));
+    }
+
+    #[tokio::test]
+    async fn test_grep_case_insensitive() {
+        let dir = setup_test_dir();
+        let tool = GrepTool::new(dir.path());
+
+        let result = tool
+            .execute(&serde_json::json!({"pattern": "FOO", "ignore_case": true}))
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        assert!(result.output.contains("Foo"));
+    }
+
+    #[tokio::test]
+    async fn test_read_file_tool() {
+        let dir = setup_test_dir();
+        let tool = ReadFileTool::new(dir.path());
+
+        let result = tool
+            .execute(&serde_json::json!({"path": "test.rs"}))
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        assert!(result.output.contains("fn main()"));
+    }
+
+    #[tokio::test]
+    async fn test_write_file_tool() {
+        let dir = setup_test_dir();
+        let tool = WriteFileTool::new(dir.path());
+
+        let result = tool
+            .execute(&serde_json::json!({
+                "path": "new_file.rs",
+                "content": "// New file\n"
+            }))
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        assert!(result.file_modified.is_some());
+        assert!(dir.path().join("new_file.rs").exists());
+    }
+
+    #[tokio::test]
+    async fn test_tool_registry() {
+        let dir = setup_test_dir();
+        let registry = ToolRegistry::with_builtins(dir.path());
+
+        // Should have all builtin tools
+        let specs = registry.specs();
+        let names: Vec<_> = specs.iter().map(|s| s.name.as_str()).collect();
+
+        assert!(names.contains(&"shell"));
+        assert!(names.contains(&"read_file"));
+        assert!(names.contains(&"write_file"));
+        assert!(names.contains(&"edit_file"));
+        assert!(names.contains(&"glob"));
+        assert!(names.contains(&"grep"));
+        assert!(names.contains(&"list_dir"));
+        assert!(names.contains(&"web_search"));
+        assert!(names.contains(&"web_fetch"));
+    }
+
+    #[tokio::test]
+    async fn test_registry_execute() {
+        let dir = setup_test_dir();
+        let registry = ToolRegistry::with_builtins(dir.path());
+
+        let result = registry
+            .execute("read_file", &serde_json::json!({"path": "test.rs"}))
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        assert!(result.output.contains("fn main()"));
+    }
+
+    #[tokio::test]
+    async fn test_glob_rejects_absolute_pattern() {
+        let dir = setup_test_dir();
+        let tool = GlobTool::new(dir.path());
+        let result = tool
+            .execute(&serde_json::json!({"pattern": "/etc/passwd"}))
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(result.output.contains("not allowed"));
+    }
+
+    #[tokio::test]
+    async fn test_glob_rejects_parent_traversal() {
+        let dir = setup_test_dir();
+        let tool = GlobTool::new(dir.path());
+        let result = tool
+            .execute(&serde_json::json!({"pattern": "../../etc/*"}))
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(result.output.contains("not allowed"));
+    }
+
+    #[tokio::test]
+    async fn test_grep_rejects_absolute_file_pattern() {
+        let dir = setup_test_dir();
+        let tool = GrepTool::new(dir.path());
+        let result = tool
+            .execute(&serde_json::json!({"pattern": "fn", "file_pattern": "/etc/*.conf"}))
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(result.output.contains("not allowed"));
+    }
+
+    #[tokio::test]
+    async fn test_list_dir_rejects_traversal() {
+        let dir = setup_test_dir();
+        let tool = ListDirTool::new(dir.path());
+        let result = tool
+            .execute(&serde_json::json!({"path": "../../.."}))
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(result.output.contains("Path outside"));
+    }
+
+    #[tokio::test]
+    async fn test_web_fetch_rejects_localhost() {
+        let tool = WebFetchTool::new();
+        let result = tool
+            .execute(&serde_json::json!({"url": "http://localhost:8080/admin"}))
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(result.output.contains("private"));
+    }
+
+    #[tokio::test]
+    async fn test_web_fetch_rejects_private_ip() {
+        let tool = WebFetchTool::new();
+        let result = tool
+            .execute(&serde_json::json!({"url": "http://169.254.169.254/latest/meta-data"}))
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert!(result.output.contains("private"));
+    }
+
+    #[tokio::test]
+    async fn test_registry_unknown_tool() {
+        let dir = setup_test_dir();
+        let registry = ToolRegistry::with_builtins(dir.path());
+
+        let result = registry
+            .execute("nonexistent", &serde_json::json!({}))
+            .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_context_filter_restricts_specs() {
+        let dir = setup_test_dir();
+        let mut registry = ToolRegistry::with_builtins(dir.path());
+        let all_count = registry.specs().len();
+
+        // Only allow tools tagged "search"
+        registry.set_context_filter(vec!["search".to_string()]);
+        let specs = registry.specs();
+        let names: Vec<_> = specs.iter().map(|s| s.name.as_str()).collect();
+
+        // grep and glob have "search" tag — should be included
+        assert!(names.contains(&"grep"));
+        assert!(names.contains(&"glob"));
+        // web_search has "web" tag only — should be filtered out
+        assert!(!names.contains(&"web_search"));
+        // shell has "runtime","code" tags — should be filtered out
+        assert!(!names.contains(&"shell"));
+        // Filtered count should be less than total
+        assert!(specs.len() < all_count);
+    }
+
+    #[tokio::test]
+    async fn test_oversized_args_rejected() {
+        let dir = setup_test_dir();
+        let registry = ToolRegistry::with_builtins(dir.path());
+
+        // Create args larger than 1MB
+        let big_string = "x".repeat(1_100_000);
+        let result = registry
+            .execute("read_file", &serde_json::json!({"path": big_string}))
+            .await;
+
+        match result {
+            Err(e) => assert!(e.to_string().contains("too large")),
+            Ok(_) => panic!("should reject oversized args"),
+        }
+    }
+
+    #[test]
+    fn test_registry_retain() {
+        let dir = setup_test_dir();
+        let mut registry = ToolRegistry::with_builtins(dir.path());
+        let initial_count = registry.len();
+
+        registry.retain(|name| name == "shell" || name == "read_file");
+        assert_eq!(registry.len(), 2);
+        assert!(registry.len() < initial_count);
+
+        let specs = registry.specs();
+        let names: Vec<_> = specs.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"shell"));
+        assert!(names.contains(&"read_file"));
+    }
+
+    #[test]
+    fn test_registry_is_empty() {
+        let registry = ToolRegistry::new();
+        assert!(registry.is_empty());
+        assert_eq!(registry.len(), 0);
+    }
+
+    #[test]
+    fn test_specs_cache_invalidated_on_register() {
+        let mut registry = ToolRegistry::new();
+        let specs1 = registry.specs();
+        assert!(specs1.is_empty());
+
+        registry.register(ReadFileTool::new("/tmp"));
+        let specs2 = registry.specs();
+        assert_eq!(specs2.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_provider_policy_filters_specs() {
+        let dir = setup_test_dir();
+        let mut registry = ToolRegistry::with_builtins(dir.path());
+        let all_count = registry.specs().len();
+
+        // Set provider policy that denies diff_edit and web_search
+        let policy: ToolPolicy = serde_json::from_value(serde_json::json!({
+            "deny": ["diff_edit", "web_search"]
+        }))
+        .unwrap();
+        registry.set_provider_policy(policy);
+
+        let filtered = registry.specs();
+        let names: Vec<_> = filtered.iter().map(|s| s.name.as_str()).collect();
+        assert!(!names.contains(&"diff_edit"));
+        assert!(!names.contains(&"web_search"));
+        assert!(names.contains(&"shell"));
+        assert!(names.contains(&"read_file"));
+        assert_eq!(filtered.len(), all_count - 2);
+
+        // Allowed tools can still be executed
+        let result = registry
+            .execute("read_file", &serde_json::json!({"path": "test.rs"}))
+            .await
+            .unwrap();
+        assert!(result.success);
+
+        // Denied tools are blocked at execution time too
+        match registry.execute("diff_edit", &serde_json::json!({})).await {
+            Err(e) => assert!(e.to_string().contains("denied by provider policy")),
+            Ok(_) => panic!("should be denied by provider policy"),
+        }
+
+        // Tools still registered internally (len unchanged)
+        assert_eq!(registry.len(), all_count);
+    }
+}

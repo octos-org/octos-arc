@@ -1,0 +1,1 @@
+octoscode --mode protocol --stdio-command 'octos serve --stdio'

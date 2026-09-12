@@ -1,0 +1,44 @@
+id: ROOT
+name: ARC Dice Evolution Smoke Test
+type: FOLDER
+dependencies: []
+description: >-
+  Extend the existing dice application with a roll counter without breaking
+  its six-sided roll behavior.
+children:
+  - id: REQ-1
+    name: Roll a six-sided die
+    type: ATOMIC
+    dependencies: []
+    description: >-
+      The home page displays a button named "Roll" and a dice value with the
+      test id "dice-value". Clicking Roll chooses an integer from 1 through 6
+      and displays it. No styling or layout is required.
+    scenarios:
+      - name: Roll and display a dice value
+        steps:
+          - keyword: GIVEN
+            content: The visitor opens the home page.
+          - keyword: THEN
+            content: A button named "Roll" is visible.
+          - keyword: WHEN
+            content: The visitor clicks Roll.
+          - keyword: THEN
+            content: The dice value displays an integer from 1 through 6.
+  - id: REQ-2
+    name: Count completed rolls
+    type: ATOMIC
+    dependencies:
+      - REQ-1
+    description: >-
+      Display the number of completed rolls with the test id "roll-count".
+      The roll count starts at 0 and increases by one each time Roll is clicked.
+    scenarios:
+      - name: Display and update the roll count
+        steps:
+          - keyword: GIVEN
+            content: The visitor opens the home page and the roll count is 0.
+          - keyword: WHEN
+            content: The visitor clicks Roll twice.
+          - keyword: THEN
+            content: The roll count is 2 and the dice value displays an integer from 1 through 6.

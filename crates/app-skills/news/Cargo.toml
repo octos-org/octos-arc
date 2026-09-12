@@ -1,0 +1,21 @@
+[package]
+name = "news_fetch"
+version = "1.0.0"
+edition = "2021"
+description = "Standalone news fetcher: RSS, Hacker News API, Yahoo scraping, article deep-fetch"
+authors = ["octos"]
+
+[[bin]]
+name = "news_fetch"
+path = "src/main.rs"
+
+[dependencies]
+reqwest = { version = "0.12", features = ["blocking", "rustls-tls", "json"], default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+scraper = "0.21"
+regex = "1"
+chrono = "0.4"
+
+[package.metadata.release]
+release = false

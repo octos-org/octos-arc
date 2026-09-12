@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "status": "runtime_implementation_unreleased",
+  "repository": "octos-org/octos-arc",
+  "upstream": {
+    "repository": "octos-org/octos",
+    "commit": "8558a3bff41f43838130808a1fa6cf0299e0bc40",
+    "tag": "arc-base-20260910",
+    "cargo_lock_sha256": "9761e8904a0949aa0cff189cdd75b6a5f0b00daf7c968a883cdf39786bbd3088"
+  },
+  "legacy": {
+    "repository": "octos-org/arc-adapter",
+    "commit": "b0999c95f7875c8d4ff3e58e733fb2c5abc8caf7",
+    "branch": "legacy",
+    "tag": "legacy-adapter-20260910",
+    "original_bundle_sha256": "1914ace16d50de61f3d7e9d3838c439f65bbfd64e7c0493992de198528f54a5e"
+  },
+  "runtime_release": null,
+  "build": null,
+  "model_configuration": null,
+  "arc_submission": null,
+  "policy": {
+    "allow_latest": false,
+    "allow_unverified_binary": false,
+    "require_binary_sha256": true,
+    "require_archive_sha256": true,
+    "require_exact_source_commit": true,
+    "allow_runtime_fallback": false
+  }
+}

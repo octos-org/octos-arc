@@ -1,0 +1,835 @@
+//! Typed error hierarchy for LLM operations.
+//!
+//! Replaces ad-hoc `eyre::Report` usage with structured errors that callers
+//! can match on programmatically rather than string-matching error messages.
+
+use std::fmt;
+
+use tracing;
+
+/// Categorized LLM error kinds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LlmErrorKind {
+    /// Authentication failure (invalid/expired API key).
+    Authentication,
+    /// Provider quota exhausted / billing-tier expired / no active package.
+    /// Sourced from HTTP 402 (Payment Required), or 403/429 bodies that
+    /// carry an explicit billing marker (`insufficient_quota`,
+    /// `quota_exceeded`, `no_active_*_package`) or a billing-class
+    /// keyword (`billing`, `monthly`, `spend`, `package`, `credit`).
+    /// Distinct from `Authentication` so operators see a "top up or
+    /// switch provider" message rather than "bad API key", and distinct
+    /// from `RateLimited` so the failover ladder skips the same-provider
+    /// backoff and tries the next configured lane (which may have a
+    /// different account/key with available billing).
+    Quota,
+    /// Rate limited by the provider (429).
+    RateLimited {
+        /// Retry-After hint in seconds, if provided.
+        retry_after_secs: Option<u64>,
+    },
+    /// Request exceeded provider's context window or token limit.
+    ContextOverflow {
+        limit: Option<u32>,
+        used: Option<u32>,
+    },
+    /// Model not found or not accessible.
+    ModelNotFound { model: String },
+    /// Provider returned a server error (5xx).
+    ServerError { status: u16 },
+    /// Network/connection error.
+    Network,
+    /// Request timed out.
+    Timeout,
+    /// Invalid request (bad parameters, schema, etc.).
+    InvalidRequest { detail: String },
+    /// Content was filtered by safety/moderation.
+    ContentFiltered,
+    /// Streaming error (connection drop, malformed SSE, etc.).
+    StreamError,
+    /// Provider-specific error not covered above.
+    Provider { code: Option<String> },
+}
+
+/// A structured LLM error with kind, message, and optional source.
+///
+/// `provider` carries the operator-visible label (e.g. "anthropic",
+/// "MiniMax-M2.5-highspeed") so user-facing messages identify which lane
+/// hit the failure without leaking secrets. Default is empty when the
+/// constructor does not have a label handy.
+#[derive(Debug)]
+pub struct LlmError {
+    pub kind: LlmErrorKind,
+    pub message: String,
+    /// Operator-visible provider/model label (e.g. "anthropic",
+    /// "MiniMax-M2.5-highspeed"). Empty when not provided.
+    pub provider: String,
+    /// Wire protocol of the lane, rendered in `Display` as `api_style=…` so
+    /// status-code errors name the concrete lane the same way transport and
+    /// operational errors do. `provider` itself is unchanged for consumers.
+    pub api_style: Option<crate::provider::ApiStyle>,
+    source: Option<Box<dyn std::error::Error + Send + Sync>>,
+}
+
+impl LlmError {
+    pub fn new(kind: LlmErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+            provider: String::new(),
+            api_style: None,
+            source: None,
+        }
+    }
+
+    /// Builder: attach the operator-visible provider/model label.
+    pub fn with_provider(mut self, provider: impl Into<String>) -> Self {
+        self.provider = provider.into();
+        self
+    }
+
+    /// Builder: attach the lane's wire protocol (`api_style=…` in `Display`).
+    pub fn with_api_style(mut self, api_style: crate::provider::ApiStyle) -> Self {
+        self.api_style = Some(api_style);
+        self
+    }
+
+    pub fn with_source(mut self, source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        self.source = Some(Box::new(source));
+        self
+    }
+
+    /// Convenience: create an Authentication error.
+    pub fn auth(message: impl Into<String>) -> Self {
+        Self::new(LlmErrorKind::Authentication, message)
+    }
+
+    /// Convenience: create a RateLimited error.
+    pub fn rate_limited(retry_after_secs: Option<u64>) -> Self {
+        Self::new(
+            LlmErrorKind::RateLimited { retry_after_secs },
+            "rate limited by provider",
+        )
+    }
+
+    /// Convenience: create a Timeout error.
+    pub fn timeout(message: impl Into<String>) -> Self {
+        Self::new(LlmErrorKind::Timeout, message)
+    }
+
+    /// Convenience: create a Network error.
+    pub fn network(message: impl Into<String>) -> Self {
+        Self::new(LlmErrorKind::Network, message)
+    }
+
+    /// Returns true if this error is retryable (rate limit, server error, network, timeout).
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self.kind,
+            LlmErrorKind::RateLimited { .. }
+                | LlmErrorKind::ServerError { .. }
+                | LlmErrorKind::Network
+                | LlmErrorKind::Timeout
+                | LlmErrorKind::StreamError
+        )
+    }
+
+    /// Lowercased body markers that flag a quota / billing-tier failure.
+    /// Kept private so the classification stays the canonical contract for
+    /// `Quota` recognition.
+    ///
+    /// Codex round-3 MAJOR narrowing: bare `RESOURCE_EXHAUSTED` (Google /
+    /// Vertex) is ambiguous — it covers both billing exhaustion *and*
+    /// transient capacity. Treating it unconditionally as `Quota` blocks
+    /// retry/backoff AND (now that `Quota` triggers failover in
+    /// `RetryProvider::should_failover`) burns the next lane on what may
+    /// have been a recoverable load shed. We now require a billing-class
+    /// keyword (`billing`, `monthly`, `spend`, `package`, `credit`) to
+    /// flag `RESOURCE_EXHAUSTED` as quota; bare `RESOURCE_EXHAUSTED`
+    /// falls through to `RateLimited` so the same-provider backoff path
+    /// can drain transient capacity blips.
+    ///
+    /// Recognised explicit quota markers (no body-keyword combo needed):
+    ///   * `insufficient_quota` — OpenAI billing exhausted
+    ///   * `quota_exceeded` — generic
+    ///   * `no_active_wisemodel_package` — Wisemodel billing tier expired
+    ///   * `no_active_*_package` — generalised Wisemodel-style marker
+    ///
+    /// Recognised billing-keyword fallbacks (any one is sufficient — these
+    /// surface across Anthropic 402, MiniMax 429, etc.):
+    ///   * `billing`, `monthly`, `spend`, `package`, `credit`
+    fn body_signals_quota(body_lower: &str) -> bool {
+        body_lower.contains("insufficient_quota")
+            || body_lower.contains("quota_exceeded")
+            || body_lower.contains("no_active_wisemodel_package")
+            || (body_lower.contains("no_active_") && body_lower.contains("_package"))
+            || body_lower.contains("billing")
+            || body_lower.contains("monthly")
+            || body_lower.contains("spend")
+            || body_lower.contains("package")
+            || body_lower.contains("credit")
+    }
+
+    /// Classify an HTTP status code into an error kind (legacy 2-arg form
+    /// kept for tests and downstream callers without a provider label).
+    pub fn from_status(status: u16, body: &str) -> Self {
+        Self::from_status_with_label(status, body, "")
+    }
+
+    /// Classify an HTTP status code into an error kind, capturing the
+    /// operator-visible provider/model label for user-facing messages.
+    /// Primary entry point for provider HTTP error handlers — replaces the
+    /// previous `eyre::bail!("API error ({label}): ...")` pattern so the
+    /// loop-boundary classifier can downcast to `LlmError` and pick the
+    /// right `HarnessError` variant (issue: variant=internal recovery=bug
+    /// for Wisemodel 403 quota errors).
+    pub fn from_status_with_label(status: u16, body: &str, provider: impl Into<String>) -> Self {
+        let body_lower = body.to_ascii_lowercase();
+        let kind = match status {
+            401 => LlmErrorKind::Authentication,
+            // 402 Payment Required → Quota. Anthropic and other providers
+            // use this status code for billing / payment issues
+            // (inactive subscription, expired card, etc.). Map to Quota
+            // so the operator sees a "top up or switch provider" message
+            // rather than "bad key".
+            402 => LlmErrorKind::Quota,
+            403 => {
+                // Disambiguate 403: quota / billing-tier failures get their
+                // own variant so the operator sees a "top up or switch
+                // provider" message instead of "bad API key".
+                if Self::body_signals_quota(&body_lower) {
+                    LlmErrorKind::Quota
+                } else {
+                    LlmErrorKind::Authentication
+                }
+            }
+            429 => {
+                // Codex round-2 MAJOR 1: 429 is overloaded across providers.
+                // Disambiguate the same way 403 already does:
+                //   * OpenAI 429 + `insufficient_quota` → exhausted billing
+                //   * Gemini 429 + `RESOURCE_EXHAUSTED` + billing keyword
+                //     → exhausted billing
+                //   * Gemini 429 + bare `RESOURCE_EXHAUSTED` (no billing
+                //     keyword) → real rate limit (capacity / transient)
+                //   * Wisemodel 429 + `no_active_*_package` → exhausted billing
+                //   * Anthropic 429 + `rate_limit_error` → real rate limit
+                //   * Bare 429 (no marker) → real rate limit (legacy default)
+                // Without this branch the failover ladder treats `Quota` as
+                // a retryable RateLimited and burns the next lane on
+                // identical billing failures. Codex round-3 narrowed the
+                // `RESOURCE_EXHAUSTED` arm so transient capacity blips
+                // stay on the same provider's backoff path.
+                if Self::body_signals_quota(&body_lower) {
+                    LlmErrorKind::Quota
+                } else {
+                    LlmErrorKind::RateLimited {
+                        retry_after_secs: None,
+                    }
+                }
+            }
+            404 => LlmErrorKind::ModelNotFound {
+                model: String::new(),
+            },
+            400 => {
+                if body.contains("context_length") || body.contains("max_tokens") {
+                    LlmErrorKind::ContextOverflow {
+                        limit: None,
+                        used: None,
+                    }
+                } else {
+                    LlmErrorKind::InvalidRequest {
+                        detail: body.chars().take(200).collect(),
+                    }
+                }
+            }
+            s if (500..600).contains(&s) => LlmErrorKind::ServerError { status: s },
+            _ => LlmErrorKind::Provider { code: None },
+        };
+        let truncated_body: String = body.chars().take(200).collect();
+        tracing::debug!(status, body = %truncated_body, "LLM provider error response");
+        let provider = provider.into();
+        // Keep the message short so the operator log line stays readable;
+        // the full body is available in the wire envelope on the SPA side.
+        let message = if truncated_body.is_empty() {
+            format!("HTTP {status}")
+        } else {
+            format!("HTTP {status} - {truncated_body}")
+        };
+        Self {
+            kind,
+            message,
+            provider,
+            api_style: None,
+            source: None,
+        }
+    }
+}
+
+impl fmt::Display for LlmError {
+    /// Human-readable rendering. Provider label is prefixed when non-empty
+    /// so the operator sees which lane failed (e.g.
+    /// "API error (MiniMax-M2.5-highspeed): provider quota exhausted — HTTP 403 - ...").
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let prefix = match (self.provider.is_empty(), self.api_style) {
+            (true, None) => "API error".to_string(),
+            (true, Some(style)) => format!("API error (api_style={style})"),
+            (false, None) => format!("API error ({})", self.provider),
+            (false, Some(style)) => format!("API error ({}, api_style={style})", self.provider),
+        };
+        let summary = match &self.kind {
+            LlmErrorKind::Authentication => "authentication failed",
+            LlmErrorKind::Quota => "provider quota exhausted",
+            LlmErrorKind::RateLimited { .. } => "rate limited by provider",
+            LlmErrorKind::ContextOverflow { .. } => "context window exceeded",
+            LlmErrorKind::ModelNotFound { .. } => "model not found",
+            LlmErrorKind::ServerError { .. } => "provider server error",
+            LlmErrorKind::Network => "network error",
+            LlmErrorKind::Timeout => "request timed out",
+            LlmErrorKind::InvalidRequest { .. } => "invalid request",
+            LlmErrorKind::ContentFiltered => "content filtered by provider",
+            LlmErrorKind::StreamError => "stream error",
+            LlmErrorKind::Provider { .. } => "provider error",
+        };
+        write!(f, "{prefix}: {summary} — {}", self.message)
+    }
+}
+
+impl std::error::Error for LlmError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source
+            .as_ref()
+            .map(|s| s.as_ref() as &(dyn std::error::Error + 'static))
+    }
+}
+
+/// Typed errors produced by the LLM streaming layer.
+///
+/// Codex round (#1355): the streaming layer used to silently break its read
+/// loop on inter-chunk timeout with a half-assembled `tool_call.arguments`
+/// buffer, then ship a sentinel `Value::String("MALFORMED_JSON:...")`
+/// downstream as if it were a valid `ChatResponse`. The plugin executor
+/// dispatched the sentinel string and errored with "missing 'out'". See
+/// `docs/STREAMING-TRANSACTIONAL-BOUNDARY-ADR.md` (PR #1355) for the full
+/// architectural argument.
+///
+/// `StreamError` is the typed boundary the agent-loop side of the streaming
+/// layer surfaces instead of silently propagating partial state. The variants
+/// implement the contract:
+///
+/// * `IdleTimeout` and `Transport` are retryable — the existing
+///   `RetryProvider` / `ProviderChain` machinery handles them as it does any
+///   other transient stream failure.
+/// * `Incomplete` (stream closed without `finish_reason`) is treated as
+///   retryable so the lane router can pick a different slot if the
+///   wire-shape mismatch repeats.
+/// * `MalformedArgs` is **not** retryable. The model produced syntactically
+///   bad JSON for a tool_call after a clean `finish_reason` — silently
+///   retrying would hide the bug from the model so it can't self-correct.
+///   The error reaches the loop, gets surfaced as a tool-failure, and the
+///   model sees the diagnostic on its next turn.
+#[derive(Debug)]
+pub enum StreamError {
+    /// Inter-chunk idle timeout fired during streaming — provider stalled.
+    /// Half-assembled buffers are discarded; the caller should retry from
+    /// scratch via the existing retry machinery.
+    IdleTimeout {
+        /// Idle window that elapsed without a chunk arriving.
+        idle_secs: u64,
+    },
+    /// Stream closed without a terminal signal (`finish_reason`).
+    Incomplete {
+        /// Operator-visible context (e.g. "stream ended before Done event").
+        detail: String,
+    },
+    /// Tool call arrived with un-parseable JSON arguments AFTER a clean
+    /// terminal signal. This is a model-side bug; surfacing it as
+    /// non-retryable lets the agent loop give the model a chance to
+    /// self-correct on its next turn.
+    MalformedArgs {
+        /// Tool call id (provider-assigned).
+        tool_id: String,
+        /// Tool name as declared in the stream.
+        tool_name: String,
+        /// Parse error rendered with truncated raw input for log brevity.
+        error: String,
+    },
+    /// Tool call arguments failed to parse because the turn hit the output
+    /// token cap (`finish_reason=length` → [`StopReason::MaxTokens`]) mid-call,
+    /// truncating the JSON. Unlike [`StreamError::MalformedArgs`], this is NOT a
+    /// model bug — the model was cut off, not wrong — so it is **retryable**:
+    /// the existing retry machinery re-requests the turn (reasoning-length
+    /// variance and the non-streaming fallback often complete the call on a
+    /// second attempt). Distinguishing this from `MalformedArgs` preserves the
+    /// #1355 invariant (a syntactically bad call after a *clean* finish stays
+    /// non-retryable so the model self-corrects) while stopping a truncated
+    /// call from instantly killing a background task, which has no "next turn".
+    TruncatedToolCall {
+        /// Tool call id (provider-assigned or synthesized).
+        tool_id: String,
+        /// Tool name as declared in the stream.
+        tool_name: String,
+        /// Parse error rendered with truncated raw input for log brevity.
+        error: String,
+    },
+    /// Underlying transport failure (connection reset, broken pipe, etc.).
+    Transport { detail: String },
+}
+
+impl StreamError {
+    /// Whether the existing retry machinery should treat this error as
+    /// transient and retry the stream. See the variant docs for policy.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            StreamError::IdleTimeout { .. }
+            | StreamError::Incomplete { .. }
+            | StreamError::TruncatedToolCall { .. }
+            | StreamError::Transport { .. } => true,
+            StreamError::MalformedArgs { .. } => false,
+        }
+    }
+}
+
+impl fmt::Display for StreamError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StreamError::IdleTimeout { idle_secs } => {
+                write!(
+                    f,
+                    "stream idle timeout after {idle_secs}s — provider stalled"
+                )
+            }
+            StreamError::Incomplete { detail } => {
+                write!(f, "stream closed without terminal signal: {detail}")
+            }
+            StreamError::MalformedArgs {
+                tool_id,
+                tool_name,
+                error,
+            } => {
+                write!(
+                    f,
+                    "malformed tool_call arguments (tool={tool_name}, id={tool_id}): {error}"
+                )
+            }
+            StreamError::TruncatedToolCall {
+                tool_id,
+                tool_name,
+                error,
+            } => {
+                write!(
+                    f,
+                    "truncated tool_call arguments (tool={tool_name}, id={tool_id}) — output token cap hit mid-call: {error}"
+                )
+            }
+            StreamError::Transport { detail } => write!(f, "stream transport error: {detail}"),
+        }
+    }
+}
+
+impl std::error::Error for StreamError {}
+
+impl From<StreamError> for LlmError {
+    /// Bridge `StreamError` into the existing `LlmError` taxonomy so the
+    /// failover/retry plumbing handles it uniformly. The mapping mirrors
+    /// the retryability policy on `StreamError::is_retryable()`:
+    ///
+    /// * `IdleTimeout` → `Timeout` (retryable in `LlmError::is_retryable`)
+    /// * `Incomplete` → `StreamError` (retryable)
+    /// * `MalformedArgs` → `InvalidRequest` (NOT retryable — model needs to see)
+    /// * `TruncatedToolCall` → `StreamError` (retryable — cut off, not wrong)
+    /// * `Transport` → `Network` (retryable)
+    fn from(err: StreamError) -> Self {
+        let message = err.to_string();
+        let kind = match &err {
+            StreamError::IdleTimeout { .. } => LlmErrorKind::Timeout,
+            StreamError::Incomplete { .. } => LlmErrorKind::StreamError,
+            StreamError::MalformedArgs { .. } => LlmErrorKind::InvalidRequest {
+                detail: message.chars().take(200).collect(),
+            },
+            StreamError::TruncatedToolCall { .. } => LlmErrorKind::StreamError,
+            StreamError::Transport { .. } => LlmErrorKind::Network,
+        };
+        LlmError::new(kind, message).with_source(err)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_classify_401_as_auth() {
+        let err = LlmError::from_status(401, "Unauthorized");
+        assert_eq!(err.kind, LlmErrorKind::Authentication);
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn should_classify_403_without_quota_marker_as_auth() {
+        let err = LlmError::from_status(403, "Forbidden");
+        assert_eq!(err.kind, LlmErrorKind::Authentication);
+    }
+
+    #[test]
+    fn should_classify_403_with_quota_marker_as_quota() {
+        // The exact body that surfaced on dspfac as "variant=internal
+        // recovery=bug": Wisemodel returned 403 with an insufficient_quota
+        // payload. We now map that to LlmErrorKind::Quota so the harness
+        // taxonomy can route it to a user-friendly message.
+        let body = r#"{"error":{"code":"no_active_wisemodel_package","message":"没有有效的 Wisemodel 资源包，请购买后再使用","type":"insufficient_quota"}}"#;
+        let err = LlmError::from_status_with_label(403, body, "MiniMax-M2.5-highspeed");
+        assert_eq!(err.kind, LlmErrorKind::Quota);
+        assert_eq!(err.provider, "MiniMax-M2.5-highspeed");
+        // Display surfaces the provider label so operators see which lane
+        // is the culprit.
+        let rendered = err.to_string();
+        assert!(rendered.contains("MiniMax-M2.5-highspeed"));
+        assert!(rendered.contains("quota exhausted"));
+    }
+
+    #[test]
+    fn should_recognise_generic_quota_keyword() {
+        let body = r#"{"error":{"type":"insufficient_quota","message":"out of credits"}}"#;
+        let err = LlmError::from_status(403, body);
+        assert_eq!(err.kind, LlmErrorKind::Quota);
+    }
+
+    #[test]
+    fn should_recognise_quota_exceeded_keyword() {
+        let body = r#"{"error":"quota_exceeded"}"#;
+        let err = LlmError::from_status(403, body);
+        assert_eq!(err.kind, LlmErrorKind::Quota);
+    }
+
+    #[test]
+    fn should_classify_429_as_rate_limited() {
+        let err = LlmError::from_status(429, "Too Many Requests");
+        assert!(matches!(err.kind, LlmErrorKind::RateLimited { .. }));
+        assert!(err.is_retryable());
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Codex round-2 MAJOR 1: 429 quota disambiguation. 429 is overloaded
+    // — providers use it for both throttling and exhausted billing. The
+    // body markers tell them apart.
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn should_classify_429_with_insufficient_quota_as_quota() {
+        // OpenAI billing-tier exhausted comes back as 429 +
+        // `insufficient_quota` (distinct from a transient TPM 429).
+        let body = r#"{"error":{"code":"insufficient_quota","message":"You exceeded your current quota","type":"insufficient_quota"}}"#;
+        let err = LlmError::from_status_with_label(429, body, "openai/gpt-4");
+        assert_eq!(err.kind, LlmErrorKind::Quota);
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn should_classify_429_with_bare_resource_exhausted_as_rate_limited() {
+        // Codex round-3 MAJOR narrowing: bare `RESOURCE_EXHAUSTED`
+        // (without a billing keyword) is ambiguous between billing
+        // exhaustion and transient capacity. We now classify it as
+        // `RateLimited` so the same-provider backoff can drain capacity
+        // blips, and only escalate to `Quota` when the body explicitly
+        // names a billing/package marker.
+        let body = r#"{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota)","status":"RESOURCE_EXHAUSTED"}}"#;
+        let err = LlmError::from_status_with_label(429, body, "gemini-1.5-pro");
+        assert!(matches!(err.kind, LlmErrorKind::RateLimited { .. }));
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn should_classify_429_with_resource_exhausted_plus_billing_as_quota() {
+        // Codex round-3 MAJOR narrowing companion: when
+        // `RESOURCE_EXHAUSTED` is accompanied by a billing-class keyword
+        // (`billing`, `monthly`, `spend`, `package`, `credit`), we
+        // upgrade the classification to `Quota` so the failover ladder
+        // can move to a different account/lane rather than burn cycles
+        // retrying the same exhausted billing tier.
+        let body = r#"{"error":{"code":429,"message":"Billing quota exhausted for project","status":"RESOURCE_EXHAUSTED"}}"#;
+        let err = LlmError::from_status_with_label(429, body, "gemini-1.5-pro");
+        assert_eq!(err.kind, LlmErrorKind::Quota);
+    }
+
+    #[test]
+    fn should_classify_429_with_no_active_package_as_quota() {
+        // Wisemodel returns 429 + `no_active_*_package` when the user's
+        // resource pack is exhausted (mirroring the 403 surface).
+        let body =
+            r#"{"error":{"code":"no_active_wisemodel_package","type":"insufficient_quota"}}"#;
+        let err = LlmError::from_status_with_label(429, body, "MiniMax-M2.5-highspeed");
+        assert_eq!(err.kind, LlmErrorKind::Quota);
+    }
+
+    #[test]
+    fn should_classify_429_with_anthropic_rate_limit_error_as_rate_limited() {
+        // Anthropic uses 429 + `{"type": "rate_limit_error"}` for real
+        // transient throttling (not billing exhaustion).
+        let body = r#"{"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your rate limit"}}"#;
+        let err = LlmError::from_status_with_label(429, body, "anthropic/claude-3-5-sonnet");
+        assert!(matches!(err.kind, LlmErrorKind::RateLimited { .. }));
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn should_classify_402_as_quota() {
+        // Anthropic returns 402 for billing failures / inactive subscription.
+        let err = LlmError::from_status(402, "Payment Required");
+        assert_eq!(err.kind, LlmErrorKind::Quota);
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn should_classify_500_as_server_error() {
+        let err = LlmError::from_status(500, "Internal Server Error");
+        assert!(matches!(
+            err.kind,
+            LlmErrorKind::ServerError { status: 500 }
+        ));
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn should_classify_400_context_overflow() {
+        let err = LlmError::from_status(400, "context_length_exceeded");
+        assert!(matches!(err.kind, LlmErrorKind::ContextOverflow { .. }));
+    }
+
+    #[test]
+    fn should_classify_400_invalid_request() {
+        let err = LlmError::from_status(400, "invalid parameter: temperature");
+        assert!(matches!(err.kind, LlmErrorKind::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn should_classify_400_invalid_request_error_payload() {
+        // OpenAI-style 400 with explicit invalid_request_error type — must
+        // map to InvalidRequest (not ContextOverflow) for the harness to
+        // surface a user-friendly "provider rejected the request" message.
+        let body = r#"{"error":{"type":"invalid_request_error","message":"unknown parameter: temperature"}}"#;
+        let err = LlmError::from_status(400, body);
+        assert!(matches!(err.kind, LlmErrorKind::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn should_create_convenience_errors() {
+        assert!(!LlmError::auth("bad key").is_retryable());
+        assert!(LlmError::rate_limited(Some(30)).is_retryable());
+        assert!(LlmError::timeout("timed out").is_retryable());
+        assert!(LlmError::network("connection reset").is_retryable());
+    }
+
+    #[test]
+    fn should_display_error() {
+        let err = LlmError::auth("invalid API key");
+        let s = err.to_string();
+        assert!(s.contains("authentication failed"));
+        assert!(s.contains("invalid API key"));
+    }
+
+    #[test]
+    fn should_display_error_with_provider_label() {
+        let err = LlmError::from_status_with_label(403, "Forbidden", "anthropic-vertex");
+        let s = err.to_string();
+        // Operator log line should identify the provider/model lane.
+        assert!(s.contains("anthropic-vertex"));
+    }
+
+    #[test]
+    fn should_handle_non_ascii_body_without_panic() {
+        // Multi-byte UTF-8 characters that would panic with byte-level slicing
+        let body = "あ".repeat(100); // 300 bytes, 100 chars
+        let err = LlmError::from_status(500, &body);
+        assert!(matches!(
+            err.kind,
+            LlmErrorKind::ServerError { status: 500 }
+        ));
+        // Should not panic — truncates at char boundary
+        let _ = err.to_string();
+    }
+
+    #[test]
+    fn should_support_source_chain() {
+        use std::error::Error;
+        let io_err = std::io::Error::new(std::io::ErrorKind::TimedOut, "connect timeout");
+        let err = LlmError::timeout("request timed out").with_source(io_err);
+        assert!(err.source().is_some());
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // StreamError — typed boundary for the streaming layer. See ADR
+    // docs/STREAMING-TRANSACTIONAL-BOUNDARY-ADR.md.
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn is_retryable_idle_timeout_true() {
+        let err = StreamError::IdleTimeout { idle_secs: 180 };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn is_retryable_transport_true() {
+        let err = StreamError::Transport {
+            detail: "connection reset".to_string(),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn is_retryable_incomplete_true() {
+        let err = StreamError::Incomplete {
+            detail: "stream ended before Done event".to_string(),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn is_retryable_malformed_args_false() {
+        // MalformedArgs MUST NOT be retried — the model needs to see the
+        // error on its next turn so it can self-correct.
+        let err = StreamError::MalformedArgs {
+            tool_id: "call_0".to_string(),
+            tool_name: "write_file".to_string(),
+            error: "EOF while parsing a string".to_string(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn is_retryable_truncated_toolcall_true() {
+        // #1712: TruncatedToolCall IS retryable — the model was cut off by the
+        // output cap mid-call, not wrong. Distinct from MalformedArgs.
+        let err = StreamError::TruncatedToolCall {
+            tool_id: "write_file_26".to_string(),
+            tool_name: "write_file".to_string(),
+            error: "EOF while parsing a string at column 4973".to_string(),
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn stream_error_truncated_toolcall_into_llm_error_retryable() {
+        let err = StreamError::TruncatedToolCall {
+            tool_id: "write_file_26".to_string(),
+            tool_name: "write_file".to_string(),
+            error: "EOF while parsing a string".to_string(),
+        };
+        let llm: LlmError = err.into();
+        assert!(matches!(llm.kind, LlmErrorKind::StreamError));
+        assert!(llm.is_retryable());
+    }
+
+    #[test]
+    fn stream_error_truncated_toolcall_display_names_tool_and_cap() {
+        let err = StreamError::TruncatedToolCall {
+            tool_id: "write_file_26".to_string(),
+            tool_name: "write_file".to_string(),
+            error: "EOF while parsing a string at column 4973".to_string(),
+        };
+        let rendered = err.to_string();
+        assert!(rendered.contains("write_file"), "got: {rendered}");
+        assert!(rendered.contains("truncated"), "got: {rendered}");
+        assert!(rendered.contains("token cap"), "got: {rendered}");
+    }
+
+    #[test]
+    fn stream_error_idle_timeout_display_mentions_seconds() {
+        let err = StreamError::IdleTimeout { idle_secs: 180 };
+        let rendered = err.to_string();
+        assert!(rendered.contains("180s"), "got: {rendered}");
+        assert!(rendered.contains("stalled"), "got: {rendered}");
+    }
+
+    #[test]
+    fn stream_error_malformed_args_display_names_tool() {
+        let err = StreamError::MalformedArgs {
+            tool_id: "call_0".to_string(),
+            tool_name: "mofa_slides".to_string(),
+            error: "EOF while parsing a string at column 4123".to_string(),
+        };
+        let rendered = err.to_string();
+        assert!(rendered.contains("mofa_slides"), "got: {rendered}");
+        assert!(rendered.contains("call_0"), "got: {rendered}");
+    }
+
+    #[test]
+    fn stream_error_idle_timeout_into_llm_error_retryable() {
+        // Bridge: StreamError::IdleTimeout → LlmError::Timeout (retryable in
+        // the RetryProvider taxonomy).
+        let err = StreamError::IdleTimeout { idle_secs: 60 };
+        let llm: LlmError = err.into();
+        assert!(matches!(llm.kind, LlmErrorKind::Timeout));
+        assert!(llm.is_retryable());
+    }
+
+    #[test]
+    fn stream_error_incomplete_into_llm_error_retryable() {
+        let err = StreamError::Incomplete {
+            detail: "no Done event".to_string(),
+        };
+        let llm: LlmError = err.into();
+        assert!(matches!(llm.kind, LlmErrorKind::StreamError));
+        assert!(llm.is_retryable());
+    }
+
+    #[test]
+    fn stream_error_malformed_args_into_llm_error_not_retryable() {
+        // MalformedArgs maps to InvalidRequest, which is NOT retryable.
+        let err = StreamError::MalformedArgs {
+            tool_id: "call_0".to_string(),
+            tool_name: "write_file".to_string(),
+            error: "EOF".to_string(),
+        };
+        let llm: LlmError = err.into();
+        assert!(matches!(llm.kind, LlmErrorKind::InvalidRequest { .. }));
+        assert!(!llm.is_retryable());
+    }
+
+    #[test]
+    fn stream_error_transport_into_llm_error_retryable() {
+        let err = StreamError::Transport {
+            detail: "broken pipe".to_string(),
+        };
+        let llm: LlmError = err.into();
+        assert!(matches!(llm.kind, LlmErrorKind::Network));
+        assert!(llm.is_retryable());
+    }
+
+    #[test]
+    fn stream_error_preserves_source_chain_through_bridge() {
+        use std::error::Error;
+        let stream_err = StreamError::IdleTimeout { idle_secs: 60 };
+        let llm: LlmError = stream_err.into();
+        // After bridging, the source should still resolve to the original
+        // StreamError so downstream logs preserve the typed context.
+        assert!(llm.source().is_some());
+    }
+}
+
+#[cfg(test)]
+mod api_style_display_tests {
+    use super::{LlmError, LlmErrorKind};
+    use crate::provider::ApiStyle;
+
+    #[test]
+    fn should_render_api_style_in_display_only_when_set() {
+        let plain = LlmError::new(LlmErrorKind::ServerError { status: 503 }, "x")
+            .with_provider("zai-coding/glm-5.3");
+        assert_eq!(
+            plain.to_string(),
+            "API error (zai-coding/glm-5.3): provider server error — x"
+        );
+        let styled = LlmError::new(LlmErrorKind::ServerError { status: 503 }, "x")
+            .with_provider("zai-coding/glm-5.3")
+            .with_api_style(ApiStyle::AnthropicMessages);
+        assert_eq!(
+            styled.to_string(),
+            "API error (zai-coding/glm-5.3, api_style=anthropic_messages): provider server error — x"
+        );
+        assert_eq!(
+            styled.provider, "zai-coding/glm-5.3",
+            "label unchanged for consumers"
+        );
+        assert_eq!(styled.kind, LlmErrorKind::ServerError { status: 503 });
+    }
+}

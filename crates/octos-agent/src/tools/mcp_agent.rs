@@ -1,0 +1,1776 @@
+//! MCP-backed sub-agent backends for [`crate::tools::spawn::SpawnTool`].
+//!
+//! This module lets octos dispatch a task to an external agent that speaks
+//! the Model Context Protocol (for example Claude Code via
+//! `claude mcp serve`, Codex via `codex mcp serve`, or any conforming
+//! hermes/jiuwenclaw runtime). The spawn tool hands the task to the backend
+//! via a `tools/call` JSON-RPC request. The sub-agent runs its own tool
+//! loop internally, and only the final (contract-gated) artifact is
+//! returned to the parent context — the sub-agent's intermediate messages
+//! never leak upward.
+//!
+//! Two transports are supported:
+//!
+//! - [`StdioMcpAgent`] — spawns a local subprocess and talks JSON-RPC over
+//!   stdin/stdout. Applies [`BLOCKED_ENV_VARS`] to the child environment,
+//!   wires `kill_on_drop(true)`, and enforces an explicit kill on timeout
+//!   so the child is reaped even if its `wait()` future is abandoned.
+//! - [`HttpMcpAgent`] — connects to a remote MCP endpoint over HTTPS with
+//!   configured connect and read timeouts. Honours SSRF allowlists through
+//!   [`crate::tools::ssrf::check_ssrf_with_addrs`] and pins the resolved
+//!   DNS addresses on the `reqwest::Client` to prevent DNS rebinding.
+//!
+//! The dispatch result is surfaced to the runtime as a typed
+//! [`crate::harness_events::HarnessEventPayload::SubAgentDispatch`] event,
+//! and accounted via the `octos_sub_agent_dispatch_total{backend, outcome}`
+//! counter.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::Arc;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use eyre::{Result, WrapErr};
+use metrics::counter;
+use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::sync::Mutex;
+use tracing::warn;
+
+use crate::harness_events::HarnessEventPayload;
+use crate::sandbox::BLOCKED_ENV_VARS;
+use crate::subprocess_env::{EnvAllowlist, sanitize_command_env, should_forward_env_name};
+use crate::tools::ssrf::check_ssrf_with_addrs;
+
+/// Default connect and read timeouts for the HTTP backend. Mirrors the
+/// webhook proxy convention of 10 seconds per leg.
+pub const DEFAULT_HTTP_CONNECT_TIMEOUT_SECS: u64 = 10;
+pub const DEFAULT_HTTP_READ_TIMEOUT_SECS: u64 = 10;
+
+/// Default wallclock budget for a single `tools/call` dispatch. The
+/// backend kills the subprocess and fails the dispatch if the remote agent
+/// has not produced a response by this point.
+pub const DEFAULT_DISPATCH_TIMEOUT_SECS: u64 = 180;
+
+/// Upper bound on a single JSON-RPC line read from a stdio child. Matches
+/// [`crate::mcp`]'s 1 MiB ceiling so oversize frames do not OOM the parent.
+const MAX_LINE_BYTES: usize = 1_048_576;
+
+/// Typed configuration for a spawn-backed MCP agent. The caller picks one
+/// variant up front; the tool dispatcher selects the matching
+/// [`McpAgentBackend`] implementation at runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpAgentBackendConfig {
+    /// Spawn a subprocess that speaks MCP over stdio (e.g. `claude mcp
+    /// serve`).
+    Local {
+        /// Absolute or PATH-resolved executable to invoke.
+        cmd: String,
+        /// Arguments passed to the child process.
+        #[serde(default)]
+        args: Vec<String>,
+        /// Extra environment variables the child is allowed to see.
+        /// [`BLOCKED_ENV_VARS`] always win — any name in that list is
+        /// stripped regardless of this allowlist.
+        #[serde(default)]
+        env: HashMap<String, String>,
+        /// Per-dispatch wallclock budget in seconds. Defaults to
+        /// [`DEFAULT_DISPATCH_TIMEOUT_SECS`].
+        #[serde(default)]
+        dispatch_timeout_secs: Option<u64>,
+    },
+    /// Connect to a remote MCP endpoint over HTTPS.
+    Remote {
+        /// Fully qualified URL of the remote endpoint.
+        url: String,
+        /// Optional authorization header value (copied verbatim into an
+        /// `Authorization:` header).
+        #[serde(default)]
+        auth_header: Option<String>,
+        /// Additional headers to forward.
+        #[serde(default)]
+        extra_headers: HashMap<String, String>,
+        /// Connect timeout in seconds.
+        #[serde(default)]
+        connect_timeout_secs: Option<u64>,
+        /// Read timeout in seconds.
+        #[serde(default)]
+        read_timeout_secs: Option<u64>,
+        /// Per-dispatch wallclock budget in seconds.
+        #[serde(default)]
+        dispatch_timeout_secs: Option<u64>,
+    },
+    /// Invoke a one-shot headless CLI agent per dispatch (for example
+    /// `claude -p` or `codex exec`) instead of speaking MCP. Simpler
+    /// and more robust for fire-and-forget contracts: no handshake, no
+    /// notification stream — but also no approvals, no mid-run events,
+    /// no cancellation short of killing the process.
+    Cli {
+        /// Absolute or PATH-resolved executable to invoke.
+        cmd: String,
+        /// Arguments passed before the prompt (e.g. `["-p"]`).
+        #[serde(default)]
+        args: Vec<String>,
+        /// Extra environment variables the child is allowed to see.
+        /// [`BLOCKED_ENV_VARS`] always win.
+        #[serde(default)]
+        env: HashMap<String, String>,
+        /// Per-dispatch wallclock budget in seconds. Defaults to
+        /// [`DEFAULT_DISPATCH_TIMEOUT_SECS`].
+        #[serde(default)]
+        dispatch_timeout_secs: Option<u64>,
+        /// Deliver the prompt on the child's stdin instead of as the
+        /// final argv entry. Avoids argv size limits and keeps the
+        /// prompt out of process listings.
+        #[serde(default)]
+        prompt_via_stdin: bool,
+    },
+}
+
+impl McpAgentBackendConfig {
+    /// Stable backend label used in logs, events, and the
+    /// `octos_sub_agent_dispatch_total` counter. One of `"local"` or
+    /// `"remote"`.
+    pub fn backend_label(&self) -> &'static str {
+        match self {
+            Self::Local { .. } => "local",
+            Self::Remote { .. } => "remote",
+            Self::Cli { .. } => "cli",
+        }
+    }
+
+    /// Human-readable endpoint ID (e.g. the command name or URL). Used in
+    /// dispatch events so operators can tell backends apart.
+    pub fn endpoint_label(&self) -> String {
+        match self {
+            Self::Local { cmd, .. } | Self::Cli { cmd, .. } => cmd.clone(),
+            Self::Remote { url, .. } => url.clone(),
+        }
+    }
+
+    /// Per-dispatch wallclock budget resolved against
+    /// [`DEFAULT_DISPATCH_TIMEOUT_SECS`]. Used by the backend
+    /// implementations and exposed for tests that want to assert default
+    /// timeouts without re-deriving the fallback.
+    pub fn dispatch_timeout(&self) -> Duration {
+        let secs = match self {
+            Self::Local {
+                dispatch_timeout_secs,
+                ..
+            } => dispatch_timeout_secs,
+            Self::Remote {
+                dispatch_timeout_secs,
+                ..
+            } => dispatch_timeout_secs,
+            Self::Cli {
+                dispatch_timeout_secs,
+                ..
+            } => dispatch_timeout_secs,
+        };
+        Duration::from_secs(secs.unwrap_or(DEFAULT_DISPATCH_TIMEOUT_SECS))
+    }
+}
+
+/// Outcome label for a dispatch attempt. Stable strings — extending this
+/// requires updating the `octos_sub_agent_dispatch_total` counter
+/// documentation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchOutcome {
+    /// Remote agent returned a well-formed response with a completed
+    /// artifact.
+    Success,
+    /// The remote agent returned a JSON-RPC error or a `content` array
+    /// flagged with `isError: true`.
+    RemoteError,
+    /// The dispatch exceeded its wallclock budget and the child was
+    /// killed (stdio) or the HTTP request was aborted.
+    Timeout,
+    /// Spawn/connect failure before the remote agent saw the request.
+    TransportError,
+    /// Response body was malformed JSON or missing required fields.
+    ProtocolError,
+    /// URL failed the SSRF allowlist (remote backend only).
+    SsrfBlocked,
+}
+
+impl DispatchOutcome {
+    /// Stable label used in metrics and typed harness events.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::RemoteError => "remote_error",
+            Self::Timeout => "timeout",
+            Self::TransportError => "transport_error",
+            Self::ProtocolError => "protocol_error",
+            Self::SsrfBlocked => "ssrf_blocked",
+        }
+    }
+}
+
+/// Structured payload returned by a backend after a single dispatch. The
+/// caller translates this into a `tools::ToolResult` and a typed harness
+/// event.
+#[derive(Debug, Clone)]
+pub struct DispatchResponse {
+    pub outcome: DispatchOutcome,
+    /// Plain-text summary of the remote agent's final output. Multi-part
+    /// MCP `content` arrays are joined newline-separated.
+    pub output: String,
+    /// Artifact paths the remote agent wants surfaced to the parent
+    /// context. Each path is returned verbatim; the caller is expected
+    /// to fold these through the workspace contract.
+    pub files_to_send: Vec<PathBuf>,
+    /// Optional error message. Populated for every non-`Success` outcome.
+    pub error: Option<String>,
+    /// Context contract evidence attached by the parent dispatcher. External
+    /// child agents either receive this as part of their arguments or the
+    /// dispatch event records why the context is explicitly unmanaged.
+    pub context_contract: Option<DispatchContextContract>,
+}
+
+impl DispatchResponse {
+    fn success(output: String, files_to_send: Vec<PathBuf>) -> Self {
+        Self {
+            outcome: DispatchOutcome::Success,
+            output,
+            files_to_send,
+            error: None,
+            context_contract: None,
+        }
+    }
+
+    fn failure(outcome: DispatchOutcome, error: impl Into<String>) -> Self {
+        let message = error.into();
+        Self {
+            outcome,
+            output: message.clone(),
+            files_to_send: Vec::new(),
+            error: Some(message),
+            context_contract: None,
+        }
+    }
+
+    pub fn with_context_contract(mut self, contract: Option<DispatchContextContract>) -> Self {
+        self.context_contract = contract;
+        self
+    }
+}
+
+/// A request dispatched to an MCP-backed sub-agent. The backend forwards
+/// this verbatim as the `arguments` payload of a `tools/call` request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DispatchRequest {
+    /// MCP tool name to invoke on the remote agent. Typically matches
+    /// the agent's own "run a task" tool (for example
+    /// `claude_code/run_task`).
+    pub tool_name: String,
+    /// Task prompt or structured instruction payload the remote agent
+    /// consumes. Opaque to this module.
+    pub task: serde_json::Value,
+    /// Context contract visible to external agents and evidence ledgers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_contract: Option<DispatchContextContract>,
+}
+
+impl DispatchRequest {
+    pub fn new(tool_name: impl Into<String>, task: serde_json::Value) -> Self {
+        Self {
+            tool_name: tool_name.into(),
+            task,
+            context_contract: None,
+        }
+    }
+
+    pub fn with_context_contract(mut self, contract: DispatchContextContract) -> Self {
+        self.context_contract = Some(contract);
+        self
+    }
+
+    /// Tool arguments exactly as the caller supplied them. The context
+    /// contract must NOT be merged in here: strict-schema MCP servers
+    /// (codex mcp-server among them) validate `arguments` against the
+    /// tool's inputSchema and reject unknown fields.
+    fn wire_arguments(&self) -> serde_json::Value {
+        self.task.clone()
+    }
+
+    /// Context contract for the wire, wrapped for `params._meta` — the
+    /// MCP-sanctioned extension point servers must tolerate. Namespaced
+    /// key so it cannot collide with other _meta producers.
+    fn meta_payload(&self) -> Option<serde_json::Value> {
+        let contract = self.context_contract.as_ref()?;
+        let contract_value = serde_json::to_value(contract).unwrap_or_else(|_| {
+            serde_json::json!({
+                "mode": "external_context_unmanaged",
+                "reason": "context_contract_serialization_failed"
+            })
+        });
+        Some(serde_json::json!({ "octos/contextContract": contract_value }))
+    }
+}
+
+/// Context evidence attached to external child-agent dispatches.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DispatchContextContract {
+    /// Stable mode label, for example `managed_payload` or
+    /// `external_context_unmanaged`.
+    pub mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_session_key: Option<String>,
+    /// #1021 / M17-C — which kind of backend is consuming this dispatch
+    /// (`"native"`, `"cli"`, or `"mcp"`). Lets validators and AppUI
+    /// evidence ledgers tell apart context modes per specialist kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_kind: Option<String>,
+    /// #1021 / M17-C — agent id (M13 task id) for evidence cross-
+    /// referencing. Pairs with `backend_kind` so a single line of the
+    /// evidence ledger fully identifies the child the contract belongs
+    /// to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// #1021 / M17-C — risk indicator when emitting
+    /// `external_context_unmanaged` (e.g. `"low"`, `"medium"`, `"high"`).
+    /// Captures whether the unmanaged dispatch leaks privileged data or
+    /// runs in a read-only context so consumers can prioritise follow-
+    /// up. Free-form by convention to stay forward-compatible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk: Option<String>,
+}
+
+impl DispatchContextContract {
+    pub fn external_unmanaged(reason: impl Into<String>) -> Self {
+        Self {
+            mode: "external_context_unmanaged".to_string(),
+            reason: Some(reason.into()),
+            context_ref: None,
+            parent_session_key: None,
+            child_session_key: None,
+            backend_kind: None,
+            agent_id: None,
+            risk: None,
+        }
+    }
+
+    pub fn managed_payload(context_ref: impl Into<String>) -> Self {
+        Self {
+            mode: "managed_payload".to_string(),
+            reason: None,
+            context_ref: Some(context_ref.into()),
+            parent_session_key: None,
+            child_session_key: None,
+            backend_kind: None,
+            agent_id: None,
+            risk: None,
+        }
+    }
+
+    pub fn with_parent_session_key(mut self, value: Option<String>) -> Self {
+        self.parent_session_key = value;
+        self
+    }
+
+    pub fn with_child_session_key(mut self, value: Option<String>) -> Self {
+        self.child_session_key = value;
+        self
+    }
+
+    /// #1021 — set the backend kind (`"native"` / `"cli"` / `"mcp"`).
+    pub fn with_backend_kind(mut self, value: impl Into<String>) -> Self {
+        self.backend_kind = Some(value.into());
+        self
+    }
+
+    /// #1021 — set the agent id (M13 task id) the contract applies to.
+    pub fn with_agent_id(mut self, value: impl Into<String>) -> Self {
+        self.agent_id = Some(value.into());
+        self
+    }
+
+    /// #1021 — set the risk indicator (e.g. `"low"`, `"medium"`,
+    /// `"high"`). Most useful alongside `external_unmanaged`.
+    pub fn with_risk(mut self, value: impl Into<String>) -> Self {
+        self.risk = Some(value.into());
+        self
+    }
+}
+
+/// Trait implemented by each transport backend. Implementations MUST be
+/// cancel-safe — the caller wraps the dispatch in `tokio::time::timeout`
+/// and expects the backend to abort cleanly on drop.
+#[async_trait]
+pub trait McpAgentBackend: Send + Sync {
+    /// Stable label for the transport (`"local"` / `"remote"`). Used in
+    /// metrics and events.
+    fn backend_label(&self) -> &'static str;
+
+    /// Human-readable endpoint identifier (command, URL, ...).
+    fn endpoint_label(&self) -> String;
+
+    /// Dispatch `request` to the remote agent and await the final
+    /// response. Returns a [`DispatchResponse`] even for failure modes —
+    /// callers inspect [`DispatchResponse::outcome`] to pick the right
+    /// event payload.
+    async fn dispatch(&self, request: DispatchRequest) -> DispatchResponse;
+}
+
+// ── Stdio backend ─────────────────────────────────────────────────────────
+
+/// Subprocess-based MCP agent. Owns the [`Command`] template for the
+/// child and re-spawns a fresh process per dispatch so failures stay
+/// scoped.
+pub struct StdioMcpAgent {
+    cmd: String,
+    args: Vec<String>,
+    env: HashMap<String, String>,
+    cwd: Option<PathBuf>,
+    dispatch_timeout: Duration,
+}
+
+impl StdioMcpAgent {
+    /// Construct a stdio backend from typed config.
+    pub fn from_config(config: &McpAgentBackendConfig) -> Result<Self> {
+        let McpAgentBackendConfig::Local {
+            cmd,
+            args,
+            env,
+            dispatch_timeout_secs,
+        } = config
+        else {
+            eyre::bail!("StdioMcpAgent requires a Local backend config");
+        };
+        if cmd.trim().is_empty() {
+            eyre::bail!("stdio MCP agent requires a non-empty command");
+        }
+        Ok(Self {
+            cmd: cmd.clone(),
+            args: args.clone(),
+            env: env.clone(),
+            cwd: None,
+            dispatch_timeout: Duration::from_secs(
+                dispatch_timeout_secs.unwrap_or(DEFAULT_DISPATCH_TIMEOUT_SECS),
+            ),
+        })
+    }
+
+    /// Set the working directory for spawned children.
+    pub fn with_cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
+        self.cwd = Some(cwd.into());
+        self
+    }
+
+    /// Override the dispatch timeout (useful in tests).
+    pub fn with_dispatch_timeout(mut self, timeout: Duration) -> Self {
+        self.dispatch_timeout = timeout;
+        self
+    }
+
+    fn build_command(&self) -> Command {
+        let mut cmd = Command::new(&self.cmd);
+        cmd.args(&self.args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
+
+        if let Some(cwd) = &self.cwd {
+            cmd.current_dir(cwd);
+        }
+
+        // Scrub parent-inherited env down to a safe allowlist before layering
+        // on the caller-configured env. Strip [`BLOCKED_ENV_VARS`] last so
+        // they win even if the caller tries to reintroduce them.
+        let allowlist = EnvAllowlist::from_names(self.env.keys().map(|key| key.as_str()));
+        sanitize_command_env(&mut cmd, &allowlist);
+
+        for (key, value) in &self.env {
+            if BLOCKED_ENV_VARS
+                .iter()
+                .any(|blocked| key.eq_ignore_ascii_case(blocked))
+            {
+                warn!(
+                    key = key.as_str(),
+                    "blocked dangerous MCP sub-agent environment variable"
+                );
+                continue;
+            }
+            if !should_forward_env_name(key, &allowlist) {
+                warn!(
+                    key = key.as_str(),
+                    "blocked non-allowlisted MCP sub-agent environment variable"
+                );
+                continue;
+            }
+            cmd.env(key, value);
+        }
+
+        for blocked in BLOCKED_ENV_VARS {
+            cmd.env_remove(blocked);
+        }
+
+        cmd.kill_on_drop(true);
+        cmd
+    }
+
+    async fn dispatch_inner(&self, request: DispatchRequest) -> DispatchResponse {
+        let mut command = self.build_command();
+        let child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                return DispatchResponse::failure(
+                    DispatchOutcome::TransportError,
+                    format!("failed to spawn MCP sub-agent '{}': {error}", self.cmd),
+                );
+            }
+        };
+
+        match tokio::time::timeout(
+            self.dispatch_timeout,
+            run_stdio_dispatch(child, request.clone()),
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(_) => DispatchResponse::failure(
+                DispatchOutcome::Timeout,
+                format!(
+                    "MCP sub-agent '{}' did not respond within {:?}",
+                    self.cmd, self.dispatch_timeout
+                ),
+            ),
+        }
+    }
+}
+
+#[async_trait]
+impl McpAgentBackend for StdioMcpAgent {
+    fn backend_label(&self) -> &'static str {
+        "local"
+    }
+
+    fn endpoint_label(&self) -> String {
+        self.cmd.clone()
+    }
+
+    async fn dispatch(&self, request: DispatchRequest) -> DispatchResponse {
+        self.dispatch_inner(request).await
+    }
+}
+
+// ── CLI backend ───────────────────────────────────────────────────────────
+
+/// One-shot headless CLI agent backend (`claude -p`, `codex exec`, or
+/// any command that takes a prompt and prints the result). No MCP
+/// framing: the prompt goes in as the final argv entry (or on stdin),
+/// stdout comes back as the dispatch output, and the exit code drives
+/// the [`DispatchOutcome`] mapping — `0` → `Success`, non-zero →
+/// `RemoteError` (retryable, mirroring MCP `isError` semantics), spawn
+/// failure → `TransportError`, wallclock overrun → `Timeout` with the
+/// child killed via `kill_on_drop`.
+///
+/// Prompt convention: `task["prompt"]` when present, else the whole
+/// task JSON serialized — so swarm contracts written for MCP backends
+/// degrade gracefully. `tool_name` and the context contract are not
+/// transmitted (a CLI has no `_meta` channel); the context contract
+/// still tags the response for the local evidence ledger.
+pub struct CliAgentBackend {
+    cmd: String,
+    args: Vec<String>,
+    env: HashMap<String, String>,
+    cwd: Option<PathBuf>,
+    dispatch_timeout: Duration,
+    prompt_via_stdin: bool,
+}
+
+/// Cap on captured CLI stdout/stderr, mirroring [`MAX_LINE_BYTES`] so a
+/// runaway transcript cannot OOM the parent.
+const MAX_CLI_CAPTURE_BYTES: usize = MAX_LINE_BYTES;
+
+impl CliAgentBackend {
+    /// Construct a CLI backend from typed config.
+    pub fn from_config(config: &McpAgentBackendConfig) -> Result<Self> {
+        let McpAgentBackendConfig::Cli {
+            cmd,
+            args,
+            env,
+            dispatch_timeout_secs,
+            prompt_via_stdin,
+        } = config
+        else {
+            eyre::bail!("CliAgentBackend requires a Cli backend config");
+        };
+        if cmd.trim().is_empty() {
+            eyre::bail!("CLI agent requires a non-empty command");
+        }
+        Ok(Self {
+            cmd: cmd.clone(),
+            args: args.clone(),
+            env: env.clone(),
+            cwd: None,
+            dispatch_timeout: Duration::from_secs(
+                dispatch_timeout_secs.unwrap_or(DEFAULT_DISPATCH_TIMEOUT_SECS),
+            ),
+            prompt_via_stdin: *prompt_via_stdin,
+        })
+    }
+
+    /// Set the working directory for spawned children.
+    pub fn with_cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
+        self.cwd = Some(cwd.into());
+        self
+    }
+
+    /// Override the dispatch timeout (useful in tests).
+    pub fn with_dispatch_timeout(mut self, timeout: Duration) -> Self {
+        self.dispatch_timeout = timeout;
+        self
+    }
+
+    /// Extract the prompt the CLI receives. `task["prompt"]` when it is
+    /// a string; otherwise the whole task JSON so structured contracts
+    /// still reach the agent verbatim.
+    fn prompt_for(task: &serde_json::Value) -> String {
+        match task.get("prompt").and_then(|value| value.as_str()) {
+            Some(prompt) => prompt.to_string(),
+            None => task.to_string(),
+        }
+    }
+
+    fn build_command(&self, prompt: &str) -> Command {
+        let mut cmd = Command::new(&self.cmd);
+        cmd.args(&self.args);
+        if !self.prompt_via_stdin {
+            cmd.arg(prompt);
+        }
+        cmd.stdin(if self.prompt_via_stdin {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        // Unlike the MCP stdio backend (which inherits stderr for
+        // operator logs), a CLI's stderr is the primary diagnostic on
+        // failure — capture it for the error message.
+        .stderr(Stdio::piped());
+
+        if let Some(cwd) = &self.cwd {
+            cmd.current_dir(cwd);
+        }
+
+        // Same env hygiene as the MCP stdio backend: scrub the parent
+        // env down to the configured allowlist, then strip
+        // [`BLOCKED_ENV_VARS`] last so they win regardless.
+        let allowlist = EnvAllowlist::from_names(self.env.keys().map(|key| key.as_str()));
+        sanitize_command_env(&mut cmd, &allowlist);
+        for (key, value) in &self.env {
+            if BLOCKED_ENV_VARS
+                .iter()
+                .any(|blocked| key.eq_ignore_ascii_case(blocked))
+            {
+                warn!(
+                    key = key.as_str(),
+                    "blocked dangerous CLI agent environment variable"
+                );
+                continue;
+            }
+            if !should_forward_env_name(key, &allowlist) {
+                warn!(
+                    key = key.as_str(),
+                    "blocked non-allowlisted CLI agent environment variable"
+                );
+                continue;
+            }
+            cmd.env(key, value);
+        }
+        for blocked in BLOCKED_ENV_VARS {
+            cmd.env_remove(blocked);
+        }
+
+        cmd.kill_on_drop(true);
+        cmd
+    }
+
+    async fn dispatch_inner(&self, request: DispatchRequest) -> DispatchResponse {
+        let prompt = Self::prompt_for(&request.task);
+        let mut command = self.build_command(&prompt);
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                return DispatchResponse::failure(
+                    DispatchOutcome::TransportError,
+                    format!("failed to spawn CLI agent '{}': {error}", self.cmd),
+                );
+            }
+        };
+
+        if self.prompt_via_stdin {
+            if let Some(mut stdin) = child.stdin.take() {
+                let mut payload = prompt.clone();
+                payload.push('\n');
+                if let Err(error) = stdin.write_all(payload.as_bytes()).await {
+                    return DispatchResponse::failure(
+                        DispatchOutcome::TransportError,
+                        format!(
+                            "failed to write prompt to CLI agent '{}': {error}",
+                            self.cmd
+                        ),
+                    );
+                }
+                // Drop closes the pipe so line-readers see EOF.
+            }
+        }
+
+        // `wait_with_output` owns the child; on timeout the dropped
+        // future releases it and `kill_on_drop(true)` reaps the process.
+        match tokio::time::timeout(self.dispatch_timeout, child.wait_with_output()).await {
+            Ok(Ok(output)) => {
+                let mut stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+                octos_core::truncate_utf8(&mut stdout, MAX_CLI_CAPTURE_BYTES, "\n[truncated]");
+                let trimmed = stdout.trim_end().to_string();
+                if output.status.success() {
+                    DispatchResponse::success(trimmed, Vec::new())
+                } else {
+                    let mut stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+                    octos_core::truncate_utf8(&mut stderr, MAX_CLI_CAPTURE_BYTES, "\n[truncated]");
+                    let code = output
+                        .status
+                        .code()
+                        .map(|code| code.to_string())
+                        .unwrap_or_else(|| "signal".to_string());
+                    let mut response = DispatchResponse::failure(
+                        DispatchOutcome::RemoteError,
+                        format!(
+                            "CLI agent '{}' exited with status {code}: {}",
+                            self.cmd,
+                            stderr.trim_end()
+                        ),
+                    );
+                    // Preserve any partial stdout for diagnostics.
+                    if !trimmed.is_empty() {
+                        response.output = trimmed;
+                    }
+                    response
+                }
+            }
+            Ok(Err(error)) => DispatchResponse::failure(
+                DispatchOutcome::TransportError,
+                format!("failed to collect CLI agent '{}' output: {error}", self.cmd),
+            ),
+            Err(_) => DispatchResponse::failure(
+                DispatchOutcome::Timeout,
+                format!(
+                    "CLI agent '{}' did not finish within {:?}",
+                    self.cmd, self.dispatch_timeout
+                ),
+            ),
+        }
+    }
+}
+
+#[async_trait]
+impl McpAgentBackend for CliAgentBackend {
+    fn backend_label(&self) -> &'static str {
+        "cli"
+    }
+
+    fn endpoint_label(&self) -> String {
+        self.cmd.clone()
+    }
+
+    async fn dispatch(&self, request: DispatchRequest) -> DispatchResponse {
+        self.dispatch_inner(request).await
+    }
+}
+
+/// Drive a single dispatch against `child`, kill-on-timeout semantics are
+/// provided by the caller via [`tokio::time::timeout`] and the
+/// `kill_on_drop(true)` flag set on the command. This function still
+/// explicitly kills the child on error paths that reach `ChildHandle::
+/// terminate` so any file descriptors held by buffered readers are
+/// released promptly.
+async fn run_stdio_dispatch(mut child: Child, request: DispatchRequest) -> DispatchResponse {
+    let guard = ChildGuard::new(&mut child);
+    let stdin = match guard.child.stdin.take() {
+        Some(stdin) => stdin,
+        None => {
+            return DispatchResponse::failure(
+                DispatchOutcome::TransportError,
+                "MCP sub-agent stdin unavailable",
+            );
+        }
+    };
+    let stdout = match guard.child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            return DispatchResponse::failure(
+                DispatchOutcome::TransportError,
+                "MCP sub-agent stdout unavailable",
+            );
+        }
+    };
+    let reader = BufReader::new(stdout);
+
+    match perform_stdio_handshake_and_call(stdin, reader, request).await {
+        Ok(response) => {
+            // Handshake succeeded — let the child terminate gracefully. We
+            // still kill via the guard to avoid lingering idle children.
+            response
+        }
+        Err((outcome, error)) => DispatchResponse::failure(outcome, error),
+    }
+}
+
+struct ChildGuard<'a> {
+    child: &'a mut Child,
+}
+
+impl<'a> ChildGuard<'a> {
+    fn new(child: &'a mut Child) -> Self {
+        Self { child }
+    }
+}
+
+impl Drop for ChildGuard<'_> {
+    fn drop(&mut self) {
+        // start_kill sends SIGKILL on Unix / TerminateProcess on Windows
+        // immediately; kill_on_drop(true) on the Command ensures the
+        // async reaper runs after we return.
+        let _ = self.child.start_kill();
+    }
+}
+
+async fn perform_stdio_handshake_and_call(
+    mut stdin: ChildStdin,
+    mut reader: BufReader<ChildStdout>,
+    request: DispatchRequest,
+) -> std::result::Result<DispatchResponse, (DispatchOutcome, String)> {
+    send_json_rpc(
+        &mut stdin,
+        1,
+        "initialize",
+        serde_json::json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "octos", "version": env!("CARGO_PKG_VERSION")}
+        }),
+    )
+    .await
+    .map_err(|error| {
+        (
+            DispatchOutcome::TransportError,
+            format!("MCP initialize write failed: {error}"),
+        )
+    })?;
+    let _init = read_json_rpc_response(&mut reader, 1)
+        .await
+        .map_err(|error| {
+            (
+                DispatchOutcome::ProtocolError,
+                format!("MCP initialize response invalid: {error}"),
+            )
+        })?;
+
+    // Spec-required handshake completion. Real servers (codex
+    // mcp-server) are within their rights to hold requests until this
+    // arrives; lenient ones ignore duplicates.
+    send_json_rpc_notification(&mut stdin, "notifications/initialized")
+        .await
+        .map_err(|error| {
+            (
+                DispatchOutcome::TransportError,
+                format!("MCP initialized notification write failed: {error}"),
+            )
+        })?;
+
+    let mut call_params = serde_json::json!({
+        "name": request.tool_name,
+        "arguments": request.wire_arguments(),
+    });
+    if let Some(meta) = request.meta_payload() {
+        call_params["_meta"] = meta;
+    }
+    send_json_rpc(&mut stdin, 2, "tools/call", call_params)
+        .await
+        .map_err(|error| {
+            (
+                DispatchOutcome::TransportError,
+                format!("MCP tools/call write failed: {error}"),
+            )
+        })?;
+
+    let response = read_json_rpc_response(&mut reader, 2)
+        .await
+        .map_err(|error| {
+            (
+                DispatchOutcome::ProtocolError,
+                format!("MCP tools/call response invalid: {error}"),
+            )
+        })?;
+
+    Ok(parse_tools_call_response(response))
+}
+
+async fn send_json_rpc(
+    stdin: &mut ChildStdin,
+    id: u64,
+    method: &str,
+    params: serde_json::Value,
+) -> std::io::Result<()> {
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": method,
+        "params": params,
+    });
+    let mut line = serde_json::to_string(&request).map_err(std::io::Error::other)?;
+    line.push('\n');
+    stdin.write_all(line.as_bytes()).await?;
+    stdin.flush().await
+}
+
+/// Fire-and-forget JSON-RPC notification (no `id`, no response).
+async fn send_json_rpc_notification(stdin: &mut ChildStdin, method: &str) -> std::io::Result<()> {
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": method,
+    });
+    let mut line = serde_json::to_string(&request).map_err(std::io::Error::other)?;
+    line.push('\n');
+    stdin.write_all(line.as_bytes()).await?;
+    stdin.flush().await
+}
+
+/// Frames a server may interleave before the response the client is
+/// waiting for. Bounded so a server spraying notifications cannot pin
+/// the read loop forever (the dispatch wallclock timeout is the outer
+/// guard; this is the inner sanity bound).
+const MAX_SKIPPED_FRAMES: usize = 10_000;
+
+/// Read frames until the response for `expect_id` arrives. Real MCP
+/// servers interleave notifications on stdout — codex mcp-server
+/// streams `codex/event` frames while a session runs — and the old
+/// single-line read treated the first such frame as a protocol error.
+/// Notifications (a `method`, no `id`) and server-initiated requests
+/// (a `method` AND an `id`) are skipped; requests are logged since an
+/// unanswered blocking request (e.g. an elicitation) will surface as a
+/// dispatch timeout rather than a hang.
+async fn read_json_rpc_response<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut BufReader<R>,
+    expect_id: u64,
+) -> std::result::Result<serde_json::Value, String> {
+    for _ in 0..MAX_SKIPPED_FRAMES {
+        let line = read_line_limited(reader, MAX_LINE_BYTES)
+            .await
+            .map_err(|error| error.to_string())?;
+        let envelope: serde_json::Value = serde_json::from_str(&line)
+            .map_err(|error| format!("invalid JSON-RPC response: {error}"))?;
+
+        if envelope.get("method").is_some() {
+            if let Some(id) = envelope.get("id") {
+                warn!(
+                    method = envelope["method"].as_str().unwrap_or("?"),
+                    id = %id,
+                    "skipping server-initiated MCP request; if the server blocks on it \
+                     the dispatch will time out"
+                );
+            }
+            continue;
+        }
+
+        let matches_expected = envelope
+            .get("id")
+            .and_then(|v| v.as_u64())
+            .is_some_and(|id| id == expect_id);
+        if !matches_expected {
+            // Response to some other id (stale or duplicate) — skip.
+            continue;
+        }
+
+        if let Some(err) = envelope.get("error").and_then(|v| v.as_object()) {
+            let code = err.get("code").and_then(|v| v.as_i64()).unwrap_or(-32603);
+            let message = err
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown error");
+            return Err(format!("remote error {code}: {message}"));
+        }
+
+        return envelope
+            .get("result")
+            .cloned()
+            .ok_or_else(|| "JSON-RPC response missing 'result'".to_string());
+    }
+    Err(format!(
+        "no response for id {expect_id} within {MAX_SKIPPED_FRAMES} frames"
+    ))
+}
+
+async fn read_line_limited<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut BufReader<R>,
+    limit: usize,
+) -> Result<String> {
+    let mut buf = Vec::with_capacity(4096);
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            eyre::bail!("MCP sub-agent closed stdout before responding");
+        }
+        if let Some(pos) = available.iter().position(|&b| b == b'\n') {
+            buf.extend_from_slice(&available[..=pos]);
+            reader.consume(pos + 1);
+            break;
+        }
+        if buf.len() + available.len() > limit {
+            eyre::bail!("MCP response exceeds {} bytes", limit);
+        }
+        let len = available.len();
+        buf.extend_from_slice(available);
+        reader.consume(len);
+    }
+    String::from_utf8(buf).wrap_err("MCP response is not valid UTF-8")
+}
+
+fn parse_tools_call_response(result: serde_json::Value) -> DispatchResponse {
+    let is_error = result
+        .get("isError")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let output = match result.get("content").and_then(|v| v.as_array()) {
+        Some(parts) => parts
+            .iter()
+            .filter_map(|part| part.get("text").and_then(|t| t.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        None => result.to_string(),
+    };
+
+    let files_to_send = match result.get("files_to_send").and_then(|v| v.as_array()) {
+        Some(items) => items
+            .iter()
+            .filter_map(|value| value.as_str().map(PathBuf::from))
+            .collect(),
+        None => Vec::new(),
+    };
+
+    if is_error {
+        return DispatchResponse {
+            outcome: DispatchOutcome::RemoteError,
+            output: output.clone(),
+            files_to_send: Vec::new(),
+            error: Some(output),
+            context_contract: None,
+        };
+    }
+
+    DispatchResponse::success(output, files_to_send)
+}
+
+// ── HTTP backend ──────────────────────────────────────────────────────────
+
+/// Remote MCP agent reached over HTTPS. Each [`Self::dispatch`] call
+/// opens a fresh JSON-RPC request with connect and read timeouts
+/// enforced via `reqwest::ClientBuilder`.
+pub struct HttpMcpAgent {
+    url: String,
+    auth_header: Option<String>,
+    extra_headers: HashMap<String, String>,
+    connect_timeout: Duration,
+    read_timeout: Duration,
+    dispatch_timeout: Duration,
+    /// Test-only bypass for SSRF allowlisting. Real callers must never
+    /// enable this — it exists so integration tests can stand up a
+    /// loopback peer without flaking on the production SSRF guard.
+    allow_loopback_for_tests: bool,
+}
+
+impl HttpMcpAgent {
+    /// Construct an HTTP backend from typed config.
+    pub fn from_config(config: &McpAgentBackendConfig) -> Result<Self> {
+        let McpAgentBackendConfig::Remote {
+            url,
+            auth_header,
+            extra_headers,
+            connect_timeout_secs,
+            read_timeout_secs,
+            dispatch_timeout_secs,
+        } = config
+        else {
+            eyre::bail!("HttpMcpAgent requires a Remote backend config");
+        };
+        if url.trim().is_empty() {
+            eyre::bail!("HTTP MCP agent requires a non-empty URL");
+        }
+        let connect_timeout =
+            Duration::from_secs(connect_timeout_secs.unwrap_or(DEFAULT_HTTP_CONNECT_TIMEOUT_SECS));
+        let read_timeout =
+            Duration::from_secs(read_timeout_secs.unwrap_or(DEFAULT_HTTP_READ_TIMEOUT_SECS));
+        let dispatch_timeout =
+            Duration::from_secs(dispatch_timeout_secs.unwrap_or(DEFAULT_DISPATCH_TIMEOUT_SECS));
+        Ok(Self {
+            url: url.clone(),
+            auth_header: auth_header.clone(),
+            extra_headers: extra_headers.clone(),
+            connect_timeout,
+            read_timeout,
+            dispatch_timeout,
+            allow_loopback_for_tests: false,
+        })
+    }
+
+    /// Override the dispatch timeout (used in tests).
+    pub fn with_dispatch_timeout(mut self, timeout: Duration) -> Self {
+        self.dispatch_timeout = timeout;
+        self
+    }
+
+    /// Test-only escape hatch that lets integration tests stand up a
+    /// loopback HTTP peer without tripping the SSRF guard. The
+    /// production config path never takes this branch — callers have to
+    /// opt in explicitly, and the setter is gated behind a `#[doc(hidden)]`
+    /// marker so it does not appear in rustdoc. Using it in production
+    /// code is a configuration mistake.
+    #[doc(hidden)]
+    pub fn with_loopback_allowed_for_tests(mut self) -> Self {
+        self.allow_loopback_for_tests = true;
+        self
+    }
+
+    async fn dispatch_inner(&self, request: DispatchRequest) -> DispatchResponse {
+        // SSRF is enforced at the URL layer so the connect timeout does not
+        // protect private endpoints by accident.
+        let resolved_addrs = match check_ssrf_with_addrs(&self.url).await {
+            Ok(result) => result.resolved_addrs,
+            Err(message) => {
+                if self.allow_loopback_for_tests {
+                    // Loopback fallback used only by the integration test
+                    // harness. Empty resolved_addrs lets reqwest fall
+                    // back to its own DNS resolution — safe for
+                    // 127.0.0.1:port targets under `cargo test`.
+                    Vec::new()
+                } else {
+                    return DispatchResponse::failure(
+                        DispatchOutcome::SsrfBlocked,
+                        format!("MCP remote endpoint blocked by SSRF policy: {message}"),
+                    );
+                }
+            }
+        };
+
+        let parsed = match reqwest::Url::parse(&self.url) {
+            Ok(url) => url,
+            Err(error) => {
+                return DispatchResponse::failure(
+                    DispatchOutcome::TransportError,
+                    format!("invalid MCP remote URL '{}': {error}", self.url),
+                );
+            }
+        };
+        let host = match parsed.host_str() {
+            Some(host) => host.to_string(),
+            None => {
+                return DispatchResponse::failure(
+                    DispatchOutcome::TransportError,
+                    format!("MCP remote URL '{}' is missing host", self.url),
+                );
+            }
+        };
+
+        let mut builder = reqwest::Client::builder()
+            .connect_timeout(self.connect_timeout)
+            .read_timeout(self.read_timeout)
+            // SSRF: never auto-follow redirects. reqwest's default policy
+            // resolves + connects to redirect targets WITHOUT re-running the
+            // SSRF check, and the `.resolve()` pin below only covers the
+            // ORIGINAL host — so a 30x to 169.254.169.254 / 10.x would be
+            // followed unchecked. An MCP endpoint is a fixed JSON-RPC URL, so
+            // we fail closed on any redirect (see `send_request`).
+            .redirect(reqwest::redirect::Policy::none());
+        for addr in &resolved_addrs {
+            builder = builder.resolve(&host, *addr);
+        }
+        let client = match builder.build() {
+            Ok(client) => client,
+            Err(error) => {
+                return DispatchResponse::failure(
+                    DispatchOutcome::TransportError,
+                    format!("failed to build HTTPS client: {error}"),
+                );
+            }
+        };
+
+        match tokio::time::timeout(self.dispatch_timeout, self.send_request(&client, &request))
+            .await
+        {
+            Ok(response) => response,
+            Err(_) => DispatchResponse::failure(
+                DispatchOutcome::Timeout,
+                format!(
+                    "MCP remote endpoint '{}' did not respond within {:?}",
+                    self.url, self.dispatch_timeout
+                ),
+            ),
+        }
+    }
+
+    async fn send_request(
+        &self,
+        client: &reqwest::Client,
+        request: &DispatchRequest,
+    ) -> DispatchResponse {
+        // JSON-RPC body — same shape as the stdio path so the remote
+        // agent's dispatcher can treat both transports uniformly.
+        let mut call_params = serde_json::json!({
+            "name": request.tool_name,
+            "arguments": request.wire_arguments(),
+        });
+        if let Some(meta) = request.meta_payload() {
+            call_params["_meta"] = meta;
+        }
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": call_params,
+        });
+
+        let mut req = client
+            .post(&self.url)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json");
+        if let Some(header) = &self.auth_header {
+            req = req.header("Authorization", header.as_str());
+        }
+        for (key, value) in &self.extra_headers {
+            req = req.header(key.as_str(), value.as_str());
+        }
+
+        let resp = match req.json(&body).send().await {
+            Ok(resp) => resp,
+            Err(error) => {
+                let outcome = if error.is_timeout() {
+                    DispatchOutcome::Timeout
+                } else {
+                    DispatchOutcome::TransportError
+                };
+                return DispatchResponse::failure(
+                    outcome,
+                    format!("MCP remote send failed: {error}"),
+                );
+            }
+        };
+
+        // Auto-redirects are disabled (see `dispatch_inner`): a 3xx here means
+        // the endpoint tried to redirect us to a target that would bypass the
+        // SSRF check. MCP endpoints are a stable URL, so fail closed rather
+        // than follow an unvalidated hop.
+        if resp.status().is_redirection() {
+            return DispatchResponse::failure(
+                DispatchOutcome::SsrfBlocked,
+                format!(
+                    "MCP remote endpoint '{}' returned redirect {}; refusing to \
+                     follow (redirect targets bypass SSRF validation)",
+                    self.url,
+                    resp.status(),
+                ),
+            );
+        }
+
+        let status = resp.status();
+        let text = match resp.text().await {
+            Ok(text) => text,
+            Err(error) => {
+                return DispatchResponse::failure(
+                    DispatchOutcome::TransportError,
+                    format!("MCP remote read failed: {error}"),
+                );
+            }
+        };
+
+        if !status.is_success() {
+            return DispatchResponse::failure(
+                DispatchOutcome::RemoteError,
+                format!("MCP remote HTTP {status}: {text}"),
+            );
+        }
+
+        let envelope: serde_json::Value = match serde_json::from_str(&text) {
+            Ok(value) => value,
+            Err(error) => {
+                return DispatchResponse::failure(
+                    DispatchOutcome::ProtocolError,
+                    format!("invalid JSON-RPC envelope: {error}"),
+                );
+            }
+        };
+
+        if let Some(err) = envelope.get("error").and_then(|v| v.as_object()) {
+            let code = err.get("code").and_then(|v| v.as_i64()).unwrap_or(-32603);
+            let message = err
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown error")
+                .to_string();
+            return DispatchResponse::failure(
+                DispatchOutcome::RemoteError,
+                format!("remote error {code}: {message}"),
+            );
+        }
+
+        match envelope.get("result").cloned() {
+            Some(result) => parse_tools_call_response(result),
+            None => DispatchResponse::failure(
+                DispatchOutcome::ProtocolError,
+                "JSON-RPC response missing 'result'",
+            ),
+        }
+    }
+}
+
+#[async_trait]
+impl McpAgentBackend for HttpMcpAgent {
+    fn backend_label(&self) -> &'static str {
+        "remote"
+    }
+
+    fn endpoint_label(&self) -> String {
+        self.url.clone()
+    }
+
+    async fn dispatch(&self, request: DispatchRequest) -> DispatchResponse {
+        self.dispatch_inner(request).await
+    }
+}
+
+// ── Dispatcher shim ───────────────────────────────────────────────────────
+
+/// Outcome emitted alongside the structured harness event after a dispatch.
+#[derive(Debug, Clone)]
+pub struct DispatchEventSummary {
+    pub backend: String,
+    pub endpoint: String,
+    pub outcome: String,
+}
+
+/// Record a dispatch attempt against the `octos_sub_agent_dispatch_total`
+/// counter. Stable label set: `backend` (`"local"` | `"remote"`) and
+/// `outcome` (one of [`DispatchOutcome::as_str`]).
+pub fn record_dispatch(backend: &str, outcome: DispatchOutcome) {
+    counter!(
+        "octos_sub_agent_dispatch_total",
+        "backend" => backend.to_string(),
+        "outcome" => outcome.as_str().to_string()
+    )
+    .increment(1);
+}
+
+/// Build a typed [`HarnessEventPayload::SubAgentDispatch`] payload from a
+/// completed dispatch. The caller is expected to wrap this in a full
+/// [`crate::harness_events::HarnessEvent`] before writing to the sink.
+pub fn build_dispatch_event_payload(
+    session_id: impl Into<String>,
+    task_id: impl Into<String>,
+    workflow: Option<impl Into<String>>,
+    phase: Option<impl Into<String>>,
+    backend: &dyn McpAgentBackend,
+    response: &DispatchResponse,
+) -> HarnessEventPayload {
+    HarnessEventPayload::SubAgentDispatch {
+        data: crate::harness_events::HarnessSubAgentDispatchEvent {
+            schema_version: crate::abi_schema::SUB_AGENT_DISPATCH_SCHEMA_VERSION,
+            session_id: session_id.into(),
+            task_id: task_id.into(),
+            workflow: workflow.map(Into::into),
+            phase: phase.map(Into::into),
+            backend: backend.backend_label().to_string(),
+            endpoint: backend.endpoint_label(),
+            outcome: response.outcome.as_str().to_string(),
+            message: response.error.clone(),
+            extra: {
+                let mut extra = HashMap::new();
+                if let Some(contract) = response.context_contract.as_ref() {
+                    extra.insert(
+                        "context_mode".to_string(),
+                        serde_json::Value::String(contract.mode.clone()),
+                    );
+                    if let Some(reason) = contract.reason.as_ref() {
+                        extra.insert(
+                            "context_reason".to_string(),
+                            serde_json::Value::String(reason.clone()),
+                        );
+                    }
+                    if let Some(context_ref) = contract.context_ref.as_ref() {
+                        extra.insert(
+                            "context_ref".to_string(),
+                            serde_json::Value::String(context_ref.clone()),
+                        );
+                    }
+                }
+                extra
+            },
+        },
+    }
+}
+
+/// Construct the correct [`McpAgentBackend`] implementation from a typed
+/// config. Keeps the SpawnTool construction site declarative.
+pub fn build_backend_from_config(
+    config: &McpAgentBackendConfig,
+    cwd: Option<&Path>,
+) -> Result<Arc<dyn McpAgentBackend>> {
+    match config {
+        McpAgentBackendConfig::Local { .. } => {
+            let mut backend = StdioMcpAgent::from_config(config)?;
+            if let Some(cwd) = cwd {
+                backend = backend.with_cwd(cwd.to_path_buf());
+            }
+            Ok(Arc::new(backend))
+        }
+        McpAgentBackendConfig::Remote { .. } => Ok(Arc::new(HttpMcpAgent::from_config(config)?)),
+        McpAgentBackendConfig::Cli { .. } => {
+            let mut backend = CliAgentBackend::from_config(config)?;
+            if let Some(cwd) = cwd {
+                backend = backend.with_cwd(cwd.to_path_buf());
+            }
+            Ok(Arc::new(backend))
+        }
+    }
+}
+
+/// Serialize-safe container around a sharable backend so
+/// [`crate::tools::spawn::SpawnTool`] can hold one without leaking the
+/// trait object to downstream modules. The boxed form lets us tweak the
+/// transport in tests.
+pub type SharedBackend = Arc<dyn McpAgentBackend>;
+
+/// Helper used by `SpawnTool` to perform a single dispatch, record the
+/// metric, and return a [`DispatchEventSummary`] for the caller to fold
+/// into a typed harness event.
+pub async fn dispatch_with_metrics(
+    backend: &dyn McpAgentBackend,
+    request: DispatchRequest,
+) -> (DispatchResponse, DispatchEventSummary) {
+    let context_contract = request.context_contract.clone();
+    let response = backend
+        .dispatch(request)
+        .await
+        .with_context_contract(context_contract);
+    record_dispatch(backend.backend_label(), response.outcome);
+    let summary = DispatchEventSummary {
+        backend: backend.backend_label().to_string(),
+        endpoint: backend.endpoint_label(),
+        outcome: response.outcome.as_str().to_string(),
+    };
+    (response, summary)
+}
+
+/// Convenience: build a `Mutex`-guarded `Command`-like shim so callers
+/// that want to re-use a single subprocess can opt-in. Default behaviour
+/// spawns a fresh child per dispatch, which keeps dispatch attempts
+/// independent (a crash in one attempt cannot leak state into another).
+#[allow(dead_code)]
+pub type BackendMutex = Mutex<Arc<dyn McpAgentBackend>>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dispatch_request_keeps_arguments_pristine_and_carries_contract_in_meta() {
+        // Strict-schema MCP servers (codex mcp-server rejects with
+        // "unknown field `context_contract`") validate `arguments`
+        // against the tool's inputSchema, so the context contract must
+        // ride in `params._meta` — the MCP-sanctioned extension point —
+        // and never leak into the tool arguments.
+        let request = DispatchRequest::new("run_task", serde_json::json!({"task": "review"}))
+            .with_context_contract(
+                DispatchContextContract::external_unmanaged("fixture")
+                    .with_parent_session_key(Some("parent".to_string()))
+                    .with_child_session_key(Some("child".to_string())),
+            );
+
+        let args = request.wire_arguments();
+        assert_eq!(args, serde_json::json!({"task": "review"}));
+        assert!(args.get("context_contract").is_none());
+
+        let meta = request.meta_payload().expect("contract present -> meta");
+        let contract = &meta["octos/contextContract"];
+        assert_eq!(contract["mode"], "external_context_unmanaged");
+        assert_eq!(contract["reason"], "fixture");
+        assert_eq!(contract["parent_session_key"], "parent");
+        assert_eq!(contract["child_session_key"], "child");
+    }
+
+    #[test]
+    fn dispatch_request_without_contract_has_no_meta() {
+        let request = DispatchRequest::new("run_task", serde_json::json!({"task": "review"}));
+        assert_eq!(
+            request.wire_arguments(),
+            serde_json::json!({"task": "review"})
+        );
+        assert!(request.meta_payload().is_none());
+    }
+
+    /// Real MCP servers (codex mcp-server) interleave `codex/event`
+    /// notifications on stdout while a session runs. The reader must
+    /// skip them and return the response frame for the expected id.
+    #[tokio::test]
+    async fn read_response_skips_notification_frames() {
+        let stream = concat!(
+            "{\"jsonrpc\":\"2.0\",\"method\":\"codex/event\",\"params\":{\"msg\":\"thinking\"}}\n",
+            "{\"jsonrpc\":\"2.0\",\"method\":\"codex/event\",\"params\":{\"msg\":\"running\"}}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"done\"}]}}\n",
+        );
+        let mut reader = BufReader::new(stream.as_bytes());
+        let result = read_json_rpc_response(&mut reader, 2)
+            .await
+            .expect("response after notifications");
+        assert_eq!(result["content"][0]["text"], "done");
+    }
+
+    /// A server-initiated request (has both `method` and `id`) must be
+    /// skipped, not mistaken for our response — and a response for a
+    /// DIFFERENT id must not satisfy the wait.
+    #[tokio::test]
+    async fn read_response_skips_server_requests_and_foreign_ids() {
+        let stream = concat!(
+            "{\"jsonrpc\":\"2.0\",\"id\":77,\"method\":\"elicitation/create\",\"params\":{}}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"stale\":true}}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"fresh\":true}}\n",
+        );
+        let mut reader = BufReader::new(stream.as_bytes());
+        let result = read_json_rpc_response(&mut reader, 2)
+            .await
+            .expect("expected-id response");
+        assert_eq!(result["fresh"], true);
+    }
+
+    /// Error envelopes for the expected id still surface as errors.
+    #[tokio::test]
+    async fn read_response_surfaces_remote_error_for_expected_id() {
+        let stream = concat!(
+            "{\"jsonrpc\":\"2.0\",\"method\":\"codex/event\",\"params\":{}}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"error\":{\"code\":-32000,\"message\":\"boom\"}}\n",
+        );
+        let mut reader = BufReader::new(stream.as_bytes());
+        let error = read_json_rpc_response(&mut reader, 2)
+            .await
+            .expect_err("error envelope");
+        assert!(
+            error.contains("-32000") && error.contains("boom"),
+            "{error}"
+        );
+    }
+
+    /// #1021 / M17-C — backend_kind, agent_id, and risk are all
+    /// optional fields. Empty Options must not appear on the wire.
+    #[test]
+    fn dispatch_context_contract_omits_unset_m17c_fields() {
+        let json = serde_json::to_value(
+            DispatchContextContract::external_unmanaged("fixture")
+                .with_parent_session_key(Some("parent".into()))
+                .with_child_session_key(Some("child".into())),
+        )
+        .expect("serialize");
+        let object = json.as_object().expect("object");
+        assert!(!object.contains_key("backend_kind"));
+        assert!(!object.contains_key("agent_id"));
+        assert!(!object.contains_key("risk"));
+    }
+
+    /// #1021 / M17-C — when an unmanaged dispatch is emitted, the
+    /// contract should carry enough diagnostic info to identify the
+    /// child: backend kind, agent id, and risk classification.
+    #[test]
+    fn dispatch_context_contract_carries_backend_kind_agent_id_and_risk() {
+        let contract = DispatchContextContract::external_unmanaged(
+            "mcp specialist cannot consume managed payload",
+        )
+        .with_parent_session_key(Some("parent".into()))
+        .with_child_session_key(Some("child".into()))
+        .with_backend_kind("mcp")
+        .with_agent_id("reviewer-42")
+        .with_risk("medium");
+
+        let json = serde_json::to_value(&contract).expect("serialize");
+        assert_eq!(json["mode"], "external_context_unmanaged");
+        assert_eq!(json["backend_kind"], "mcp");
+        assert_eq!(json["agent_id"], "reviewer-42");
+        assert_eq!(json["risk"], "medium");
+        assert_eq!(json["parent_session_key"], "parent");
+        assert_eq!(json["child_session_key"], "child");
+
+        // Round-trip via Deserialize keeps the new fields intact.
+        let parsed: DispatchContextContract = serde_json::from_value(json).expect("round trip");
+        assert_eq!(parsed.backend_kind.as_deref(), Some("mcp"));
+        assert_eq!(parsed.agent_id.as_deref(), Some("reviewer-42"));
+        assert_eq!(parsed.risk.as_deref(), Some("medium"));
+    }
+
+    #[test]
+    fn sub_agent_dispatch_event_exposes_context_contract() {
+        let response = DispatchResponse::success("done".to_string(), Vec::new())
+            .with_context_contract(Some(DispatchContextContract::external_unmanaged(
+                "mcp unmanaged",
+            )));
+        let backend = StdioMcpAgent {
+            cmd: "claude".to_string(),
+            args: Vec::new(),
+            env: HashMap::new(),
+            cwd: None,
+            dispatch_timeout: Duration::from_secs(1),
+        };
+
+        let payload = build_dispatch_event_payload(
+            "session",
+            "task",
+            Some("coding"),
+            Some("review"),
+            &backend,
+            &response,
+        );
+        match payload {
+            HarnessEventPayload::SubAgentDispatch { data } => {
+                assert_eq!(
+                    data.extra
+                        .get("context_mode")
+                        .and_then(|value| value.as_str()),
+                    Some("external_context_unmanaged")
+                );
+                assert_eq!(
+                    data.extra
+                        .get("context_reason")
+                        .and_then(|value| value.as_str()),
+                    Some("mcp unmanaged")
+                );
+            }
+            other => panic!("wrong payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn backend_label_round_trips() {
+        let local = McpAgentBackendConfig::Local {
+            cmd: "claude".into(),
+            args: vec!["mcp".into(), "serve".into()],
+            env: HashMap::new(),
+            dispatch_timeout_secs: Some(5),
+        };
+        let remote = McpAgentBackendConfig::Remote {
+            url: "https://example.com/mcp".into(),
+            auth_header: Some("Bearer token".into()),
+            extra_headers: HashMap::new(),
+            connect_timeout_secs: None,
+            read_timeout_secs: None,
+            dispatch_timeout_secs: None,
+        };
+        assert_eq!(local.backend_label(), "local");
+        assert_eq!(remote.backend_label(), "remote");
+        assert_eq!(local.endpoint_label(), "claude");
+        assert_eq!(remote.endpoint_label(), "https://example.com/mcp");
+        assert_eq!(local.dispatch_timeout(), Duration::from_secs(5));
+        assert_eq!(
+            remote.dispatch_timeout(),
+            Duration::from_secs(DEFAULT_DISPATCH_TIMEOUT_SECS)
+        );
+    }
+
+    #[test]
+    fn dispatch_outcome_labels_stable() {
+        assert_eq!(DispatchOutcome::Success.as_str(), "success");
+        assert_eq!(DispatchOutcome::RemoteError.as_str(), "remote_error");
+        assert_eq!(DispatchOutcome::Timeout.as_str(), "timeout");
+        assert_eq!(DispatchOutcome::TransportError.as_str(), "transport_error");
+        assert_eq!(DispatchOutcome::ProtocolError.as_str(), "protocol_error");
+        assert_eq!(DispatchOutcome::SsrfBlocked.as_str(), "ssrf_blocked");
+    }
+
+    #[test]
+    fn parse_tools_call_extracts_text_and_files() {
+        let result = serde_json::json!({
+            "content": [{"type": "text", "text": "ok"}, {"type": "text", "text": "done"}],
+            "files_to_send": ["/tmp/out.md"],
+        });
+        let response = parse_tools_call_response(result);
+        assert_eq!(response.outcome, DispatchOutcome::Success);
+        assert_eq!(response.output, "ok\ndone");
+        assert_eq!(response.files_to_send, vec![PathBuf::from("/tmp/out.md")]);
+    }
+
+    #[test]
+    fn parse_tools_call_surfaces_remote_error_flag() {
+        let result = serde_json::json!({
+            "content": [{"type": "text", "text": "remote rejected"}],
+            "isError": true,
+        });
+        let response = parse_tools_call_response(result);
+        assert_eq!(response.outcome, DispatchOutcome::RemoteError);
+        assert_eq!(response.output, "remote rejected");
+        assert!(response.error.is_some());
+    }
+
+    #[test]
+    fn stdio_config_rejects_empty_command() {
+        let bad = McpAgentBackendConfig::Local {
+            cmd: "   ".into(),
+            args: vec![],
+            env: HashMap::new(),
+            dispatch_timeout_secs: None,
+        };
+        assert!(StdioMcpAgent::from_config(&bad).is_err());
+    }
+
+    #[test]
+    fn http_config_rejects_empty_url() {
+        let bad = McpAgentBackendConfig::Remote {
+            url: "".into(),
+            auth_header: None,
+            extra_headers: HashMap::new(),
+            connect_timeout_secs: None,
+            read_timeout_secs: None,
+            dispatch_timeout_secs: None,
+        };
+        assert!(HttpMcpAgent::from_config(&bad).is_err());
+    }
+
+    #[test]
+    fn build_backend_routes_variant_to_impl() {
+        let local = McpAgentBackendConfig::Local {
+            cmd: "claude".into(),
+            args: vec![],
+            env: HashMap::new(),
+            dispatch_timeout_secs: None,
+        };
+        let backend = build_backend_from_config(&local, None).unwrap();
+        assert_eq!(backend.backend_label(), "local");
+
+        let remote = McpAgentBackendConfig::Remote {
+            url: "https://example.com/mcp".into(),
+            auth_header: None,
+            extra_headers: HashMap::new(),
+            connect_timeout_secs: None,
+            read_timeout_secs: None,
+            dispatch_timeout_secs: None,
+        };
+        let backend = build_backend_from_config(&remote, None).unwrap();
+        assert_eq!(backend.backend_label(), "remote");
+    }
+
+    #[test]
+    fn dispatch_response_failure_carries_message() {
+        let response =
+            DispatchResponse::failure(DispatchOutcome::Timeout, "slow agent".to_string());
+        assert_eq!(response.outcome, DispatchOutcome::Timeout);
+        assert_eq!(response.output, "slow agent");
+        assert_eq!(response.error.as_deref(), Some("slow agent"));
+        assert!(response.files_to_send.is_empty());
+    }
+}

@@ -1,0 +1,111 @@
+//! Swarm orchestration primitive for octos (harness M7.5).
+//!
+//! `octos-swarm` formalises the PM + swarm supervisor pattern the
+//! octos harness has been running manually: a supervisor writes a
+//! contract, fans it out to N sub-agents, aggregates their artifacts,
+//! gates the aggregate through an M4.3 validator, rolls up cost via
+//! the M7.4 ledger (stubbed here until that work lands), and emits a
+//! typed [`HarnessEventPayload::SwarmDispatch`] event the operator
+//! dashboard and Matrix channel can render live.
+//!
+//! # Usage sketch
+//!
+//! ```ignore
+//! use std::num::NonZeroUsize;
+//! use std::sync::Arc;
+//! use octos_agent::tools::mcp_agent::{build_backend_from_config, McpAgentBackendConfig};
+//! use octos_swarm::{
+//!     ContractSpec, Swarm, SwarmBudget, SwarmContext, SwarmTopology,
+//! };
+//!
+//! # async fn demo() -> eyre::Result<()> {
+//! let cfg = McpAgentBackendConfig::Local {
+//!     cmd: "claude".into(),
+//!     args: vec!["mcp".into(), "serve".into()],
+//!     env: Default::default(),
+//!     dispatch_timeout_secs: Some(60),
+//! };
+//! let backend = build_backend_from_config(&cfg, None)?;
+//!
+//! let swarm = Swarm::builder(backend, "/tmp/swarm-state").build().await?;
+//! let result = swarm
+//!     .dispatch(
+//!         "dispatch-1",
+//!         vec![ContractSpec {
+//!             contract_id: "c1".into(),
+//!             tool_name: "claude_code/run_task".into(),
+//!             task: serde_json::json!({"task": "write a haiku"}),
+//!             label: Some("haiku".into()),
+//!         }],
+//!         SwarmTopology::Parallel {
+//!             max_concurrency: NonZeroUsize::new(1).unwrap(),
+//!         },
+//!         SwarmBudget::default(),
+//!         SwarmContext {
+//!             session_id: "api:example".into(),
+//!             task_id: "task-1".into(),
+//!             workflow: Some("poetry".into()),
+//!             phase: Some("draft".into()),
+//!         },
+//!     )
+//!     .await?;
+//! println!("completed: {}/{}", result.completed_subtasks, result.total_subtasks);
+//! # Ok(()) }
+//! ```
+//!
+//! # Invariants
+//!
+//! 1. [`Swarm::dispatch`] is idempotent given the same
+//!    `(dispatch_id, contracts, topology, budget)`: a finalized record
+//!    in the redb ledger short-circuits re-dispatch and returns the
+//!    stored result verbatim. Reusing a dispatch_id with a different
+//!    contract list, task payload, or topology is rejected, and a
+//!    second concurrent dispatch of an in-flight id is rejected.
+//! 2. [`SwarmTopology::Parallel`] fans out up to `max_concurrency`
+//!    contracts, aggregation is arrival order.
+//! 3. [`SwarmTopology::Sequential`] runs one-at-a-time and aborts on
+//!    the first terminal (non-retryable) failure — including across a
+//!    crash/resume: contracts behind a persisted terminal failure stay
+//!    `not_run`.
+//! 4. [`SwarmTopology::Pipeline`] chains output of contract `i` as
+//!    `pipeline_input` into contract `i + 1`; a stage never dispatches
+//!    unless its predecessor is Completed (fresh round or resume), so a
+//!    downstream stage never runs without its upstream input.
+//! 5. Retry budget bounded at [`MAX_RETRY_ROUNDS`] (3) no-progress
+//!    rounds, enforced before each round (a record resumed at the cap
+//!    dispatches nothing). Rounds that complete at least one new
+//!    sub-contract do not consume the budget — they are bounded by the
+//!    contract count.
+//! 6. Aggregate M4.3 validator runs AFTER every sub-contract reaches
+//!    terminal state.
+//! 7. Session-durable: redb-backed, supervisor can reload state and
+//!    resume after process restart.
+//! 8. Events emitted as
+//!    [`HarnessEventPayload::SwarmDispatch`](octos_agent::harness_events::HarnessEventPayload::SwarmDispatch)
+//!    with [`SWARM_DISPATCH_SCHEMA_VERSION`](octos_agent::abi_schema::SWARM_DISPATCH_SCHEMA_VERSION)
+//!    pinned at 1.
+//! 9. Zero new `unsafe` — the workspace-wide `deny(unsafe_code)` lint
+//!    is honoured.
+
+#![doc(html_root_url = "https://docs.rs/octos-swarm/0.1.0")]
+
+mod dispatcher;
+mod gate;
+mod ledger;
+mod persistence;
+mod result;
+mod topology;
+
+pub use dispatcher::{
+    AggregateValidator, MAX_RETRY_ROUNDS, NoopSwarmEventSink, Swarm, SwarmBudget, SwarmBuilder,
+    SwarmContext, SwarmCostBudget, SwarmEventSink, flatten_aggregate,
+};
+// #714: the gate type now lives in `octos-agent` so both swarm and
+// spawn agent_mcp dispatch share a single source of truth. Re-export
+// here so existing `octos_swarm::DispatchPolicy` callers (CLI / tests
+// / harness) keep compiling without changes.
+pub use ledger::{CostLedger, NoopCostLedger, SwarmCostAttribution};
+pub use octos_agent::DispatchPolicy;
+pub use persistence::{DISPATCH_RECORD_SCHEMA_VERSION, DispatchRecord, DispatchStore};
+pub use result::{AggregateArtifact, SubtaskOutcome, SubtaskStatus, SwarmOutcomeKind, SwarmResult};
+pub use topology::{ContractSpec, FanoutPattern, MAX_CONTRACTS_PER_DISPATCH, SwarmTopology};

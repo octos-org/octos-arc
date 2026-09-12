@@ -1,0 +1,1373 @@
+//! Email OTP authentication and session management.
+//!
+//! Provides Larksuite-style email verification: user enters email, receives a
+//! 6-digit code, verifies it, and gets a session token. Sessions are stored
+//! in-memory with configurable expiry.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use chrono::{DateTime, Duration, Utc};
+use eyre::{Result, bail};
+use serde::{Deserialize, Serialize};
+use tokio::sync::RwLock;
+
+use crate::user_store::{UserRole, UserStore};
+
+/// SMTP configuration for sending OTP emails.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SmtpConfig {
+    /// SMTP server hostname.
+    pub host: String,
+    /// SMTP server port (465 for implicit TLS, 587 for STARTTLS).
+    #[serde(default = "default_smtp_port")]
+    pub port: u16,
+    /// SMTP username.
+    pub username: String,
+    /// Env var name holding the SMTP password.
+    ///
+    /// Deprecated: the SMTP password is now read first from
+    /// `{data_dir}/smtp_secret.json` (via [`crate::smtp_secret_store::SmtpSecretStore`]).
+    /// This env var remains as a backwards-compatible fallback when the file
+    /// store is absent. New installs should not depend on it.
+    pub password_env: String,
+    /// Sender email address.
+    pub from_address: String,
+}
+
+fn default_smtp_port() -> u16 {
+    465
+}
+
+/// Dashboard authentication configuration.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DashboardAuthConfig {
+    /// SMTP configuration for sending OTP emails. Optional so a partial
+    /// `dashboard_auth` block (e.g. `{"allow_self_registration": true}`
+    /// with no SMTP yet — the wizard's mid-setup state, or
+    /// cloud-host-deploy.sh's "SMTP disabled" leftover) parses cleanly
+    /// instead of crashing on startup. `None` here is functionally the
+    /// same as no `dashboard_auth.smtp` at all: OTP delivery falls
+    /// through to the console-log path, and the wizard surfaces the
+    /// "SMTP not configured" warning.
+    #[serde(default)]
+    pub smtp: Option<SmtpConfig>,
+    /// Session expiry in hours.
+    #[serde(default = "default_session_hours")]
+    pub session_expiry_hours: u64,
+    /// Whether to allow self-registration (unknown emails auto-create users).
+    #[serde(default)]
+    pub allow_self_registration: bool,
+    /// Static tokens that bypass OTP verification (for E2E testing).
+    /// When a verify request's code matches a static token, authentication
+    /// succeeds immediately without sending or checking an OTP.
+    #[serde(default)]
+    pub static_tokens: Vec<String>,
+}
+
+fn default_session_hours() -> u64 {
+    24
+}
+
+struct PendingOtp {
+    code: String,
+    created_at: DateTime<Utc>,
+    attempts: u32,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ActiveSession {
+    pub user_id: String,
+    pub role: UserRole,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TestEmail {
+    pub to: String,
+    pub subject: String,
+    pub html: String,
+}
+
+/// `(candidate_id, authorized_for_candidate) -> taken`. See
+/// [`AuthManager::with_id_taken_probe`].
+pub type IdTakenProbe = Arc<dyn Fn(&str, bool) -> bool + Send + Sync>;
+
+/// OTP and session manager with optional disk persistence.
+pub struct AuthManager {
+    pending_otps: RwLock<HashMap<String, PendingOtp>>,
+    sessions: RwLock<HashMap<String, ActiveSession>>,
+    smtp_config: RwLock<Option<SmtpConfig>>,
+    /// Pre-resolved SMTP password from the selected profile email settings or
+    /// keychain. Preferred over process env so stale launch env cannot shadow
+    /// dashboard-configured SMTP credentials.
+    smtp_password: Option<String>,
+    session_expiry_hours: u64,
+    /// Whether unknown emails auto-register on first OTP verify. Stored as
+    /// AtomicBool so the admin SMTP-save endpoint can flip it without a
+    /// server restart (matches the hot-reload behaviour of `smtp_config`).
+    /// Read via `allow_self_registration()`, write via
+    /// `set_allow_self_registration()`.
+    allow_self_registration_flag: AtomicBool,
+    /// Static tokens that bypass OTP (for E2E testing).
+    pub static_tokens: Vec<String>,
+    user_store: Arc<UserStore>,
+    /// Optional probe for registration ids that are taken OUTSIDE the
+    /// user store — `(candidate, authorized_for_candidate) -> taken`.
+    /// The serve bootstrap wires this to
+    /// `ProfileStore::id_reserved_for_registration`, so a generated id
+    /// can never claim an admin-created (but unclaimed) profile:
+    /// /api/auth/verify treats an existing profile under the new
+    /// user's id as that user's own (codex #1613 r6). The `authorized`
+    /// flag is true ONLY for the exact allowlist-derived id (suffix
+    /// candidates from collisions carry no authorization — r8 P1),
+    /// and even then the store keeps unloadable records reserved so a
+    /// claim can't clobber a corrupt profile file (r8 P2). `None`
+    /// (tests, solo) checks the user store only.
+    id_taken_probe: Option<IdTakenProbe>,
+    /// Path to persist sessions. `None` = in-memory only (tests).
+    sessions_path: Option<PathBuf>,
+    /// Data directory used to load the SMTP password from `smtp_secret.json`.
+    data_dir: Option<PathBuf>,
+    #[cfg(test)]
+    sent_emails: RwLock<Vec<TestEmail>>,
+}
+
+impl AuthManager {
+    pub fn new(config: Option<DashboardAuthConfig>, user_store: Arc<UserStore>) -> Self {
+        let (smtp_config, session_expiry_hours, allow_self_registration, static_tokens) =
+            match config {
+                Some(c) => (
+                    c.smtp,
+                    c.session_expiry_hours,
+                    c.allow_self_registration,
+                    c.static_tokens,
+                ),
+                None => (None, 24, false, Vec::new()),
+            };
+        Self {
+            pending_otps: RwLock::new(HashMap::new()),
+            sessions: RwLock::new(HashMap::new()),
+            smtp_config: RwLock::new(smtp_config),
+            smtp_password: None,
+            session_expiry_hours,
+            allow_self_registration_flag: AtomicBool::new(allow_self_registration),
+            static_tokens,
+            user_store,
+            sessions_path: None,
+            data_dir: None,
+            id_taken_probe: None,
+            #[cfg(test)]
+            sent_emails: RwLock::new(Vec::new()),
+        }
+    }
+
+    /// Attach a data directory so the manager can resolve the SMTP password
+    /// from `{data_dir}/smtp_secret.json` in preference to the env var.
+    pub fn with_data_dir(mut self, data_dir: PathBuf) -> Self {
+        self.data_dir = Some(data_dir);
+        self
+    }
+
+    /// Attach the external id-taken probe used by registration id
+    /// generation (see the field docs — codex #1613 r6/r8).
+    pub fn with_id_taken_probe(mut self, probe: IdTakenProbe) -> Self {
+        self.id_taken_probe = Some(probe);
+        self
+    }
+
+    /// Set an explicit SMTP password (resolved from profile email settings or
+    /// keychain). Used as fallback when neither the file store nor the process
+    /// environment has the password.
+    pub fn with_smtp_password(mut self, password: String) -> Self {
+        self.smtp_password = Some(password);
+        self
+    }
+
+    fn resolved_smtp_password(&self, smtp: &SmtpConfig) -> Option<String> {
+        resolve_smtp_password(self.smtp_password.as_deref(), &smtp.password_env, |name| {
+            std::env::var(name).ok()
+        })
+    }
+
+    /// Set the path for session persistence and load any existing sessions.
+    pub fn with_sessions_path(mut self, path: PathBuf) -> Self {
+        if let Ok(data) = std::fs::read_to_string(&path) {
+            if let Ok(saved) = serde_json::from_str::<HashMap<String, ActiveSession>>(&data) {
+                let now = Utc::now();
+                let active: HashMap<String, ActiveSession> = saved
+                    .into_iter()
+                    .filter(|(_, s)| now < s.expires_at)
+                    .collect();
+                let count = active.len();
+                self.sessions = RwLock::new(active);
+                tracing::info!(count, path = %path.display(), "restored persisted sessions");
+            }
+        }
+        self.sessions_path = Some(path);
+        self
+    }
+
+    #[cfg(test)]
+    pub async fn test_sent_emails(&self) -> Vec<TestEmail> {
+        self.sent_emails.read().await.clone()
+    }
+
+    #[cfg(test)]
+    pub async fn test_pending_code(&self, email: &str, user_id: Option<&str>) -> Option<String> {
+        let key = Self::otp_key(&email.to_lowercase(), user_id);
+        self.pending_otps
+            .read()
+            .await
+            .get(&key)
+            .map(|otp| otp.code.clone())
+    }
+
+    /// Persist current sessions to disk (best-effort).
+    fn persist_sessions_blocking(sessions: &HashMap<String, ActiveSession>, path: &PathBuf) {
+        if let Ok(data) = serde_json::to_string(sessions) {
+            let _ = std::fs::write(path, data);
+        }
+    }
+
+    fn otp_key(email: &str, user_id: Option<&str>) -> String {
+        match user_id {
+            Some(user_id) => format!("{email}::{user_id}"),
+            None => email.to_string(),
+        }
+    }
+
+    async fn store_pending_otp(&self, otp_key: &str) -> Result<bool> {
+        let now = Utc::now();
+        let code = generate_otp_code();
+        let mut otps = self.pending_otps.write().await;
+        if let Some(existing) = otps.get(otp_key) {
+            let elapsed = now.signed_duration_since(existing.created_at);
+            if elapsed < Duration::seconds(60) {
+                return Ok(false);
+            }
+        }
+        otps.insert(
+            otp_key.to_string(),
+            PendingOtp {
+                code,
+                created_at: now,
+                attempts: 0,
+            },
+        );
+        Ok(true)
+    }
+
+    async fn verify_pending_otp(&self, otp_key: &str, code: &str) -> Result<bool> {
+        let now = Utc::now();
+        let valid = {
+            let mut otps = self.pending_otps.write().await;
+            let otp = match otps.get_mut(otp_key) {
+                Some(otp) => otp,
+                None => return Ok(false),
+            };
+
+            if now.signed_duration_since(otp.created_at) > Duration::minutes(5) {
+                otps.remove(otp_key);
+                return Ok(false);
+            }
+
+            otp.attempts += 1;
+            if otp.attempts > 3 {
+                otps.remove(otp_key);
+                return Ok(false);
+            }
+
+            let code_matches = constant_time_eq(code.as_bytes(), otp.code.as_bytes());
+            if code_matches {
+                otps.remove(otp_key);
+            }
+            code_matches
+        };
+
+        Ok(valid)
+    }
+
+    /// Send an arbitrary HTML email through the configured SMTP transport.
+    ///
+    /// Returns `Ok(true)` when an email was sent, `Ok(false)` when SMTP is not
+    /// configured and the email was intentionally skipped.
+    pub async fn send_html_email(&self, email: &str, subject: &str, html: &str) -> Result<bool> {
+        let smtp = self.smtp_config.read().await.clone();
+        let Some(smtp) = smtp else {
+            tracing::warn!(email = %email, subject = %subject, "email skipped — no SMTP configured");
+            return Ok(false);
+        };
+
+        self.deliver_html_email(&smtp, email, subject, html).await?;
+        Ok(true)
+    }
+
+    /// Replace the in-memory SMTP config (used by the admin settings endpoint
+    /// after writing new values to disk). Pass `None` to clear.
+    pub async fn set_smtp_config(&self, cfg: Option<SmtpConfig>) {
+        *self.smtp_config.write().await = cfg;
+    }
+
+    /// Whether SMTP delivery is currently usable. Returns true only when a
+    /// host is set; password presence is checked at send time. Used by
+    /// auth/status to drive `email_login_enabled` honestly and by send_code
+    /// to short-circuit with a server-state error when SMTP isn't configured
+    /// (vs. silently logging the OTP to the server console).
+    pub async fn smtp_configured(&self) -> bool {
+        match &*self.smtp_config.read().await {
+            Some(cfg) => !cfg.host.trim().is_empty(),
+            None => false,
+        }
+    }
+
+    /// Read the current `allow_self_registration` flag. Used by send_code,
+    /// verify, and auth_status to decide whether unknown emails can
+    /// auto-register.
+    pub fn allow_self_registration(&self) -> bool {
+        self.allow_self_registration_flag.load(Ordering::Relaxed)
+    }
+
+    /// Live-update the `allow_self_registration` flag (admin save path).
+    /// Takes effect immediately; no `octos serve` restart required.
+    pub fn set_allow_self_registration(&self, value: bool) {
+        self.allow_self_registration_flag
+            .store(value, Ordering::Relaxed);
+    }
+
+    /// Generate and send OTP to email. Returns Ok(true) if sent, Ok(false) if rate-limited.
+    pub async fn send_otp(&self, email: &str) -> Result<bool> {
+        self.send_otp_with_registration(email, self.allow_self_registration())
+            .await
+    }
+
+    pub async fn send_otp_with_registration(
+        &self,
+        email: &str,
+        allow_registration: bool,
+    ) -> Result<bool> {
+        let email_lower = email.to_lowercase();
+
+        if !allow_registration {
+            let user = self.user_store.get_by_email(&email_lower)?;
+            if user.is_none() {
+                tracing::warn!(email = %email_lower, "OTP skipped — user not found and self-registration is disabled");
+                return Ok(true);
+            }
+        }
+
+        let otp_key = Self::otp_key(&email_lower, None);
+        let should_send = self.store_pending_otp(&otp_key).await?;
+        if !should_send {
+            return Ok(false);
+        }
+
+        let smtp = self.smtp_config.read().await.clone();
+        if let Some(smtp) = smtp {
+            let code = {
+                let otps = self.pending_otps.read().await;
+                otps.get(&otp_key).map(|otp| otp.code.clone())
+            };
+            if let Some(code) = code {
+                if let Err(e) = self.send_otp_email(&smtp, &email_lower, &code).await {
+                    let mut otps = self.pending_otps.write().await;
+                    otps.remove(&otp_key);
+                    return Err(e);
+                }
+            } else {
+                let mut otps = self.pending_otps.write().await;
+                otps.remove(&otp_key);
+                bail!("pending OTP missing before email send");
+            }
+        } else {
+            let code = {
+                let otps = self.pending_otps.read().await;
+                otps.get(&otp_key)
+                    .map(|otp| otp.code.clone())
+                    .unwrap_or_default()
+            };
+            tracing::debug!(email = %email_lower, code = %code, "OTP code (no SMTP configured) — configure dashboard_auth.smtp to send emails");
+            tracing::warn!(email = %email_lower, "OTP generated (code redacted, enable debug logging to see) — configure dashboard_auth.smtp to send emails");
+        }
+
+        Ok(true)
+    }
+
+    pub async fn send_otp_for_user(&self, email: &str, user_id: &str) -> Result<bool> {
+        let email_lower = email.to_lowercase();
+        let user = self
+            .user_store
+            .get(user_id)?
+            .ok_or_else(|| eyre::eyre!("user '{user_id}' not found"))?;
+        if user.email.to_lowercase() != email_lower {
+            bail!("email '{email_lower}' is not registered to user '{user_id}'");
+        }
+
+        let otp_key = Self::otp_key(&email_lower, Some(user_id));
+        let should_send = self.store_pending_otp(&otp_key).await?;
+        if !should_send {
+            return Ok(false);
+        }
+
+        let smtp = self.smtp_config.read().await.clone();
+        if let Some(smtp) = smtp {
+            let code = {
+                let otps = self.pending_otps.read().await;
+                otps.get(&otp_key).map(|otp| otp.code.clone())
+            };
+            if let Some(code) = code {
+                if let Err(e) = self.send_otp_email(&smtp, &email_lower, &code).await {
+                    let mut otps = self.pending_otps.write().await;
+                    otps.remove(&otp_key);
+                    return Err(e);
+                }
+            } else {
+                let mut otps = self.pending_otps.write().await;
+                otps.remove(&otp_key);
+                bail!("pending OTP missing before email send");
+            }
+        } else {
+            let code = {
+                let otps = self.pending_otps.read().await;
+                otps.get(&otp_key)
+                    .map(|otp| otp.code.clone())
+                    .unwrap_or_default()
+            };
+            tracing::debug!(email = %email_lower, user_id = %user_id, code = %code, "OTP code (no SMTP configured) — configure dashboard_auth.smtp to send emails");
+            tracing::warn!(email = %email_lower, user_id = %user_id, "OTP generated (code redacted, enable debug logging to see) — configure dashboard_auth.smtp to send emails");
+        }
+
+        Ok(true)
+    }
+
+    /// Verify OTP code. Returns session token on success.
+    /// Check if a code is a static token (bypasses OTP for E2E testing).
+    pub fn is_static_token(&self, code: &str) -> bool {
+        self.static_tokens
+            .iter()
+            .any(|t| !t.is_empty() && t == code)
+    }
+
+    pub async fn verify_otp(&self, email: &str, code: &str) -> Result<Option<String>> {
+        self.verify_otp_with_registration(email, code, self.allow_self_registration())
+            .await
+    }
+
+    /// Verify with ANONYMOUS registration semantics: a generated id
+    /// must not claim an existing-but-unclaimed profile (the
+    /// `id_taken_probe` applies — codex #1613 r6).
+    pub async fn verify_otp_with_registration(
+        &self,
+        email: &str,
+        code: &str,
+        allow_registration: bool,
+    ) -> Result<Option<String>> {
+        self.verify_otp_registration_inner(email, code, allow_registration, false)
+            .await
+    }
+
+    /// Verify with AUTHORIZED-CLAIM semantics (codex #1613 r7 P1): the
+    /// caller has explicit provenance — an allowlist entry — that this
+    /// email is entitled to its derived id, so an existing unclaimed
+    /// profile under that id is the invitee's pre-provisioned profile,
+    /// not a squat target. The profile probe is skipped; user-row
+    /// collisions still advance the suffix (a user row means the id
+    /// belongs to a DIFFERENT account).
+    pub async fn verify_otp_with_authorized_claim(
+        &self,
+        email: &str,
+        code: &str,
+    ) -> Result<Option<String>> {
+        self.verify_otp_registration_inner(email, code, true, true)
+            .await
+    }
+
+    async fn verify_otp_registration_inner(
+        &self,
+        email: &str,
+        code: &str,
+        allow_registration: bool,
+        authorized_claim: bool,
+    ) -> Result<Option<String>> {
+        let email_lower = email.to_lowercase();
+        let now = Utc::now();
+
+        // Static tokens bypass OTP verification entirely (E2E testing).
+        let is_static = self.is_static_token(code);
+
+        if !is_static
+            && !self
+                .verify_pending_otp(&Self::otp_key(&email_lower, None), code)
+                .await?
+        {
+            return Ok(None);
+        }
+
+        let user = self.user_store.get_by_email(&email_lower)?;
+        let user = match user {
+            Some(u) => u,
+            None => {
+                if !allow_registration {
+                    bail!("no account found for this email");
+                }
+                let id = crate::user_store::email_to_user_id(&email_lower);
+                let mut final_id = id.clone();
+                let mut suffix = 1u32;
+                // A candidate is taken when a user row exists OR the
+                // bootstrap probe says the id is occupied elsewhere (a
+                // profile file on disk): self-registration must never
+                // claim an admin-created-but-unclaimed profile, or
+                // /api/auth/verify hands the existing profile to the
+                // new user (codex #1613 r6). Allowlist provenance
+                // authorizes claiming ONLY the exact derived id — an
+                // invitee keeps their pre-provisioned profile (r7 P1)
+                // — but a suffix candidate minted after a collision
+                // carries no such authorization, or the invitee would
+                // silently absorb some OTHER unclaimed profile
+                // (`alice-1`, r8 P1). The probe itself still reserves
+                // unloadable records even for authorized claims
+                // (r8 P2 — see id_reserved_for_registration).
+                loop {
+                    let user_taken = self.user_store.get(&final_id)?.is_some();
+                    let candidate_authorized = authorized_claim && final_id == id;
+                    let probe_taken = self
+                        .id_taken_probe
+                        .as_ref()
+                        .is_some_and(|probe| probe(&final_id, candidate_authorized));
+                    if !user_taken && !probe_taken {
+                        break;
+                    }
+                    // Reserve room for `-N` within the 63-char slug
+                    // budget (matching email_to_user_id's own cap): a
+                    // 63-char base id would otherwise mint a 65-char
+                    // candidate that validate_user_id rejects, failing
+                    // a VALID OTP with a generic error (codex #1613
+                    // r7 P2). Trailing hyphens from the cut are
+                    // trimmed so the candidate stays slug-shaped.
+                    let suffix_str = suffix.to_string();
+                    let max_base = 63usize.saturating_sub(suffix_str.len() + 1);
+                    let base: String = id.chars().take(max_base).collect();
+                    let base = base.trim_end_matches('-');
+                    final_id = format!("{base}-{suffix_str}");
+                    suffix += 1;
+                }
+                let new_user = crate::user_store::User {
+                    id: final_id,
+                    email: email_lower.clone(),
+                    name: email_lower.split('@').next().unwrap_or("User").to_string(),
+                    role: UserRole::User,
+                    created_at: now,
+                    last_login_at: Some(now),
+                };
+                self.user_store.save(&new_user)?;
+                new_user
+            }
+        };
+
+        let mut updated_user = user.clone();
+        updated_user.last_login_at = Some(now);
+        self.user_store.save(&updated_user)?;
+
+        let token = generate_session_token();
+        let session = ActiveSession {
+            user_id: user.id.clone(),
+            role: user.role.clone(),
+            created_at: now,
+            expires_at: now + Duration::hours(self.session_expiry_hours as i64),
+        };
+
+        {
+            let mut sessions = self.sessions.write().await;
+            sessions.insert(token.clone(), session);
+            if let Some(ref path) = self.sessions_path {
+                Self::persist_sessions_blocking(&sessions, path);
+            }
+        }
+
+        Ok(Some(token))
+    }
+
+    pub async fn verify_otp_for_user(
+        &self,
+        email: &str,
+        code: &str,
+        user_id: &str,
+    ) -> Result<Option<String>> {
+        let email_lower = email.to_lowercase();
+        let is_static = self.is_static_token(code);
+        let otp_key = Self::otp_key(&email_lower, Some(user_id));
+        if !is_static && !self.verify_pending_otp(&otp_key, code).await? {
+            return Ok(None);
+        }
+
+        let now = Utc::now();
+        let user = self
+            .user_store
+            .get(user_id)?
+            .ok_or_else(|| eyre::eyre!("user '{user_id}' not found"))?;
+        if user.email.to_lowercase() != email_lower {
+            bail!("email '{email_lower}' is not registered to user '{user_id}'");
+        }
+
+        let mut updated_user = user.clone();
+        updated_user.last_login_at = Some(now);
+        self.user_store.save(&updated_user)?;
+
+        let token = generate_session_token();
+        let session = ActiveSession {
+            user_id: user.id.clone(),
+            role: user.role.clone(),
+            created_at: now,
+            expires_at: now + Duration::hours(self.session_expiry_hours as i64),
+        };
+
+        {
+            let mut sessions = self.sessions.write().await;
+            sessions.insert(token.clone(), session);
+            if let Some(ref path) = self.sessions_path {
+                Self::persist_sessions_blocking(&sessions, path);
+            }
+        }
+
+        Ok(Some(token))
+    }
+
+    /// Mint a session token for a known user WITHOUT an OTP challenge.
+    ///
+    /// This backs the loopback-only solo (no-password) login path. It performs
+    /// NO authorization of its own — the caller is responsible for gating
+    /// (`deployment_mode == Local` AND a loopback peer). Treat a call to this
+    /// as "the caller has already proven this is a local solo box."
+    ///
+    /// `user_id`/`role` are recorded on the session as-is; `validate_session`
+    /// later re-reads the live role from the user store, so a stale role here
+    /// cannot escalate privileges.
+    pub async fn create_session_for_user(&self, user_id: &str, role: UserRole) -> Result<String> {
+        let now = Utc::now();
+        // Record the login on the user, matching the OTP paths, so admin /
+        // user audit views show an accurate last_login_at after a solo login.
+        if let Some(mut user) = self.user_store.get(user_id)? {
+            user.last_login_at = Some(now);
+            self.user_store.save(&user)?;
+        }
+        let token = generate_session_token();
+        let session = ActiveSession {
+            user_id: user_id.to_owned(),
+            role,
+            created_at: now,
+            expires_at: now + Duration::hours(self.session_expiry_hours as i64),
+        };
+
+        {
+            let mut sessions = self.sessions.write().await;
+            sessions.insert(token.clone(), session);
+            if let Some(ref path) = self.sessions_path {
+                Self::persist_sessions_blocking(&sessions, path);
+            }
+        }
+
+        Ok(token)
+    }
+
+    /// Validate a session token. Returns (user_id, role) if valid.
+    /// Re-reads user role from disk to reflect role changes / deletions.
+    pub async fn validate_session(&self, token: &str) -> Option<(String, UserRole)> {
+        let user_id = {
+            let sessions = self.sessions.read().await;
+            let session = sessions.get(token)?;
+            if Utc::now() > session.expires_at {
+                drop(sessions);
+                // Eagerly remove expired session
+                let mut sessions = self.sessions.write().await;
+                sessions.remove(token);
+                if let Some(ref path) = self.sessions_path {
+                    Self::persist_sessions_blocking(&sessions, path);
+                }
+                return None;
+            }
+            session.user_id.clone()
+        };
+
+        // Re-check that user still exists and get current role
+        match self.user_store.get(&user_id) {
+            Ok(Some(user)) => Some((user.id, user.role)),
+            _ => {
+                // User deleted — revoke session
+                let mut sessions = self.sessions.write().await;
+                sessions.remove(token);
+                None
+            }
+        }
+    }
+
+    /// Revoke a session token.
+    pub async fn revoke_session(&self, token: &str) {
+        let mut sessions = self.sessions.write().await;
+        sessions.remove(token);
+        if let Some(ref path) = self.sessions_path {
+            Self::persist_sessions_blocking(&sessions, path);
+        }
+    }
+
+    /// Clean up expired OTPs and sessions.
+    pub async fn cleanup(&self) {
+        let now = Utc::now();
+
+        {
+            let mut otps = self.pending_otps.write().await;
+            otps.retain(|_, otp| now.signed_duration_since(otp.created_at) < Duration::minutes(10));
+        }
+
+        {
+            let mut sessions = self.sessions.write().await;
+            let before = sessions.len();
+            sessions.retain(|_, session| now < session.expires_at);
+            if sessions.len() != before {
+                if let Some(ref path) = self.sessions_path {
+                    Self::persist_sessions_blocking(&sessions, path);
+                }
+            }
+        }
+    }
+
+    /// Send OTP email via SMTP.
+    #[cfg(feature = "api")]
+    async fn send_otp_email(&self, smtp: &SmtpConfig, email: &str, code: &str) -> Result<()> {
+        let html = format!(
+            r#"<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 480px; margin: 0 auto; padding: 40px 20px;">
+                    <h2 style="color: #1a1a2e; margin-bottom: 8px;">octos Login</h2>
+                    <p style="color: #666; margin-bottom: 24px;">Use this code to sign in. It expires in 5 minutes.</p>
+                    <div style="background: #f5f5f5; border-radius: 8px; padding: 24px; text-align: center; margin-bottom: 24px;">
+                        <span style="font-size: 32px; font-weight: bold; letter-spacing: 8px; color: #1a1a2e;">{code}</span>
+                    </div>
+                    <p style="color: #999; font-size: 12px;">If you didn't request this code, you can safely ignore this email.</p>
+                </div>"#
+        );
+        self.deliver_html_email(smtp, email, "Your octos login code", &html)
+            .await
+    }
+
+    #[cfg(all(feature = "api", test))]
+    async fn deliver_html_email(
+        &self,
+        _smtp: &SmtpConfig,
+        email: &str,
+        subject: &str,
+        html: &str,
+    ) -> Result<()> {
+        self.sent_emails.write().await.push(TestEmail {
+            to: email.to_string(),
+            subject: subject.to_string(),
+            html: html.to_string(),
+        });
+        Ok(())
+    }
+
+    #[cfg(all(feature = "api", not(test)))]
+    async fn deliver_html_email(
+        &self,
+        smtp: &SmtpConfig,
+        email: &str,
+        subject: &str,
+        html: &str,
+    ) -> Result<()> {
+        use lettre::message::header::ContentType;
+        use lettre::transport::smtp::authentication::Credentials;
+        use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
+
+        let password = self
+            .data_dir
+            .as_deref()
+            .and_then(|dir| {
+                crate::smtp_secret_store::SmtpSecretStore::new(dir)
+                    .load()
+                    .unwrap_or_else(|e| {
+                        tracing::warn!(error = %e, "failed to read smtp_secret.json; falling back to other sources");
+                        None
+                    })
+            })
+            .or_else(|| self.resolved_smtp_password(smtp))
+            .ok_or_else(|| {
+                eyre::eyre!(
+                    "SMTP password not found in smtp_secret.json, env var '{}', or profile env_vars",
+                    smtp.password_env,
+                )
+            })?;
+
+        let email_msg = Message::builder()
+            .from(
+                smtp.from_address
+                    .parse()
+                    .map_err(|e| eyre::eyre!("invalid from address: {e}"))?,
+            )
+            .to(email
+                .parse()
+                .map_err(|e| eyre::eyre!("invalid to address: {e}"))?)
+            .subject(subject)
+            .header(ContentType::TEXT_HTML)
+            .body(html.to_string())
+            .map_err(|e| eyre::eyre!("failed to build email: {e}"))?;
+
+        let creds = Credentials::new(smtp.username.clone(), password);
+
+        let mailer = if smtp.port == 465 {
+            AsyncSmtpTransport::<Tokio1Executor>::relay(&smtp.host)
+                .map_err(|e| eyre::eyre!("SMTP relay error: {e}"))?
+                .credentials(creds)
+                .build()
+        } else {
+            AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&smtp.host)
+                .map_err(|e| eyre::eyre!("SMTP STARTTLS error: {e}"))?
+                .credentials(creds)
+                .build()
+        };
+
+        mailer
+            .send(email_msg)
+            .await
+            .map_err(|e| eyre::eyre!("failed to send email: {e}"))?;
+        tracing::info!(email = %email, subject = %subject, "email sent");
+        Ok(())
+    }
+
+    #[cfg(not(feature = "api"))]
+    async fn send_otp_email(&self, _smtp: &SmtpConfig, email: &str, _code: &str) -> Result<()> {
+        tracing::info!(email = %email, "OTP sent (code redacted, lettre not available)");
+        Ok(())
+    }
+
+    #[cfg(not(feature = "api"))]
+    async fn deliver_html_email(
+        &self,
+        _smtp: &SmtpConfig,
+        email: &str,
+        subject: &str,
+        _html: &str,
+    ) -> Result<()> {
+        tracing::info!(email = %email, subject = %subject, "email sent (content redacted, lettre not available)");
+        Ok(())
+    }
+}
+
+fn non_empty_secret(value: String) -> Option<String> {
+    if value.trim().is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn resolve_smtp_password(
+    profile_password: Option<&str>,
+    password_env: &str,
+    get_env: impl FnOnce(&str) -> Option<String>,
+) -> Option<String> {
+    profile_password
+        .map(str::to_string)
+        .and_then(non_empty_secret)
+        .or_else(|| get_env(password_env).and_then(non_empty_secret))
+}
+
+/// Generate a 6-digit numeric OTP code.
+#[cfg(feature = "api")]
+fn generate_otp_code() -> String {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    let code: u32 = rng.gen_range(100_000..1_000_000);
+    format!("{code:06}")
+}
+
+#[cfg(not(feature = "api"))]
+fn generate_otp_code() -> String {
+    // Deterministic fallback — OTP is only meaningful with the API server.
+    "000000".to_string()
+}
+
+/// Generate a 32-byte hex session token.
+#[cfg(feature = "api")]
+fn generate_session_token() -> String {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    let mut bytes = [0u8; 32];
+    rng.fill(&mut bytes);
+    hex_encode(&bytes)
+}
+
+#[cfg(not(feature = "api"))]
+fn generate_session_token() -> String {
+    // Deterministic fallback — sessions are only meaningful with the API server.
+    hex_encode(&[0u8; 32])
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+/// Constant-time byte comparison (no length leak).
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    let len_eq = a.len() ^ b.len();
+    let mut result = 0u8;
+    // Always iterate over both, using modular index to avoid early exit
+    for i in 0..a.len().max(b.len()) {
+        let x = a.get(i).copied().unwrap_or(0);
+        let y = b.get(i).copied().unwrap_or(0);
+        result |= x ^ y;
+    }
+    result == 0 && len_eq == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg(feature = "api")]
+    fn test_generate_otp_code() {
+        let code = generate_otp_code();
+        assert_eq!(code.len(), 6);
+        assert!(code.chars().all(|c| c.is_ascii_digit()));
+        let n: u32 = code.parse().unwrap();
+        assert!((100_000..1_000_000).contains(&n));
+    }
+
+    #[test]
+    #[cfg(feature = "api")]
+    fn test_generate_session_token() {
+        let token = generate_session_token();
+        assert_eq!(token.len(), 64);
+        assert!(token.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_constant_time_eq() {
+        assert!(constant_time_eq(b"123456", b"123456"));
+        assert!(!constant_time_eq(b"123456", b"654321"));
+        assert!(!constant_time_eq(b"short", b"longer"));
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn test_hex_encode() {
+        assert_eq!(hex_encode(&[0x00, 0xff, 0x42]), "00ff42");
+    }
+
+    #[test]
+    fn test_smtp_password_resolution_prefers_profile_secret() {
+        let password = resolve_smtp_password(Some("profile-secret"), "SMTP_PASSWORD", |_| {
+            Some("stale-process-secret".to_string())
+        });
+        assert_eq!(password.as_deref(), Some("profile-secret"));
+    }
+
+    #[test]
+    fn test_smtp_password_resolution_ignores_empty_profile_secret() {
+        let password = resolve_smtp_password(Some("   "), "SMTP_PASSWORD", |_| {
+            Some("process-secret".to_string())
+        });
+        assert_eq!(password.as_deref(), Some("process-secret"));
+    }
+
+    #[test]
+    fn test_smtp_password_resolution_ignores_empty_process_env() {
+        let password = resolve_smtp_password(None, "SMTP_PASSWORD", |_| Some(String::new()));
+        assert!(password.is_none());
+    }
+
+    #[test]
+    fn test_auth_manager_uses_profile_smtp_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let user_store = Arc::new(UserStore::open(dir.path()).unwrap());
+        let smtp = SmtpConfig {
+            host: "smtp.gmail.com".into(),
+            port: 587,
+            username: "dspfac@gmail.com".into(),
+            password_env: "SMTP_PASSWORD".into(),
+            from_address: "dspfac@gmail.com".into(),
+        };
+        let mgr = AuthManager::new(
+            Some(DashboardAuthConfig {
+                smtp: Some(smtp.clone()),
+                session_expiry_hours: 24,
+                allow_self_registration: false,
+                static_tokens: Vec::new(),
+            }),
+            user_store,
+        )
+        .with_smtp_password("profile-secret".into());
+
+        assert_eq!(
+            mgr.resolved_smtp_password(&smtp).as_deref(),
+            Some("profile-secret"),
+        );
+    }
+
+    #[tokio::test]
+    async fn test_otp_flow() {
+        let dir = tempfile::tempdir().unwrap();
+        let user_store = Arc::new(UserStore::open(dir.path()).unwrap());
+
+        // Create a user first
+        let user = crate::user_store::User {
+            id: "alice".into(),
+            email: "alice@example.com".into(),
+            name: "Alice".into(),
+            role: UserRole::User,
+            created_at: Utc::now(),
+            last_login_at: None,
+        };
+        user_store.save(&user).unwrap();
+
+        let mgr = AuthManager::new(None, user_store);
+
+        // Send OTP (no SMTP, logs to console)
+        assert!(mgr.send_otp("alice@example.com").await.unwrap());
+
+        // Get the code from pending_otps
+        let code = {
+            let otps = mgr.pending_otps.read().await;
+            otps.get("alice@example.com").unwrap().code.clone()
+        };
+
+        // Wrong code
+        assert!(
+            mgr.verify_otp("alice@example.com", "000000")
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        // Correct code
+        let token = mgr.verify_otp("alice@example.com", &code).await.unwrap();
+        assert!(token.is_some());
+
+        // Validate session
+        let token = token.unwrap();
+        let (user_id, role) = mgr.validate_session(&token).await.unwrap();
+        assert_eq!(user_id, "alice");
+        assert_eq!(role, UserRole::User);
+
+        // Revoke
+        mgr.revoke_session(&token).await;
+        assert!(mgr.validate_session(&token).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn create_session_for_user_mints_validatable_session() {
+        // The solo (no-password) login path mints a session directly, with
+        // no OTP exchange. The minted token must validate exactly like an
+        // OTP-issued one so the rest of the auth pipeline is unchanged.
+        let dir = tempfile::tempdir().unwrap();
+        let user_store = Arc::new(UserStore::open(dir.path()).unwrap());
+        user_store
+            .save(&crate::user_store::User {
+                id: "ada".into(),
+                email: "ada@example.com".into(),
+                name: "Ada".into(),
+                role: UserRole::Admin,
+                created_at: Utc::now(),
+                last_login_at: None,
+            })
+            .unwrap();
+
+        let mgr = AuthManager::new(None, user_store);
+        let token = mgr
+            .create_session_for_user("ada", UserRole::Admin)
+            .await
+            .unwrap();
+
+        let (user_id, role) = mgr.validate_session(&token).await.unwrap();
+        assert_eq!(user_id, "ada");
+        assert_eq!(role, UserRole::Admin);
+    }
+
+    #[tokio::test]
+    async fn test_otp_rate_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let user_store = Arc::new(UserStore::open(dir.path()).unwrap());
+        let user = crate::user_store::User {
+            id: "bob".into(),
+            email: "bob@test.com".into(),
+            name: "Bob".into(),
+            role: UserRole::User,
+            created_at: Utc::now(),
+            last_login_at: None,
+        };
+        user_store.save(&user).unwrap();
+
+        let mgr = AuthManager::new(None, user_store);
+
+        // First send succeeds
+        assert!(mgr.send_otp("bob@test.com").await.unwrap());
+        // Second send within 60s is rate-limited
+        assert!(!mgr.send_otp("bob@test.com").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_otp_max_attempts() {
+        let dir = tempfile::tempdir().unwrap();
+        let user_store = Arc::new(UserStore::open(dir.path()).unwrap());
+        let user = crate::user_store::User {
+            id: "carol".into(),
+            email: "carol@test.com".into(),
+            name: "Carol".into(),
+            role: UserRole::User,
+            created_at: Utc::now(),
+            last_login_at: None,
+        };
+        user_store.save(&user).unwrap();
+
+        let mgr = AuthManager::new(None, user_store);
+        mgr.send_otp("carol@test.com").await.unwrap();
+
+        // Use wrong code 3 times
+        for _ in 0..3 {
+            assert!(
+                mgr.verify_otp("carol@test.com", "000000")
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        // 4th attempt fails (OTP removed after 3 attempts)
+        assert!(
+            mgr.verify_otp("carol@test.com", "000000")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_self_registration() {
+        let dir = tempfile::tempdir().unwrap();
+        let user_store = Arc::new(UserStore::open(dir.path()).unwrap());
+
+        // Use None for smtp to trigger dev mode (console log instead of email)
+        let mgr = AuthManager::new(None, user_store.clone());
+        mgr.set_allow_self_registration(true);
+        mgr.send_otp("newuser@example.com").await.unwrap();
+
+        let code = {
+            let otps = mgr.pending_otps.read().await;
+            otps.get("newuser@example.com").unwrap().code.clone()
+        };
+
+        let token = mgr.verify_otp("newuser@example.com", &code).await.unwrap();
+        assert!(token.is_some());
+
+        // User should have been auto-created
+        let user = user_store.get_by_email("newuser@example.com").unwrap();
+        assert!(user.is_some());
+        assert_eq!(user.unwrap().id, "newuser");
+    }
+
+    #[tokio::test]
+    async fn should_skip_probe_taken_ids_when_generating_registration_ids() {
+        // codex #1613 r6: the collision loop only consulted the USER
+        // store, so a generated id could claim an admin-created (but
+        // unclaimed) PROFILE: with self-registration on, api@… became
+        // user `api-user` (reserved-name disambiguation), and
+        // /api/auth/verify then treated the existing api-user profile
+        // as that user's own — granting an anonymous registrant an
+        // admin-provisioned profile. The serve bootstrap now wires a
+        // probe (profile-file existence); a probe-taken candidate
+        // advances to the next suffix.
+        let dir = tempfile::tempdir().unwrap();
+        let user_store = Arc::new(UserStore::open(dir.path()).unwrap());
+        let mgr = AuthManager::new(None, user_store.clone())
+            .with_id_taken_probe(Arc::new(|id: &str, _authorized: bool| id == "api-user"));
+        mgr.set_allow_self_registration(true);
+        mgr.send_otp("api@example.com").await.unwrap();
+        let code = {
+            let otps = mgr.pending_otps.read().await;
+            otps.get("api@example.com").unwrap().code.clone()
+        };
+
+        let token = mgr.verify_otp("api@example.com", &code).await.unwrap();
+        assert!(token.is_some());
+
+        let user = user_store
+            .get_by_email("api@example.com")
+            .unwrap()
+            .expect("registration must create a user");
+        assert_eq!(
+            user.id, "api-user-1",
+            "a probe-taken id (existing profile) must not be claimed"
+        );
+    }
+
+    #[tokio::test]
+    async fn should_let_authorized_claims_take_probe_taken_ids() {
+        // codex #1613 r7 P1: an admin pre-creates profile `alice` and
+        // allowlists alice@example.com. That flow routes through the
+        // registration path with ALLOWLIST provenance — the profile
+        // probe must NOT bump the invitee to `alice-1` (which would
+        // strand the pre-provisioned profile and record the allowlist
+        // claim under the wrong id). The probe guards ANONYMOUS
+        // self-registration only.
+        let dir = tempfile::tempdir().unwrap();
+        let user_store = Arc::new(UserStore::open(dir.path()).unwrap());
+        let mgr = AuthManager::new(None, user_store.clone()).with_id_taken_probe(Arc::new(
+            |id: &str, authorized: bool| {
+                // Loadable pre-provisioned profile: reserved from
+                // anonymous registration, claimable with allowlist
+                // authorization (mirrors id_reserved_for_registration).
+                id == "alice" && !authorized
+            },
+        ));
+        mgr.send_otp_with_registration("alice@example.com", true)
+            .await
+            .unwrap();
+        let code = {
+            let otps = mgr.pending_otps.read().await;
+            otps.get("alice@example.com").unwrap().code.clone()
+        };
+
+        let token = mgr
+            .verify_otp_with_authorized_claim("alice@example.com", &code)
+            .await
+            .unwrap();
+        assert!(token.is_some());
+        let user = user_store
+            .get_by_email("alice@example.com")
+            .unwrap()
+            .expect("allowlisted registration must create the user");
+        assert_eq!(
+            user.id, "alice",
+            "an authorized claim must keep the pre-provisioned id"
+        );
+    }
+
+    #[tokio::test]
+    async fn should_probe_suffix_candidates_even_for_authorized_claims() {
+        // codex #1613 r8 P1: allowlist authorization covers the exact
+        // DERIVED id only. When that id collides with another account's
+        // user row, the suffix candidates are ordinary generated ids —
+        // an unclaimed `alice-1` profile must not be silently absorbed
+        // by the invitee.
+        let dir = tempfile::tempdir().unwrap();
+        let user_store = Arc::new(UserStore::open(dir.path()).unwrap());
+        // `alice` belongs to a DIFFERENT account.
+        user_store
+            .save(&crate::user_store::User {
+                id: "alice".into(),
+                email: "other-alice@corp.example".into(),
+                name: "Other Alice".into(),
+                role: UserRole::User,
+                created_at: Utc::now(),
+                last_login_at: None,
+            })
+            .unwrap();
+        let mgr = AuthManager::new(None, user_store.clone()).with_id_taken_probe(Arc::new(
+            |id: &str, authorized: bool| match id {
+                // Pre-provisioned loadable profile for the derived id —
+                // claimable only WITH authorization (moot here: the
+                // user-row collision advances first)…
+                "alice" => !authorized,
+                // …and an unrelated unclaimed profile on the first
+                // suffix, which carries NO authorization.
+                "alice-1" => true,
+                _ => false,
+            },
+        ));
+        mgr.send_otp_with_registration("alice@new.example", true)
+            .await
+            .unwrap();
+        let code = {
+            let otps = mgr.pending_otps.read().await;
+            otps.get("alice@new.example").unwrap().code.clone()
+        };
+
+        let token = mgr
+            .verify_otp_with_authorized_claim("alice@new.example", &code)
+            .await
+            .unwrap();
+        assert!(token.is_some());
+        let user = user_store
+            .get_by_email("alice@new.example")
+            .unwrap()
+            .expect("registration must create a user");
+        assert_eq!(
+            user.id, "alice-2",
+            "suffix candidates must be probed even under an authorized claim"
+        );
+    }
+
+    #[tokio::test]
+    async fn should_keep_suffixed_ids_within_the_slug_limit() {
+        // codex #1613 r7 P2: a 63-char local part maps to a 63-char id;
+        // appending `-1` produced a 65-char candidate that
+        // validate_user_id rejects, so a VALID OTP failed with a
+        // generic error instead of registering. Suffixed candidates
+        // must reserve space for `-N`.
+        let long_local = "a".repeat(63);
+        let email = format!("{long_local}@example.com");
+        let dir = tempfile::tempdir().unwrap();
+        let user_store = Arc::new(UserStore::open(dir.path()).unwrap());
+        let base_id = crate::user_store::email_to_user_id(&email);
+        assert_eq!(base_id.len(), 63, "fixture must sit at the slug limit");
+        let mgr = AuthManager::new(None, user_store.clone()).with_id_taken_probe(Arc::new(
+            move |id: &str, _authorized: bool| id == "a".repeat(63),
+        ));
+        mgr.set_allow_self_registration(true);
+        mgr.send_otp(&email).await.unwrap();
+        let code = {
+            let otps = mgr.pending_otps.read().await;
+            otps.get(&email).unwrap().code.clone()
+        };
+
+        let token = mgr
+            .verify_otp(&email, &code)
+            .await
+            .expect("suffixing at the limit must not error");
+        assert!(token.is_some());
+        let user = user_store
+            .get_by_email(&email)
+            .unwrap()
+            .expect("registration must create a user");
+        assert!(
+            user.id.len() <= 63,
+            "suffixed id must stay within the slug limit, got {} chars",
+            user.id.len()
+        );
+        assert!(
+            user.id.ends_with("-1"),
+            "collision must advance to the -1 suffix, got {}",
+            user.id
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        let user_store = Arc::new(UserStore::open(dir.path()).unwrap());
+        let mgr = AuthManager::new(None, user_store);
+
+        // Insert an expired session
+        {
+            let mut sessions = mgr.sessions.write().await;
+            sessions.insert(
+                "expired-token".into(),
+                ActiveSession {
+                    user_id: "test".into(),
+                    role: UserRole::User,
+                    created_at: Utc::now() - Duration::hours(25),
+                    expires_at: Utc::now() - Duration::hours(1),
+                },
+            );
+        }
+
+        mgr.cleanup().await;
+
+        let sessions = mgr.sessions.read().await;
+        assert!(sessions.is_empty());
+    }
+}

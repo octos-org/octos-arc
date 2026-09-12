@@ -1,0 +1,45 @@
+name: Build Linux x86_64
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch or tag to build'
+        required: false
+        default: 'fix/pipeline-stream-errors'
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Set build metadata
+        run: |
+          echo "OCTOS_GIT_HASH=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+          echo "OCTOS_BUILD_DATE=$(date -u +%Y-%m-%d)" >> "$GITHUB_ENV"
+
+      - name: Build octos CLI and sandbox helper
+        run: |
+          cargo build --release -p octos-cli --features "api,telegram,discord,feishu,twilio,wecom,wecom-bot,audio_mp3"
+          cargo build --release -p octos-sandbox
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: octos-linux-x86_64
+          path: |
+            target/release/octos
+            target/release/octos-sandbox
+          retention-days: 7

@@ -1,0 +1,479 @@
+export interface ProcessStatus {
+  status?: 'running' | 'stopped' | 'configuration_error'
+  running: boolean
+  pid: number | null
+  started_at: string | null
+  uptime_secs: number | null
+  error?: string | null
+  error_since?: string | null
+}
+
+export interface GatewaySettings {
+  max_history?: number | null
+  max_iterations?: number | null
+  system_prompt?: string | null
+  max_concurrent_sessions?: number | null
+  browser_timeout_secs?: number | null
+  max_output_tokens?: number | null
+  watchdog_enabled?: boolean | null
+  alerts_enabled?: boolean | null
+}
+
+export interface ChannelCredentials {
+  type: string
+  allowed_senders?: string
+  bot_user_id?: string
+  [key: string]: string | number | boolean | undefined
+}
+
+export interface FallbackModel {
+  provider: string
+  model?: string | null
+  base_url?: string | null
+  api_key_env?: string | null
+  api_type?: string | null
+}
+
+export interface ModelHints {
+  uses_completion_tokens?: boolean
+  fixed_temperature?: boolean
+  lacks_vision?: boolean
+  merge_system_messages?: boolean
+}
+
+export interface LlmRouteConfig {
+  route_id?: string | null
+  label?: string | null
+  base_url?: string | null
+  api_key_env?: string | null
+  api_type?: string | null
+}
+
+export interface LlmModelSelectionConfig {
+  family_id?: string | null
+  model_id?: string | null
+  route?: LlmRouteConfig | null
+  model_hints?: ModelHints | null
+  cost_per_m?: number | null
+  strong?: boolean | null
+}
+
+export interface LlmProfileConfig {
+  primary?: LlmModelSelectionConfig | null
+  fallbacks?: LlmModelSelectionConfig[]
+}
+
+export interface EmailSettings {
+  provider: string
+  smtp_host?: string | null
+  smtp_port?: number | null
+  username?: string | null
+  /** Literal SMTP password. Preferred over `password_env` when both are set. */
+  password?: string | null
+  /** Name of an env var holding the SMTP password (advanced — when `password` is unset). */
+  password_env?: string | null
+  from_address?: string | null
+  feishu_app_id?: string | null
+  /** Literal Feishu app secret. Preferred over `feishu_app_secret_env`. */
+  feishu_app_secret?: string | null
+  /** Name of an env var holding the Feishu app secret (advanced). */
+  feishu_app_secret_env?: string | null
+  feishu_from_address?: string | null
+  feishu_region?: string | null
+}
+
+export interface HookConfig {
+  event: string
+  command: string[]
+  timeout_ms?: number
+  tool_filter?: string[]
+}
+
+export interface DockerConfig {
+  image?: string | null
+  cpu_limit?: string | null
+  memory_limit?: string | null
+  pids_limit?: number | null
+}
+
+export interface SandboxConfig {
+  enabled?: boolean
+  mode?: 'auto' | 'macos' | 'docker' | 'bwrap' | 'appcontainer'
+  allow_network?: boolean
+  docker?: DockerConfig
+}
+
+export type SearchProviderId = 'tavily' | 'perplexity' | 'brave' | 'you' | 'serper'
+
+export interface SearchProviderConfig {
+  api_key_env?: string | null
+}
+
+export interface SearchConfig {
+  providers?: Partial<Record<SearchProviderId, SearchProviderConfig>> | null
+}
+
+export interface DeepCrawlConfig {
+  page_settle_ms?: number | null
+  max_output_chars?: number | null
+}
+
+export interface SlidesAppConfig {
+  template_dir?: string | null
+  default_theme?: string | null
+}
+
+export interface AppsConfig {
+  slides?: SlidesAppConfig | null
+}
+
+export interface ProfileConfig {
+  llm?: LlmProfileConfig | null
+  search?: SearchConfig | null
+  deep_crawl?: DeepCrawlConfig | null
+  apps?: AppsConfig | null
+  channels: ChannelCredentials[]
+  gateway: GatewaySettings
+  email?: EmailSettings | null
+  env_vars: Record<string, string>
+  hooks?: HookConfig[]
+  admin_mode?: boolean
+  sandbox?: SandboxConfig
+}
+
+export interface UserProfile {
+  id: string
+  name: string
+  enabled: boolean
+  data_dir: string | null
+  parent_id?: string | null
+  public_subdomain?: string | null
+  config: ProfileConfig
+  created_at: string
+  updated_at: string
+}
+
+export interface ProfileResponse {
+  id: string
+  name: string
+  enabled: boolean
+  data_dir: string | null
+  parent_id?: string | null
+  public_subdomain?: string | null
+  config: ProfileConfig
+  created_at: string
+  updated_at: string
+  status: ProcessStatus
+  email?: string | null
+}
+
+export interface OverviewResponse {
+  total_profiles: number
+  running: number
+  stopped: number
+  profiles: ProfileResponse[]
+}
+
+export interface ActionResponse {
+  ok: boolean
+  message?: string
+}
+
+export interface PurgeReport {
+  profile_id: string
+  user_email: string | null
+  tenant_id: string | null
+  node_name: string | null
+  port_released: number | null
+  files_removed: string[]
+  bytes_freed: number
+}
+
+export interface BulkActionResponse {
+  ok: boolean
+  count: number
+}
+
+export type ChannelType = 'telegram' | 'discord' | 'dingtalk' | 'slack' | 'whatsapp' | 'feishu' | 'line' | 'email'
+
+export const CHANNEL_TYPES: ChannelType[] = ['telegram', 'discord', 'dingtalk', 'slack', 'whatsapp', 'feishu', 'line', 'email']
+
+export const CHANNEL_COLORS: Record<ChannelType, string> = {
+  telegram: 'bg-blue-500',
+  discord: 'bg-indigo-500',
+  dingtalk: 'bg-sky-500',
+  slack: 'bg-purple-500',
+  whatsapp: 'bg-green-500',
+  feishu: 'bg-cyan-500',
+  line: 'bg-green-600',
+  email: 'bg-orange-500',
+}
+
+export const CHANNEL_LABELS: Record<ChannelType, string> = {
+  telegram: 'TG',
+  discord: 'DC',
+  dingtalk: 'DT',
+  slack: 'SL',
+  whatsapp: 'WA',
+  feishu: 'FS',
+  line: 'LN',
+  email: 'EM',
+}
+
+// ── User & Auth types ───────────────────────────────────────────────
+
+export type UserRole = 'admin' | 'user'
+
+export interface User {
+  id: string
+  email: string
+  name: string
+  role: UserRole
+  created_at: string
+  last_login_at: string | null
+}
+
+export interface OtpSendResponse {
+  ok: boolean
+  message?: string
+}
+
+export interface OtpVerifyResponse {
+  ok: boolean
+  token?: string
+  user?: User
+  message?: string
+}
+
+export interface AllowlistEntry {
+  email: string
+  note?: string | null
+  created_at: string
+  claimed_user_id?: string | null
+  claimed_at?: string | null
+  registered: boolean
+  registered_user_id?: string | null
+  registered_name?: string | null
+  last_login_at?: string | null
+}
+
+export interface AdminAuditEntry {
+  schema_version: number
+  id: string
+  timestamp: string
+  actor: string
+  action: string
+  target_id: string
+  before_summary?: unknown
+  after_summary?: unknown
+}
+
+export interface AdminAuditResponse {
+  entries: AdminAuditEntry[]
+  total: number
+  limit: number
+  offset: number
+}
+
+/// The active tenant scope derived from the request `Host` /
+/// `X-Forwarded-Host` header. Populated by the server's
+/// `host_scoped_profile_id` resolver. `null` when no tenant subdomain
+/// is in scope (root domain, direct IP, or localhost). The dashboard
+/// reads this from `/api/auth/me` to hide admin-global navigation
+/// while an admin is operating inside a tenant scope (Option Y,
+/// issue #315).
+export interface ScopedAuthTarget {
+  id: string
+  name: string
+  email_login_enabled: boolean
+}
+
+export interface MeResponse {
+  user: User
+  profile: ProfileResponse | null
+  scoped_profile?: ScopedAuthTarget | null
+}
+
+/// Public login configuration from `GET /api/auth/status`. Drives which
+/// login affordances the page renders. `local_solo_enabled` is the
+/// no-password solo path (Local-mode host with stores); see
+/// `crate::api::solo_auth`.
+export interface AuthStatusResponse {
+  bootstrap_mode: boolean
+  email_login_enabled: boolean
+  admin_token_login_enabled: boolean
+  allow_self_registration: boolean
+  local_solo_enabled: boolean
+  scoped_profile?: ScopedAuthTarget | null
+}
+
+/// `POST /api/auth/solo` — re-login for the existing local solo owner.
+export interface SoloLoginResult {
+  token: string
+  user: User
+}
+
+/// `POST /api/auth/solo/create` — create the local profile AND log in.
+/// Mirrors the server `ProfileLocalCreateResult` shape plus a session
+/// `token`.
+export interface SoloCreateResult {
+  profile_id: string
+  user_id: string
+  name: string
+  username: string
+  email: string
+  created: boolean
+  runtime_mode: string
+  token: string
+}
+
+export interface BridgeQrInfo {
+  qr: string | null
+  status: 'waiting' | 'connected' | 'disconnected' | 'logged_out'
+  ws_port: number
+  http_port: number
+  phone_number: string | null
+  lid: string | null
+}
+
+// ── Provider QoS Metrics ─────────────────────────────────────────────
+
+export interface ProviderMetricsSnapshot {
+  latency_ema_ms: number
+  p95_latency_ms: number
+  success_count: number
+  failure_count: number
+  consecutive_failures: number
+  error_rate: number
+}
+
+export interface SharedProviderMetrics extends ProviderMetricsSnapshot {
+  provider: string
+  model: string
+  score: number
+}
+
+export interface SharedPolicy {
+  ema_alpha: number
+  failure_threshold: number
+  latency_threshold_ms: number
+  error_rate_threshold: number
+  probe_probability: number
+  probe_interval_secs: number
+  weight_latency: number
+  weight_error_rate: number
+  weight_priority: number
+}
+
+export interface SharedMetrics {
+  updated_at: string
+  policy: SharedPolicy
+  providers: SharedProviderMetrics[]
+}
+
+// ── Persistent Usage Analytics ──────────────────────────────────────
+
+export interface UsageTotals {
+  run_count: number
+  input_tokens: number
+  output_tokens: number
+  estimated_cost_usd: number
+}
+
+export interface UsageRollup {
+  key: string
+  totals: UsageTotals
+}
+
+export interface UsageAnalytics {
+  totals: UsageTotals
+  by_day: UsageRollup[]
+  by_month: UsageRollup[]
+  by_profile: UsageRollup[]
+  by_provider: UsageRollup[]
+  by_model: UsageRollup[]
+  by_channel: UsageRollup[]
+}
+
+export interface UsageQueryParams {
+  session_id?: string
+  from?: string
+  to?: string
+}
+
+// ── Admin Bot Config (legacy, kept for backwards compat) ─────────────
+
+export interface AdminBotConfig {
+  telegram_token_env?: string | null
+  feishu_app_id_env?: string | null
+  feishu_app_secret_env?: string | null
+  admin_chat_ids: number[]
+  admin_feishu_ids: string[]
+  provider?: string | null
+  model?: string | null
+  base_url?: string | null
+  api_key_env?: string | null
+  alerts_enabled: boolean
+  watchdog_enabled: boolean
+  health_check_interval_secs: number
+  max_restart_attempts: number
+  env_vars: Record<string, string>
+  fallback_models?: FallbackModel[]
+}
+
+// ── Monitor Status ──────────────────────────────────────────────────
+
+export interface MonitorStatus {
+  watchdog_enabled: boolean
+  alerts_enabled: boolean
+  profiles: MonitorProfileStatus[]
+}
+
+export interface MonitorProfileStatus {
+  id: string
+  name: string
+  enabled: boolean
+  watchdog_enabled: boolean
+  watchdog_override: boolean | null
+  alerts_enabled: boolean
+  alerts_override: boolean | null
+}
+
+// ── System Metrics ─────────────────────────────────────────────────
+
+export interface SystemMetrics {
+  cpu: {
+    usage_percent: number
+    core_count: number
+    brand: string
+  }
+  memory: {
+    total_bytes: number
+    used_bytes: number
+    available_bytes: number
+  }
+  swap: {
+    total_bytes: number
+    used_bytes: number
+  }
+  disks: {
+    name: string
+    mount_point: string
+    total_bytes: number
+    available_bytes: number
+    used_bytes: number
+    file_system: string
+  }[]
+  top_processes: {
+    pid: number
+    name: string
+    cpu_percent: number
+    memory_bytes: number
+  }[]
+  platform: {
+    hostname: string
+    os: string
+    os_version: string
+    uptime_secs: number
+  }
+}
