@@ -4164,7 +4164,6 @@ dependencies = [
  "octos-arc",
  "octos-bus",
  "octos-core",
- "octos-diagnostics",
  "octos-fleet",
  "octos-fleet-worker",
  "octos-llm",
@@ -4227,18 +4226,6 @@ dependencies = [
  "tokio-test",
  "tracing",
  "uuid",
-]
-
-[[package]]
-name = "octos-diagnostics"
-version = "2.0.3-rc.11"
-dependencies = [
- "eyre",
- "octos-core",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tempfile",
 ]
 
 [[package]]

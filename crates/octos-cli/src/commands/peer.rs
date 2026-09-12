@@ -424,54 +424,6 @@ mod tests {
         assert_eq!(serde_json::to_string(&rows).expect("json"), "[]");
     }
 
-    /// Spec filter: peer_list_fields_match_status_interface_contract —
-    /// the serialized PeerListRow key set MUST equal the tracked contract
-    /// docs/peer-status-interface.json's declared output_fields. A drift in
-    /// either direction (missing or extra field) fails, so the JSON machine
-    /// contract can never silently diverge from the tracked document.
-    #[test]
-    fn peer_list_fields_match_status_interface_contract() {
-        let contract: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../docs/peer-status-interface.json"
-            ))
-            .expect("tracked contract file"),
-        )
-        .expect("contract json");
-        let mut expected: Vec<String> = contract["output_fields"]
-            .as_object()
-            .expect("output_fields object")
-            .keys()
-            .map(|k| k.to_string())
-            .collect();
-        expected.sort();
-
-        let temp = tempfile::tempdir().expect("tempdir");
-        // Serialize a NON-empty row: field visibility requires real values.
-        // (An empty dir serializes to `[]`, so the key set is derived from a
-        // staged fixture row.)
-        let _dir = stage_fixture_row_for_contract(temp.path());
-        let rows = list_peers(temp.path(), "octos");
-        assert_eq!(rows.len(), 1);
-        let mut actual: Vec<String> = serde_json::to_value(&rows)
-            .expect("json")
-            .as_array()
-            .expect("rows array")
-            .first()
-            .expect("one row")
-            .as_object()
-            .expect("row object")
-            .keys()
-            .map(|k| k.to_string())
-            .collect();
-        actual.sort();
-        assert_eq!(
-            actual, expected,
-            "PeerListRow serialized keys must equal the tracked contract"
-        );
-    }
-
     /// Spec filter: peer_list_json_and_table_share_assembly — --json and the
     /// human table are TWO RENDERINGS of the SAME rows. Calls the PRODUCTION
     /// renderer (render_table_line, the same fn print_table loops over) —

@@ -12,7 +12,6 @@ mod completions;
 mod config;
 mod cron;
 mod docs;
-mod doctor;
 pub mod gateway;
 mod goal;
 
@@ -42,7 +41,6 @@ pub mod serve_console;
 pub mod skills;
 mod status;
 mod steer;
-mod update;
 
 use std::path::PathBuf;
 
@@ -69,7 +67,6 @@ pub use completions::CompletionsCommand;
 pub use config::ConfigCommand;
 pub use cron::CronCommand;
 pub use docs::DocsCommand;
-pub use doctor::DoctorCommand;
 pub use gateway::GatewayCommand;
 pub use goal::GoalCommand;
 
@@ -92,7 +89,6 @@ pub use serve::ServeCommand;
 pub use skills::SkillsCommand;
 pub use status::StatusCommand;
 pub use steer::SteerCommand;
-pub use update::UpdateCommand;
 
 /// octos: Rust-native coding agent orchestration.
 #[derive(Debug, Parser)]
@@ -147,8 +143,6 @@ pub enum Command {
     Config(ConfigCommand),
     /// Manage scheduled cron jobs.
     Cron(CronCommand),
-    /// Run local environment diagnostics (flutter-doctor style).
-    Doctor(DoctorCommand),
     /// Generate documentation for tools and providers.
     Docs(DocsCommand),
     /// Initialize a new .octos configuration.
@@ -172,8 +166,6 @@ pub enum Command {
     Status(StatusCommand),
     /// Queue an external-reviewer steer into a session (OLP control).
     Steer(SteerCommand),
-    /// Check for a newer octos release (`--check`); self-update is Stage 3.
-    Update(UpdateCommand),
     /// Run as a persistent messaging gateway.
     Gateway(GatewayCommand),
 
@@ -199,11 +191,7 @@ pub enum Command {
 ///   parse error at strict clients like Zed);
 /// * `mcp-serve --transport stdio` speaks MCP JSON-RPC on stdout;
 /// * `profile` emits payloads meant for `$(...)` capture / piping;
-/// * `chat` streams assistant text (or one `--json` result) on stdout;
-/// * `doctor --json` emits the diagnostics support bundle on stdout — the
-///   config-parse check loads the real config, whose tracing INFO lines
-///   ("no config.json found, using defaults") would otherwise corrupt the
-///   JSON.
+/// * `chat` streams assistant text (or one `--json` result) on stdout.
 ///
 /// Every other command keeps its historical stdout console routing untouched.
 pub fn reserve_stdout(command: &Command) -> bool {
@@ -215,11 +203,9 @@ pub fn reserve_stdout(command: &Command) -> bool {
         | Command::Arc(_) => true,
         // `inbox path` is a machine-readable single path.
         Command::Inbox(_) => true,
-        Command::Doctor(cmd) => cmd.json,
         // `octos cache <sub> --json` emits a machine-readable object meant
-        // for scripting / the outer loop's gate check — same rule as
-        // `doctor --json`. Without `--json` the human table stays on the
-        // historical stdout routing.
+        // for scripting / the outer loop's gate check. Without `--json` the
+        // human table stays on the historical stdout routing.
         Command::Cache(cmd) => cmd.emits_json(),
         _ => false,
     }
@@ -433,7 +419,6 @@ impl Executable for Command {
             Self::Cache(cmd) => cmd.execute(),
             Self::Config(cmd) => cmd.execute(),
             Self::Cron(cmd) => cmd.execute(),
-            Self::Doctor(cmd) => cmd.execute(),
             Self::Docs(cmd) => cmd.execute(),
             Self::Init(cmd) => cmd.execute(),
             Self::Inbox(cmd) => cmd.execute(),
@@ -445,7 +430,6 @@ impl Executable for Command {
             Self::Skills(cmd) => cmd.execute(),
             Self::Status(cmd) => cmd.execute(),
             Self::Steer(cmd) => cmd.execute(),
-            Self::Update(cmd) => cmd.execute(),
             Self::Gateway(cmd) => cmd.execute(),
             Self::Goal(cmd) => cmd.execute(),
             Self::Ledger(cmd) => cmd.execute(),
@@ -479,18 +463,6 @@ mod reserve_stdout_tests {
         let args =
             Args::try_parse_from(["octos", "chat", "--message", "hi"]).expect("`chat` must parse");
         assert!(reserve_stdout(&args.command));
-    }
-
-    #[test]
-    fn should_reserve_stdout_only_for_doctor_json() {
-        // `octos doctor --json` emits the support bundle on stdout; the
-        // config-parse check's tracing INFO lines must route to stderr so the
-        // JSON stays parseable. Plain `octos doctor` keeps stdout logging.
-        let json = Args::try_parse_from(["octos", "doctor", "--json"])
-            .expect("`doctor --json` must parse");
-        assert!(reserve_stdout(&json.command));
-        let human = Args::try_parse_from(["octos", "doctor"]).expect("`doctor` must parse");
-        assert!(!reserve_stdout(&human.command));
     }
 
     #[test]
