@@ -16,12 +16,9 @@ pub mod metrics;
 pub(crate) mod ominix_runtime;
 pub mod profile_scope;
 pub mod provider_diagnostics;
-mod private_asr;
 mod router;
 pub(crate) mod session_ingress;
 pub(crate) mod skill_action_jobs;
-mod smart_home_bridge;
-mod smart_home_panel;
 mod ui_protocol_alpha2_bridge;
 mod ui_protocol_alpha9_bridge;
 // Relocated to crate::contracts (Phase 3 of goal-in-chat) so `octos chat

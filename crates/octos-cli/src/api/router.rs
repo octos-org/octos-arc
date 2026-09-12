@@ -17,7 +17,6 @@ use super::profile_scope;
 use super::provider_diagnostics;
 use super::handlers;
 use super::metrics;
-use super::private_asr;
 use super::session_ingress;
 use super::ui_protocol_transport;
 use super::usage;
