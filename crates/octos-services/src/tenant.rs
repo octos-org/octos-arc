@@ -249,6 +249,50 @@ fn validate_tenant_id(id: &str) -> Result<()> {
     Ok(())
 }
 
+/// frpc configuration template for tunnel tenants. Placeholders:
+/// {{FRPS_SERVER}}, {{FRPS_PORT}}, {{FRPS_TOKEN}}, {{SUBDOMAIN}},
+/// {{LOCAL_PORT}}, {{SSH_REMOTE_PORT}}, {{TUNNEL_DOMAIN}}.
+const TENANT_FRPC_TEMPLATE: &str = r#"# frpc configuration template for octos tunnel tenants.
+#
+# Placeholders (replaced by setup-frpc.sh or octos admin):
+#   {{FRPS_SERVER}}    — VPS hostname or IP
+#   {{FRPS_PORT}}      — frps control port (default: 7000)
+#   {{FRPS_TOKEN}}     — Per-tenant tunnel token (goes in metadatas.token)
+#   {{SUBDOMAIN}}      — Tenant subdomain (e.g. "alice")
+#   {{LOCAL_PORT}}     — Local octos serve port (default: 8080)
+#   {{SSH_REMOTE_PORT}} — Allocated SSH tunnel port (e.g. 6001)
+#   {{TUNNEL_DOMAIN}}  — Base domain (e.g. "octos-cloud.org")
+
+serverAddr = "{{FRPS_SERVER}}"
+serverPort = {{FRPS_PORT}}
+
+# Both sides use empty auth.token so frps's built-in VerifyLogin passes
+# without any content rewriting. The octos plugin authenticates the tenant
+# via metadatas.token below.
+auth.method = "token"
+auth.token = ""
+metadatas.token = "{{FRPS_TOKEN}}"
+
+# Logging
+log.to = "/var/log/frpc.log"
+log.level = "info"
+log.maxDays = 7
+
+# ── HTTP tunnel: subdomain.octos-cloud.org → localhost:8080 ──────────
+[[proxies]]
+name = "{{SUBDOMAIN}}-web"
+type = "http"
+localPort = {{LOCAL_PORT}}
+customDomains = ["{{SUBDOMAIN}}.{{TUNNEL_DOMAIN}}"]
+
+# ── SSH tunnel: VPS:6XXX → localhost:22 (admin access) ───────────────
+[[proxies]]
+name = "{{SUBDOMAIN}}-ssh"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 22
+remotePort = {{SSH_REMOTE_PORT}}"#;
+
 /// Generate the frpc TOML config for a tenant by filling the template.
 ///
 /// Uses the shared FRPS auth token for host-wide frps authentication.
@@ -259,8 +303,7 @@ pub fn render_frpc_config(
     tunnel_domain: &str,
     frps_token: &str,
 ) -> String {
-    let template = include_str!("../../../scripts/frp/tenant-frpc.toml.template");
-    template
+    TENANT_FRPC_TEMPLATE
         .replace("{{FRPS_SERVER}}", frps_server)
         .replace("{{FRPS_PORT}}", &frps_port.to_string())
         .replace("{{FRPS_TOKEN}}", frps_token)

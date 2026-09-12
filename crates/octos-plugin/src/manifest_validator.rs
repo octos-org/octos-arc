@@ -864,17 +864,59 @@ mod tests {
         );
     }
 
-    /// Sanity test: a known-good bundled manifest passes strict mode.
-    /// We use the weather skill — clean `type: "object"` root, every
-    /// property has a `type`, `required` is well-formed. If this
-    /// regresses we've introduced a false positive.
+    /// Sanity test: a known-good manifest passes strict mode — clean
+    /// `type: "object"` root, every property has a `type`, `required`
+    /// is well-formed. If this regresses we've introduced a false
+    /// positive.
     #[test]
     fn valid_manifest_accepted() {
-        let raw = include_str!("../../app-skills/weather/manifest.json");
-        let manifest = PluginManifest::from_json(raw).expect("bundled weather manifest must parse");
+        let raw = r#"{
+            "name": "valid-manifest-fixture",
+            "version": "1.0.0",
+            "author": "octos",
+            "description": "Summarize a text file into a compact report artifact.",
+            "timeout_secs": 15,
+            "requires_network": false,
+            "actions": [
+                {
+                    "id": "source.import",
+                    "label": "Import source",
+                    "description": "Import a text source and create a grounded summary artifact.",
+                    "tags": ["source", "import"],
+                    "surfaces": ["studio.sources"],
+                    "execution": "sync",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "input_path": { "type": "string" },
+                            "output_path": { "type": "string" }
+                        },
+                        "required": ["input_path", "output_path"]
+                    },
+                    "binding": { "type": "tool", "tool": "summarize_text" }
+                }
+            ],
+            "tools": [
+                {
+                    "name": "summarize_text",
+                    "description": "Read a text file and write a compact summary. Returns the summary file as a deliverable artifact.",
+                    "concurrency_class": "exclusive",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "input_path": { "type": "string" },
+                            "output_path": { "type": "string" }
+                        },
+                        "required": ["input_path", "output_path"]
+                    },
+                    "env": ["VALID_FIXTURE_TOKEN"]
+                }
+            ]
+        }"#;
+        let manifest = PluginManifest::from_json(raw).expect("fixture manifest must parse");
         assert!(
             validate_manifest_schemas_with(&manifest, ValidationProfile::Strict).is_ok(),
-            "bundled weather manifest should pass strict validation"
+            "known-good manifest should pass strict validation"
         );
     }
 

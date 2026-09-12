@@ -440,35 +440,13 @@ mod tests {
         let exe_dir = tmp.path().join("exe");
         std::fs::create_dir_all(&exe_dir).unwrap();
 
-        // None of the bundled binaries exist beside this fake exe dir.
+        // This build ships no bundled skills (BUNDLED_APP_SKILLS is empty),
+        // so nothing can ever be reported missing — the guard must stay
+        // silent even beside an empty exe dir.
         let missing = missing_sibling_skill_binaries_in(&exe_dir);
         assert!(
-            !missing.is_empty(),
-            "an empty exe dir must report missing bundled binaries"
-        );
-        assert!(
-            missing.contains(&"weather"),
-            "the weather sibling binary should be reported missing, got: {missing:?}"
-        );
-        // Preflight-optional skills (not shipped by the standard bundle) must
-        // never be reported, even when absent, or the guard cries wolf.
-        assert!(
-            !missing.contains(&"skill-evolve"),
-            "preflight-optional skill-evolve must not be reported missing, got: {missing:?}"
-        );
-
-        // Touch every bundled binary beside the exe dir.
-        for &(_, binary_name, _, _) in BUNDLED_APP_SKILLS {
-            std::fs::write(exe_dir.join(binary_name), b"x").unwrap();
-        }
-        let after = missing_sibling_skill_binaries_in(&exe_dir);
-        assert!(
-            !after.contains(&"weather"),
-            "weather must no longer be reported missing once its sibling exists"
-        );
-        assert!(
-            after.is_empty(),
-            "no bundled binaries should be missing once all are present, got: {after:?}"
+            missing.is_empty(),
+            "no bundled binaries means nothing is reported missing, got: {missing:?}"
         );
     }
 

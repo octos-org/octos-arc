@@ -1,6 +1,0 @@
-[package]
-name = "worklog-core"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]

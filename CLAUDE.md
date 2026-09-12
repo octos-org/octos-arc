@@ -2,6 +2,14 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Downstream ARC build
+
+This is the ARC competition downstream of `octos-org/octos` (baseline `arc-base-20260910`,
+see ARC_BASELINE.md). The workspace is slimmed to the coding runtime: no bundled
+app-skills/platform-skills, no server/FFI/wasm/embedding crates. The competition
+channels are `arc/` (platform submission adapter) and `crates/octos-arc` (native
+`octos arc` workflow, which drives the same binary's `octos chat --profile coding`).
+
 ## Build & Test Commands
 
 ```bash
@@ -26,7 +34,7 @@ cargo install --path crates/octos-cli \
 
 ## Architecture
 
-octos is a Rust-native, API-first Agentic OS — multi-tenant AI agent platform. 8-crate workspace + bundled skills, layered:
+octos is a Rust-native agentic runtime. 16-crate workspace, layered:
 
 ```
 octos-cli  (CLI: clap commands, config loading, config watcher)
@@ -43,7 +51,8 @@ Alongside octos-agent:
 - **octos-pipeline**: DOT-graph pipeline engine — per-node model selection, parallel fan-out, checkpoints, human gates
 - **octos-plugin**: Plugin SDK — manifest parsing, discovery, gating (binary/env/OS checks)
 
-Bundled skills in `crates/app-skills/` (weather, time, news, deep-search, etc.) and `crates/platform-skills/` (voice).
+Bundled skills: none in this downstream build (`octos-agent::bundled_app_skills` ships
+empty tables; skill bootstrap is a no-op).
 
 Commands: chat, init, status, gateway, serve, clean, completions, cron, channels, auth (login/logout/status), skills (list/install/remove).
 
