@@ -101,39 +101,6 @@ impl OupFrontend for PeerFrontend {
     }
 }
 
-async fn serve_peer(
-    state: Arc<crate::api::AppState>,
-    event: PeerStagedEvent,
-    permissions: octos_agent::EffectivePermissions,
-    stop: CancellationToken,
-) -> Result<()> {
-    let key = SessionKey(format!("{}#{}", event.session_id.base_key(), event.topic));
-    let session =
-        OupSession::open(state, key, std::path::Path::new(&event.cwd), permissions).await?;
-    let frontend = PeerFrontend(event.slug.clone());
-    let work = async {
-        // A reopened, already-started peer must not replay its initial brief.
-        if session
-            .hydrate()
-            .await?
-            .messages
-            .unwrap_or_default()
-            .is_empty()
-        {
-            session
-                .turn(&event.brief, None, &AtomicBool::new(false), &frontend)
-                .await?;
-        }
-        session.listen(&frontend).await
-    };
-    let result = tokio::select! {
-        result = work => result,
-        _ = stop.cancelled() => Ok(()),
-    };
-    session.close().await?;
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

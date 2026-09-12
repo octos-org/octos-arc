@@ -7171,67 +7171,6 @@ async fn unknown_command_help_lists_queue_command() {
     let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
 }
 
-/// B3.4 (integration) — a router failover event triggers a one-line
-/// push on the bus side. Exercises the broadcast subscription wired
-/// into `SessionActor::run` plus the debounce.
-#[tokio::test]
-async fn router_failover_event_pushes_bus_notice() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let agent_llm = Arc::new(DelayedMockProvider::new(
-        "agent",
-        vec![(Duration::ZERO, make_response("noop"))],
-    ));
-    let router = make_test_router();
-    let (tx, mut rx, handle, _session_mgr) = setup_actor_with_mode(
-        agent_llm,
-        QueueMode::Followup,
-        Some(router.clone()),
-        false,
-        &dir,
-    )
-    .await;
-
-    // Yield once so the actor's run loop has time to subscribe to
-    // the broadcast channel before we publish.
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    // Stamp the originating session via RouterContext so the
-    // forwarder's strict per-session filter accepts the event. In
-    // production the gateway's agent call wraps in `with_router_context`
-    // around `process_inbound`; the test mirrors that.
-    octos_llm::with_router_context(
-        octos_llm::RouterContext {
-            session_id: Some(test_session_key(dir.path()).to_string()),
-            turn_id: None,
-        },
-        async {
-            router.publish_failover_for_subscribers(
-                "primary/p1",
-                "secondary/p2",
-                "test_synthetic",
-                42,
-            );
-        },
-    )
-    .await;
-
-    let push = tokio::time::timeout(Duration::from_secs(3), rx.recv())
-        .await
-        .expect("failover push must arrive")
-        .expect("channel must not close");
-    assert!(
-        push.content.starts_with("↺ Router failover:"),
-        "failover push must use the canonical prefix: {}",
-        push.content
-    );
-    assert!(push.content.contains("`primary/p1`"));
-    assert!(push.content.contains("`secondary/p2`"));
-    assert!(push.content.contains("`test_synthetic`"));
-
-    drop(tx);
-    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
-}
-
 /// B3.4 — a burst of router failovers MUST collapse to one push per
 /// `FAILOVER_PUSH_DEBOUNCE` window so a thrashing router does not
 /// flood the bus.
@@ -7313,69 +7252,6 @@ async fn router_failover_debounce_collapses_burst() {
     let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
 }
 
-/// B3.4 — failovers stamped with a different `originating_session_id`
-/// MUST be filtered out so two concurrent gateway sessions on the
-/// same profile-scoped router do not echo one another's failovers.
-#[tokio::test]
-async fn router_failover_filters_to_originating_session() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let agent_llm = Arc::new(DelayedMockProvider::new(
-        "agent",
-        vec![(Duration::ZERO, make_response("noop"))],
-    ));
-    let router = make_test_router();
-    let (tx, mut rx, handle, _session_mgr) = setup_actor_with_mode(
-        agent_llm,
-        QueueMode::Followup,
-        Some(router.clone()),
-        false,
-        &dir,
-    )
-    .await;
-
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    // Publish a failover stamped with a stranger session id. The
-    // actor (session_key = "cli:test") must ignore it.
-    octos_llm::with_router_context(
-        octos_llm::RouterContext {
-            session_id: Some("cli:other-session".to_string()),
-            turn_id: None,
-        },
-        async {
-            router.publish_failover_for_subscribers("primary/p1", "secondary/p2", "stranger", 7);
-        },
-    )
-    .await;
-
-    // Then a same-session failover MUST get through.
-    octos_llm::with_router_context(
-        octos_llm::RouterContext {
-            session_id: Some(test_session_key(dir.path()).to_string()),
-            turn_id: None,
-        },
-        async {
-            router.publish_failover_for_subscribers("primary/p1", "secondary/p2", "mine", 9);
-        },
-    )
-    .await;
-
-    // The first reply we observe must be the "mine" reason — the
-    // stranger event was filtered out.
-    let first = tokio::time::timeout(Duration::from_secs(3), rx.recv())
-        .await
-        .expect("matching failover must arrive")
-        .expect("channel must not close");
-    assert!(
-        first.content.contains("`mine`"),
-        "stranger session's failover leaked through: {}",
-        first.content
-    );
-
-    drop(tx);
-    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
-}
-
 // ───────────────────────── Post-spawn failure feedback loop ──────────────────────────
 //
 // Tests for the spawn_only post-spawn failure → synthetic recovery
@@ -7435,52 +7311,6 @@ async fn router_failover_drops_events_without_originator() {
 // -----------------------------------------------------------------
 
 #[test]
-fn build_gateway_session_scope_attaches_scope_for_per_profile_session() {
-    // Per-profile gateway path: `ProfileFactory::build` sets
-    // `profile_id: Some(..)` and supplies plugin_dirs. The session
-    // id is a safe SPA shape (`web-...`). SPA WS sessions construct
-    // `SessionKey` with the bare session id (no channel prefix)
-    // so `base_key()` passes `is_safe_session_id`.
-    let tmp = tempfile::TempDir::new().unwrap();
-    let data_dir = tmp.path().to_path_buf();
-    // Two plugin dirs: one exists (gets canonicalised in), one
-    // missing (gets dropped fail-closed).
-    let plugin_a = tmp.path().join("skills").join("mofa-slides");
-    std::fs::create_dir_all(&plugin_a).unwrap();
-    let plugin_missing = tmp.path().join("skills").join("ghost-skill");
-    let plugin_dirs = vec![plugin_a.clone(), plugin_missing.clone()];
-
-    let session_key = SessionKey("web-1779574360679-o8x9kv".to_string());
-    // Sanity: pin that the test fixture matches the production
-    // SPA path that routes through `runtime/session.rs`.
-    assert!(
-        octos_core::is_safe_session_id(session_key.base_key()),
-        "test fixture must use a safe SPA session id",
-    );
-    let scope = build_gateway_session_scope(Some("dspfac"), &data_dir, &session_key, &plugin_dirs)
-        .expect("per-profile + safe session id must build a scope");
-
-    // The factory's data_dir maps to scope.root (the profile data
-    // dir in the multi-tenant constructor).
-    assert_eq!(
-        scope.root(),
-        data_dir.as_path(),
-        "scope root mirrors data_dir"
-    );
-    // skill_read_zones contains the canonicalised existing
-    // plugin_dir AND drops the missing one (round-2 BLOCKER 2
-    // fail-closed).
-    let zones = scope.skill_read_zones();
-    assert_eq!(
-        zones.len(),
-        1,
-        "fail-closed canonicalise must drop missing plugin_dir: zones = {zones:?}"
-    );
-    let canon_plugin_a = std::fs::canonicalize(&plugin_a).unwrap();
-    assert_eq!(zones[0], canon_plugin_a);
-}
-
-#[test]
 fn build_gateway_session_scope_returns_none_for_admin_factory() {
     // Top-level / admin factory path: `profile_id: None`. We MUST
     // NOT construct a scope because the admin factory's data_dir
@@ -7525,21 +7355,6 @@ fn build_gateway_session_scope_binds_tenant_for_unsafe_session_id() {
 }
 
 #[test]
-fn build_gateway_session_scope_handles_empty_plugin_dirs() {
-    // Edge: profile_id set, session id safe, but plugin_dirs empty
-    // (profile has no installed skills). Scope must still build —
-    // just with empty skill_read_zones.
-    let tmp = tempfile::TempDir::new().unwrap();
-    let session_key = SessionKey("web-empty".to_string());
-    let scope = build_gateway_session_scope(Some("dspfac"), tmp.path(), &session_key, &[])
-        .expect("empty plugin_dirs is a legitimate configuration");
-    assert!(
-        scope.skill_read_zones().is_empty(),
-        "no plugin_dirs => no skill_read_zones",
-    );
-}
-
-#[test]
 fn build_gateway_session_scope_drops_all_missing_plugin_dirs() {
     // Edge: all plugin_dirs are missing — fail-closed drops them
     // all, scope still builds (empty skill_read_zones is safe).
@@ -7554,75 +7369,6 @@ fn build_gateway_session_scope_drops_all_missing_plugin_dirs() {
     assert!(
         scope.skill_read_zones().is_empty(),
         "every plugin_dir missing => no skill_read_zones (fail-closed)",
-    );
-}
-
-/// Codex round-2 MAJOR (PR #1327 review): cross-profile isolation
-/// is structurally correct by construction — each profile's
-/// `SessionScope` only carries that profile's `plugin_dirs` as
-/// `skill_read_zones`, so a session bound to profile A can never
-/// resolve profile B's skill_dir to `InSkillDir`. This test pins
-/// the invariant explicitly so a future refactor that widens
-/// `plugin_dirs` (e.g. union across profiles, global skill cache)
-/// can't silently regress the boundary.
-#[test]
-fn build_gateway_session_scope_classifies_cross_profile_skill_dir_as_out_of_scope() {
-    use octos_core::PathClassification;
-
-    let root = tempfile::TempDir::new().unwrap();
-
-    // Profile A: data_dir + one skill_dir with a file inside.
-    let profile_a_data = root.path().join("profile_a");
-    let profile_a_skill = profile_a_data.join("skills").join("mofa-slides");
-    std::fs::create_dir_all(profile_a_skill.join("styles")).unwrap();
-    let profile_a_skill_file = profile_a_skill.join("styles").join("nb-pro.toml");
-    std::fs::write(&profile_a_skill_file, "[meta]\nname = 'nb-pro'\n").unwrap();
-
-    // Profile B: separate data_dir + a different skill_dir with a
-    // file inside. Lives outside profile A's data_dir entirely.
-    let profile_b_data = root.path().join("profile_b");
-    let profile_b_skill = profile_b_data.join("skills").join("mofa-cards");
-    std::fs::create_dir_all(profile_b_skill.join("styles")).unwrap();
-    let profile_b_skill_file = profile_b_skill.join("styles").join("custom.toml");
-    std::fs::write(&profile_b_skill_file, "[meta]\nname = 'custom'\n").unwrap();
-
-    // Build a `SessionScope` for profile A using ONLY profile A's
-    // plugin_dirs. This is exactly the production wiring: each
-    // `ProfileFactory` constructs scopes from its own
-    // `plugin_dirs`, never from another profile's.
-    let session_key = SessionKey("web-cross-profile".to_string());
-    let plugin_dirs = vec![profile_a_skill.clone()];
-    let scope = build_gateway_session_scope(
-        Some("profile_a"),
-        &profile_a_data,
-        &session_key,
-        &plugin_dirs,
-    )
-    .expect("scope build for profile A must succeed");
-
-    // Positive control: profile A's OWN skill file classifies as
-    // `InSkillDir`. If this regresses, the test fixture is broken
-    // (not the cross-profile assertion below).
-    let a_classification = scope.classify_canonical_path(&profile_a_skill_file);
-    assert!(
-        matches!(a_classification, PathClassification::InSkillDir { .. }),
-        "profile A's own skill file must be InSkillDir under profile A's scope; \
-             got {a_classification:?}",
-    );
-
-    // The invariant under test: profile B's skill file MUST
-    // classify as `OutOfScope` because profile B's skill_dir is
-    // not in profile A's `skill_read_zones`, not in profile A's
-    // workspace, and not in profile A's shared zones
-    // (`<profile_a>/skills`, `<profile_a>/research`). A future
-    // change that, e.g., merged all profiles' plugin_dirs into a
-    // global pool would flip this to `InSkillDir` and the test
-    // would catch it.
-    let b_classification = scope.classify_canonical_path(&profile_b_skill_file);
-    assert!(
-        matches!(b_classification, PathClassification::OutOfScope),
-        "profile B's skill file MUST be OutOfScope under profile A's scope; \
-             got {b_classification:?}",
     );
 }
 

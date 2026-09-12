@@ -73,7 +73,6 @@ pub(crate) mod peers;
 pub mod persona_service;
 #[cfg(feature = "api")]
 pub mod process_manager;
-pub mod profile_qr;
 pub mod profiles;
 mod qos_catalog;
 pub mod runtime;

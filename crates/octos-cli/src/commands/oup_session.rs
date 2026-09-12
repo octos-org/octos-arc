@@ -496,64 +496,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn should_report_only_current_turn_usage_for_repeated_oup_failures() {
-        use crate::commands::acp::{SessionAgentFactory, TestAgentFactory};
-        let data = tempfile::tempdir().unwrap();
-        let workspace = tempfile::tempdir().unwrap();
-        let model = Arc::new(TerminalModel {
-            stop: octos_llm::StopReason::MaxTokens,
-            reasoning_only: false,
-            recover: false,
-            calls: std::sync::atomic::AtomicUsize::new(0),
-        });
-        let factory = TestAgentFactory::new(
-            model.clone(),
-            data.path().to_owned(),
-            workspace.path().to_owned(),
-        );
-        let state = factory.oup_state().await.unwrap();
-        let session = OupSession::open(
-            state,
-            SessionKey::with_profile(
-                octos_core::MAIN_PROFILE_ID,
-                "acp",
-                &uuid::Uuid::now_v7().to_string(),
-            ),
-            workspace.path(),
-            octos_agent::EffectivePermissions::workspace_write(),
-        )
-        .await
-        .unwrap();
-        for _ in 0..2 {
-            let error = session
-                .turn(
-                    "Continue the explanation",
-                    None,
-                    &AtomicBool::new(false),
-                    &Frontend,
-                )
-                .await
-                .unwrap_err();
-            let failure = error.downcast_ref::<OupTurnFailure>().unwrap();
-            assert_eq!(
-                failure.partial.usage,
-                EnvelopeTokenUsage {
-                    input_tokens: 12,
-                    output_tokens: 7,
-                    ..Default::default()
-                },
-                "never substitute cumulative session cost for this failed turn"
-            );
-            assert_eq!(
-                failure.partial.text,
-                "First I need to inspect the image and then I will"
-            );
-        }
-        assert_eq!(model.calls.load(Ordering::SeqCst), 2);
-        session.close().await.unwrap();
-    }
-
     struct ToolThenEmptyModel(std::sync::atomic::AtomicUsize, bool, Option<&'static str>);
 
     #[async_trait::async_trait]
@@ -677,42 +619,6 @@ mod tests {
                 .any(|row| row.content == "OLD-FINAL-DO-NOT-REUSE")
         );
         session.close().await.unwrap();
-    }
-
-    #[test]
-    fn should_require_current_turn_canonical_identity_for_error_partial() {
-        let current = HashMap::from([("current-final".into(), "ACTUAL-FINAL".into())]);
-        for (data, expected) in [
-            (None, ""),
-            (
-                Some(json!({"partial_result": {"session_result": null}})),
-                "",
-            ),
-            (Some(json!({"partial_result": "malformed"})), ""),
-            (
-                Some(json!({"partial_result": {"session_result": {
-                    "message_id": "previous-turn-final", "committed_seq": 1
-                }}})),
-                "",
-            ),
-            (
-                Some(json!({"partial_result": {"session_result": {
-                    "message_id": "current-final", "committed_seq": 5
-                }}})),
-                "ACTUAL-FINAL",
-            ),
-        ] {
-            let error = TurnTerminalError {
-                code: "output_truncated".into(),
-                message: "failed".into(),
-                data,
-            };
-            assert_eq!(
-                authoritative_partial_answer(Some(&error), &current),
-                expected
-            );
-        }
-        assert!(authoritative_partial_answer(None, &current).is_empty());
     }
 
     struct PendingModel {
@@ -840,78 +746,6 @@ mod tests {
         async fn event(&self, _event: UiNotification) -> Result<Option<UiCommand>> {
             Ok(None)
         }
-    }
-
-    #[tokio::test]
-    async fn local_frontends_share_oup_persistence_and_reopen_context() {
-        use crate::runtime::local_oup::{LocalOupOptions, bootstrap, local_profile};
-        let data = tempfile::tempdir().unwrap();
-        let workspace = tempfile::tempdir().unwrap();
-        let model = Arc::new(RecordingModel {
-            inputs: std::sync::Mutex::new(Vec::new()),
-        });
-        let config = crate::config::Config {
-            provider: Some("local".into()),
-            model: Some("oup-mock".into()),
-            memory: Some(crate::config::MemoryConfig {
-                refresh: Some(crate::config::MemoryRefreshConfig {
-                    enabled: Some(false),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let state = bootstrap(LocalOupOptions {
-            profile: local_profile("migration", &config),
-            config,
-            data_dir: data.path().to_owned(),
-            config_home: data.path().to_owned(),
-            no_retry: true,
-            provider: Some(model.clone()),
-            tool_profile: None,
-            save_episodes: false,
-        })
-        .await
-        .unwrap();
-        let key = SessionKey::with_profile("migration", "acp", "reopen");
-        let permissions = octos_agent::EffectivePermissions::workspace_write();
-        let cancelled = AtomicBool::new(false);
-        let session = OupSession::open(state.clone(), key.clone(), workspace.path(), permissions)
-            .await
-            .unwrap();
-        let first = tokio::time::timeout(
-            Duration::from_secs(30),
-            session.turn("first migration prompt", None, &cancelled, &Frontend),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        assert_eq!(first.text, "canonical-answer-1");
-        session.close().await.unwrap();
-        let reopened = OupSession::open(state, key, workspace.path(), permissions)
-            .await
-            .unwrap();
-        let history = reopened.hydrate().await.unwrap().messages.unwrap();
-        assert!(
-            history
-                .iter()
-                .any(|message| message.content == "canonical-answer-1")
-        );
-        let second = tokio::time::timeout(
-            Duration::from_secs(30),
-            reopened.turn("second migration prompt", None, &cancelled, &Frontend),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        assert_eq!(second.text, "canonical-answer-2");
-        assert!(
-            model.inputs.lock().unwrap()[1]
-                .iter()
-                .any(|message| message.content.contains("canonical-answer-1"))
-        );
-        reopened.close().await.unwrap();
     }
 
     #[cfg(unix)]

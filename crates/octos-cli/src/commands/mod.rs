@@ -1,24 +1,14 @@
 //! CLI commands for octos.
 
-mod account;
-pub mod acp;
-mod auth;
+pub mod auth;
 mod cache;
-mod channels;
 pub mod chat;
 mod clean;
 mod completions;
 mod config;
-mod cron;
-mod docs;
 pub mod gateway;
 
 mod init;
-pub mod mcp;
-pub mod mcp_serve;
-mod memory;
-pub(crate) mod obs_resolve;
-mod office;
 #[cfg(feature = "api")]
 pub(crate) mod oup_client;
 #[cfg(feature = "api")]
@@ -28,55 +18,29 @@ pub(crate) mod oup_session;
 #[cfg(feature = "api")]
 mod oup_text;
 #[cfg_attr(test, allow(unused_imports))]
-mod peer;
-mod profile;
 #[cfg(feature = "api")]
 mod serve;
 pub mod serve_console;
 pub mod skills;
-mod status;
-
+pub 
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use eyre::Result;
 
-pub use account::AccountCommand;
-pub use acp::AcpCommand;
 pub use octos_arc::ArcCommand;
-// Test-support seam for the `octos acp` bridge: the end-to-end integration test
-// in `crates/octos-cli/tests/acp_integration.rs` drives the real ACP handler
-// wiring with a `MockLlm`-backed agent over an in-process transport. Hidden
-// from docs; not part of the stable surface.
-#[doc(hidden)]
-#[cfg(feature = "api")]
-pub use acp::{OctosAcpAgentTransport, TestAgentFactory};
 pub use auth::AuthCommand;
 pub use cache::CacheCommand;
-pub use channels::ChannelsCommand;
 pub use chat::ChatCommand;
 pub use clean::CleanCommand;
 pub use completions::CompletionsCommand;
 pub use config::ConfigCommand;
-pub use cron::CronCommand;
-pub use docs::DocsCommand;
 pub use gateway::GatewayCommand;
 
 pub use init::InitCommand;
-pub use mcp::McpCommand;
-pub use mcp_serve::McpServeCommand;
-pub use memory::MemoryCommand;
-pub(crate) use obs_resolve as obs;
-pub use office::OfficeCommand;
 #[cfg_attr(not(test), allow(unused_imports))]
-pub use peer::PeerCommand;
-#[cfg(test)]
-pub(crate) use peer::peer_list_for_test;
-pub use profile::ProfileCommand;
 #[cfg(feature = "api")]
 pub use serve::ServeCommand;
-pub use skills::SkillsCommand;
-pub use status::StatusCommand;
 
 /// octos: Rust-native coding agent orchestration.
 #[derive(Debug, Parser)]
@@ -112,14 +76,8 @@ fn version_string() -> &'static str {
 /// Available commands.
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Manage sub-accounts under profiles.
-    Account(AccountCommand),
-    /// Run as an Agent Client Protocol (ACP) agent over stdio (Zed, etc.).
-    Acp(AcpCommand),
     /// Manage authentication for LLM providers.
     Auth(AuthCommand),
-    /// Manage messaging channels.
-    Channels(ChannelsCommand),
     /// Interactive multi-turn chat with an agent.
     Chat(ChatCommand),
     Arc(ArcCommand),
@@ -127,27 +85,11 @@ pub enum Command {
     Cache(CacheCommand),
     /// Inspect the saved startup config (`show` / `path`); read-only.
     Config(ConfigCommand),
-    /// Manage scheduled cron jobs.
-    Cron(CronCommand),
-    /// Generate documentation for tools and providers.
-    Docs(DocsCommand),
     /// Initialize a new .octos configuration.
     Init(InitCommand),
-    /// Manage OAuth-authenticated MCP servers (`login`/`logout`).
-    Mcp(McpCommand),
-    /// Inspect and drive the memory-refresh pipeline.
-    Memory(MemoryCommand),
-    /// Portable profile export (QR) and payload inspection.
-    Profile(ProfileCommand),
-    /// Run as an MCP server so outer orchestrators can invoke octos as a sub-agent.
-    McpServe(McpServeCommand),
     /// Start the REST API server (requires --features api).
     #[cfg(feature = "api")]
     Serve(ServeCommand),
-    /// Manage agent skills (list, install, remove).
-    Skills(SkillsCommand),
-    /// Show system status.
-    Status(StatusCommand),
     /// Run as a persistent messaging gateway.
     Gateway(GatewayCommand),
 
@@ -155,10 +97,6 @@ pub enum Command {
     Clean(CleanCommand),
     /// Generate shell completions.
     Completions(CompletionsCommand),
-    /// Office file manipulation (extract, unpack, pack, clean, add-slide, validate).
-    Office(OfficeCommand),
-    /// Read-only peer listing (direct peers/ dir read; OLP observability).
-    Peer(PeerCommand),
 }
 
 /// Whether stdout is reserved for protocol or assistant output, so tracing
@@ -173,10 +111,7 @@ pub enum Command {
 /// Every other command keeps its historical stdout console routing untouched.
 pub fn reserve_stdout(command: &Command) -> bool {
     match command {
-        Command::Acp(_)
-        | Command::Profile(_)
-        | Command::McpServe(_)
-        | Command::Chat(_)
+        Command::Chat(_)
         | Command::Arc(_) => true,
         // `octos cache <sub> --json` emits a machine-readable object meant
         // for scripting / the outer loop's gate check. Without `--json` the
@@ -367,10 +302,7 @@ pub(crate) fn load_profile_prompt_template(
 impl Executable for Command {
     fn execute(self) -> Result<()> {
         match self {
-            Self::Account(cmd) => cmd.execute(),
-            Self::Acp(cmd) => cmd.execute(),
             Self::Auth(cmd) => cmd.execute(),
-            Self::Channels(cmd) => cmd.execute(),
             Self::Chat(cmd) => cmd.execute(),
             Self::Arc(cmd) => {
                 eyre::ensure!(
@@ -392,23 +324,13 @@ impl Executable for Command {
             }
             Self::Cache(cmd) => cmd.execute(),
             Self::Config(cmd) => cmd.execute(),
-            Self::Cron(cmd) => cmd.execute(),
-            Self::Docs(cmd) => cmd.execute(),
             Self::Init(cmd) => cmd.execute(),
-            Self::Mcp(cmd) => cmd.execute(),
-            Self::Profile(cmd) => cmd.execute(),
-            Self::McpServe(cmd) => cmd.execute(),
             #[cfg(feature = "api")]
             Self::Serve(cmd) => cmd.execute(),
-            Self::Skills(cmd) => cmd.execute(),
-            Self::Status(cmd) => cmd.execute(),
             Self::Gateway(cmd) => cmd.execute(),
             Self::Clean(cmd) => cmd.execute(),
-            Self::Memory(cmd) => cmd.execute(),
             Self::Completions(cmd) => cmd.execute(),
-            Self::Office(cmd) => cmd.execute(),
 
-            Self::Peer(cmd) => cmd.execute(),
         }
     }
 }

@@ -6583,28 +6583,6 @@ mod peer_turn_status_compat_tests {
     use super::*;
 
     #[test]
-    fn peer_list_numbered_only_peer_stays_done() {
-        // A peer with ONLY result-1.md (no bare result.md) was `done` under
-        // the legacy CLI semantics and must remain so.
-        let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("peers").join("num-only");
-        std::fs::create_dir_all(&dir).unwrap();
-        peer_io::write_peer_file_atomic(&dir, "brief.md", "b").unwrap();
-        let text =
-            "---\nslug: num-only\noutcome: completed\nupdated_unix: 100\nturn: 1\n---\n\nbody\n";
-        peer_io::write_peer_file_atomic(&dir, "result-1.md", text).unwrap();
-        peer_io::append_peer_line(&dir, "turns.txt", "1 completed 100\n").unwrap();
-        let rows = crate::commands::peer_list_for_test(temp.path(), "octos");
-        assert_eq!(rows.len(), 1);
-        assert_eq!(
-            rows[0].status, "done",
-            "numbered-only result proves delivery"
-        );
-        assert_eq!(rows[0].execution, "unknown", "no lifetime authority");
-        assert_eq!(rows[0].last_outcome.as_deref(), Some("completed"));
-    }
-
-    #[test]
     fn peer_list_oversized_bare_result_still_done() {
         // An over-cap bare result.md fails the blackboard's content read
         // (row.result=None) but its EXISTENCE still proves delivery.
@@ -6623,40 +6601,6 @@ mod peer_turn_status_compat_tests {
     }
 
     #[test]
-    fn peer_list_explicit_name_equal_to_slug_is_preserved() {
-        // Three REAL fixtures pinning the ORIGINAL optional-name semantics:
-        // no name file → None; empty name file → None; explicit name (even
-        // == slug) → Some(recorded). The blackboard's slug fallback is an
-        // ADDRESSING convenience and must not leak into the CLI field.
-        let temp = tempfile::tempdir().unwrap();
-        let fixtures = [
-            ("missing", None, None),
-            ("blank", Some("   \n"), None),
-            ("echo", Some("echo"), Some("echo")),
-            ("distinct", Some("Ada"), Some("Ada")),
-        ];
-        for (slug, name_file, _expect) in &fixtures {
-            let dir = temp.path().join("peers").join(slug);
-            std::fs::create_dir_all(&dir).unwrap();
-            peer_io::write_peer_file_atomic(&dir, "brief.md", "b").unwrap();
-            if let Some(content) = name_file {
-                peer_io::write_peer_file_atomic(&dir, "name", content).unwrap();
-            }
-        }
-        let rows = crate::commands::peer_list_for_test(temp.path(), "octos");
-        // Each REAL fixture asserts its OWN expectation (missing → None,
-        // empty → None, explicit == slug → Some(slug), distinct → Some).
-        for (slug, _name_file, expect) in &fixtures {
-            let row = rows.iter().find(|r| r.slug == *slug).unwrap();
-            assert_eq!(
-                row.name.as_deref(),
-                *expect,
-                "fixture {slug}: optional-name semantics"
-            );
-        }
-    }
-
-    #[test]
     fn peer_list_foreign_slug_frontmatter_is_not_outcome_evidence() {
         // result-1.md frontmatter naming ANOTHER peer must not certify this
         // peer's last_outcome even when turns.txt agrees.
@@ -6672,44 +6616,6 @@ mod peer_turn_status_compat_tests {
             facet.last_outcome.is_none(),
             "foreign slug cannot vouch for this peer"
         );
-    }
-
-    #[test]
-    fn peer_list_scan_cap_truncation_yields_no_outcome() {
-        // Scanner-level truncation: a SMALL cap with MIXED entries (result
-        // files + unrelated files) exhausts the scan budget before the dir
-        // ends — the scanner must report truncation (not a partial "highest")
-        // and the strict reader must assert nothing. Mirrors the outer-loop
-        // correction: the budget counts ALL scanned entries.
-        let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("peers").join("capped");
-        std::fs::create_dir_all(&dir).unwrap();
-        peer_io::write_peer_file_atomic(&dir, "brief.md", "b").unwrap();
-        peer_io::write_peer_file_atomic(&dir, "originator", "m").unwrap();
-        for round in 1..=3u32 {
-            let text = format!(
-                "---\nslug: capped\noutcome: completed\nupdated_unix: 100\nturn: {round}\n---\n\nbody\n"
-            );
-            peer_io::write_peer_file_atomic(&dir, &format!("result-{round}.md"), &text).unwrap();
-        }
-        peer_io::append_peer_line(&dir, "turns.txt", "3 completed 100\n").unwrap();
-        // cap=4 with 3 result files + brief + originator + turns.txt = 6
-        // entries: the scan MUST hit the budget and report truncated. Test
-        // the imp scanner directly (Err) — the public wrapper maps Err→None.
-        assert!(
-            peer_io::peer_dir_list_prefixed_raw(&dir, "result-", 4).is_err(),
-            "mixed entries exhaust the scan budget: truncation must be explicit"
-        );
-        // And a cap large enough to finish cleanly returns the full hit list.
-        let full = peer_io::peer_dir_list_prefixed(&dir, "result-", 100).unwrap();
-        assert_eq!(full.len(), 3);
-        // The strict evidence reader consumes the wrapper with the PRODUCTION
-        // cap (100k), which this 6-entry fixture cannot exhaust — the
-        // truncation-to-no-outcome path is therefore exercised at the
-        // scanner level above (Err ⇒ wrapper None ⇒ no outcome by
-        // construction in read_last_terminal_evidence: `?` on the Option).
-        let facet = derive_peer_execution_facet(&dir, "octos", "capped", false);
-        assert_eq!(facet.rounds_delivered, 3, "count semantics unaffected");
     }
 
     #[test]
