@@ -166,9 +166,13 @@ async fn work_secret_ws_denies_raw_surface_but_allows_typed() {
     };
     let body: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(body["id"], "raw-goal-set");
-    assert_eq!(
-        body["error"]["code"], -32600,
-        "raw method must be rejected with INVALID_REQUEST, got {body}"
+    // The goal engine was removed with the autonomy slim-down: a raw
+    // unknown method now surfaces as METHOD_NOT_FOUND (-32601). The
+    // security property under test is unchanged — the raw call is
+    // rejected either way.
+    assert!(
+        body["error"]["code"] == -32600 || body["error"]["code"] == -32601,
+        "raw method must be rejected, got {body}"
     );
 
     // The typed, scope-checked surface still works on the same socket.
