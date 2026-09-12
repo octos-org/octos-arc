@@ -6,8 +6,6 @@ members = [
     "crates/octos-llm",
     "crates/octos-agent",
     "crates/octos-bus",
-    "crates/octos-store",
-    "crates/octos-services",
     "crates/octos-cli",
     "crates/octos-arc",
     "crates/octos-pipeline",
@@ -32,8 +30,6 @@ octos-llm = { path = "crates/octos-llm" }
 octos-agent = { path = "crates/octos-agent" }
 octos-arc = { path = "crates/octos-arc" }
 octos-bus = { path = "crates/octos-bus" }
-octos-store = { path = "crates/octos-store" }
-octos-services = { path = "crates/octos-services" }
 octos-pipeline = { path = "crates/octos-pipeline" }
 octos-plugin = { path = "crates/octos-plugin" }
 # codex-rs crates (reused)

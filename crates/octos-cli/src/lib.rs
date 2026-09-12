@@ -9,7 +9,7 @@
 // keeps resolving unchanged.
 #[cfg(feature = "api")]
 pub mod api;
-pub use octos_store::approvals_audit;
+pub mod approvals_audit;
 pub mod auth;
 // Build-cache pool (outer-loop #3, design docs/build-cache-pool.md):
 // per-repository reusable cargo target-dir slots with flock exclusivity,
@@ -33,11 +33,11 @@ pub(crate) mod turn_loop;
 /// calls these; kept feature-independent so the shape is testable).
 #[cfg_attr(not(feature = "api"), allow(dead_code))]
 pub(crate) mod turn_trace;
-pub use octos_services::cli_agent_adapter;
+
 pub mod commands;
-pub use octos_services::compaction;
+pub mod compaction;
 pub mod config;
-pub use octos_services::config_context;
+pub mod config_context;
 pub mod config_layer;
 pub mod config_watcher;
 #[cfg(feature = "api")]
@@ -70,7 +70,7 @@ pub(crate) mod obs_events;
 // staging and OUP transport helpers are intentionally dormant in that build.
 #[cfg_attr(not(feature = "api"), allow(dead_code))]
 pub(crate) mod peers;
-pub use octos_services::persona_service;
+pub mod persona_service;
 #[cfg(feature = "api")]
 pub mod process_manager;
 pub mod profile_qr;
@@ -79,12 +79,12 @@ mod qos_catalog;
 pub mod runtime;
 pub mod session_actor;
 pub mod skills_scope;
-pub use octos_services::soul_service;
+pub mod soul_service;
 pub mod status_indicator;
 pub mod status_layers;
 pub mod stream_reporter;
 pub mod tools;
 #[cfg(feature = "api")]
-pub use octos_services::updater;
-pub use octos_store::usage_ledger;
-pub use octos_store::user_store;
+
+pub mod usage_ledger;
+pub mod user_store;

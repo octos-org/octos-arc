@@ -4168,8 +4168,6 @@ dependencies = [
  "octos-memory",
  "octos-pipeline",
  "octos-plugin",
- "octos-services",
- "octos-store",
  "open",
  "percent-encoding",
  "qrcode",
@@ -4307,48 +4305,6 @@ dependencies = [
  "tokio-test",
  "tracing",
  "which 7.0.3",
-]
-
-[[package]]
-name = "octos-services"
-version = "2.0.3-rc.11"
-dependencies = [
- "async-trait",
- "chrono",
- "dirs",
- "eyre",
- "flate2",
- "futures",
- "octos-bus",
- "octos-core",
- "octos-llm",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tar",
- "tempfile",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "octos-store"
-version = "2.0.3-rc.11"
-dependencies = [
- "base64",
- "chrono",
- "constant_time_eq",
- "eyre",
- "getrandom 0.2.17",
- "octos-core",
- "redb",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
- "tracing",
- "uuid",
 ]
 
 [[package]]
