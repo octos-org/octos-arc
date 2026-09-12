@@ -695,12 +695,6 @@ impl ServeCommand {
         // wrapper aborts the task instead of leaking it (the previous
         // local-binding pattern relied on `process::exit(0)` and would
         // strand the sweeper on any error-path drop).
-        let preview_tokens = Arc::new(crate::api::PreviewTokens::new());
-        let preview_sweeper = crate::api::PreviewSweeperHandle::spawn(
-            preview_tokens.clone(),
-            crate::api::DEFAULT_PREVIEW_SWEEP_INTERVAL,
-        );
-
         let solo_login_enabled_flag = self.solo
             || std::env::var("OCTOS_SOLO_LOGIN")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -838,16 +832,9 @@ impl ServeCommand {
             // `/api/preview/...` route now requires. Daemon restart
             // invalidates every grant (see
             // `crate::api::preview_tokens` for the design rationale).
-            preview_tokens,
             work_secret_store: Arc::new(
                 octos_agent::bridge::work_secret::WorkSecretGrantStore::new(&data_dir),
             ),
-            // Issue #1009: owning sweeper handle. `Drop` aborts the
-            // tokio task when the last `Arc<AppState>` is released,
-            // replacing the previous `_preview_sweeper` local that
-            // leaked the task on any non-`process::exit(0)` shutdown
-            // path.
-            preview_sweeper: Some(preview_sweeper),
         });
 
         // mini5 soak gap #1 / #1973 fix E: drain queued master continuations

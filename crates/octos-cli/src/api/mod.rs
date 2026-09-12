@@ -7,17 +7,13 @@
 //! exclusively. The harness/admin and swarm event surfaces still use a
 //! process-wide [`EventBroadcaster`] over SSE (admin-only).
 
-mod bilibili;
 pub(crate) mod coding_tool_contract;
 mod cron_panel;
 mod events;
-mod events_harness;
 mod handlers;
 mod memory_panel;
 pub mod metrics;
 pub(crate) mod ominix_runtime;
-pub mod preview;
-pub mod preview_tokens;
 pub mod profile_scope;
 pub mod provider_diagnostics;
 mod private_asr;
@@ -53,10 +49,6 @@ pub mod ws_slash;
 
 pub use events::EventBroadcaster;
 pub use metrics::init_metrics;
-pub use preview_tokens::{
-    DEFAULT_PREVIEW_SWEEP_INTERVAL, IssueError as PreviewTokenIssueError, PreviewSweeperHandle,
-    PreviewTokens, SharedPreviewTokens, SignedPreviewResponse,
-};
 pub(crate) use router::resolve_appui_allowed_origins;
 pub use router::{DEFAULT_BASE_DOMAIN, build_router, cors_allowlist_for_base_domain};
 
@@ -360,13 +352,6 @@ pub struct AppState {
     /// The SPA mints a token via `POST /api/my/preview/sign` and serves
     /// the iframe at `GET /api/preview-signed/{token}/{*path}` — that
     /// public route consumes the token as its auth credential, so the
-    /// iframe can drop the missing `Authorization: Bearer ...` header
-    /// that the post-PR-#1001 `/api/preview/...` route requires.
-    ///
-    /// Cache is process-local (no disk persistence) so a daemon restart
-    /// invalidates every outstanding grant. See
-    /// [`crate::api::preview_tokens`] for full design rationale.
-    pub preview_tokens: SharedPreviewTokens,
     /// Persistent session-ingress grant store for external CLI agents.
     ///
     /// `octos auth issue-work-secret` writes short-lived grants here and
@@ -374,14 +359,6 @@ pub struct AppState {
     /// every frame, so revocation applies to already-open sockets without
     /// requiring a daemon restart.
     pub work_secret_store: Arc<octos_agent::bridge::work_secret::WorkSecretGrantStore>,
-    /// Owning handle to the background sweeper task spawned for
-    /// `preview_tokens` (issue #1009). Storing it here ties the
-    /// task's lifetime to `AppState`: when the last `Arc<AppState>` is
-    /// dropped (clean shutdown OR any abnormal exit path), the inner
-    /// `PreviewSweeperHandle::drop` aborts the task instead of leaking
-    /// it. `None` in tests and code paths that don't spawn the
-    /// sweeper.
-    pub preview_sweeper: Option<PreviewSweeperHandle>,
 }
 
 impl AppState {
@@ -446,14 +423,12 @@ impl AppState {
             content_classifier: None,
             task_query_store: None,
             appui_default_session_cwd: None,
-            preview_tokens: Arc::new(PreviewTokens::new()),
             work_secret_store: Arc::new(
                 octos_agent::bridge::work_secret::WorkSecretGrantStore::new(data_dir),
             ),
             // Tests don't spawn the sweeper. Tests that exercise the
             // sweeper either drive `sweep_expired_all` directly or
             // build their own `PreviewSweeperHandle::spawn(...)`.
-            preview_sweeper: None,
         }
     }
 }

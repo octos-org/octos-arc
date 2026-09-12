@@ -15,8 +15,6 @@ use url::Url;
 use super::AppState;
 use super::profile_scope;
 use super::provider_diagnostics;
-use super::bilibili;
-use super::events_harness;
 use super::handlers;
 use super::metrics;
 use super::private_asr;
@@ -295,14 +293,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     // (`/api/tasks/*`), chat ingress (`/api/ui-protocol/ws`), uploads,
     // and site-preview remain REST per the ADR.
     let chat_api = Router::new()
-        .route("/api/events/harness", get(events_harness::events_harness))
         .route(
             "/api/ui-protocol/ws",
             get(ui_protocol_transport::ws_handler),
-        )
-        .route(
-            "/api/integrations/bilibili/first-video",
-            get(bilibili::first_video),
         )
         .route(
             "/api/upload",
