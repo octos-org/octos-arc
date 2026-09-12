@@ -190,7 +190,6 @@ mod tests {
 
         #[cfg(feature = "api")]
         assert_round_trip::<crate::commands::ServeCommand>();
-        assert_round_trip::<crate::commands::GatewayCommand>();
         assert_round_trip::<crate::commands::ChatCommand>();
     }
 }

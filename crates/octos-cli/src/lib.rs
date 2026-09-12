@@ -62,7 +62,6 @@ pub mod gateway_dispatcher;
 pub mod memory_consolidate;
 pub mod memory_refresh;
 #[cfg(feature = "api")]
-pub mod monitor;
 #[cfg_attr(not(feature = "api"), allow(dead_code))]
 pub(crate) mod obs_events;
 #[cfg(feature = "api")]
@@ -71,7 +70,6 @@ pub(crate) mod obs_events;
 #[cfg_attr(not(feature = "api"), allow(dead_code))]
 pub(crate) mod peers;
 pub mod persona_service;
-#[cfg(feature = "api")]
 pub mod process_manager;
 pub mod profiles;
 mod qos_catalog;

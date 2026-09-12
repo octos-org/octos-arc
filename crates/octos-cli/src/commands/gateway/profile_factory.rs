@@ -104,7 +104,7 @@ pub(crate) fn canonical_search_env(provider_id: &str) -> Option<&'static str> {
     }
 }
 
-pub(crate) fn profile_search_provider_keys(
+pub fn profile_search_provider_keys(
     profile: &crate::profiles::UserProfile,
 ) -> HashMap<String, String> {
     let resolved_env_vars = crate::auth::keychain::resolve_env_vars(&profile.config.env_vars);
@@ -137,7 +137,7 @@ fn push_env_once(env: &mut Vec<(String, String)>, key: impl Into<String>, value:
     env.push((key, value));
 }
 
-pub(crate) fn profile_plugin_env(profile: &crate::profiles::UserProfile) -> Vec<(String, String)> {
+pub fn profile_plugin_env(profile: &crate::profiles::UserProfile) -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> = profile_search_provider_keys(profile)
         .into_iter()
         .filter_map(|(provider_id, secret)| {

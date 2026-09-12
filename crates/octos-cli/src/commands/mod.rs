@@ -36,7 +36,6 @@ pub use chat::ChatCommand;
 pub use clean::CleanCommand;
 pub use completions::CompletionsCommand;
 pub use config::ConfigCommand;
-pub use gateway::GatewayCommand;
 
 pub use init::InitCommand;
 #[cfg_attr(not(test), allow(unused_imports))]
@@ -91,8 +90,6 @@ pub enum Command {
     /// Start the REST API server (requires --features api).
     #[cfg(feature = "api")]
     Serve(ServeCommand),
-    /// Run as a persistent messaging gateway.
-    Gateway(GatewayCommand),
 
     /// Clean up stale state and cache files.
     Clean(CleanCommand),
@@ -328,7 +325,6 @@ impl Executable for Command {
             Self::Init(cmd) => cmd.execute(),
             #[cfg(feature = "api")]
             Self::Serve(cmd) => cmd.execute(),
-            Self::Gateway(cmd) => cmd.execute(),
             Self::Clean(cmd) => cmd.execute(),
             Self::Completions(cmd) => cmd.execute(),
 

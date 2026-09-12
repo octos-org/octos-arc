@@ -189,9 +189,29 @@ pub struct UiProtocolRuntimeResources {
     commit_observer: std::sync::OnceLock<octos_bus::MessageCommitObserver>,
 }
 
-/// Shared application state for API handlers.
 pub struct AppState {
-    pub ui_protocol: UiProtocolRuntimeResources,
+    /// Shared HTTP client for webhook proxying.
+    /// Bootstrap admin auth token from config/env (used only until the
+    /// hashed admin-token file is created via dashboard rotation).
+    pub auth_token: Option<String>,
+
+    /// Process-wide event broadcaster for harness/admin + swarm SSE
+    /// surfaces. Chat traffic uses `/api/ui-protocol/ws` exclusively as
+    /// of M9-α-5/α-6.
+    pub broadcaster: Arc<EventBroadcaster>,
+
+    /// Prometheus metrics handle.
+    pub metrics_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
+
+    /// Process manager for gateway lifecycle.
+    pub process_manager: Option<Arc<ProcessManager>>,
+
+    /// Per-profile guard for AppUI skill install/remove plus runtime reload.
+    pub profile_skill_mutation_locks: Arc<ProfileSkillMutationLocks>,
+
+    /// Profile store for admin dashboard.
+    pub profile_store: Option<Arc<ProfileStore>>,
+
     /// Per-profile runtime catalog. Built at startup from
     /// `ProfileStore::list()` — one [`ProfileRuntime`] per enabled
     /// profile with an active primary LLM. The `/api/chat` handler
@@ -203,13 +223,13 @@ pub struct AppState {
     /// the legacy server-wide `agent` fallback); handlers fail closed
     /// with 503 when a request routes to a missing profile.
     pub profiles: HashMap<String, Arc<ProfileRuntime>>,
+
     /// TTL/LRU cache of per-session runtimes keyed by
     /// `(profile_id, session_key)`. Built once at startup;
     /// `/api/chat` and other dispatchers call `get_or_init` to
     /// materialize an `Arc<SessionRuntime>` per turn.
     pub session_cache: Arc<SessionRuntimeCache>,
-    /// Per-profile guard for AppUI skill install/remove plus runtime reload.
-    pub profile_skill_mutation_locks: Arc<ProfileSkillMutationLocks>,
+
     /// Process-wide [`octos_bus::SessionManager`] backed by
     /// `<data_dir>/sessions/`. Used by REST endpoints that browse and
     /// edit on-disk session history (`/api/sessions`, `/api/sessions/:id/messages`,
@@ -221,24 +241,12 @@ pub struct AppState {
     /// `None` in tests / setup-wizard deployments that haven't opened
     /// a SessionManager yet.
     pub sessions: Option<Arc<tokio::sync::Mutex<octos_bus::SessionManager>>>,
-    /// Process-wide event broadcaster for harness/admin + swarm SSE
-    /// surfaces. Chat traffic uses `/api/ui-protocol/ws` exclusively as
-    /// of M9-α-5/α-6.
-    pub broadcaster: Arc<EventBroadcaster>,
+
     /// Server start time.
     pub started_at: chrono::DateTime<chrono::Utc>,
-    /// Bootstrap admin auth token from config/env (used only until the
-    /// hashed admin-token file is created via dashboard rotation).
-    pub auth_token: Option<String>,
-    /// Prometheus metrics handle.
-    pub metrics_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
-    /// Profile store for admin dashboard.
-    pub profile_store: Option<Arc<ProfileStore>>,
-    /// Process manager for gateway lifecycle.
-    pub process_manager: Option<Arc<ProcessManager>>,
-    /// Allowlist for pre-authorized email-based signup.
-    /// Auth manager for email OTP and sessions.
-    /// Shared HTTP client for webhook proxying.
+
+    pub ui_protocol: UiProtocolRuntimeResources,
+
     pub http_client: reqwest::Client,
     /// Path to the global config.json file (for admin bot config editing).
     pub config_path: Option<PathBuf>,
@@ -347,11 +355,6 @@ pub struct AppState {
     /// serve cwd under launchd is `~`, outside the profile root, and
     /// `/api/files` would 403 anything written there).
     pub appui_default_session_cwd: Option<PathBuf>,
-    /// In-memory signed-preview token cache (issue #1001 follow-up).
-    ///
-    /// The SPA mints a token via `POST /api/my/preview/sign` and serves
-    /// the iframe at `GET /api/preview-signed/{token}/{*path}` — that
-    /// public route consumes the token as its auth credential, so the
     /// Persistent session-ingress grant store for external CLI agents.
     ///
     /// `octos auth issue-work-secret` writes short-lived grants here and
@@ -398,7 +401,6 @@ impl AppState {
             auth_token: None,
             metrics_handle: None,
             profile_store: None,
-            process_manager: None,
             http_client: reqwest::Client::new(),
             config_path: None,
             watchdog_enabled: None,
@@ -415,6 +417,7 @@ impl AppState {
             default_network_denied: false,
             llm_compaction: false,
             host_memory: None,
+            process_manager: None,
             user_store: None,
             allow_admin_shell: false,
             content_catalog_mgr: None,

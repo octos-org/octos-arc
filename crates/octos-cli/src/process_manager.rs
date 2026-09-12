@@ -32,6 +32,18 @@ const WEBHOOK_BASE_PORT: u16 = 9321;
 const API_BASE_PORT: u16 = 9401;
 
 /// Manages gateway and bridge child processes — one of each per user profile.
+/// Alert payload previously delivered to the retired `octos monitor`
+/// task. Retained as a placeholder so gateway child-process plumbing
+/// keeps compiling without the monitor module.
+#[derive(Debug, Clone)]
+pub enum AdminAlert {
+    GatewayExited {
+        profile_id: String,
+        exit_code: i32,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    },
+}
+
 pub struct ProcessManager {
     processes: Arc<RwLock<HashMap<String, GatewayProcess>>>,
     bridges: Arc<RwLock<HashMap<String, BridgeProcess>>>,
@@ -40,7 +52,7 @@ pub struct ProcessManager {
     bridge_js_path: Option<PathBuf>,
     /// Optional channel for sending admin alerts when gateways exit.
     #[cfg(feature = "api")]
-    alert_tx: std::sync::Mutex<Option<mpsc::Sender<crate::monitor::AdminAlert>>>,
+    alert_tx: std::sync::Mutex<Option<mpsc::Sender<crate::process_manager::AdminAlert>>>,
     /// Port that `octos serve` is listening on (for admin mode gateways).
     serve_port: Option<u16>,
     /// Admin token for API access (passed to admin mode gateways).
@@ -309,7 +321,7 @@ impl ProcessManager {
 
     /// Set the alert sender for monitor notifications.
     #[cfg(feature = "api")]
-    pub fn set_alert_sender(&self, tx: mpsc::Sender<crate::monitor::AdminAlert>) {
+    pub fn set_alert_sender(&self, tx: mpsc::Sender<crate::process_manager::AdminAlert>) {
         *self.alert_tx.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
     }
 
@@ -731,9 +743,9 @@ impl ProcessManager {
                     };
                     #[cfg(feature = "api")]
                     if let Some(ref tx) = alert_tx {
-                        let _ = tx.try_send(crate::monitor::AdminAlert::GatewayExited {
+                        let _ = tx.try_send(AdminAlert::GatewayExited {
                             profile_id: profile_id.clone(),
-                            exit_code,
+                            exit_code: exit_code.unwrap_or(-1),
                             timestamp: Utc::now(),
                         });
                     }

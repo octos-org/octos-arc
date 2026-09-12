@@ -71,7 +71,6 @@ pub fn apply(args: &mut crate::commands::Args, matches: &clap::ArgMatches) -> ey
     match &mut args.command {
         #[cfg(feature = "api")]
         crate::commands::Command::Serve(inner) => overlay(name, inner, sub, sub_cmd, &section),
-        crate::commands::Command::Gateway(inner) => overlay(name, inner, sub, sub_cmd, &section),
         crate::commands::Command::Chat(inner) => overlay(name, inner, sub, sub_cmd, &section),
         _ => {}
     }
