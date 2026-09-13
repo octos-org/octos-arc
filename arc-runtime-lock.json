@@ -16,16 +16,16 @@
     "original_bundle_sha256": "1914ace16d50de61f3d7e9d3838c439f65bbfd64e7c0493992de198528f54a5e"
   },
   "runtime_release": {
-    "version": "v2.0.3-rc.11-arc.2",
-    "source_commit": "78394e5032cfe0ed8387c0b226250c229d9fbfa8",
+    "version": "v2.0.3-rc.11-arc.10",
+    "source_commit": "ca337e4ff409144fa8e4469b4057371f4bca1d3f",
     "target": "x86_64-unknown-linux-gnu",
     "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
     "archive": "octos-bundle-x86_64-unknown-linux-gnu.tar.gz",
-    "archive_sha256": "9b2f8a34831148a4650e9f91b862fec0e0bf1f9ea3bc965573e60f23cd0d4f2d",
+    "archive_sha256": "68e10832f382a3f9b6cba3f142666b9ba3ffae30b072fa9808557cdbeda9027f",
     "binary": "octos",
-    "binary_version": "octos 2.0.3-rc.11 (78394e50 2026-09-13)",
-    "binary_sha256": "bca911a3690be992da01b0d116ab21064c673d65303aa1b79bc16d22c3a00afb",
-    "url": "https://github.com/octos-org/octos-arc/releases/download/v2.0.3-rc.11-arc.2/octos-bundle-x86_64-unknown-linux-gnu.tar.gz"
+    "binary_version": "octos 2.0.3-rc.11 (ca337e4f 2026-09-13)",
+    "binary_sha256": "5e7a1b8b2cd3db40f0db290932f3b2e9909b4dd5c1adea29057873fc288b7753",
+    "url": "https://github.com/octos-org/octos-arc/releases/download/v2.0.3-rc.11-arc.10/octos-bundle-x86_64-unknown-linux-gnu.tar.gz"
   },
   "build": {
     "source_commit": "a10521e414adcac61e09c1a20f834aa4b3cbcadb",
