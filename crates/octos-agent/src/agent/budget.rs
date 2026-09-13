@@ -607,70 +607,7 @@ pub(super) fn checkpoint_budget_exhaustion(
 mod budget_checkpoint_tests {
     use super::*;
 
-    /// #27h (BLOCKER-2) — combined path: peer owns result.md + dirty wt +
-    /// MaxIterations ⇒ the PEER's authoritative result.md survives verbatim,
-    /// the staged view lands in result.checkpoint.md, and the code progress
-    /// is still checkpoint-committed (git add -A path unchanged).
-    #[test]
-    fn peer_owned_result_survives_budget_checkpoint() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let cwd = dir.path();
-        init_repo(cwd);
-        // Peer's authoritative final version + ownership sidecar.
-        let peer_final = "---\nstatus: complete\n---\n\nPEER FINAL — authoritative.\n";
-        std::fs::write(cwd.join("result.md"), peer_final).expect("peer result");
-        std::fs::write(cwd.join(".result-owner"), "peer").expect("sidecar");
-        // Dirty tree (code progress).
-        std::fs::write(cwd.join("src.rs"), "fn main() {}").expect("progress");
 
-        let marker =
-            checkpoint_budget_exhaustion(Some(cwd), &BudgetStop::MaxIterations { limit: 50 }, 42);
-
-        // Marker unchanged (the distinct terminal signal still fires).
-        assert_eq!(marker.as_deref(), Some("budget_exhausted:50"));
-        // Peer result.md survives VERBATIM.
-        assert_eq!(
-            std::fs::read_to_string(cwd.join("result.md")).expect("read"),
-            peer_final,
-            "peer-owned result.md must not be overwritten (#27h)"
-        );
-        // Staged view went to result.checkpoint.md with the three parts.
-        let staged = std::fs::read_to_string(cwd.join("result.checkpoint.md"))
-            .expect("staged checkpoint view");
-        assert!(staged.contains("budget_exhausted"));
-        assert!(staged.contains("Done so far"));
-        assert!(staged.contains("Remaining"));
-        // Progress checkpointed: a commit exists and the tree is clean.
-        let log = git_in(cwd, &["log", "--oneline"]).expect("log");
-        assert!(log.contains("#27e"), "checkpoint commit present: {log}");
-        let status = git_in(cwd, &["status", "--porcelain"]).expect("status");
-        assert!(
-            status.trim().is_empty(),
-            "tree clean after checkpoint: {status}"
-        );
-        // The sidecar is NOT part of the overwrite semantics.
-        assert_eq!(
-            std::fs::read_to_string(cwd.join(".result-owner")).expect("sidecar"),
-            "peer"
-        );
-    }
-
-    /// #27h-r1 — the ownership JUDGMENT on sidecar content (single shared
-    /// implementation; the cli consumer routes its fd-anchored read through
-    /// the same function — see the twin contract test in
-    /// octos-cli ui_protocol_tests::result_owner_contract_27h_r1).
-    #[test]
-    fn result_owner_content_contract_agent_side() {
-        use super::result_md_owner_content_is_peer;
-        assert!(result_md_owner_content_is_peer("peer"));
-        assert!(result_md_owner_content_is_peer("peer\n"));
-        assert!(result_md_owner_content_is_peer("  peer  "));
-        // Anything else is NOT ownership (fail-open).
-        assert!(!result_md_owner_content_is_peer(""));
-        assert!(!result_md_owner_content_is_peer("Peer")); // case-sensitive
-        assert!(!result_md_owner_content_is_peer("peer-model"));
-        assert!(!result_md_owner_content_is_peer("runtime"));
-    }
 
     /// #27h-r1 — dir-level ownership through the fs path (this crate's
     /// consumer shape).

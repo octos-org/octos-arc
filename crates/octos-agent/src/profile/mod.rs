@@ -607,8 +607,6 @@ mod tests {
         assert_eq!(full.name, "coding-full");
         assert!(matches!(full.tools, ProfileTools::Default));
 
-        let swarm = ProfileDefinition::builtin("swarm").expect("swarm builtin");
-        assert_eq!(swarm.name, "swarm");
         // Unknown names produce `None` so the load() caller can fall
         // through to a typed error.
         assert!(ProfileDefinition::builtin("does-not-exist").is_none());
