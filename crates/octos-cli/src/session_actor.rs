@@ -3300,13 +3300,7 @@ impl ActorFactory {
         // (32 slots), or the UI / SSE consumers stay stuck on `running`.
         // See [`forward_task_status_to_actor_inbox`].
         install_gateway_task_status_sinks(&supervisor, tx.clone(), self.data_dir.clone());
-        if let Err(error) = crate::peers::enable_peer_task_persistence(
-            &supervisor,
-            &task_state_path,
-            &self.data_dir.join("peers"),
-            session_key.profile_id().unwrap_or(MAIN_PROFILE_ID),
-            &session_key.0,
-        ) {
+        if let Err(error) = supervisor.enable_persistence(&task_state_path) {
             warn!(
                 session = %session_key,
                 error = %error,

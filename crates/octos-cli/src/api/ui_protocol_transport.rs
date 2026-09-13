@@ -11571,21 +11571,7 @@ async fn raw_skill_action_invoke(
                 &params.session_id,
                 ledger,
             );
-            enable_peer_task_persistence(
-                &supervisor,
-                ui_protocol_task_output::task_state_path(
-                    &session_runtime.sessions_root,
-                    &params.session_id,
-                ),
-                &session_runtime.profile.data_dir.join("peers"),
-                &profile_id,
-                &params.session_id.0,
-            )
-            .map_err(|error| {
-                RpcError::internal_error(format!(
-                    "failed to enable skill action task persistence: {error}"
-                ))
-            })?;
+;
             if let Some(store) = state.task_query_store.as_ref() {
                 store.register(
                     &params.session_id,
@@ -11668,16 +11654,7 @@ async fn load_skill_action_job_view(
                 session_id,
                 ledger,
             );
-            enable_peer_task_persistence(
-                &supervisor,
-                ui_protocol_task_output::task_state_path(&runtime.sessions_root, session_id),
-                &runtime.profile.data_dir.join("peers"),
-                &profile_id,
-                &session_id.0,
-            )
-            .map_err(|error| {
-                RpcError::internal_error(format!("failed to restore skill action tasks: {error}"))
-            })?;
+;
             Ok((
                 profile_id,
                 project_skill_action_jobs(supervisor.get_tasks_for_session(&session_id.0)),
@@ -26356,19 +26333,6 @@ async fn run_standalone_turn(
                 Some(change_profile_id.as_str()),
             );
         });
-        if let Err(error) = enable_peer_task_persistence(
-            &task_supervisor,
-            task_state_path.clone(),
-            &session_runtime.profile.data_dir.join("peers"),
-            &session_runtime.profile.profile_id,
-            &session_id.0,
-        ) {
-            warn!(
-                session_id = %session_id.0,
-                error = %error,
-                "failed to enable AppUI turn task-supervisor persistence"
-            );
-        }
         // Register the per-turn supervisor with `SessionTaskQueryStore`
         // so `session/tasks.list` and `session/status.get` can see live
         // spawn_only tasks after the SPA closes + reopens the chat
