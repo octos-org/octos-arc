@@ -735,9 +735,12 @@ Requirement {node_id}: {description}
 
 Acceptance test (ground truth):
 {spec}
-Files (exact): frontend/src/index.html (the page); frontend/package.json = {{"name":"f","scripts":{{"build":"node -e \\"const f=require('fs');f.mkdirSync('dist',{{recursive:true}});for(const n of f.readdirSync('src'))f.copyFileSync('src/'+n,'dist/'+n)\\""}}}}; backend/package.json = {{"name":"b","scripts":{{"start":"node server.js"}}}}; backend/server.js = Node http server on process.env.PORT||{port} serving ../frontend/dist files at / (index.html for /), 404 for anything else, wrapped in try/catch and process.on('uncaughtException').
-Rules: texts, button names, labels and test ids exactly as in the test; the initial state is literally in the HTML; state lives in the page script unless the requirement says it is persisted; no external resources, no CSS, no comments, no notes. index.html <= 20 lines, server.js <= 20 lines.
+Files (exact): frontend/src/index.html (the page); frontend/package.json = {{"name":"f","scripts":{{"build":"node -e \\"const f=require('fs');f.mkdirSync('dist',{{recursive:true}});for(const n of f.readdirSync('src'))f.copyFileSync('src/'+n,'dist/'+n)\\""}}}}; backend/package.json = {{"name":"b","scripts":{{"start":"node server.js"}}}}; backend/server.js = Node http server on process.env.PORT||{port} serving ../frontend/dist files at / (index.html for /) plus any API routes the requirement needs (in-memory state), 404 for anything else, wrapped in try/catch and process.on('uncaughtException').
+Rules: texts, button names, labels and test ids exactly as in the test; the initial state is literally in the HTML; state lives in the page script unless the requirement says it is persisted; no external resources, no CSS, no comments, no notes. {size_rule}
 """
+
+CODEGEN_SIZE_SMALL = "index.html <= 20 lines, server.js <= 20 lines."
+CODEGEN_SIZE_FULL = "As short as the tests allow; one page file per route is fine."
 
 UI_CONTRACT_DATA = """\
 - Concrete example values in the requirement (seed records, option labels, sample accounts, nationalities, seat classes) are FIXTURE DATA: they must exist verbatim as <option>s / seed rows. When a control's values are described but not listed, offer a broad standard set.
@@ -1101,7 +1104,7 @@ class Flow:
         """One-request generation for one-node tasks (OCTOS_ARC_CODEGEN=0 disables)."""
         return (os.environ.get("OCTOS_ARC_CODEGEN", "1") != "0" and getattr(self, "llm_proxy", None) is not None
                 and not getattr(self, "codegen_blocked", False)
-                and getattr(self, "nodes_to_implement", 2) <= 1 and getattr(self, "n_nodes", 99) <= 2)
+                and getattr(self, "n_nodes", 99) <= int(os.environ.get("OCTOS_ARC_CODEGEN_MAX_NODES", "2")))
 
     def codegen_turn(self, prompt: str, timeout: int, label: str) -> tuple[bool, str]:
         """Run a tool-less turn; parse and write the file blocks from the reply."""
@@ -1129,12 +1132,15 @@ class Flow:
         if not self.tests_dir:
             return "(none)"
         files = list(self.spec_map.get(node_id) or [])
+        files += sorted(str(p.relative_to(self.tests_dir)) for p in self.tests_dir.rglob("*.ts")
+                        if not p.name.endswith(".spec.ts") and str(p.relative_to(self.tests_dir)) not in files)
         parts = []
         for rel in files:
             try:
-                parts.append((self.tests_dir / rel).read_text(encoding="utf-8", errors="replace").strip())
+                text = (self.tests_dir / rel).read_text(encoding="utf-8", errors="replace").strip()
             except OSError:
                 continue
+            parts.append(text if len(files) == 1 else f"--- {rel} ---\n{text}")
         return "\n".join(parts) or "(none)"
 
     def tests_prompt_for(self, node_id: str | None, skeleton: bool = False) -> str:
@@ -1525,11 +1531,12 @@ class Flow:
         implement_timeout = min(self.node_timeout, self.implement_fraction * node_budget, deadline - time.time())
         if self.codegen_mode():
             compact = CODEGEN_PROMPT.format(node_id=node_id, description=str(node.get("description") or "").strip(),
-                                            spec=self.spec_bodies(node_id), port=self.web_port)
+                                            spec=self.spec_bodies(node_id), port=self.web_port,
+                                            size_rule=CODEGEN_SIZE_SMALL if self.n_nodes <= 1 else CODEGEN_SIZE_FULL)
             if self.has_app():  # evolution: keep the existing app, return every changed file complete
                 compact = (compact.replace("Files (exact):", "Existing app below; keep everything that works and output "
                                            "every changed file complete. Files (exact):", 1)
-                           + inline_sources(self.output_dir, 12000, exts=(".html", ".js")))
+                           + inline_sources(self.output_dir, 30000, exts=(".html", ".js")))
             ok, text = self.codegen_turn(compact, implement_timeout, f"{node_id} implement")
         else:
             ok, text = self.turn(prompt, implement_timeout, f"{node_id} implement")

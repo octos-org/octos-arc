@@ -126,6 +126,6 @@ class FailureNormalizationTests(unittest.TestCase):
 class CodegenPromptTests(unittest.TestCase):
     def test_should_format_without_placeholder_errors_and_keep_build_command(self):
         import main as m
-        text = m.CODEGEN_PROMPT.format(node_id="REQ-1", description="S", spec="T", port=3000)
+        text = m.CODEGEN_PROMPT.format(node_id="REQ-1", description="S", spec="T", port=3000, size_rule="R")
         self.assertIn("mkdirSync('dist',{recursive:true})", text)
         self.assertIn("REQ-1", text)
