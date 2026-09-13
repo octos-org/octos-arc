@@ -2073,7 +2073,6 @@ async fn build_minimal_actor_factory(
         spawn_inbound_tx: spawn_tx,
         cron_service: None,
         tool_registry_factory: Arc::new(SnapshotToolRegistryFactory::new(tools)),
-        pipeline_factory: None,
         max_history: Arc::new(std::sync::atomic::AtomicUsize::new(50)),
         idle_timeout: Duration::from_secs(60),
         session_timeout: Duration::from_secs(120),

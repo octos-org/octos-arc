@@ -26815,32 +26815,6 @@ async fn run_standalone_turn(
                 Arc::new(tool) as Arc<dyn octos_agent::tools::Tool>
             }));
         }
-        // NEW-07 fix: mirror the gateway path (`session_actor.rs:2744-2748`)
-        // and attach the profile-scope `PipelineToolFactory` to the
-        // SpawnTool child registry so a child agent declaring
-        // `allowed_tools=["run_pipeline"]` clears the spawn preflight
-        // (`spawn.rs::ensure_subagent_tools_available`). Round-7 soak
-        // (binary `5cfd85f3`) caught mini1 `deep_research` stalling for
-        // 900s when the LLM emitted
-        // `spawn(allowed_tools=["run_pipeline"])` and preflight failed
-        // with `required tool(s) not available on this host: run_pipeline`.
-        // Phase 2-A (PR #1203) plumbed scope through `RunPipelineTool`
-        // but did not extend child-registry wiring on this path; the
-        // `pipeline_factory` field on `ProfileRuntime` is populated by
-        // `ProfileRuntime::bootstrap` (see `runtime/profile.rs`), and we
-        // clone the `Arc` here for every spawn-tool child closure
-        // invocation.
-        if let Some(pipeline_factory) = session_runtime.profile.pipeline_factory.clone() {
-            // #1607 (codex round 4): bind spawn-child `run_pipeline` instances to
-            // the SESSION-effective sandbox (`session_runtime.sandbox`, set by
-            // `bootstrap_with_permissions_and_sandbox`), NOT the profile-time
-            // default the factory was built with — otherwise a read-only
-            // session's spawned pipeline validators regain removed
-            // writes/network.
-            let child_sandbox = session_runtime.sandbox.clone();
-            spawn_tool = spawn_tool
-                .with_child_tool_factory(Arc::new(move || pipeline_factory.create(&child_sandbox)));
-        }
         tool_registry.register(spawn_tool);
         // RFC-0 (#1289): LRU deferral removed — no base-tool pin needed.
 

@@ -2795,7 +2795,6 @@ pub struct ActorFactory {
     pub spawn_inbound_tx: mpsc::Sender<InboundMessage>,
     pub cron_service: Option<Arc<octos_bus::CronService>>,
     pub tool_registry_factory: Arc<dyn ToolRegistryFactory + Send + Sync>,
-    pub pipeline_factory: Option<Arc<dyn PipelineToolFactory + Send + Sync>>,
     pub max_history: Arc<std::sync::atomic::AtomicUsize>,
     pub idle_timeout: Duration,
     pub session_timeout: Duration,
@@ -2888,30 +2887,6 @@ pub trait ToolRegistryFactory: Send + Sync {
         workspace: &std::path::Path,
         sandbox: Box<dyn octos_agent::Sandbox>,
     ) -> ToolRegistry;
-}
-
-/// Trait for creating per-session pipeline tool instances.
-///
-/// #1607 (codex round 4): `create` takes the SESSION-effective sandbox so the
-/// produced `run_pipeline` tool (and every spawn-child instance) confines its
-/// pipeline command validators to the sandbox that is actually in force for
-/// this session — NOT a profile-time default captured when the factory was
-/// built. In the AppUI path the effective sandbox is only known after
-/// `SessionRuntime::bootstrap_with_permissions_and_sandbox` resolves the
-/// permission/override, so passing it in at `create` time is the only correct
-/// binding: a read-only session's pipeline validators must not regain writes
-/// or network the profile default allowed.
-pub trait PipelineToolFactory: Send + Sync {
-    fn create(&self, sandbox: &octos_agent::SandboxConfig) -> Arc<dyn octos_agent::tools::Tool>;
-
-    /// Rebind canonical project discovery without rebuilding shared provider
-    /// and memory resources. Custom factories may retain their own discovery.
-    fn with_plugin_dirs(
-        &self,
-        _plugin_dirs: Vec<std::path::PathBuf>,
-    ) -> Option<Arc<dyn PipelineToolFactory + Send + Sync>> {
-        None
-    }
 }
 
 /// ToolRegistryFactory backed by snapshot_excluding() — clones shared tools cheaply.
@@ -3443,15 +3418,6 @@ impl ActorFactory {
         if let Some(ref ctx) = session_hook_context {
             spawn_tool = spawn_tool.with_hook_context(ctx.clone());
         }
-        if let Some(ref pipeline_factory) = self.pipeline_factory {
-            let pipeline_factory = pipeline_factory.clone();
-            // #1607 (codex round 4): hand each spawn-child `run_pipeline`
-            // instance the SESSION-effective sandbox (the same one the actor's
-            // tool registry uses), not a profile-time default.
-            let child_sandbox = self.sandbox_config.clone();
-            spawn_tool = spawn_tool
-                .with_child_tool_factory(Arc::new(move || pipeline_factory.create(&child_sandbox)));
-        }
         // Child SendFileTool factory (gateway parity with AppUI). Every
         // spawned subagent's registry gets a fresh `SendFileTool` wired
         // to the SAME `proxy_tx` channel as the parent, so spawn_only
@@ -3599,20 +3565,6 @@ impl ActorFactory {
         } else {
             None
         };
-
-        if let Some(ref pf) = self.pipeline_factory {
-            // #1607 (codex round 4): the parent `run_pipeline` also uses the
-            // session-effective sandbox this actor's registry was built with.
-            let pt = pf.create(&self.sandbox_config);
-            tools.register_arc(pt);
-            tools.mark_spawn_only(
-                "run_pipeline",
-                Some(
-                    "Pipeline started in background. The final result and any artifacts will be sent here when complete. You can keep chatting in the meantime."
-                        .to_string(),
-                ),
-            );
-        }
 
         // PR #688 follow-up — MEDIUM #4: re-apply the global tool_policy
         // AFTER the per-session pipeline tool was registered. The base

@@ -237,7 +237,6 @@ async fn make_m11g_profile(profile_id: &str, data_dir: &std::path::Path) -> Arc<
         tool_config,
         cron_service: None,
         runtime_lifecycle: None,
-        pipeline_factory: None,
         hook_executor: None,
         lane_routing: None,
     })

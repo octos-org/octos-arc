@@ -376,18 +376,6 @@ impl SessionRuntime {
         // absent here; re-adding it unconditionally would make a policy-disabled
         // pipeline visible + callable, bypassing the tool policy (#1607 codex
         // round 5). `register_arc` replaces the existing entry by name.
-        if let Some(ref pf) = profile.pipeline_factory {
-            if tools.get_tool("run_pipeline").is_some() {
-                tools.register_arc(pf.create(&sandbox));
-                tools.mark_spawn_only(
-                    "run_pipeline",
-                    Some(
-                        "Pipeline started in background. The final result and any artifacts will be sent here when complete. You can keep chatting in the meantime."
-                            .to_string(),
-                    ),
-                );
-            }
-        }
         // RFC-0 (#1289): the `activate_tools` meta-tool was removed — every
         // enabled tool is emitted every turn, so there is no per-session
         // meta-tool to re-register or wire.
@@ -1376,7 +1364,6 @@ tools = ["read_file"]
             tool_config,
             cron_service: None,
             runtime_lifecycle: None,
-            pipeline_factory: None,
             hook_executor: None,
             lane_routing: None,
             voice: crate::config::VoiceConfig::default(),
@@ -2168,7 +2155,6 @@ tools = ["read_file"]
             tool_config,
             cron_service: None,
             runtime_lifecycle: None,
-            pipeline_factory: None,
             hook_executor: Some(executor),
             lane_routing: None,
             voice: crate::config::VoiceConfig::default(),

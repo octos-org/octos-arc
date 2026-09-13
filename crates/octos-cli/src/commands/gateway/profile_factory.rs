@@ -25,7 +25,7 @@ use super::build_system_prompt;
 use crate::commands::chat::{create_embedder, resolve_provider_policy};
 use crate::config::{Config, detect_provider};
 use crate::session_actor::{
-    ActorFactory, PendingMessages, PipelineToolFactory, SessionTaskQueryStore,
+    ActorFactory, PendingMessages, SessionTaskQueryStore,
     SnapshotToolRegistryFactory, ToolRegistryFactory,
 };
 
@@ -639,7 +639,6 @@ pub(super) struct ProfileActorFactoryBuilder {
     pub(super) spawn_inbound_tx: mpsc::Sender<octos_core::InboundMessage>,
     pub(super) cron_service: Arc<CronService>,
     pub(super) tool_registry_factory: Arc<dyn ToolRegistryFactory + Send + Sync>,
-    pub(super) pipeline_factory: Option<Arc<dyn PipelineToolFactory + Send + Sync>>,
     pub(super) max_history: Arc<AtomicUsize>,
     pub(super) session_timeout_secs: u64,
     pub(super) shutdown: Arc<AtomicBool>,
@@ -745,7 +744,6 @@ impl ProfileActorFactoryBuilder {
             system_prompt.post_memory.push_str("\n\n");
             system_prompt.post_memory.push_str(fragment);
         }
-        let mut pipeline_factory = self.pipeline_factory.clone();
         let mut provider_policy = self.provider_policy.clone();
         let mut worker_prompt = self.worker_prompt.clone();
         let mut provider_router = self.provider_router.clone();
@@ -974,50 +972,7 @@ impl ProfileActorFactoryBuilder {
                 tools.apply_policy(policy);
             }
 
-            struct ChildPipelineToolFactory {
-                llm: Arc<dyn LlmProvider>,
-                memory: Arc<octos_memory::EpisodeStore>,
-                data_dir: PathBuf,
-                policy: Option<octos_agent::ToolPolicy>,
-                plugin_dirs: Vec<PathBuf>,
-                router: Option<Arc<ProviderRouter>>,
-                octos_home: PathBuf,
-                plugin_require_signed: bool,
-                /// NEW-06 fix: forwarded to every worker `Agent` via
-                /// `RunPipelineTool::with_embedder` so pipeline-spawned
-                /// agents inherit hybrid scored + filtered memory
-                /// recall instead of the cwd-only unfiltered fallback.
-                embedder: Option<Arc<dyn octos_llm::EmbeddingProvider>>,
-            }
 
-            impl crate::session_actor::PipelineToolFactory for ChildPipelineToolFactory {
-                fn create(
-                    &self,
-                    sandbox: &octos_agent::SandboxConfig,
-                ) -> Arc<dyn octos_agent::Tool> {
-                    let mut pt = octos_pipeline::RunPipelineTool::new(
-                        self.llm.clone(),
-                        self.memory.clone(),
-                        self.data_dir.clone(),
-                        self.data_dir.clone(),
-                    )
-                    .with_provider_policy(self.policy.clone())
-                    .with_plugin_dirs(self.plugin_dirs.clone())
-                    .with_plugin_require_signed(self.plugin_require_signed)
-                    // #1607 (codex round 4): confine pipeline command validators
-                    // to the SESSION-effective sandbox handed in by the actor
-                    // factory.
-                    .with_sandbox(sandbox.clone())
-                    .with_octos_home(self.octos_home.clone());
-                    if let Some(ref router) = self.router {
-                        pt = pt.with_provider_router(router.clone());
-                    }
-                    if let Some(ref embedder) = self.embedder {
-                        pt = pt.with_embedder(embedder.clone());
-                    }
-                    Arc::new(pt)
-                }
-            }
 
             // NEW-06 fix: the parent ActorFactory's session agent gets
             // its embedder from the shared single resolve below; hand the
@@ -1025,29 +980,6 @@ impl ProfileActorFactoryBuilder {
             // the same contamination-safe hybrid memory path.
             let child_pipeline_embedder = profile_embedder.clone();
 
-            pipeline_factory = Some(Arc::new(ChildPipelineToolFactory {
-                llm: llm.clone(),
-                memory: self.memory.clone(),
-                data_dir: profile_data_dir.clone(),
-                policy: provider_policy.clone(),
-                plugin_dirs: plugin_dirs.clone(),
-                router: provider_router.clone(),
-                // Gap 4.1 BLOCKER 1: the child-profile pipeline root MUST be
-                // the same `effective_octos_home` the gateway bootstrapped the
-                // bundled pipelines into — NOT `project_dir` (= `cwd/.octos`
-                // on the standalone path). bootstrap-dir == search-dir, so an
-                // installed global pipeline wins over the bundled fallback on
-                // every path, including standalone `octos gateway`.
-                octos_home: self.child_pipeline_octos_home().to_path_buf(),
-                // Section B (codex review follow-up): propagate the
-                // profile's strict-signing policy.
-                plugin_require_signed: profile_config.plugins.require_signed,
-                embedder: child_pipeline_embedder,
-                // #1607 (codex round 4): the session sandbox is now handed to
-                // `create()` by the actor factory (`self.sandbox_config`), so no
-                // per-factory field is needed.
-            })
-                as Arc<dyn crate::session_actor::PipelineToolFactory + Send + Sync>);
 
             Arc::new(SnapshotToolRegistryFactory::new(tools))
         };
@@ -1091,7 +1023,6 @@ impl ProfileActorFactoryBuilder {
             spawn_inbound_tx: self.spawn_inbound_tx.clone(),
             cron_service: Some(self.cron_service.clone()),
             tool_registry_factory,
-            pipeline_factory,
             max_history: self.max_history.clone(),
             idle_timeout: Duration::from_secs(crate::session_actor::DEFAULT_IDLE_TIMEOUT_SECS),
             session_timeout: Duration::from_secs(self.session_timeout_secs),
@@ -1617,9 +1548,7 @@ mod tests {
             out_tx,
             spawn_inbound_tx,
             cron_service,
-            tool_registry_factory: Arc::new(SnapshotToolRegistryFactory::new(ToolRegistry::new())),
-            pipeline_factory: None,
-            max_history: Arc::new(AtomicUsize::new(50)),
+            tool_registry_factory: Arc::new(SnapshotToolRegistryFactory::new(ToolRegistry::new())),            max_history: Arc::new(AtomicUsize::new(50)),
             session_timeout_secs: octos_agent::DEFAULT_SESSION_TIMEOUT_SECS,
             shutdown: Arc::new(AtomicBool::new(false)),
             cwd: project_dir.clone(),

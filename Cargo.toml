@@ -8,7 +8,6 @@ members = [
     "crates/octos-bus",
     "crates/octos-cli",
     "crates/octos-arc",
-    "crates/octos-pipeline",
     "crates/octos-plugin",
 ]
 [workspace.package]
@@ -30,7 +29,6 @@ octos-llm = { path = "crates/octos-llm" }
 octos-agent = { path = "crates/octos-agent" }
 octos-arc = { path = "crates/octos-arc" }
 octos-bus = { path = "crates/octos-bus" }
-octos-pipeline = { path = "crates/octos-pipeline" }
 octos-plugin = { path = "crates/octos-plugin" }
 # codex-rs crates (reused)
 codex-execpolicy = { git = "https://github.com/openai/codex", path = "codex-rs/execpolicy" }

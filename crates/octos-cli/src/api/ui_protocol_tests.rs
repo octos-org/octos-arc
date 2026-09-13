@@ -26332,7 +26332,6 @@ async fn make_m11e_profile_with_llm_and_sandbox(
         tool_config,
         cron_service: None,
         runtime_lifecycle: None,
-        pipeline_factory: None,
         hook_executor: None,
         lane_routing: None,
         voice: crate::config::VoiceConfig::default(),
