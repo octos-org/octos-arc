@@ -918,8 +918,6 @@ fn ui_protocol_v1_wire_contract_is_golden() {
             "context/compaction_completed",
             "context/compaction_started",
             "context/normalization_reported",
-            "peer/staged",
-            "peer/closed",
             "background/activity",
         ]
     );
@@ -1136,8 +1134,6 @@ fn ui_protocol_v1_representative_wire_payloads_are_golden() {
                 "context/compaction_completed",
                 "context/compaction_started",
                 "context/normalization_reported",
-                "peer/staged",
-                "peer/closed",
                 "background/activity"
             ],
             "supported_features": [
