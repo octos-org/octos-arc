@@ -361,3 +361,20 @@ no timers, no per-keystroke work, state rendered server-side or from the initial
 | Counter | 1 request, 578/358 = 936 tokens, 1/1, grade 100 |
 
 Cloud: 未评测.
+
+## Round 26 — speed rule dropped; backend manifest pinned to CommonJS
+
+Cloud round 25 (C): TB 84444321d4f7 9/10 ¥0.564 (reasoning 49.8k vs 15.9k in round 24) and 3e425ce2ebf6 9/10
+¥0.746 (24 requests: the codegen server.js mixed `import` and `require`; Node 20.19 module detection loaded
+it as ESM → "require is not defined in ES module scope" → three tool-mode rounds). The speed rule did not
+change the grader's 10 s timeouts and correlated with the reasoning jump, so it is dropped. The harness-written
+backend/package.json now has `"type": "commonjs"` and the prompt says "CommonJS (require)".
+
+| task (local) | result |
+|---|---|
+| Ticket Booking (speed rule dropped) | 3 requests, 16,457 prompt / 15,784 completion (7,833 reasoning), 10/10, grade 100 |
+| Counter | 1 request, 509/357 = 866 tokens, 1/1, grade 100 |
+| Dice | 1 request, 436/309 = 745 tokens, 1/1, grade 100 |
+
+Leaderboard (C, round 24 submission): all three tracks real-agent #1 — Smoke ¥0.0095, Evolution ¥0.0086,
+TB ¥0.251 / 9/10. Cloud for round 26: 未评测.
