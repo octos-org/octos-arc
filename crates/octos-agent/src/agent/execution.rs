@@ -340,7 +340,7 @@ pub(super) fn satisfied_completion_content(output_files: &[String], tool_output:
 /// Empirical validation (llm-benchmark replay of mini3 session
 /// slides-1780013669236-8w2ime, the production failure that motivated
 /// this fix):
-/// - kimi-k2.5 + only `check_workspace_contract`:
+/// - kimi-k2.5 + only the contract-inspection tool:
 ///   loop rate 5/5 → 3/5 with this block (40% break out)
 /// - kimi-k2.5 + check + read_file + list_dir:
 ///   no consistent change (within noise)
@@ -1303,40 +1303,6 @@ impl Agent {
                             .await
                             {
                                 SpawnTaskContractResult::Satisfied { output_files } => {
-                                    // octos #997 (round-3 fix): the session-scope
-                                    // contract above runs validators at the SESSION
-                                    // root and writes
-                                    // `<session>/.octos/validator_outcomes.jsonl`,
-                                    // but `inspect_workspace_contract` reads
-                                    // `<session>/<kind>/<slug>/.octos/validator_outcomes.jsonl`.
-                                    // Without this call, a direct spawn_only
-                                    // invocation of `mofa_slides` (or any kind-
-                                    // managed tool) lands in the project workspace
-                                    // but never writes the project ledger — so a
-                                    // subsequent contract gate surfaces
-                                    // `ready = false` even when the hard-required
-                                    // validator (octos #997:
-                                    // `slides.mofa_slides.pptx_magic_bytes`)
-                                    // would have passed at the project root.
-                                    //
-                                    // Kind-agnostic: the helper iterates every
-                                    // slides/sites project beneath
-                                    // `workspace_root` and runs each project's
-                                    // own declared completion-phase validators.
-                                    // Non-slides/sites tools simply find no
-                                    // projects to validate and the helper
-                                    // returns an empty report.
-                                    if let Some(workspace_root) = bg_tools.workspace_root() {
-                                        let _project_root_report =
-                                            crate::workspace_contract::run_project_root_validators(
-                                                &bg_tools,
-                                                workspace_root,
-                                                None,
-                                                &r.files_to_send,
-                                                bg_tools.sandbox(),
-                                            )
-                                            .await;
-                                    }
                                     // When the tool emitted real text output
                                     // (run_pipeline synthesize summary, plugin
                                     // structured result), surface it in the

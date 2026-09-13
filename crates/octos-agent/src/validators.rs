@@ -93,12 +93,6 @@ fn ominix_api_base_url() -> String {
     std::env::var("OMINIX_API_URL").unwrap_or_else(|_| DEFAULT_OMINIX_API_URL.to_string())
 }
 
-/// Sample value, on a normalized -1.0..1.0 audio axis, above which a sample is
-/// considered "non-silent". Matches the existing `mofa-podcast` skill's
-/// non-silent heuristic so the validator and the skill agree on what counts
-/// as silence.
-const NON_SILENT_SAMPLE_FLOOR: f32 = 0.01;
-
 /// Phase in which a validator runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -179,8 +173,8 @@ pub struct ValidatorInvocation {
     /// Optional `files_to_send` list from the originating spawn_only tool's
     /// stdout envelope (the plugin protocol's authoritative list of files
     /// the skill just produced). Consumed by file-list-driven validators
-    /// (`MagicBytes`, `AudioNonSilent`, `PerFileNonSilent`) when their spec
-    /// declares `source = "spawn_only_files"` — see issue octos #1034.
+    /// (`MagicBytes`) when their spec declares
+    /// `source = "spawn_only_files"` — see issue octos #1034.
     ///
     /// Absent (defaulted to an empty `Vec`) for non-spawn contexts and for
     /// spawn_only tools that emit no files. Validators that consult this
@@ -570,38 +564,6 @@ impl ValidatorRunner {
                     )
                     .await
                 }
-                ValidatorSpec::AudioNonSilent {
-                    glob,
-                    min_ratio,
-                    source,
-                    extension,
-                } => self.run_audio_non_silent(
-                    invocation,
-                    validator,
-                    glob,
-                    *min_ratio,
-                    *source,
-                    extension.as_deref(),
-                    started_at,
-                    started,
-                ),
-                ValidatorSpec::PerFileNonSilent {
-                    glob,
-                    min_ratio,
-                    require_at_least,
-                    source,
-                    extension,
-                } => self.run_per_file_non_silent(
-                    invocation,
-                    validator,
-                    glob,
-                    *min_ratio,
-                    *require_at_least,
-                    *source,
-                    extension.as_deref(),
-                    started_at,
-                    started,
-                ),
                 ValidatorSpec::MagicBytes {
                     glob,
                     format,
@@ -1239,195 +1201,6 @@ impl ValidatorRunner {
         }
     }
 
-    /// Run an AudioNonSilent validator.
-    #[allow(clippy::too_many_arguments)]
-    fn run_audio_non_silent(
-        &self,
-        invocation: &ValidatorInvocation,
-        validator: &Validator,
-        pattern: &str,
-        min_ratio: f32,
-        source: ValidatorFileSource,
-        extension: Option<&str>,
-        started_at: DateTime<Utc>,
-        started: Instant,
-    ) -> ValidatorOutcome {
-        // Resolve the candidate file list. For `source = "glob"` (legacy
-        // default) the validator interpolates the glob and matches it
-        // against the workspace root. For `source = "spawn_only_files"`
-        // (issue octos #1034) the validator consumes the plugin-reported
-        // `files_to_send` list verbatim, optionally narrowed by extension —
-        // see [`resolve_validator_files`] for the shared resolution rules.
-        let (matches, pattern_for_diagnostics) = match resolve_validator_files(
-            invocation,
-            pattern,
-            source,
-            extension,
-            FileResolutionMode::TemplateBoth,
-            "audio_non_silent",
-        ) {
-            Ok(resolution) => resolution,
-            Err(FileResolutionError { status, reason }) => {
-                return self
-                    .make_outcome(invocation, validator, status, reason, started_at, started);
-            }
-        };
-        if matches.is_empty() {
-            return self.make_outcome(
-                invocation,
-                validator,
-                ValidatorStatus::Fail,
-                format!("audio_non_silent: no files matched '{pattern_for_diagnostics}'"),
-                started_at,
-                started,
-            );
-        }
-
-        let mut passed_any = false;
-        let mut failures = Vec::new();
-        for path in &matches {
-            match decode_non_silent_ratio(path) {
-                Ok(ratio) if ratio >= min_ratio => {
-                    passed_any = true;
-                    break;
-                }
-                Ok(ratio) => failures.push(format!(
-                    "{}: non_silent_ratio={ratio:.3} < min_ratio={min_ratio:.3}",
-                    path.display()
-                )),
-                Err(reason) => failures.push(format!("{}: {reason}", path.display())),
-            }
-        }
-
-        if passed_any {
-            self.make_outcome(
-                invocation,
-                validator,
-                ValidatorStatus::Pass,
-                format!("audio_non_silent: at least one file met min_ratio={min_ratio:.3}"),
-                started_at,
-                started,
-            )
-        } else {
-            self.make_outcome(
-                invocation,
-                validator,
-                ValidatorStatus::Fail,
-                format!("audio_non_silent failed: {}", failures.join("; ")),
-                started_at,
-                started,
-            )
-        }
-    }
-
-    /// Run a [`ValidatorSpec::PerFileNonSilent`] validator: every matched
-    /// file must independently pass the non-silent ratio threshold, and the
-    /// match count must meet `require_at_least`.
-    ///
-    /// Complements [`Self::run_audio_non_silent`], which only requires a
-    /// single match. Reuses the WAV/MP3 decoder via
-    /// [`decode_non_silent_ratio`]. Failure messages include the file's
-    /// basename (NOT the full path) so an LLM logger can reason about which
-    /// segment failed without leaking workspace layout.
-    #[allow(clippy::too_many_arguments)]
-    fn run_per_file_non_silent(
-        &self,
-        invocation: &ValidatorInvocation,
-        validator: &Validator,
-        pattern: &str,
-        min_ratio: f32,
-        require_at_least: usize,
-        source: ValidatorFileSource,
-        extension: Option<&str>,
-        started_at: DateTime<Utc>,
-        started: Instant,
-    ) -> ValidatorOutcome {
-        // Resolve the candidate file list. Glob mode interpolates `${args.X}`
-        // ONLY (rejects path-traversal segments and absolute-path arg
-        // values). `${output.X}` is intentionally not supported in glob mode
-        // here — callers wanting tool-output-driven globs should use the
-        // whole-file `AudioNonSilent` variant. `spawn_only_files` mode
-        // (octos #1034) bypasses interpolation entirely and consumes the
-        // plugin-reported file list verbatim.
-        let (matches, _resolved_pattern) = match resolve_validator_files(
-            invocation,
-            pattern,
-            source,
-            extension,
-            FileResolutionMode::TemplateArgsOnly,
-            "per_file_non_silent",
-        ) {
-            Ok(resolution) => resolution,
-            Err(FileResolutionError { status, reason }) => {
-                return self
-                    .make_outcome(invocation, validator, status, reason, started_at, started);
-            }
-        };
-
-        // Enforce `require_at_least` as a hard floor on matched count
-        // FIRST — that lets us distinguish "tool emitted zero artifacts"
-        // (a true contract failure when the operator declared a minimum)
-        // from "tool emitted artifacts but one is silent" (the per-file
-        // gate below). The two failure modes warrant different remediation
-        // hints in the ledger.
-        if matches.len() < require_at_least {
-            return self.make_outcome(
-                invocation,
-                validator,
-                ValidatorStatus::Fail,
-                format!(
-                    "per_file_non_silent: expected >={require_at_least} audio files, found {}",
-                    matches.len()
-                ),
-                started_at,
-                started,
-            );
-        }
-
-        let mut failures = Vec::new();
-        for path in &matches {
-            // Per-file basename for diagnostics. We deliberately avoid
-            // emitting the full absolute path so the failure message stays
-            // stable across hosts and doesn't surface a workspace temp
-            // directory (which leaks across CI runs).
-            let label = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("<unnamed>")
-                .to_string();
-            match decode_non_silent_ratio(path) {
-                Ok(ratio) if ratio >= min_ratio => {}
-                Ok(ratio) => failures.push(format!(
-                    "{label}: non_silent_ratio={ratio:.3} < min_ratio={min_ratio:.3}"
-                )),
-                Err(reason) => failures.push(format!("{label}: {reason}")),
-            }
-        }
-
-        if failures.is_empty() {
-            self.make_outcome(
-                invocation,
-                validator,
-                ValidatorStatus::Pass,
-                format!(
-                    "per_file_non_silent: all {} match(es) met min_ratio={min_ratio:.3}",
-                    matches.len()
-                ),
-                started_at,
-                started,
-            )
-        } else {
-            self.make_outcome(
-                invocation,
-                validator,
-                ValidatorStatus::Fail,
-                format!("per_file_non_silent failed: {}", failures.join("; ")),
-                started_at,
-                started,
-            )
-        }
-    }
-
     /// Run a MagicBytes validator.
     #[allow(clippy::too_many_arguments)]
     fn run_magic_bytes(
@@ -1446,20 +1219,14 @@ impl ValidatorRunner {
         // tool-emitted output path. `spawn_only_files` mode (octos #1034)
         // bypasses interpolation and consumes the plugin-reported file list
         // verbatim.
-        let (matches, pattern_for_diagnostics) = match resolve_validator_files(
-            invocation,
-            pattern,
-            source,
-            extension,
-            FileResolutionMode::TemplateBoth,
-            "magic_bytes",
-        ) {
-            Ok(resolution) => resolution,
-            Err(FileResolutionError { status, reason }) => {
-                return self
-                    .make_outcome(invocation, validator, status, reason, started_at, started);
-            }
-        };
+        let (matches, pattern_for_diagnostics) =
+            match resolve_validator_files(invocation, pattern, source, extension, "magic_bytes") {
+                Ok(resolution) => resolution,
+                Err(FileResolutionError { status, reason }) => {
+                    return self
+                        .make_outcome(invocation, validator, status, reason, started_at, started);
+                }
+            };
         if matches.is_empty() {
             return self.make_outcome(
                 invocation,
@@ -2126,22 +1893,6 @@ async fn fetch_ominix_voices(url: &str, timeout_ms: u64) -> Result<Vec<String>, 
     Ok(names)
 }
 
-/// Template-interpolation flavour used by [`resolve_validator_files`].
-///
-/// Mirrors the per-variant interpolation rules already in place before octos
-/// #1034: `MagicBytes` / `AudioNonSilent` substitute both `${args.X}` and
-/// `${output.X}`, while `PerFileNonSilent` substitutes `${args.X}` only via
-/// the path-traversal-safe [`interpolate_args_path`] helper.
-#[derive(Clone, Copy, Debug)]
-enum FileResolutionMode {
-    /// Interpolate both `${args.X}` and `${output.X}`. Used by `MagicBytes`
-    /// and `AudioNonSilent`.
-    TemplateBoth,
-    /// Interpolate `${args.X}` only via [`interpolate_args_path`]. Used by
-    /// `PerFileNonSilent`.
-    TemplateArgsOnly,
-}
-
 /// Error returned by [`resolve_validator_files`] when the file list cannot be
 /// produced (interpolation failure, invalid glob, etc.). The caller surfaces
 /// `status` + `reason` directly through `make_outcome`.
@@ -2152,12 +1903,13 @@ struct FileResolutionError {
 }
 
 /// Resolve the candidate file list for a file-list-driven validator
-/// (`MagicBytes`, `AudioNonSilent`, `PerFileNonSilent`).
+/// (`MagicBytes`).
 ///
-/// * `ValidatorFileSource::Glob` (legacy default) — interpolates the
-///   `pattern` per `mode` and matches the resolved glob against
-///   `invocation.workspace_root` via [`glob_files`]. Returns the matched
-///   path list and the resolved pattern (for diagnostics).
+/// * `ValidatorFileSource::Glob` (legacy default) — interpolates both
+///   `${args.<key>}` and `${output.<key>}` in the `pattern` and matches the
+///   resolved glob against `invocation.workspace_root` via [`glob_files`].
+///   Returns the matched path list and the resolved pattern (for
+///   diagnostics).
 /// * `ValidatorFileSource::SpawnOnlyFiles` (octos #1034) — bypasses the glob
 ///   entirely and consumes `invocation.spawn_only_files` verbatim. If
 ///   `extension` is set, only files whose extension matches (case-
@@ -2171,21 +1923,15 @@ fn resolve_validator_files(
     pattern: &str,
     source: ValidatorFileSource,
     extension: Option<&str>,
-    mode: FileResolutionMode,
     validator_kind: &str,
 ) -> Result<(Vec<PathBuf>, String), FileResolutionError> {
     match source {
         ValidatorFileSource::Glob => {
-            let resolved_pattern = match mode {
-                FileResolutionMode::TemplateBoth => interpolate_template(
-                    pattern,
-                    invocation.input_args.as_ref(),
-                    invocation.tool_output.as_ref(),
-                ),
-                FileResolutionMode::TemplateArgsOnly => {
-                    interpolate_args_path(pattern, invocation.input_args.as_ref())
-                }
-            }
+            let resolved_pattern = interpolate_template(
+                pattern,
+                invocation.input_args.as_ref(),
+                invocation.tool_output.as_ref(),
+            )
             .map_err(|reason| FileResolutionError {
                 status: ValidatorStatus::Error,
                 reason,
@@ -2301,152 +2047,6 @@ fn compute_sha256_hex(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-/// Decode `path` (WAV via [`hound`], or MP3 via the optional `audio_mp3`
-/// feature) and return the ratio of non-silent samples to total samples.
-fn decode_non_silent_ratio(path: &Path) -> Result<f32, String> {
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|s| s.to_ascii_lowercase())
-        .unwrap_or_default();
-    match ext.as_str() {
-        "wav" | "wave" => decode_non_silent_ratio_wav(path),
-        "mp3" => decode_non_silent_ratio_mp3(path),
-        other => Err(format!(
-            "audio_non_silent: unsupported file extension '{other}' (supported: wav, mp3)"
-        )),
-    }
-}
-
-fn decode_non_silent_ratio_wav(path: &Path) -> Result<f32, String> {
-    let mut reader =
-        hound::WavReader::open(path).map_err(|err| format!("wav open failed: {err}"))?;
-    let spec = reader.spec();
-    let mut total: u64 = 0;
-    let mut non_silent: u64 = 0;
-    let denom = match spec.sample_format {
-        hound::SampleFormat::Float => 1.0_f32,
-        // PCM full-scale magnitude per bit depth: (2^(bits-1)) - 1. The
-        // earlier coarse approximation (`i32::MAX` for both 24 and 32 bit)
-        // mis-normalized 24-bit samples by a factor of 256, so a perfectly
-        // loud 24-bit recording fell below the 0.01 non-silent floor.
-        hound::SampleFormat::Int => match spec.bits_per_sample {
-            8 => i8::MAX as f32,
-            16 => i16::MAX as f32,
-            24 => ((1u32 << 23) - 1) as f32,
-            32 => i32::MAX as f32,
-            other => {
-                return Err(format!("unsupported wav bits_per_sample={other}"));
-            }
-        },
-    };
-    match spec.sample_format {
-        hound::SampleFormat::Float => {
-            for sample in reader.samples::<f32>() {
-                let value = sample.map_err(|err| format!("wav decode failed: {err}"))?;
-                total += 1;
-                if value.abs() > NON_SILENT_SAMPLE_FLOOR {
-                    non_silent += 1;
-                }
-            }
-        }
-        hound::SampleFormat::Int => {
-            for sample in reader.samples::<i32>() {
-                let value = sample.map_err(|err| format!("wav decode failed: {err}"))? as f32;
-                total += 1;
-                if (value / denom).abs() > NON_SILENT_SAMPLE_FLOOR {
-                    non_silent += 1;
-                }
-            }
-        }
-    }
-    if total == 0 {
-        return Err("wav file has zero samples".to_string());
-    }
-    Ok(non_silent as f32 / total as f32)
-}
-
-#[cfg(feature = "audio_mp3")]
-fn decode_non_silent_ratio_mp3(path: &Path) -> Result<f32, String> {
-    use symphonia::core::audio::SampleBuffer;
-    use symphonia::core::codecs::DecoderOptions;
-    use symphonia::core::formats::FormatOptions;
-    use symphonia::core::io::MediaSourceStream;
-    use symphonia::core::meta::MetadataOptions;
-    use symphonia::core::probe::Hint;
-
-    let file = std::fs::File::open(path).map_err(|err| format!("mp3 open failed: {err}"))?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
-    let mut hint = Hint::new();
-    hint.with_extension("mp3");
-    let probed = symphonia::default::get_probe()
-        .format(
-            &hint,
-            mss,
-            &FormatOptions::default(),
-            &MetadataOptions::default(),
-        )
-        .map_err(|err| format!("mp3 probe failed: {err}"))?;
-    let mut format = probed.format;
-    let track = format
-        .default_track()
-        .ok_or_else(|| "mp3 file has no default track".to_string())?;
-    let mut decoder = symphonia::default::get_codecs()
-        .make(&track.codec_params, &DecoderOptions::default())
-        .map_err(|err| format!("mp3 decoder init failed: {err}"))?;
-    let track_id = track.id;
-    let mut total: u64 = 0;
-    let mut non_silent: u64 = 0;
-    let mut sample_buf: Option<SampleBuffer<f32>> = None;
-    loop {
-        let packet = match format.next_packet() {
-            Ok(packet) => packet,
-            Err(symphonia::core::errors::Error::IoError(err))
-                if err.kind() == std::io::ErrorKind::UnexpectedEof =>
-            {
-                break;
-            }
-            Err(symphonia::core::errors::Error::ResetRequired) => break,
-            Err(err) => return Err(format!("mp3 read failed: {err}")),
-        };
-        if packet.track_id() != track_id {
-            continue;
-        }
-        let decoded = match decoder.decode(&packet) {
-            Ok(decoded) => decoded,
-            Err(symphonia::core::errors::Error::IoError(_)) => break,
-            Err(symphonia::core::errors::Error::DecodeError(_)) => continue,
-            Err(err) => return Err(format!("mp3 decode failed: {err}")),
-        };
-        if sample_buf.is_none() {
-            let spec = *decoded.spec();
-            sample_buf = Some(SampleBuffer::new(decoded.capacity() as u64, spec));
-        }
-        if let Some(ref mut buf) = sample_buf {
-            buf.copy_interleaved_ref(decoded);
-            for &sample in buf.samples() {
-                total += 1;
-                if sample.abs() > NON_SILENT_SAMPLE_FLOOR {
-                    non_silent += 1;
-                }
-            }
-        }
-    }
-    if total == 0 {
-        return Err("mp3 file decoded zero samples".to_string());
-    }
-    Ok(non_silent as f32 / total as f32)
-}
-
-#[cfg(not(feature = "audio_mp3"))]
-fn decode_non_silent_ratio_mp3(_path: &Path) -> Result<f32, String> {
-    Err(
-        "audio_non_silent for .mp3 requires the 'audio_mp3' feature; \
-         enable it on octos-agent or use a .wav input"
-            .to_string(),
-    )
-}
-
 /// Build a representation of the command for the safety-policy check. This is
 /// not forwarded to a shell — we only use it to run the denylist matcher.
 fn build_command_string(cmd: &str, args: &[String]) -> String {
@@ -2490,8 +2090,6 @@ fn validator_kind_label(spec: &ValidatorSpec) -> &'static str {
         ValidatorSpec::FileExists { .. } => "file_exists",
         ValidatorSpec::HttpProbe { .. } => "http_probe",
         ValidatorSpec::OminixVoiceExists { .. } => "ominix_voice_exists",
-        ValidatorSpec::AudioNonSilent { .. } => "audio_non_silent",
-        ValidatorSpec::PerFileNonSilent { .. } => "per_file_non_silent",
         ValidatorSpec::MagicBytes { .. } => "magic_bytes",
         ValidatorSpec::HttpProbeUntil { .. } => "http_probe_until",
         ValidatorSpec::Sha256Match { .. } => "sha256_match",

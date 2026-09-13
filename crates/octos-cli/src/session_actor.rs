@@ -1553,46 +1553,6 @@ async fn persist_child_session_lifecycle(
     }
 }
 
-fn resolve_builtin_slides_styles_dir(data_dir: &std::path::Path) -> Option<std::path::PathBuf> {
-    let current_profile_id = data_dir
-        .parent()
-        .and_then(|parent| parent.file_name())
-        .and_then(|name| name.to_str())
-        .filter(|value| !value.is_empty())
-        .map(|value| value.to_string());
-
-    let family_root_profile = current_profile_id
-        .as_deref()
-        .and_then(|value| value.split("--").next())
-        .filter(|value| !value.is_empty())
-        .map(|value| value.to_string());
-
-    let octos_home = data_dir
-        .ancestors()
-        .nth(3)
-        .map(std::path::Path::to_path_buf);
-
-    let mut candidates = Vec::new();
-    candidates.push(data_dir.join("skills").join("mofa-slides").join("styles"));
-
-    if let Some(ref home) = octos_home {
-        candidates.push(home.join("skills").join("mofa-slides").join("styles"));
-
-        if let Some(ref root_profile) = family_root_profile {
-            candidates.push(
-                home.join("profiles")
-                    .join(root_profile)
-                    .join("data")
-                    .join("skills")
-                    .join("mofa-slides")
-                    .join("styles"),
-            );
-        }
-    }
-
-    candidates.into_iter().find(|candidate| candidate.is_dir())
-}
-
 /// Shared buffer of outbound messages from inactive sessions, keyed by session key string.
 /// Flushed when the user switches to that session via `/s`.
 pub type PendingMessages = Arc<Mutex<HashMap<String, Vec<OutboundMessage>>>>;
@@ -2220,130 +2180,6 @@ fn merge_optional_text(existing: Option<String>, incoming: Option<String>) -> Op
 fn topic_requires_serial_delivery(topic: Option<&str>) -> bool {
     topic.is_some_and(|value| value.starts_with("slides"))
         || topic.is_some_and(|value| value == "site" || value.starts_with("site "))
-}
-
-async fn snapshot_workspace_turn_for_path(
-    session_key: &SessionKey,
-    workspace_root: std::path::PathBuf,
-    turn_summary: &str,
-) -> Option<String> {
-    let turn_summary = git_turn_summary(turn_summary);
-
-    match tokio::task::spawn_blocking(move || {
-        octos_agent::snapshot_workspace_turn(&workspace_root, &turn_summary)
-    })
-    .await
-    {
-        Ok(Ok(report)) => {
-            if !report.committed.is_empty() {
-                info!(
-                    session = %session_key,
-                    repos = ?report.committed,
-                    "workspace turn snapshot committed"
-                );
-            }
-            if report.enforced_failures.is_empty() && report.validation_failures.is_empty() {
-                return None;
-            }
-
-            if !report.validation_failures.is_empty() {
-                warn!(
-                    session = %session_key,
-                    failures = ?report.validation_failures,
-                    "workspace contract validation failed"
-                );
-            }
-
-            let enforcement_notice = if report.enforced_failures.is_empty() {
-                None
-            } else {
-                let repo_labels = report
-                    .enforced_failures
-                    .iter()
-                    .map(|failure| failure.repo_label.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let first_error = report
-                    .enforced_failures
-                    .first()
-                    .map(|failure| failure.error.as_str())
-                    .unwrap_or("unknown error");
-                warn!(
-                    session = %session_key,
-                    failures = ?report.enforced_failures,
-                    "workspace turn snapshot enforcement failed"
-                );
-                Some(format!(
-                    "Workspace versioning failed for {repo_labels}. Turn snapshot was not recorded.\nError: {first_error}"
-                ))
-            };
-
-            let validation_notice = if report.validation_failures.is_empty() {
-                None
-            } else {
-                let failures = report
-                    .validation_failures
-                    .iter()
-                    .map(|failure| {
-                        format!(
-                            "{} [{}] {}: {}",
-                            failure.repo_label,
-                            match failure.phase {
-                                octos_agent::WorkspaceValidationPhase::TurnEnd => "turn_end",
-                                octos_agent::WorkspaceValidationPhase::Completion => "completion",
-                            },
-                            failure.check,
-                            failure.reason
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                Some(format!("Workspace contract validation failed:\n{failures}"))
-            };
-
-            merge_optional_text(enforcement_notice, validation_notice)
-        }
-        Ok(Err(error)) => {
-            warn!(
-                session = %session_key,
-                error = %error,
-                "workspace turn snapshot failed"
-            );
-            Some(format!(
-                "Workspace versioning failed. Turn snapshot was not recorded.\nError: {error}"
-            ))
-        }
-        Err(error) => {
-            warn!(
-                session = %session_key,
-                error = %error,
-                "workspace turn snapshot task failed"
-            );
-            Some(format!(
-                "Workspace versioning task failed. Turn snapshot was not recorded.\nError: {error}"
-            ))
-        }
-    }
-}
-
-async fn emit_workspace_snapshot_notice(
-    out_tx: &mpsc::Sender<OutboundMessage>,
-    channel: &str,
-    chat_id: &str,
-    reply_to: Option<String>,
-    sender_user_id: Option<&str>,
-    content: String,
-) {
-    let _ = out_tx
-        .send(OutboundMessage {
-            channel: channel.to_string(),
-            chat_id: chat_id.to_string(),
-            content,
-            reply_to,
-            media: vec![],
-            metadata: system_notice_metadata(sender_user_id),
-        })
-        .await;
 }
 
 // ── Messages ────────────────────────────────────────────────────────────────
@@ -4378,30 +4214,6 @@ impl SessionActor {
             self.hook_context.as_ref(),
         ))
         .await;
-    }
-
-    async fn snapshot_workspace_turn_if_needed(
-        &self,
-        turn_summary: &str,
-        reply_to: Option<String>,
-    ) {
-        if let Some(notice) = snapshot_workspace_turn_for_path(
-            &self.session_key,
-            self.user_workspace.clone(),
-            turn_summary,
-        )
-        .await
-        {
-            emit_workspace_snapshot_notice(
-                &self.out_tx,
-                &self.channel,
-                &self.chat_id,
-                reply_to,
-                self.sender_user_id.as_deref(),
-                notice,
-            )
-            .await;
-        }
     }
 
     /// Check if this session is currently the active session for its chat.
@@ -7352,8 +7164,6 @@ impl SessionActor {
             }
         }
 
-        self.snapshot_workspace_turn_if_needed(status_prompt, inbound_message_id.clone())
-            .await;
         self.emit_turn_end_hook(status_prompt).await;
 
         // Reset per-session cancellation flag so the next message starts fresh.
@@ -7822,20 +7632,6 @@ impl SessionActor {
                     session = %session_key,
                     "overflow task cancelled by command, suppressing response"
                 );
-                if let Some(notice) =
-                    snapshot_workspace_turn_for_path(&session_key, user_workspace.clone(), &content)
-                        .await
-                {
-                    emit_workspace_snapshot_notice(
-                        &out_tx,
-                        &channel,
-                        &chat_id,
-                        overflow_reply_to.clone(),
-                        sender_user_id.as_deref(),
-                        notice,
-                    )
-                    .await;
-                }
                 // Still decrement and return — skip sending any reply.
                 overflow_counter.fetch_sub(1, Ordering::Release);
                 return;
@@ -8128,19 +7924,6 @@ impl SessionActor {
                 }
             }
 
-            if let Some(notice) =
-                snapshot_workspace_turn_for_path(&session_key, user_workspace, &content).await
-            {
-                emit_workspace_snapshot_notice(
-                    &out_tx,
-                    &channel,
-                    &chat_id,
-                    overflow_reply_to.clone(),
-                    sender_user_id.as_deref(),
-                    notice,
-                )
-                .await;
-            }
             // Decrement active overflow counter
             overflow_counter.fetch_sub(1, Ordering::Release);
         });
@@ -8843,8 +8626,6 @@ impl SessionActor {
             }
         }
 
-        self.snapshot_workspace_turn_if_needed(status_prompt, inbound_message_id.clone())
-            .await;
         self.emit_turn_end_hook(status_prompt).await;
 
         // Reset per-session cancellation flag so the next message starts fresh.

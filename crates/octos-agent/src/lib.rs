@@ -63,7 +63,6 @@ pub mod tools;
 pub mod turn;
 pub mod validators;
 pub mod workspace_contract;
-pub mod workspace_git;
 pub mod workspace_policy;
 /// #48b — stable prefix marking that a turn terminated because the
 /// malformed tool-call self-correction budget was exhausted. The CLI's
@@ -193,7 +192,7 @@ pub use task_supervisor::{
 };
 pub use tools::{
     AskUserQuestionTool, BackgroundResultKind, BackgroundResultPayload, CheckBackgroundTasksTool,
-    CheckWorkspaceContractTool, ConcurrencyClass, ConfigureToolTool, DEFAULT_DISPATCH_TIMEOUT_SECS,
+    ConcurrencyClass, ConfigureToolTool, DEFAULT_DISPATCH_TIMEOUT_SECS,
     DEFAULT_HTTP_CONNECT_TIMEOUT_SECS, DEFAULT_HTTP_READ_TIMEOUT_SECS, DELEGATED_DENY_GROUP,
     DELEGATION_METRIC, DelegateTool, DelegationEvent, DelegationOutcome, DepthBudget, DiffEditTool,
     DispatchContextContract, DispatchOutcome, DispatchRequest, DispatchResponse, EditFileTool,
@@ -211,20 +210,12 @@ pub use validators::{
     VALIDATOR_RESULT_SCHEMA_VERSION, ValidatorInvocation, ValidatorLedger, ValidatorOutcome,
     ValidatorPhase, ValidatorRunner, ValidatorStatus, kill_child_process, run_workspace_validators,
 };
-pub use workspace_git::{
-    WorkspaceArtifactStatus, WorkspaceCheckStatus, WorkspaceContractStatus, WorkspaceProjectKind,
-    WorkspaceValidationFailure, WorkspaceValidationPhase, commit_all_if_dirty,
-    detect_workspace_repo, init_workspace_repo, initialize_and_commit, inspect_workspace_contract,
-    inspect_workspace_contract_at_root, inspect_workspace_contracts, list_workspace_repos,
-    snapshot_workspace_change, snapshot_workspace_turn,
-};
 pub use workspace_policy::{
     CompactionPolicy, CompactionSummarizerKind, ValidationPolicy, Validator, ValidatorPhaseKind,
     ValidatorSpec, WORKSPACE_POLICY_FILE, WorkspaceArtifactsPolicy, WorkspacePolicy,
     WorkspacePolicyKind, WorkspaceSnapshotTrigger, WorkspaceSpawnTaskPolicy,
     WorkspaceTrackingPolicy, WorkspaceVersionControlPolicy, WorkspaceVersionControlProvider,
-    read_workspace_policy, upgrade_workspace_policy_if_legacy, workspace_policy_path,
-    write_workspace_policy,
+    read_workspace_policy, workspace_policy_path, write_workspace_policy,
 };
 
 #[cfg(test)]

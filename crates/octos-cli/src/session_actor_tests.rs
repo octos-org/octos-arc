@@ -897,56 +897,6 @@ fn completion_meta_carries_node_costs_when_tool_results_have_metadata() {
     );
 }
 
-#[test]
-fn test_resolve_builtin_slides_styles_dir_falls_back_to_root_profile() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let octos_home = dir.path().join(".octos");
-    let current_data = octos_home
-        .join("profiles")
-        .join("dspfac--newsbot")
-        .join("data");
-    let root_styles = octos_home
-        .join("profiles")
-        .join("dspfac")
-        .join("data")
-        .join("skills")
-        .join("mofa-slides")
-        .join("styles");
-
-    std::fs::create_dir_all(&current_data).unwrap();
-    std::fs::create_dir_all(&root_styles).unwrap();
-    std::fs::write(root_styles.join("default.toml"), "name = 'default'\n").unwrap();
-
-    let resolved = resolve_builtin_slides_styles_dir(&current_data).unwrap();
-
-    assert_eq!(resolved, root_styles);
-}
-
-#[test]
-fn test_resolve_builtin_slides_styles_dir_does_not_use_unrelated_profile() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let octos_home = dir.path().join(".octos");
-    let current_data = octos_home
-        .join("profiles")
-        .join("dspfac--newsbot")
-        .join("data");
-    let unrelated_styles = octos_home
-        .join("profiles")
-        .join("someone-else")
-        .join("data")
-        .join("skills")
-        .join("mofa-slides")
-        .join("styles");
-
-    std::fs::create_dir_all(&current_data).unwrap();
-    std::fs::create_dir_all(&unrelated_styles).unwrap();
-    std::fs::write(unrelated_styles.join("default.toml"), "name = 'default'\n").unwrap();
-
-    let resolved = resolve_builtin_slides_styles_dir(&current_data);
-
-    assert!(resolved.is_none());
-}
-
 /// C8 / GAP A: `raw_tasks_for_session` returns the live `BackgroundTask`
 /// snapshots (paired with the owning supervisor's data_dir) so the WS
 /// `session/open` handler can replay them as `task/updated` events. It must

@@ -29,9 +29,6 @@ on_verify = [
     "file_exists:$artifact",
     "file_size_min:$artifact:1024",
 ]
-on_completion = [
-    { kind = "audio_non_silent", source = "spawn_only_files", extension = "mp3", min_ratio = 0.3 },
-]
 on_failure = ["notify_user:TTS generation failed"]
 
 [spawn_tasks.podcast_generate]
@@ -41,7 +38,7 @@ on_verify = [
     "file_size_min:$artifact:4096",
 ]
 on_failure = ["notify_user:Podcast generation failed"]
-# octos #1034: opt the magic-bytes + audio-non-silent validators into the
+# octos #1034: opt the magic-bytes validator into the
 # `spawn_only_files` source so the validator consumes the authoritative path
 # list the plugin reports via its JSON stdout envelope. Avoids the
 # topic-suffixed output directory race (`mofa-podcast-zhuyu/`, etc.) that
@@ -50,7 +47,6 @@ on_failure = ["notify_user:Podcast generation failed"]
 # adjacent intermediate WAVs in `files_to_send` are ignored.
 on_completion = [
     { kind = "magic_bytes", source = "spawn_only_files", extension = "mp3", format = "mp3" },
-    { kind = "audio_non_silent", source = "spawn_only_files", extension = "mp3", min_ratio = 0.3 },
 ]
 
 [spawn_tasks.fm_voice_save]
@@ -109,24 +105,6 @@ on_completion = [
     { kind = "magic_bytes", source = "spawn_only_files", extension = "png", format = "png" },
 ]
 on_failure = ["notify_user:Frame extraction failed"]
-
-# octos #1038 (follow-up to #1037): voice_synthesize now opts into the
-# `spawn_only_files` source so the audio-non-silent check inspects the
-# exact audio path the plugin reported via `files_to_send`. The previous
-# `skill-output/voice/**/*.{mp3,wav}` glob could match a stale file from
-# an earlier run in the same session workspace and falsely satisfy the
-# contract for a freshly-failed call. PR #1037 originally swept this
-# contract but the voice half was reverted (772783e7) until the plugin
-# learned to emit a marker `PluginTool::detect_output_file` recognises —
-# fixed in PR #1039. No `extension` filter: the voice plugin always
-# emits exactly one audio path per call (.mp3 when ffmpeg is available,
-# otherwise .wav fallback from the macOS Say path), and the validator
-# decodes either format.
-[spawn_tasks.voice_synthesize]
-on_completion = [
-    { kind = "audio_non_silent", source = "spawn_only_files", min_ratio = 0.3 },
-]
-on_failure = ["notify_user:Voice synthesis failed"]
 
 # Wave-3a: HttpProbeUntil + Sha256Match + soft_fail are operator-visible
 # TOML shapes; this fixture also acts as a syntax demo for operators.

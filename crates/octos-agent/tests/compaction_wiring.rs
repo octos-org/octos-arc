@@ -143,7 +143,7 @@ fn workspace_with_compaction(policy: CompactionPolicy) -> WorkspacePolicy {
     WorkspacePolicy {
         schema_version: WORKSPACE_POLICY_SCHEMA_VERSION,
         workspace: WorkspacePolicyWorkspace {
-            kind: WorkspacePolicyKind::Sites,
+            kind: WorkspacePolicyKind::Session,
         },
         version_control: WorkspaceVersionControlPolicy {
             provider: WorkspaceVersionControlProvider::Git,

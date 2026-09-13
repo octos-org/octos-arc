@@ -29,7 +29,7 @@
 //! 7. `DepthBudget` round-trips via serde.
 //! 8. Zero new `unsafe` — nothing here touches raw pointers.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -439,64 +439,6 @@ fn compose_task_prompt(input: &Input) -> String {
     }
 }
 
-fn contract_failure_summary(working_dir: &Path) -> Option<String> {
-    // Inspect every workspace contract beneath the working directory and
-    // report the first unready one. A `None` return means "no contract
-    // declared" — which is legal at the child boundary — or "all declared
-    // contracts are ready".
-    let Ok(statuses) = crate::inspect_workspace_contracts(working_dir) else {
-        return Some(format!(
-            "workspace contract inspection failed for {}",
-            working_dir.display()
-        ));
-    };
-
-    for status in statuses {
-        if !status.policy_managed {
-            continue;
-        }
-        if status.ready {
-            continue;
-        }
-        let mut reasons = Vec::new();
-        if let Some(error) = status.error.as_deref() {
-            reasons.push(error.to_string());
-        }
-        reasons.extend(
-            status
-                .turn_end_checks
-                .iter()
-                .chain(status.completion_checks.iter())
-                .filter(|check| !check.passed)
-                .map(|check| match check.reason.as_deref() {
-                    Some(reason) if !reason.is_empty() => {
-                        format!("{}: {}", check.spec, reason)
-                    }
-                    _ => format!("{}: failed", check.spec),
-                }),
-        );
-        reasons.extend(
-            status
-                .artifacts
-                .iter()
-                .filter(|a| !a.present)
-                .map(|a| format!("missing artifact '{}' matching '{}'", a.name, a.pattern)),
-        );
-        let summary = if reasons.is_empty() {
-            format!("workspace contract for {} is not ready", status.repo_label)
-        } else {
-            format!(
-                "workspace contract for {} is not ready: {}",
-                status.repo_label,
-                reasons.join("; ")
-            )
-        };
-        return Some(summary);
-    }
-
-    None
-}
-
 #[async_trait]
 impl Tool for DelegateTool {
     fn name(&self) -> &str {
@@ -780,17 +722,14 @@ impl Tool for DelegateTool {
 
         let run_result = worker.run_task(&subtask).await;
 
-        // Step 6 (Review A F-004 + F-017): run the contract-gate. Previously we
-        // only called `contract_failure_summary`, which READS stale rows from
-        // `validator_outcomes.jsonl` — meaning an empty ledger silently
-        // admitted an un-validated child artifact. Fix: explicitly
-        // `run_declared_validators` so the completion-phase validators ACTUALLY
-        // execute against the child's output before any gate check reads the
-        // ledger. `contract_failure_summary` still runs as a secondary check —
-        // it now sees the real outcomes we just appended.
+        // Step 6 (Review A F-004 + F-017): run the contract-gate. Explicitly
+        // `run_declared_validators` so the completion-phase validators
+        // ACTUALLY execute against the child's output before success is
+        // reported (an empty ledger must never silently admit an
+        // un-validated child artifact).
         let contract_failure = match run_result.as_ref() {
             Ok(task_result) if task_result.success => {
-                let validator_failure = if let Some(ref policy) = parent_workspace_policy {
+                if let Some(ref policy) = parent_workspace_policy {
                     if policy.validation.validators.is_empty() {
                         None
                     } else {
@@ -808,8 +747,7 @@ impl Tool for DelegateTool {
                     }
                 } else {
                     None
-                };
-                validator_failure.or_else(|| contract_failure_summary(&self.working_dir))
+                }
             }
             _ => None,
         };

@@ -52,17 +52,6 @@ impl ActionContext {
         self
     }
 
-    pub(crate) fn with_named_targets<I, N>(mut self, targets: I) -> Self
-    where
-        I: IntoIterator<Item = (N, Vec<PathBuf>)>,
-        N: Into<String>,
-    {
-        for (name, paths) in targets {
-            self.named_targets.insert(name.into(), paths);
-        }
-        self
-    }
-
     pub(crate) fn resolve_targets(
         &self,
         workspace_root: &Path,
@@ -611,7 +600,8 @@ mod tests {
         std::fs::write(&audio, vec![0u8; 2048]).unwrap();
 
         let context = ActionContext::default()
-            .with_named_targets([("$report", vec![report]), ("$audio", vec![audio])]);
+            .with_named_target("$report", vec![report])
+            .with_named_target("$audio", vec![audio]);
 
         let report_result =
             run_action_with_context(temp.path(), &context, "file_exists:$report").unwrap();

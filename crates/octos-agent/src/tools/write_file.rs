@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use eyre::{Result, WrapErr};
 use serde::Deserialize;
-use tracing::warn;
 
 use super::write_grant::WritePathGrant;
 use super::{ConcurrencyClass, Tool, ToolContext, ToolResult};
@@ -558,17 +557,10 @@ impl WriteFileTool {
         // #1976 SECURITY ROUND 2 (codex): a per-path write fence makes this a
         // LEAF-FILE operation, not a project mutation — so the post-write
         // processors that re-resolve the LEXICAL path are SKIPPED under a
-        // fence. Both would breach the fence: the formatter would run an
-        // external tool on a lexical filename, and `snapshot_workspace_change`
-        // lexically derives a repo root and unconditionally creates
-        // dirs/`.gitignore`/`.git`/objects/commits at NON-granted sibling
-        // paths (and an ancestor swap before it re-opens the very TOCTOU the
-        // confined write just closed). A fenced worker is allowlisted to
-        // specific files; it must not trigger repo snapshotting of
-        // lexically-derived siblings. Cache invalidation stays — it is a pure
-        // in-memory, path-keyed operation with no filesystem re-resolution.
-        // `fenced` (set on the confined-write path above) is true iff a fence
-        // is bound: reaching here with `write_grant` Some implies `fenced`.
+        // fence (a formatter, for example, would run an external tool on a
+        // lexical filename, breaching the fence). `fenced` (set on the
+        // confined-write path above) is true iff a fence is bound: reaching
+        // here with `write_grant` Some implies `fenced`.
 
         // #1774: opt-in post-edit formatting. Runs BEFORE cache invalidation
         // and the git snapshot so both observe the final on-disk content.
@@ -585,18 +577,6 @@ impl WriteFileTool {
         // a [FILE_UNCHANGED] stub on the next read.
         if let Some(cache) = ctx.file_state_cache.as_ref() {
             cache.invalidate(&path);
-        }
-
-        if !fenced {
-            if let Err(error) =
-                crate::workspace_git::snapshot_workspace_change(&self.base_dir, &path, "write_file")
-            {
-                warn!(
-                    path = %input.path,
-                    error = %error,
-                    "workspace git snapshot failed after write_file"
-                );
-            }
         }
 
         // #1638 (c): a successful whole-file write makes the on-disk content
@@ -1197,56 +1177,6 @@ mod tests {
             "nothing may land at the symlink target"
         );
     }
-
-    #[tokio::test]
-    async fn write_grant_skips_workspace_git_snapshot() {
-        // #1976 security round 2 (codex): a fenced write to an allowlisted
-        // sites/<slug>/index.html must NOT trigger workspace-git snapshotting,
-        // which lexically derives repo root sites/<slug>/ and creates
-        // .gitignore/.git there — NON-granted paths (and reopens the
-        // ancestor-swap window). Assert the snapshot was skipped.
-        let dir = tempfile::tempdir().unwrap();
-        let tool = fenced_tool(dir.path(), &["sites/demo/index.html"], false);
-        let result = tool
-            .execute(&serde_json::json!({
-                "path": "sites/demo/index.html",
-                "content": "<h1>hi</h1>\n",
-            }))
-            .await
-            .unwrap();
-        assert!(
-            result.success,
-            "granted create must pass: {}",
-            result.output
-        );
-        assert!(dir.path().join("sites/demo/index.html").exists());
-        assert!(
-            !dir.path().join("sites/demo/.git").exists(),
-            "fence must skip git init",
-        );
-        assert!(
-            !dir.path().join("sites/demo/.gitignore").exists(),
-            "fence must skip .gitignore creation",
-        );
-
-        // Control: the SAME shape WITHOUT a fence DOES snapshot (writes
-        // .gitignore at the derived repo root before git init), so the skip
-        // assertion above is not vacuous.
-        let unfenced = WriteFileTool::new(dir.path());
-        let ctrl = unfenced
-            .execute(&serde_json::json!({
-                "path": "sites/other/index.html",
-                "content": "<h1>c</h1>\n",
-            }))
-            .await
-            .unwrap();
-        assert!(ctrl.success, "{}", ctrl.output);
-        assert!(
-            dir.path().join("sites/other/.gitignore").exists(),
-            "unfenced write must snapshot (control) — else the skip is vacuous",
-        );
-    }
-
     #[tokio::test]
     async fn write_grant_skips_post_edit_formatting() {
         // #1976 security round 2: format-under-fence is a no-op — the external

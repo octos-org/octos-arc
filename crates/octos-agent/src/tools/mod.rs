@@ -850,9 +850,7 @@ pub mod write_grant;
 
 pub mod check;
 pub mod check_background_tasks;
-pub mod check_workspace_contract;
 pub mod tool_config;
-pub mod workspace_history;
 
 #[cfg(feature = "git")]
 pub mod git;
@@ -902,9 +900,7 @@ pub use write_grant::{
 
 pub use check::CheckTool;
 pub use check_background_tasks::CheckBackgroundTasksTool;
-pub use check_workspace_contract::CheckWorkspaceContractTool;
 pub use tool_config::{ConfigureToolTool, ToolConfigStore};
-pub use workspace_history::{WorkspaceDiffTool, WorkspaceLogTool, WorkspaceShowTool};
 
 #[cfg(feature = "git")]
 pub use git::GitTool;

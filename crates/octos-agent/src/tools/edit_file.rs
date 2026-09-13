@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use eyre::Result;
 use serde::Deserialize;
-use tracing::warn;
 
 use super::write_grant::WritePathGrant;
 use super::{ConcurrencyClass, Tool, ToolContext, ToolResult};
@@ -332,18 +331,15 @@ impl Tool for EditFileTool {
         // #1976 SECURITY ROUND 2 (codex): under a per-path write fence the
         // post-write processors that re-resolve the LEXICAL path are SKIPPED —
         // a fenced edit is a leaf-file operation, not a project mutation.
-        // Formatting would run an external tool on a lexical filename, and
-        // `snapshot_workspace_change` lexically derives a repo root and
-        // unconditionally creates dirs/`.git`/objects/commits at NON-granted
-        // sibling paths (reopening the ancestor-swap window the confined edit
-        // just closed). `write_grant` Some at this point means the edit went
+        // Formatting, for example, would run an external tool on a lexical
+        // filename. `write_grant` Some at this point means the edit went
         // through the confined path above. Cache invalidation stays (pure
         // in-memory, path-keyed).
         let fence_active = self.write_grant.is_some();
 
         // #1774: opt-in post-edit formatting. Runs BEFORE cache invalidation
-        // and the git snapshot so both observe the final on-disk content.
-        // Best-effort by contract — a formatter failure never fails the edit.
+        // so both observe the final on-disk content. Best-effort by contract
+        // — a formatter failure never fails the edit.
         // Never runs under a fence (see above).
         let format_note = if ctx.format_after_edit && !fence_active {
             crate::format::post_edit_format_note(&path, &new_content).await
@@ -355,18 +351,6 @@ impl Tool for EditFileTool {
         // mtime just changed.
         if let Some(cache) = ctx.file_state_cache.as_ref() {
             cache.invalidate(&path);
-        }
-
-        if !fence_active {
-            if let Err(error) =
-                crate::workspace_git::snapshot_workspace_change(&self.base_dir, &path, "edit_file")
-            {
-                warn!(
-                    path = %input.path,
-                    error = %error,
-                    "workspace git snapshot failed after edit_file"
-                );
-            }
         }
 
         // Report which replacer produced the match. The exact-match wording

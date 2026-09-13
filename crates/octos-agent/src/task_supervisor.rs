@@ -2,8 +2,9 @@
 //!
 //! The `TaskSupervisor` is a status store that tracks background tasks from
 //! spawn to completion. It does NOT enforce workspace contracts — that
-//! responsibility belongs to `workspace_contract::enforce()`, which runs
-//! inline in `execution.rs` BEFORE the supervisor status is updated.
+//! responsibility belongs to `workspace_contract::enforce_spawn_task_contract`,
+//! which runs inline in `execution.rs` BEFORE the supervisor status is
+//! updated.
 //!
 //! The supervisor only sees truth-checked states: `Completed` means the
 //! workspace contract was satisfied, `Failed` means it was not.

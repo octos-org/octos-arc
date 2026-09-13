@@ -87,7 +87,6 @@ pub(crate) const SPAWN_BUILTIN_TOOLS: &[&str] = &[
     "apply_patch",
     "ask_user_question",
     "bash",
-    "check_workspace_contract",
     "close_agent",
     "diff_edit",
     "edit_file",
@@ -105,9 +104,6 @@ pub(crate) const SPAWN_BUILTIN_TOOLS: &[&str] = &[
     "update_plan",
     "view_image",
     "wait_agent",
-    "workspace_diff",
-    "workspace_log",
-    "workspace_show",
     "write_file",
     "write_stdin",
 ];
@@ -708,7 +704,6 @@ mod tests {
     /// - `group:runtime` -> shell / exec_command / write_stdin
     /// - `group:sessions` -> spawn / spawn_agent / ...
     /// - `group:admin` -> configure_tool
-    /// - `group:media` -> mofa_* / fm_tts (write generated media)
     /// - `group:delegated` -> delegate_task / delegate / spawn /
     ///   spawn_agent / send_input / message / save_memory (spawning plus
     ///   messaging and memory writes)

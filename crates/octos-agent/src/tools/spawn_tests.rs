@@ -576,118 +576,6 @@ async fn test_background_spawn_refused_at_fanout_cap_does_not_spawn() {
     );
 }
 
-#[ignore = "Pre-migration test: the SpawnOnlyFiles-source MagicBytes validator \
-                (post-#997 round-3) rejects no-files-emitted tasks at the project-scope \
-                gate, so this test's `ShellThenEndProvider`-driven shell tool (which \
-                doesn't emit `files_to_send`) can no longer simulate a successful \
-                slides spawn — the deck-on-disk fallback the old Glob validator \
-                provided is gone by design. Re-enable by replacing `ShellThenEndProvider` \
-                with a stub plugin tool that returns the staged deck path in \
-                `tool_result.files_to_send`."]
-#[tokio::test]
-async fn test_background_spawn_uses_contract_selected_slides_artifact_for_persistence() {
-    let (in_tx, _in_rx) = tokio::sync::mpsc::channel(16);
-    let temp = tempfile::tempdir().unwrap();
-    let repo_root = temp.path().join("slides/demo");
-    let ledger = temp.path().join("tasks.jsonl");
-    std::fs::create_dir_all(repo_root.join("output")).unwrap();
-    crate::write_workspace_policy(
-        &repo_root,
-        &crate::WorkspacePolicy::for_kind(crate::WorkspaceProjectKind::Slides),
-    )
-    .unwrap();
-    std::fs::write(repo_root.join("script.js"), "// slides").unwrap();
-    std::fs::write(repo_root.join("memory.md"), "# memory").unwrap();
-    std::fs::write(repo_root.join("changelog.md"), "# changelog").unwrap();
-    // octos #997 (round-2): real PPTX magic bytes ONLY. The spawn loop
-    // itself runs the slides-kind project-scope validator at the project
-    // root after `run_task` succeeds — that production wiring writes the
-    // Pass row into `slides/demo/.octos/validator_outcomes.jsonl`, which
-    // the contract-gated terminal delivery step then reads. Pre-round-2
-    // this fixture manually seeded the Pass via `ledger.append(...)`,
-    // masking the gap codex flagged. No manual seeding here.
-    let mut pptx = vec![0x50, 0x4B, 0x03, 0x04];
-    pptx.extend_from_slice(b"final");
-    std::fs::write(repo_root.join("output/deck.pptx"), pptx).unwrap();
-    std::fs::write(repo_root.join("output/slide-01.png"), "png").unwrap();
-
-    let supervisor = Arc::new(TaskSupervisor::new());
-    supervisor.enable_persistence(&ledger).unwrap();
-    let tool = SpawnTool::new(
-        Arc::new(ShellThenEndProvider {
-            calls: std::sync::atomic::AtomicUsize::new(0),
-        }),
-        Arc::new(create_test_store().await),
-        temp.path().to_path_buf(),
-        in_tx,
-    )
-    .with_task_supervisor(supervisor.clone(), "api:test-session", ledger.clone());
-
-    let result = tool
-        .execute(&serde_json::json!({
-            "task": "Acknowledge the request and stop.",
-            "label": "Slides deliverable",
-            "mode": "background",
-            "allowed_tools": ["shell"],
-            "workflow": {
-                "workflow_kind": "slides",
-                "current_phase": "design",
-                "allowed_tools": ["shell"],
-                "terminal_output": {
-                    "deliver_final_artifact_only": true,
-                    "forbid_intermediate_files": true,
-                    "required_artifact_kind": "presentation"
-                }
-            }
-        }))
-        .await
-        .unwrap();
-
-    assert!(result.success);
-
-    let started = std::time::Instant::now();
-    loop {
-        let tasks = supervisor.get_tasks_for_session("api:test-session");
-        if let Some(task) = tasks.first() {
-            if task.status == crate::task_supervisor::TaskStatus::Completed {
-                assert_eq!(
-                    task.output_files,
-                    vec![
-                        repo_root
-                            .join("output/deck.pptx")
-                            .to_string_lossy()
-                            .to_string()
-                    ]
-                );
-                break;
-            }
-        }
-        assert!(
-            started.elapsed() < BACKGROUND_DEADLINE,
-            "background spawn task did not complete in time"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-
-    let restored = TaskSupervisor::new();
-    restored.enable_persistence(&ledger).unwrap();
-    let tasks = restored.get_tasks_for_session("api:test-session");
-    assert_eq!(tasks.len(), 1);
-    assert_eq!(
-        tasks[0].status,
-        crate::task_supervisor::TaskStatus::Completed
-    );
-    assert_eq!(
-        tasks[0].output_files,
-        vec![
-            repo_root
-                .join("output/deck.pptx")
-                .to_string_lossy()
-                .to_string()
-        ]
-    );
-}
-
 #[tokio::test]
 #[cfg(unix)]
 async fn test_before_spawn_verify_hook_can_replace_output_files() {
@@ -718,155 +606,6 @@ async fn test_before_spawn_verify_hook_can_replace_output_files() {
         .unwrap();
 
     assert_eq!(modified_files, vec![replacement]);
-}
-
-#[tokio::test]
-async fn test_background_spawn_fails_when_contract_owned_workflow_is_not_ready() {
-    let (in_tx, _in_rx) = tokio::sync::mpsc::channel(16);
-    let temp = tempfile::tempdir().unwrap();
-    let repo_root = temp.path().join("slides/demo");
-    let ledger = temp.path().join("tasks.jsonl");
-    std::fs::create_dir_all(&repo_root).unwrap();
-    crate::write_workspace_policy(
-        &repo_root,
-        &crate::WorkspacePolicy::for_kind(crate::WorkspaceProjectKind::Slides),
-    )
-    .unwrap();
-    std::fs::write(repo_root.join("script.js"), "// slides").unwrap();
-    std::fs::write(repo_root.join("memory.md"), "# memory").unwrap();
-    std::fs::write(repo_root.join("changelog.md"), "# changelog").unwrap();
-
-    let supervisor = Arc::new(TaskSupervisor::new());
-    supervisor.enable_persistence(&ledger).unwrap();
-    let tool = SpawnTool::new(
-        Arc::new(ShellThenEndProvider {
-            calls: std::sync::atomic::AtomicUsize::new(0),
-        }),
-        Arc::new(create_test_store().await),
-        temp.path().to_path_buf(),
-        in_tx,
-    )
-    .with_task_supervisor(supervisor.clone(), "api:test-session", ledger);
-
-    let result = tool
-        .execute(&serde_json::json!({
-            "task": "Acknowledge the request and stop.",
-            "label": "Slides deliverable",
-            "mode": "background",
-            "allowed_tools": ["shell"],
-            "workflow": {
-                "workflow_kind": "slides",
-                "current_phase": "design",
-                "allowed_tools": ["shell"],
-                "terminal_output": {
-                    "deliver_final_artifact_only": true,
-                    "forbid_intermediate_files": true,
-                    "required_artifact_kind": "presentation"
-                }
-            }
-        }))
-        .await
-        .unwrap();
-
-    assert!(result.success);
-
-    let started = std::time::Instant::now();
-    loop {
-        let tasks = supervisor.get_tasks_for_session("api:test-session");
-        if let Some(task) = tasks.first() {
-            if task.status == crate::task_supervisor::TaskStatus::Failed {
-                let error = task.error.as_deref().unwrap_or_default();
-                assert!(error.contains("workspace contract"), "{error}");
-                return;
-            }
-        }
-        assert!(
-            started.elapsed() < BACKGROUND_DEADLINE,
-            "background spawn task did not fail in time"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-}
-
-#[tokio::test]
-#[cfg(unix)]
-async fn test_background_spawn_emits_failure_hook_for_contract_failure() {
-    let (in_tx, _in_rx) = tokio::sync::mpsc::channel(16);
-    let temp = tempfile::tempdir().unwrap();
-    let repo_root = temp.path().join("slides/demo");
-    let ledger = temp.path().join("tasks.jsonl");
-    let hook_log = temp.path().join("spawn-failure-hooks.jsonl");
-    std::fs::create_dir_all(&repo_root).unwrap();
-    crate::write_workspace_policy(
-        &repo_root,
-        &crate::WorkspacePolicy::for_kind(crate::WorkspaceProjectKind::Slides),
-    )
-    .unwrap();
-    std::fs::write(repo_root.join("script.js"), "// slides").unwrap();
-    std::fs::write(repo_root.join("memory.md"), "# memory").unwrap();
-    std::fs::write(repo_root.join("changelog.md"), "# changelog").unwrap();
-
-    let supervisor = Arc::new(TaskSupervisor::new());
-    supervisor.enable_persistence(&ledger).unwrap();
-    let hooks = Arc::new(HookExecutor::new(vec![capture_hook(
-        HookEvent::OnSpawnFailure,
-        &hook_log,
-    )]));
-    let tool = SpawnTool::new(
-        Arc::new(MockProvider),
-        Arc::new(create_test_store().await),
-        temp.path().to_path_buf(),
-        in_tx,
-    )
-    .with_task_supervisor(supervisor.clone(), "api:test-session", ledger)
-    .with_hooks(hooks)
-    .with_hook_context(HookContext {
-        session_id: Some("api:test-session".to_string()),
-        profile_id: Some("test-profile".to_string()),
-    });
-
-    let result = tool
-        .execute(&serde_json::json!({
-            "task": "Build the deck",
-            "label": "Slides deliverable",
-            "mode": "background",
-            "allowed_tools": ["mofa_slides"],
-            "workflow": {
-                "workflow_kind": "slides",
-                "current_phase": "design",
-                "allowed_tools": ["mofa_slides"],
-                "terminal_output": {
-                    "deliver_final_artifact_only": true,
-                    "forbid_intermediate_files": true,
-                    "required_artifact_kind": "presentation"
-                }
-            }
-        }))
-        .await
-        .unwrap();
-
-    assert!(result.success);
-
-    let started = std::time::Instant::now();
-    loop {
-        let tasks = supervisor.get_tasks_for_session("api:test-session");
-        let hook_lines = std::fs::read_to_string(&hook_log).unwrap_or_default();
-        if let Some(task) = tasks.first() {
-            if task.status == crate::task_supervisor::TaskStatus::Failed
-                && hook_lines.contains("\"event\":\"on_spawn_failure\"")
-            {
-                assert!(hook_lines.contains("\"failure_action\":\"escalate\""));
-                assert!(hook_lines.contains("\"workflow_kind\":\"slides\""));
-                assert!(hook_lines.contains("\"result\":\""));
-                return;
-            }
-        }
-        assert!(
-            started.elapsed() < BACKGROUND_DEADLINE,
-            "background spawn failure hook did not arrive in time"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
 }
 
 #[test]
@@ -922,7 +661,6 @@ fn workflow_terminal_output_accepts_audio_from_modified_files_when_explicit_send
 
 #[test]
 fn workflow_terminal_output_requires_required_audio_artifact() {
-    let temp = tempfile::tempdir().unwrap();
     let workflow = WorkflowMetadata {
         workflow_kind: "research_podcast".to_string(),
         current_phase: "deliver_result".to_string(),
@@ -935,7 +673,7 @@ fn workflow_terminal_output_requires_required_audio_artifact() {
         progress: None,
     };
 
-    let error = resolve_background_terminal_files(temp.path(), &[], &[], Some(&workflow))
+    let error = resolve_background_terminal_files(&[], &[], Some(&workflow))
         .expect_err("research_podcast must not complete without audio");
 
     assert!(error.contains("required audio terminal artifact"));
@@ -956,7 +694,7 @@ fn deliverable_contract_surfaces_a_shell_written_file_no_tool_reported_it() {
     std::fs::write(root.join("octos-review.md"), "# Review\n").unwrap();
 
     // Control: the pre-existing tool-record path is blind to it (the bug).
-    let via_tool_record = resolve_background_terminal_files(root, &[], &[], None).unwrap();
+    let via_tool_record = resolve_background_terminal_files(&[], &[], None).unwrap();
     assert!(
         via_tool_record.is_empty(),
         "tool-record path should see nothing: {via_tool_record:?}"
@@ -1053,29 +791,6 @@ fn workflow_terminal_output_prefers_site_entrypoint_and_skips_assets() {
     let selected = select_workflow_terminal_files(&files_to_send, &[], Some(&workflow)).unwrap();
 
     assert_eq!(selected, vec![PathBuf::from("/tmp/site/dist/index.html")]);
-}
-
-#[test]
-fn contract_owned_workflow_denies_send_file_in_subagent_policy() {
-    let workflow = WorkflowMetadata {
-        workflow_kind: "slides".to_string(),
-        current_phase: "deliver_result".to_string(),
-        allowed_tools: vec!["mofa_slides".to_string(), "send_file".to_string()],
-        terminal_output: Some(WorkflowTerminalOutputPolicy {
-            deliver_final_artifact_only: true,
-            forbid_intermediate_files: true,
-            required_artifact_kind: "presentation".to_string(),
-        }),
-        progress: None,
-    };
-
-    // Workflow-node spawn: no agent-definition manifest, so no
-    // manifest-level disallowed_tools deny-list.
-    let policy =
-        build_subagent_tool_policy(workflow.allowed_tools.clone(), Vec::new(), Some(&workflow));
-
-    assert!(policy.deny.contains(&"spawn".to_string()));
-    assert!(policy.deny.contains(&"send_file".to_string()));
 }
 
 #[test]
@@ -1481,7 +1196,7 @@ fn default_subagent_policy_allows_spawn_agent_and_delegate_but_denies_direct_spa
     // restriction can actually call the freshly-bound spawn_agent/delegate.
     // (A child with an explicit allow-list that omits them is denied — that
     // is the intended per-contract gate, not a regression.)
-    let policy = build_subagent_tool_policy(Vec::new(), Vec::new(), None);
+    let policy = build_subagent_tool_policy(Vec::new(), Vec::new());
     assert!(
         !policy.is_allowed("spawn"),
         "direct low-level spawn stays denied for subagents"
@@ -1559,103 +1274,6 @@ async fn nested_spawn_agent_resolves_a_real_agent_id_through_the_bound_delegate(
     );
 }
 
-#[test]
-fn contract_terminal_output_prefers_declared_slides_deck_name_over_newer_draft() {
-    let temp = tempfile::tempdir().unwrap();
-    let repo_root = temp.path().join("slides/demo");
-    std::fs::create_dir_all(repo_root.join("output")).unwrap();
-    crate::write_workspace_policy(
-        &repo_root,
-        &crate::WorkspacePolicy::for_kind(crate::WorkspaceProjectKind::Slides),
-    )
-    .unwrap();
-    std::fs::write(repo_root.join("script.js"), "// slides").unwrap();
-    std::fs::write(repo_root.join("memory.md"), "# memory").unwrap();
-    std::fs::write(repo_root.join("changelog.md"), "# changelog").unwrap();
-    // octos #997: real PPTX magic bytes so the slides-kind project-scope
-    // `MagicBytes` validator does not block delivery on a fake-bytes deck.
-    let mut pptx_final = vec![0x50, 0x4B, 0x03, 0x04];
-    pptx_final.extend_from_slice(b"final");
-    std::fs::write(repo_root.join("output/deck.pptx"), pptx_final).unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(20));
-    let mut pptx_draft = vec![0x50, 0x4B, 0x03, 0x04];
-    pptx_draft.extend_from_slice(b"draft");
-    std::fs::write(repo_root.join("output/deck-draft.pptx"), pptx_draft).unwrap();
-    std::fs::write(repo_root.join("output/slide-01.png"), "png").unwrap();
-    // octos #997 (round-2): exercise the production project-root
-    // validator helper so `inspect_workspace_contract_at_root` sees a
-    // real `Pass` row in the project ledger. Pre-round-2 this fixture
-    // manually `ledger.append(...)`ed a Pass — codex flagged that as
-    // masking the gap (the validator was declared but never RUN at the
-    // project root in production).
-    {
-        let registry = std::sync::Arc::new(crate::ToolRegistry::new());
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("build tokio runtime for fixture validator run");
-        let files_to_send = vec![repo_root.join("output/deck.pptx")];
-        runtime.block_on(async {
-            let _ = crate::workspace_contract::run_project_root_validators(
-                &registry,
-                temp.path(),
-                Some(crate::WorkspaceProjectKind::Slides),
-                &files_to_send,
-                std::sync::Arc::new(crate::sandbox::NoSandbox),
-            )
-            .await;
-        });
-    }
-
-    let workflow = WorkflowMetadata {
-        workflow_kind: "slides".to_string(),
-        current_phase: "deliver_result".to_string(),
-        allowed_tools: vec!["mofa_slides".to_string()],
-        terminal_output: Some(WorkflowTerminalOutputPolicy {
-            deliver_final_artifact_only: true,
-            forbid_intermediate_files: true,
-            required_artifact_kind: "presentation".to_string(),
-        }),
-        progress: None,
-    };
-
-    let selected = resolve_contract_terminal_files(&repo_root, Some(&workflow))
-        .unwrap()
-        .unwrap();
-
-    assert_eq!(selected, vec![repo_root.join("output/deck.pptx")]);
-}
-
-#[test]
-fn contract_terminal_output_fails_when_site_entrypoint_is_missing() {
-    let temp = tempfile::tempdir().unwrap();
-    let repo_root = temp.path().join("sites/news");
-    std::fs::create_dir_all(&repo_root).unwrap();
-    crate::write_workspace_policy(
-        &repo_root,
-        &crate::WorkspacePolicy::for_site_build_output("out"),
-    )
-    .unwrap();
-    std::fs::write(repo_root.join("mofa-site-session.json"), "{}").unwrap();
-    std::fs::write(repo_root.join("site-plan.json"), "{}").unwrap();
-    std::fs::write(repo_root.join("optimized-prompt.md"), "# prompt").unwrap();
-
-    let workflow = WorkflowMetadata {
-        workflow_kind: "site".to_string(),
-        current_phase: "deliver_result".to_string(),
-        allowed_tools: vec!["shell".to_string()],
-        terminal_output: Some(WorkflowTerminalOutputPolicy {
-            deliver_final_artifact_only: true,
-            forbid_intermediate_files: true,
-            required_artifact_kind: "site".to_string(),
-        }),
-        progress: None,
-    };
-
-    let error = resolve_contract_terminal_files(&repo_root, Some(&workflow)).unwrap_err();
-    assert!(error.contains("workspace contract"));
-    assert!(error.contains("out/index.html"));
-}
 #[tokio::test]
 async fn test_background_spawn_persists_workflow_phase_transitions() {
     let (in_tx, _in_rx) = tokio::sync::mpsc::channel(16);
@@ -2913,7 +2531,7 @@ fn manifest_disallowed_tools_are_denied_by_policy_not_pruned_from_allow_list() {
     assert!(input.allowed_tools.contains(&"grep".to_string()));
     assert!(input.allowed_tools.contains(&"shell".to_string()));
 
-    let policy = build_subagent_tool_policy(input.allowed_tools.clone(), disallowed, None);
+    let policy = build_subagent_tool_policy(input.allowed_tools.clone(), disallowed);
     assert!(
         !policy.is_allowed("shell"),
         "manifest-disallowed shell must be denied by policy"
@@ -2949,7 +2567,7 @@ fn manifest_forbidding_its_only_tool_grants_no_tools_not_allow_all() {
     let disallowed = apply_agent_definition(&mut input, &registry).expect("apply");
     assert_eq!(disallowed, vec!["shell".to_string()]);
 
-    let policy = build_subagent_tool_policy(input.allowed_tools.clone(), disallowed, None);
+    let policy = build_subagent_tool_policy(input.allowed_tools.clone(), disallowed);
     assert!(!policy.is_allowed("shell"), "the forbidden tool is denied");
     // The critical anti-inversion assertions: NOT allow-all.
     assert!(
@@ -2979,7 +2597,7 @@ fn role_refill_cannot_reintroduce_a_manifest_disallowed_tool() {
     ];
     let manifest_disallowed = vec!["shell".to_string()];
 
-    let policy = build_subagent_tool_policy(role_refilled_allow, manifest_disallowed, None);
+    let policy = build_subagent_tool_policy(role_refilled_allow, manifest_disallowed);
     assert!(
         !policy.is_allowed("shell"),
         "a role-provided tool must still be denied by the manifest's disallowed_tools"

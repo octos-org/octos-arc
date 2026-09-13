@@ -17,7 +17,7 @@ use std::hash::{Hash, Hasher};
 /// This is the OpenClaw lesson — distinguish "no progress" (same args
 /// AND same result) from legitimate polling (same args, different
 /// result over time). The production loop on mini3 session 8w2ime had
-/// kimi-k2.5 calling `check_workspace_contract` 5 times with the same
+/// kimi-k2.5 calling a contract-inspection tool 5 times with the same
 /// args, all returning identical 4 KB trees. With result hashing, that
 /// fires at iter 3 — early enough to nudge before the hard cycle
 /// detector terminates the turn at iter 4. Legitimate polls like

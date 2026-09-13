@@ -9,7 +9,6 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use octos_agent::inspect_workspace_contract;
 use octos_bus::file_handle::{
     encode_profile_file_handle, encode_tmp_upload_handle, resolve_legacy_file_request,
     resolve_scoped_file_handle, resolve_workspace_file_handle,
@@ -1433,6 +1432,11 @@ pub async fn session_files(
 // this function survives as the implementation backing the WS
 // `session/workspace.get` RPC method.
 /// Backing impl for the WS `session/workspace.get` RPC method.
+///
+/// The slides/sites workspace project system (and with it the
+/// `WorkspaceContractStatus` inspector) was removed from octos-agent, so a
+/// session never has declared workspace contracts any more. The RPC surface
+/// stays for protocol compatibility and always reports an empty list.
 pub async fn session_workspace_contract(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1447,32 +1451,16 @@ pub async fn session_workspace_contract(
     // `sess.data_dir()` BEFORE checking the host-routed profile, so a
     // cross-tenant header on a TRUSTED hop exposed the victim
     // profile's workspace-contract statuses. The Layer-2 gate runs
-    // up-front, and data-directory selection below must remain identical
-    // to the companion `session_files` surface.
+    // up-front so the tenant boundary stays enforced even though the
+    // payload is now a constant empty list.
     if let Err(response) = authorized_routed_profile_id_from_headers(&state, &headers, identity_ref)
     {
         return response;
     }
 
-    let data_dir = match resolve_file_access_data_dir(&state, &headers, identity_ref).await {
-        Ok(data_dir) => data_dir,
-        Err(response) => return response,
-    };
-
-    let mut statuses = Vec::new();
-    for workspace in api_session_workspace_dirs(&data_dir, &id) {
-        if !workspace.exists() {
-            continue;
-        }
-        let Ok(repos) = octos_agent::list_workspace_repos(&workspace) else {
-            continue;
-        };
-        statuses.extend(repos.iter().map(inspect_workspace_contract));
-    }
-
-    statuses.sort_by(|left, right| left.repo_label.cmp(&right.repo_label));
-    statuses.dedup_by(|left, right| left.repo_label == right.repo_label);
-    Json(statuses).into_response()
+    let _ = resolve_file_access_data_dir(&state, &headers, identity_ref).await;
+    let _ = id;
+    Json(Vec::<serde_json::Value>::new()).into_response()
 }
 
 // The error is a ready-to-return axum response. Keeping it inline avoids an

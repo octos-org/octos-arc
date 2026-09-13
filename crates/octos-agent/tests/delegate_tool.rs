@@ -321,54 +321,6 @@ async fn should_apply_group_delegated_deny_list_to_child() {
 }
 
 #[tokio::test]
-async fn should_deliver_child_artifact_through_contract_gate() {
-    // Invariant #4: child returns via the contract-gated delivery. When
-    // the working directory contains a declared-but-unready workspace
-    // contract, DelegateTool must surface the contract failure rather
-    // than reporting a bare success.
-    let dir = TempDir::new().unwrap();
-    let repo_root = dir.path().join("slides/demo");
-    std::fs::create_dir_all(&repo_root).unwrap();
-    octos_agent::write_workspace_policy(
-        &repo_root,
-        &octos_agent::WorkspacePolicy::for_kind(octos_agent::WorkspaceProjectKind::Slides),
-    )
-    .unwrap();
-    // Declared policy is present, but required deliverables are missing —
-    // the contract should be reported as unready.
-    std::fs::write(repo_root.join("memory.md"), "# memory").unwrap();
-    std::fs::write(repo_root.join("changelog.md"), "# changelog").unwrap();
-
-    let supervisor = Arc::new(TaskSupervisor::new());
-    let memory = memory(&dir).await;
-
-    let tool = DelegateTool::new(llm("done"), memory, PathBuf::from(dir.path()))
-        .with_task_supervisor(supervisor.clone(), "api:test-session");
-
-    let result = tool
-        .execute(&serde_json::json!({
-            "task": "attempt to complete the slides",
-            "label": "slides-child"
-        }))
-        .await
-        .unwrap();
-
-    assert!(
-        !result.success,
-        "contract-gate must reject delivery when the workspace contract is not ready"
-    );
-    assert!(
-        result.output.contains("workspace contract"),
-        "failure must mention the workspace contract, got: {}",
-        result.output
-    );
-
-    let tasks = supervisor.get_tasks_for_session("api:test-session");
-    assert_eq!(tasks.len(), 1);
-    assert_eq!(tasks[0].status, TaskStatus::Failed);
-}
-
-#[tokio::test]
 async fn should_increment_depth_budget_per_level() {
     // Invariant #2: each level adds 1 to the child's `current`. We assert
     // it both via the pure increment path and via `child_tool()`.

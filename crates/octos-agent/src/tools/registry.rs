@@ -15,12 +15,11 @@ use crate::task_supervisor::TaskSupervisor;
 use super::CodeStructureTool;
 use super::policy::{self, ToolPolicy};
 use super::{
-    ApplyPatchTool, AskUserQuestionTool, CheckWorkspaceContractTool, CloseAgentTool,
-    ConfigureToolTool, DiffEditTool, EditFileTool, ExecCommandTool, GlobTool, GrepTool,
-    ListDirTool, ReadFileTool, RequestUserInputTool, ResumeAgentTool, SendInputTool, ShellTool,
-    SpawnAgentTool, Tool, ToolCatalogEntry, ToolConfigStore, ToolResult, ToolSearchTool,
-    ToolSuggestTool, UpdatePlanTool, ViewImageTool, WaitAgentTool, WorkspaceDiffTool,
-    WorkspaceLogTool, WorkspaceShowTool, WriteFileTool, WriteStdinTool,
+    ApplyPatchTool, AskUserQuestionTool, CloseAgentTool, ConfigureToolTool, DiffEditTool,
+    EditFileTool, ExecCommandTool, GlobTool, GrepTool, ListDirTool, ReadFileTool,
+    RequestUserInputTool, ResumeAgentTool, SendInputTool, ShellTool, SpawnAgentTool, Tool,
+    ToolCatalogEntry, ToolConfigStore, ToolResult, ToolSearchTool, ToolSuggestTool, UpdatePlanTool,
+    ViewImageTool, WaitAgentTool, WriteFileTool, WriteStdinTool,
 };
 use crate::sandbox::{NoSandbox, Sandbox};
 
@@ -1197,10 +1196,6 @@ impl ToolRegistry {
         registry.register(GrepTool::new(cwd));
         registry
             .register(ListDirTool::new(cwd).with_filesystem_scope(permissions.filesystem_scope));
-        registry.register(CheckWorkspaceContractTool::new(cwd));
-        registry.register(WorkspaceLogTool::new(cwd));
-        registry.register(WorkspaceShowTool::new(cwd));
-        registry.register(WorkspaceDiffTool::new(cwd));
         // #1772 (lite): project static-check with compact diagnostics.
         // Shares the session sandbox with shell/exec/bash — `cargo check`
         // executes build.rs/proc-macros (project-controlled code), so it
@@ -1301,10 +1296,6 @@ impl ToolRegistry {
         "glob",
         "grep",
         "list_dir",
-        "check_workspace_contract",
-        "workspace_log",
-        "workspace_show",
-        "workspace_diff",
         // #1772 (lite): `check` detects the project (Cargo.toml / tsconfig /
         // go.mod) at its bound workspace root and runs the checker there, so
         // a re-scoped session must re-register it against the new root.
@@ -1395,10 +1386,6 @@ impl ToolRegistry {
         registry.register(GrepTool::new(cwd));
         registry
             .register(ListDirTool::new(cwd).with_filesystem_scope(permissions.filesystem_scope));
-        registry.register(CheckWorkspaceContractTool::new(cwd));
-        registry.register(WorkspaceLogTool::new(cwd));
-        registry.register(WorkspaceShowTool::new(cwd));
-        registry.register(WorkspaceDiffTool::new(cwd));
         // #1772 (lite): `check` detects the project type from the workspace
         // root, so it must follow `rebind_cwd` like the other cwd-bound
         // tools — and it re-binds to the NEW session sandbox stored just
@@ -2631,13 +2618,11 @@ mod profile_filter_tests {
         let mut reg = ToolRegistry::with_builtins(dir.path());
 
         reg.filter_by_profile(&ProfileTools::AllowList {
-            tools: vec!["workspace_*".into()],
+            tools: vec!["read_*".into()],
         });
 
         let names: Vec<String> = reg.tools.keys().cloned().collect();
-        assert!(names.contains(&"workspace_log".to_string()));
-        assert!(names.contains(&"workspace_show".to_string()));
-        assert!(names.contains(&"workspace_diff".to_string()));
+        assert!(names.contains(&"read_file".to_string()));
         assert!(!names.contains(&"shell".to_string()));
     }
 

@@ -29,10 +29,7 @@ use crate::sandbox::{SandboxConfig, create_sandbox};
 use crate::subagent_output::SubAgentOutputRouter;
 use crate::subagent_summary::AgentSummaryGenerator;
 use crate::task_supervisor::{TaskSupervisor, TaskTerminalGuard};
-use crate::workspace_git::{
-    WorkspaceContractStatus, WorkspaceProjectKind,
-    resolve_preferred_workspace_contract_artifact_path, resolve_workspace_contract_artifact_paths,
-};
+use crate::workspace_contract::resolve_workspace_contract_artifact_paths;
 use crate::{Agent, AgentConfig, HookContext, HookExecutor, HookPayload, HookResult};
 
 /// Default MCP tool name dispatched on the remote agent. Chosen to match
@@ -1148,7 +1145,7 @@ pub struct SpawnTool {
     /// to the same backend as the parent's shell/exec tools. Before this
     /// field, the two validator registries in `execute_with_context`'s
     /// `agent_mcp` branch were built with `ToolRegistry::with_builtins`
-    /// (hardcoded `NoSandbox`), so `run_project_root_validators` /
+    /// (hardcoded `NoSandbox`), so `run_declared_validators` /
     /// `run_declared_validators` executed a workspace-authored `Command`
     /// validator directly on the host even when the session was sandboxed —
     /// a second construction site for the exact escape #1607 closed on the
@@ -2204,16 +2201,6 @@ fn select_workflow_terminal_files(
     Some(candidates)
 }
 
-fn workflow_uses_contract_terminal_delivery(workflow: &WorkflowMetadata) -> bool {
-    matches!(
-        workflow
-            .terminal_output
-            .as_ref()
-            .map(|policy| policy.required_artifact_kind.as_str()),
-        Some("presentation" | "site")
-    )
-}
-
 fn workflow_is_research_podcast(workflow: Option<&WorkflowMetadata>) -> bool {
     workflow.is_some_and(|workflow| workflow.workflow_kind == "research_podcast")
 }
@@ -2419,15 +2406,8 @@ fn effective_allowed_tools(allowed_tools: &[String], disallowed_tools: &[String]
 fn build_subagent_tool_policy(
     allowed_tools: Vec<String>,
     disallowed_tools: Vec<String>,
-    workflow: Option<&WorkflowMetadata>,
 ) -> ToolPolicy {
     let mut deny = vec!["spawn".to_string()];
-    if workflow.is_some_and(workflow_uses_contract_terminal_delivery) {
-        // Contract-owned workflow families must have exactly one runtime-owned
-        // terminal delivery path. Deny explicit send_file so child workers
-        // cannot double-deliver slides/site artifacts.
-        deny.push("send_file".to_string());
-    }
     // A manifest's `disallowed_tools` is enforced here as a DENY-list. Deny
     // wins over allow (see `ToolPolicy::evaluate`), so a forbidden tool is
     // blocked even if it appears in `allow` (inline/manifest) OR was added by
@@ -2489,112 +2469,6 @@ fn ensure_subagent_tools_available(
 }
 
 const PRIMARY_CONTRACT_ARTIFACT: &str = "primary";
-
-fn workflow_contract_kind_label(kind: WorkspaceProjectKind) -> &'static str {
-    match kind {
-        WorkspaceProjectKind::Slides => "slides",
-        WorkspaceProjectKind::Sites => "site",
-    }
-}
-
-fn workflow_contract_project_kind(workflow: &WorkflowMetadata) -> Option<WorkspaceProjectKind> {
-    match workflow
-        .terminal_output
-        .as_ref()
-        .map(|policy| policy.required_artifact_kind.as_str())
-    {
-        Some("presentation") => Some(WorkspaceProjectKind::Slides),
-        Some("site") => Some(WorkspaceProjectKind::Sites),
-        _ => None,
-    }
-}
-
-fn normalize_observed_path(base_dir: &std::path::Path, path: &std::path::Path) -> PathBuf {
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        base_dir.join(path)
-    }
-}
-
-fn is_matching_workspace_root(path: &std::path::Path, expected_kind: WorkspaceProjectKind) -> bool {
-    if !crate::workspace_policy_path(path).is_file() {
-        return false;
-    }
-
-    matches!(
-        (
-            expected_kind,
-            path.parent()
-                .and_then(|parent| parent.file_name())
-                .and_then(|name| name.to_str())
-        ),
-        (WorkspaceProjectKind::Slides, Some("slides"))
-            | (WorkspaceProjectKind::Sites, Some("sites"))
-    )
-}
-
-fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
-    if !paths.iter().any(|existing| existing == &path) {
-        paths.push(path);
-    }
-}
-
-fn resolve_contract_workspace_root(
-    working_dir: &std::path::Path,
-    files_to_send: &[PathBuf],
-    files_modified: &[PathBuf],
-    workflow: &WorkflowMetadata,
-) -> std::result::Result<PathBuf, String> {
-    let expected_kind = workflow_contract_project_kind(workflow).ok_or_else(|| {
-        "workflow contract root resolution requires a contract-owned artifact kind".to_string()
-    })?;
-    let kind_label = workflow_contract_kind_label(expected_kind);
-
-    let mut ancestry_candidates = Vec::new();
-    for path in files_to_send.iter().chain(files_modified.iter()) {
-        let observed = normalize_observed_path(working_dir, path);
-        for ancestor in observed.ancestors() {
-            if is_matching_workspace_root(ancestor, expected_kind) {
-                push_unique_path(&mut ancestry_candidates, ancestor.to_path_buf());
-                break;
-            }
-        }
-    }
-
-    match ancestry_candidates.as_slice() {
-        [single] => return Ok(single.clone()),
-        [] => {}
-        _ => {
-            return Err(format!(
-                "multiple {kind_label} workspace contracts matched observed output paths"
-            ));
-        }
-    }
-
-    if is_matching_workspace_root(working_dir, expected_kind) {
-        return Ok(working_dir.to_path_buf());
-    }
-
-    let matching_roots = crate::list_workspace_repos(working_dir)
-        .map_err(|error| format!("workspace contract discovery failed: {error}"))?
-        .into_iter()
-        .filter(|repo| repo.kind == expected_kind)
-        .map(|repo| repo.root)
-        .collect::<Vec<_>>();
-
-    match matching_roots.as_slice() {
-        [single] => Ok(single.clone()),
-        [] => Err(format!(
-            "no {kind_label} workspace contract found beneath {}",
-            working_dir.display()
-        )),
-        _ => Err(format!(
-            "multiple {kind_label} workspace contracts found beneath {}; unable to choose a terminal artifact root deterministically",
-            working_dir.display()
-        )),
-    }
-}
 
 /// Glob used when a spawn requests deliverable collection with an empty
 /// pattern: top-level files only (not `**/*`, which would also sweep up a
@@ -2667,15 +2541,13 @@ fn deliverable_artifact_glob(deliverable: Option<&str>) -> Option<String> {
 /// Seed a minimal workspace-contract policy in `output_dir` declaring a single
 /// `primary` artifact matching `artifact_glob`.
 ///
-/// This reuses the existing workspace-contract harness rather than inventing a
-/// bespoke scan: [`resolve_workspace_contract_artifact_paths`] reads this
-/// policy's declared glob and resolves matches on disk — the SAME artifact
-/// resolver the slides/sites contracts use — so a deliverable written by ANY
-/// means (a `shell` heredoc, `write_file`, a plugin) is surfaced, not just
-/// files reported through a tracked write tool. The seeded policy is `Session`
-/// kind with no validators or git auto-init: we want the artifact-glob
-/// resolution, not the slides/sites content validators (which would reject a
-/// plain document) or `inspect_workspace_contract_at_root`'s project-kind gate.
+/// This reuses the workspace-contract artifact resolver rather than inventing
+/// a bespoke scan: [`resolve_workspace_contract_artifact_paths`] reads this
+/// policy's declared glob and resolves matches on disk, so a deliverable
+/// written by ANY means (a `shell` heredoc, `write_file`, a plugin) is
+/// surfaced, not just files reported through a tracked write tool. The
+/// seeded policy is `Session` kind with no validators or git auto-init — we
+/// only want the artifact-glob resolution.
 fn seed_deliverable_contract(output_dir: &Path, artifact_glob: &str) -> Result<()> {
     use crate::workspace_policy::{
         ValidationPolicy, WorkspaceArtifactsPolicy, WorkspacePolicy, WorkspacePolicyKind,
@@ -2728,20 +2600,10 @@ fn resolve_deliverable_terminal_files(output_dir: &Path) -> Vec<PathBuf> {
 }
 
 fn resolve_background_terminal_files(
-    working_dir: &std::path::Path,
     files_to_send: &[PathBuf],
     files_modified: &[PathBuf],
     workflow: Option<&WorkflowMetadata>,
 ) -> std::result::Result<Vec<PathBuf>, String> {
-    if let Some(workflow) =
-        workflow.filter(|workflow| workflow_uses_contract_terminal_delivery(workflow))
-    {
-        let workspace_root =
-            resolve_contract_workspace_root(working_dir, files_to_send, files_modified, workflow)?;
-        return resolve_contract_terminal_files(&workspace_root, Some(workflow))?
-            .ok_or_else(|| "workspace contract returned no terminal files".to_string());
-    }
-
     let terminal_files = select_workflow_terminal_files(files_to_send, files_modified, workflow)
         .unwrap_or_else(|| {
             files_to_send
@@ -2765,130 +2627,6 @@ fn resolve_background_terminal_files(
     Ok(terminal_files)
 }
 
-fn format_workspace_contract_failure(status: &WorkspaceContractStatus) -> String {
-    let mut failures = Vec::new();
-    if let Some(error) = status.error.as_deref() {
-        failures.push(error.to_string());
-    }
-    failures.extend(
-        status
-            .turn_end_checks
-            .iter()
-            .chain(status.completion_checks.iter())
-            .filter(|check| !check.passed)
-            .map(|check| match check.reason.as_deref() {
-                Some(reason) if !reason.is_empty() => format!("{}: {}", check.spec, reason),
-                _ => format!("{}: failed", check.spec),
-            }),
-    );
-    failures.extend(
-        status
-            .artifacts
-            .iter()
-            .filter(|artifact| !artifact.present)
-            .map(|artifact| {
-                format!(
-                    "missing artifact '{}' matching '{}'",
-                    artifact.name, artifact.pattern
-                )
-            }),
-    );
-
-    if failures.is_empty() {
-        format!("workspace contract for {} is not ready", status.repo_label)
-    } else {
-        format!(
-            "workspace contract for {} is not ready: {}",
-            status.repo_label,
-            failures.join("; ")
-        )
-    }
-}
-
-fn resolve_contract_terminal_files(
-    workspace_root: &std::path::Path,
-    workflow: Option<&WorkflowMetadata>,
-) -> std::result::Result<Option<Vec<PathBuf>>, String> {
-    let Some(workflow) = workflow else {
-        return Ok(None);
-    };
-    if !workflow_uses_contract_terminal_delivery(workflow) {
-        return Ok(None);
-    }
-
-    let status = crate::inspect_workspace_contract_at_root(workspace_root)
-        .map_err(|error| format!("workspace contract inspection failed: {error}"))?;
-    if !status.policy_managed {
-        return Err(format!(
-            "workspace contract missing for {}",
-            status.repo_label
-        ));
-    }
-    if !status.ready {
-        return Err(format_workspace_contract_failure(&status));
-    }
-
-    let terminal_output = workflow
-        .terminal_output
-        .as_ref()
-        .ok_or_else(|| "workflow terminal output policy missing".to_string())?;
-    let mut selected = Vec::new();
-    let primary_declared = status
-        .artifacts
-        .iter()
-        .any(|artifact| artifact.name == PRIMARY_CONTRACT_ARTIFACT);
-    let primary_ready = status
-        .artifacts
-        .iter()
-        .any(|artifact| artifact.name == PRIMARY_CONTRACT_ARTIFACT && artifact.present);
-
-    if terminal_output.deliver_final_artifact_only {
-        if !primary_declared {
-            return Err(format!(
-                "workspace contract for {} is ready but does not declare a '{}' artifact",
-                status.repo_label, PRIMARY_CONTRACT_ARTIFACT
-            ));
-        }
-
-        if !primary_ready {
-            return Err(format!(
-                "workspace contract for {} is ready but its '{}' artifact is missing",
-                status.repo_label, PRIMARY_CONTRACT_ARTIFACT
-            ));
-        }
-
-        let path = resolve_preferred_workspace_contract_artifact_path(
-            workspace_root,
-            PRIMARY_CONTRACT_ARTIFACT,
-        )
-        .map_err(|error| format!("workspace contract resolution failed: {error}"))?;
-        return path.map(|path| Some(vec![path])).ok_or_else(|| {
-            format!(
-                "workspace contract for {} is ready but the '{}' artifact could not be resolved",
-                status.repo_label, PRIMARY_CONTRACT_ARTIFACT
-            )
-        });
-    }
-
-    for artifact in status.artifacts.iter().filter(|artifact| artifact.present) {
-        selected.extend(
-            resolve_workspace_contract_artifact_paths(workspace_root, &artifact.name)
-                .map_err(|error| format!("workspace contract resolution failed: {error}"))?,
-        );
-    }
-
-    selected.sort();
-    selected.dedup();
-
-    if !selected.is_empty() {
-        return Ok(Some(selected));
-    }
-
-    Err(format!(
-        "workspace contract for {} is ready but has no resolved artifact paths",
-        status.repo_label
-    ))
-}
 async fn deliver_background_result(
     sender: Option<BackgroundResultSender>,
     payload: BackgroundResultPayload,
@@ -3536,23 +3274,6 @@ impl Tool for SpawnTool {
             // here, against the parent's workspace root, restores the
             // invariant: any required validator failure demotes the
             // response to a typed failure before it leaves the tool.
-            //
-            // octos #997 (round-4 fix): run both the session-scope and
-            // project-scope validator blocks BEFORE
-            // `resolve_contract_terminal_files`. With
-            // `terminal_output.required_artifact_kind = "presentation"`
-            // (real `slides_delivery` shape),
-            // `resolve_contract_terminal_files` calls
-            // `inspect_workspace_contract_at_root` which reads the project
-            // ledger at
-            // `<session>/<kind>/<slug>/.octos/validator_outcomes.jsonl`.
-            // If validators run AFTER that gate, the gate returns
-            // `ready = false` (empty ledger) and the agent_mcp branch
-            // early-returns at `Err(error) => return Ok(...)` before
-            // either validator block executes. Re-ordering ensures the
-            // project ledger is populated first, so the contract gate
-            // inside `resolve_contract_terminal_files` sees the real
-            // `Pass` rows.
             let mut mcp_success = success;
             let mut mcp_output_override: Option<String> = None;
             if mcp_success {
@@ -3601,84 +3322,7 @@ impl Tool for SpawnTool {
                 }
             }
 
-            // octos #997 (round-3 fix): the session-scope validator block above
-            // runs against `self.working_dir` (the session root) and writes the
-            // session ledger only. The project-scope contract gate
-            // (`inspect_workspace_contract`) reads
-            // `<session>/<kind>/<slug>/.octos/validator_outcomes.jsonl`. Without
-            // this run, an `agent_mcp` slides dispatch that produces a valid
-            // PPTX would leave the project ledger empty and a downstream
-            // contract gate would surface `ready = false`. Mirror the sync
-            // (`:2312`) and background (`:2680`) spawn fixes so the agent_mcp
-            // branch closes the same bypass.
-            if mcp_success {
-                let expected_kind = workflow.as_ref().and_then(workflow_contract_project_kind);
-                // #1607 (codex-review follow-up): same rationale as the
-                // session-scope block above — the project-root validator pass
-                // runs `Command` validators declared by an untrusted
-                // `slides/<slug>` or `sites/<slug>` `workspace_policy.toml`, so
-                // it MUST inherit the session sandbox instead of `with_builtins`'
-                // hardcoded `NoSandbox`. This is the child mirror of the
-                // `build_validator_runner` chokepoint fix; without it the
-                // agent_mcp branch is a second unsandboxed construction site.
-                let validator_sandbox: std::sync::Arc<dyn crate::sandbox::Sandbox> =
-                    std::sync::Arc::from(create_sandbox(&self.sandbox));
-                let mut registry_for_validators = ToolRegistry::with_builtins_and_sandbox(
-                    &self.working_dir,
-                    create_sandbox(&self.sandbox),
-                );
-                // Honour the parent's provider tool policy in the validator
-                // registry too, so a workspace `ToolCall` validator can't invoke
-                // a tool the policy denies (#1607 codex round 2).
-                if let Some(policy) = self.provider_policy.clone() {
-                    registry_for_validators.set_provider_policy(policy);
-                }
-                let report = crate::workspace_contract::run_project_root_validators(
-                    &registry_for_validators,
-                    &self.working_dir,
-                    expected_kind,
-                    &response.files_to_send,
-                    validator_sandbox,
-                )
-                .await;
-                if let Some(reason) = report.first_failure_reason() {
-                    mcp_success = false;
-                    mcp_output_override = Some(format!(
-                        "Status: FAILED\nremote_agent_mcp: project-scope validator rejected child artifact: {reason}"
-                    ));
-                }
-            }
-
-            // Workflow contract families always gate outputs through the
-            // workspace contract. The dispatch response is advisory; the
-            // final delivery path remains owned by the runtime.
-            //
-            // Runs LAST so the validator blocks above have already written
-            // the session + project ledgers; `inspect_workspace_contract_at_root`
-            // (inside `resolve_contract_terminal_files`) reads those ledgers
-            // to decide `ready`. Skipped on validator failure — empty
-            // `files_to_send` is correct for a failed result.
-            let mut files_to_send = response.files_to_send.clone();
-            if mcp_success {
-                if let Some(workflow_meta) = workflow.as_ref() {
-                    if workflow_uses_contract_terminal_delivery(workflow_meta) {
-                        match resolve_contract_terminal_files(
-                            self.working_dir.as_path(),
-                            Some(workflow_meta),
-                        ) {
-                            Ok(Some(contract_files)) => files_to_send = contract_files,
-                            Ok(None) => {}
-                            Err(error) => {
-                                return Ok(ToolResult {
-                                    output: format!("Status: FAILED\n{error}"),
-                                    success: false,
-                                    ..Default::default()
-                                });
-                            }
-                        }
-                    }
-                }
-            }
+            let files_to_send = response.files_to_send.clone();
 
             return Ok(ToolResult {
                 output: mcp_output_override.unwrap_or_else(|| {
@@ -3825,7 +3469,7 @@ impl Tool for SpawnTool {
             // #1607 (codex-review follow-up): build the child registry with the
             // SESSION sandbox, not the hardcoded `NoSandbox` that
             // `with_builtins` stores. The child's `child_tools_handle` feeds
-            // `run_declared_validators` / `run_project_root_validators` below,
+            // `run_declared_validators` below,
             // and `build_validator_runner` confines `ValidatorSpec::Command`
             // validators to `tools.sandbox()`. A `NoSandbox` registry there
             // would let an untrusted `workspace_policy.toml` command validator
@@ -3915,11 +3559,7 @@ impl Tool for SpawnTool {
                 allow_list_is_caller_explicit,
             )
             .map_err(|error| eyre::eyre!(error))?;
-            let policy = build_subagent_tool_policy(
-                allowed_tools,
-                manifest_disallowed_tools,
-                workflow.as_ref(),
-            );
+            let policy = build_subagent_tool_policy(allowed_tools, manifest_disallowed_tools);
             tools.apply_policy(&policy);
             if let Some(ref pp) = self.provider_policy {
                 tools.set_provider_policy(pp.clone());
@@ -4074,37 +3714,6 @@ impl Tool for SpawnTool {
                                     }
                                 }
                             }
-                        }
-                    }
-
-                    // octos #997 (round-2 fix): in addition to the session-scope
-                    // validator run above, ALSO run each project-scope policy
-                    // at its OWN project root. The session run writes its
-                    // outcome to `<session>/.octos/validator_outcomes.jsonl`,
-                    // but `inspect_workspace_contract` reads from
-                    // `<session>/<kind>/<slug>/.octos/validator_outcomes.jsonl`
-                    // — so without this run a real valid deck whose project
-                    // policy declares a hard-required validator (octos #997:
-                    // `slides.mofa_slides.pptx_magic_bytes`) would surface as
-                    // `ready = false`. Scope the iteration to the workflow's
-                    // expected kind when available so a slides spawn does not
-                    // run the sites validator chain.
-                    if success {
-                        let expected_kind =
-                            workflow.as_ref().and_then(workflow_contract_project_kind);
-                        let report = crate::workspace_contract::run_project_root_validators(
-                            child_tools_handle.as_ref(),
-                            &child_working_dir,
-                            expected_kind,
-                            &r.files_to_send,
-                            std::sync::Arc::from(create_sandbox(&self.sandbox)),
-                        )
-                        .await;
-                        if let Some(reason) = report.first_failure_reason() {
-                            success = false;
-                            output = format!(
-                                "Subagent failed: project-scope validator rejected child artifact: {reason}"
-                            );
                         }
                     }
 
@@ -4449,7 +4058,7 @@ impl Tool for SpawnTool {
                 // #1607 (codex-review follow-up): build the detached child
                 // registry with the SESSION sandbox rather than the hardcoded
                 // `NoSandbox` `with_builtins` stores. Its `child_tools_handle`
-                // feeds `run_declared_validators` / `run_project_root_validators`
+                // feeds `run_declared_validators`
                 // below, and `build_validator_runner` confines command
                 // validators to `tools.sandbox()`. On hosts without a real
                 // backend `create_sandbox` yields `NoSandbox` (unchanged).
@@ -4513,11 +4122,7 @@ impl Tool for SpawnTool {
                     allow_list_is_caller_explicit,
                 )
                 .map_err(|error| eyre::eyre!(error));
-                let policy = build_subagent_tool_policy(
-                    allowed_tools,
-                    manifest_disallowed_tools,
-                    workflow_metadata.as_ref(),
-                );
+                let policy = build_subagent_tool_policy(allowed_tools, manifest_disallowed_tools);
                 tools.apply_policy(&policy);
                 if let Some(pp) = provider_policy {
                     tools.set_provider_policy(pp);
@@ -4699,46 +4304,10 @@ impl Tool for SpawnTool {
                     }
                 }
 
-                // octos #997 (round-2 fix): also run each project-scope
-                // policy AT its OWN project root. The session-scope run above
-                // writes to `<session>/.octos/validator_outcomes.jsonl`, but
-                // `inspect_workspace_contract` reads from
-                // `<session>/<kind>/<slug>/.octos/validator_outcomes.jsonl`.
-                // Without this run a real valid deck whose project policy
-                // declares a hard-required validator (octos #997:
-                // `slides.mofa_slides.pptx_magic_bytes`) would surface as
-                // `ready = false` because the persisted outcome is missing
-                // from the path `inspect_workspace_contract` reads.
-                if contract_failure.is_none()
-                    && matches!(&result, Ok(task_result) if task_result.success)
-                {
-                    let expected_kind = workflow_metadata
-                        .as_ref()
-                        .and_then(workflow_contract_project_kind);
-                    let bg_files_to_send: &[PathBuf] = match &result {
-                        Ok(task_result) => &task_result.files_to_send,
-                        Err(_) => &[],
-                    };
-                    let report = crate::workspace_contract::run_project_root_validators(
-                        child_tools_handle.as_ref(),
-                        &working_dir,
-                        expected_kind,
-                        bg_files_to_send,
-                        std::sync::Arc::from(create_sandbox(&child_sandbox)),
-                    )
-                    .await;
-                    if let Some(reason) = report.first_failure_reason() {
-                        contract_failure = Some(format!(
-                            "project-scope validator rejected child artifact: {reason}"
-                        ));
-                    }
-                }
-
                 if contract_failure.is_none() {
                     contract_failure = match &result {
                         Ok(task_result) if task_result.success => {
                             resolve_background_terminal_files(
-                                &working_dir,
                                 &task_result.files_to_send,
                                 &task_result.files_modified,
                                 workflow_metadata.as_ref(),
@@ -4751,7 +4320,6 @@ impl Tool for SpawnTool {
                 let mut terminal_files = match (&result, contract_failure.as_ref()) {
                     (Ok(task_result), None) if task_result.success => {
                         resolve_background_terminal_files(
-                            &working_dir,
                             &task_result.files_to_send,
                             &task_result.files_modified,
                             workflow_metadata.as_ref(),

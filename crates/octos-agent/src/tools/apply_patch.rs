@@ -40,7 +40,6 @@ use async_trait::async_trait;
 use eyre::{Result, WrapErr};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tracing::warn;
 
 use super::diff_edit::{DiffLine, matches_at, pattern_lines, replacement_lines};
 use super::{ConcurrencyClass, Tool, ToolContext, ToolResult};
@@ -223,27 +222,6 @@ impl ApplyPatchTool {
         // but if one happens we report exactly what was already applied and
         // any partial state the failed section itself left on disk.
         let (applied, failure) = self.apply_planned(ctx, &plan).await;
-
-        let snapshot_seed = applied
-            .first()
-            .and_then(|op| op.touched.first())
-            .or_else(|| {
-                failure
-                    .as_ref()
-                    .and_then(|f| f.partial.first().map(|p| &p.resolved))
-            });
-        if let Some(first) = snapshot_seed
-            && let Err(error) = crate::workspace_git::snapshot_workspace_change(
-                &self.base_dir,
-                first,
-                "apply_patch",
-            )
-        {
-            warn!(
-                error = %error,
-                "workspace git snapshot failed after apply_patch"
-            );
-        }
 
         let previews: Vec<Value> = applied.iter().map(AppliedOp::preview_entry).collect();
         let mut modified_paths: Vec<String> = applied.iter().map(|op| op.display.clone()).collect();

@@ -101,10 +101,6 @@ pub(crate) const OCTOS_KNOWN_MODEL_VISIBLE_TOOLS: &[&str] = &[
     "spawn",
     "read_task_output",
     "configure_tool",
-    "check_workspace_contract",
-    "workspace_log",
-    "workspace_show",
-    "workspace_diff",
     // #972 / M14-B P1 — Codex-compatible image inspection and dynamic
     // tool discovery. These resolve through the same profile runtime as
     // the P0 set and respect the active filesystem scope.
@@ -483,34 +479,6 @@ const OCTOS_TOOL_SPECS: &[OctosToolSpec] = &[
         detail: Some(
             "Canonical Codex view_image entry. Returns format / MIME / byte length for a workspace image.",
         ),
-    },
-    OctosToolSpec {
-        name: "check_workspace_contract",
-        category: "workspace",
-        aliases: &[],
-        policy: "allowed",
-        detail: None,
-    },
-    OctosToolSpec {
-        name: "workspace_log",
-        category: "workspace",
-        aliases: &[],
-        policy: "allowed",
-        detail: None,
-    },
-    OctosToolSpec {
-        name: "workspace_show",
-        category: "workspace",
-        aliases: &[],
-        policy: "allowed",
-        detail: None,
-    },
-    OctosToolSpec {
-        name: "workspace_diff",
-        category: "workspace",
-        aliases: &[],
-        policy: "allowed",
-        detail: None,
     },
     // #1172 — Codex naming-parity aliases. Surface them in the tool
     // contract so `tool/status/list` advertises the new spellings.

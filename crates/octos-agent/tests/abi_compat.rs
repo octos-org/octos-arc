@@ -42,45 +42,6 @@ fn copy_fixture_into_workspace(fixture: &str, project_root: &Path) {
 }
 
 #[test]
-fn should_load_workspace_policy_v1_slides_fixture() {
-    let temp = tempfile::tempdir().unwrap();
-    copy_fixture_into_workspace("workspace_policy_v1_slides.toml", temp.path());
-
-    let policy = read_workspace_policy(temp.path())
-        .expect("v1 slides fixture should parse")
-        .expect("policy file should exist");
-
-    assert_eq!(policy.schema_version, WORKSPACE_POLICY_SCHEMA_VERSION);
-    assert_eq!(
-        policy.workspace.kind,
-        octos_agent::WorkspacePolicyKind::Slides
-    );
-    assert!(
-        policy
-            .validation
-            .on_turn_end
-            .iter()
-            .any(|line| line == "file_exists:script.js"),
-        "expected slides turn-end validation to include script.js",
-    );
-    // Post-#997 round-3: `read_workspace_policy` auto-migrates legacy
-    // slides policies to slug-aware skill-output artifact paths. The
-    // fixture is a pre-migration v1 snapshot; the read should yield
-    // the migrated form. The slug is the parent dir's name (here the
-    // tempdir's random tail).
-    let primary = policy.artifacts.entries.get("primary").expect("primary");
-    let slug = temp
-        .path()
-        .file_name()
-        .and_then(|n| n.to_str())
-        .expect("tempdir must have a name");
-    assert_eq!(
-        primary.as_str(),
-        format!("skill-output/slides/{slug}/output/deck.pptx").as_str()
-    );
-}
-
-#[test]
 fn should_load_workspace_policy_v1_session_fixture() {
     use octos_agent::workspace_policy::{
         SpawnTaskValidatorSpec, ValidatorFileSource, ValidatorSpec,
@@ -109,59 +70,30 @@ fn should_load_workspace_policy_v1_session_fixture() {
             .any(|line| line == "file_size_min:$artifact:1024"),
         "expected fm_tts verify action for artifact size",
     );
-    assert!(
-        tts.on_completion.iter().any(|entry| matches!(
-            entry,
-            SpawnTaskValidatorSpec::Bare(ValidatorSpec::AudioNonSilent {
-                source: ValidatorFileSource::SpawnOnlyFiles,
-                extension,
-                ..
-            }) if extension.as_deref() == Some("mp3")
-        )),
-        "expected fm_tts AudioNonSilent validator over spawn_only_files mp3",
-    );
-
     // octos #1034: the podcast_generate contract opts into the
     // `spawn_only_files` source via the new ABI fields. The fixture is the
     // durable promise of that shape — parsing it must populate `source =
-    // SpawnOnlyFiles` and `extension = Some("mp3")` on both the MagicBytes
-    // and AudioNonSilent validators so an older operator policy that
-    // committed the prior glob form will surface a clear deserialization
-    // error rather than silently fall back to the glob path.
+    // SpawnOnlyFiles` and `extension = Some("mp3")` on the MagicBytes
+    // validator so an older operator policy that committed the prior glob
+    // form will surface a clear deserialization error rather than silently
+    // fall back to the glob path.
     let podcast = policy
         .spawn_tasks
         .get("podcast_generate")
         .expect("podcast_generate spawn task contract");
-    let mut saw_magic = false;
-    let mut saw_audio = false;
-    for entry in &podcast.on_completion {
-        match entry {
+    let saw_magic = podcast.on_completion.iter().any(|entry| {
+        matches!(
+            entry,
             SpawnTaskValidatorSpec::Bare(ValidatorSpec::MagicBytes {
-                source, extension, ..
-            }) => {
-                assert_eq!(*source, ValidatorFileSource::SpawnOnlyFiles);
-                assert_eq!(extension.as_deref(), Some("mp3"));
-                saw_magic = true;
-            }
-            SpawnTaskValidatorSpec::Bare(ValidatorSpec::AudioNonSilent {
-                source,
+                source: ValidatorFileSource::SpawnOnlyFiles,
                 extension,
                 ..
-            }) => {
-                assert_eq!(*source, ValidatorFileSource::SpawnOnlyFiles);
-                assert_eq!(extension.as_deref(), Some("mp3"));
-                saw_audio = true;
-            }
-            _ => {}
-        }
-    }
+            }) if extension.as_deref() == Some("mp3")
+        )
+    });
     assert!(
         saw_magic,
         "podcast fixture must declare MagicBytes(spawn_only_files)"
-    );
-    assert!(
-        saw_audio,
-        "podcast fixture must declare AudioNonSilent(spawn_only_files)"
     );
 
     // octos #1040 (follow-up to #1035 / #1037): mofa_comic, mofa_infographic,
@@ -208,29 +140,17 @@ fn should_default_workspace_policy_to_v1_when_schema_version_missing() {
     );
     assert_eq!(
         policy.workspace.kind,
-        octos_agent::WorkspacePolicyKind::Sites
+        octos_agent::WorkspacePolicyKind::Session
     );
 }
 
 #[test]
 fn should_preserve_all_first_party_built_in_workspace_policies() {
-    // Real policies produced by harness callers: slides, sites, session, and
-    // the site-build-output variant. All four must round-trip TOML cleanly
-    // and carry the current ABI version.
+    // Real policies produced by harness callers: session and coding. Both
+    // must round-trip TOML cleanly and carry the current ABI version.
     let contracts: Vec<(&str, WorkspacePolicy)> = vec![
-        (
-            "slides",
-            WorkspacePolicy::for_kind(octos_agent::WorkspaceProjectKind::Slides),
-        ),
-        (
-            "sites",
-            WorkspacePolicy::for_kind(octos_agent::WorkspaceProjectKind::Sites),
-        ),
         ("session", WorkspacePolicy::for_session()),
-        (
-            "site-build-output",
-            WorkspacePolicy::for_site_build_output("dist"),
-        ),
+        ("coding", WorkspacePolicy::for_coding()),
     ];
 
     for (label, policy) in contracts {
@@ -263,7 +183,7 @@ fn should_reject_future_workspace_policy_schema_version() {
 schema_version = {}
 
 [workspace]
-kind = "slides"
+kind = "session"
 
 [version_control]
 provider = "git"

@@ -8,8 +8,6 @@ use crate::abi_schema::{
     COMPACTION_POLICY_SCHEMA_VERSION, WORKSPACE_POLICY_SCHEMA_VERSION, check_supported,
     default_compaction_policy_schema_version, default_workspace_policy_schema_version,
 };
-use crate::workspace_git::WorkspaceProjectKind;
-
 pub const WORKSPACE_POLICY_FILE: &str = ".octos-workspace.toml";
 
 /// Harness-facing workspace policy.
@@ -246,8 +244,8 @@ fn is_default_phase(phase: &ValidatorPhaseKind) -> bool {
     *phase == ValidatorPhaseKind::default()
 }
 
-/// Where a file-list-driven validator (`MagicBytes`, `AudioNonSilent`,
-/// `PerFileNonSilent`) sources its candidate file paths.
+/// Where a file-list-driven validator (`MagicBytes`) sources its candidate
+/// file paths.
 ///
 /// Defaults to [`ValidatorFileSource::Glob`] so existing TOML contracts keep
 /// their historic behaviour: the validator resolves the `glob` field against
@@ -257,10 +255,10 @@ fn is_default_phase(phase: &ValidatorPhaseKind) -> bool {
 /// of files the skill just produced), optionally filtered by an extension
 /// suffix.
 ///
-/// Issue octos #1034: the topic-suffixed plugin output paths
-/// (e.g. `mofa-podcast-zhuyu/`) break globbing because the per-topic
-/// directory name is unpredictable. `files_to_send` carries the exact path
-/// the plugin wrote and is the canonical source of truth.
+/// Issue octos #1034: topic-suffixed plugin output directories break
+/// globbing because the per-topic directory name is unpredictable.
+/// `files_to_send` carries the exact path the plugin wrote and is the
+/// canonical source of truth.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ValidatorFileSource {
@@ -342,71 +340,6 @@ pub enum ValidatorSpec {
         /// Argument key in the spawn task's input args (e.g. `name`) that
         /// holds the voice name to look up.
         name_arg: String,
-    },
-    /// Assert that at least one file matching `glob` has decoded audio with
-    /// `non_silent_samples / total_samples >= min_ratio`. WAV is supported
-    /// natively. MP3 support requires the `audio_mp3` feature flag.
-    ///
-    /// When `source = "spawn_only_files"` (octos #1034) the validator skips
-    /// the glob entirely and consumes the originating spawn_only tool's
-    /// `files_to_send` list, optionally narrowed by `extension`
-    /// (e.g. `extension = "mp3"`). This is the canonical mode for plugins
-    /// that write to topic-suffixed output directories whose names a glob
-    /// cannot predict.
-    AudioNonSilent {
-        #[serde(default)]
-        glob: String,
-        #[serde(default = "default_non_silent_ratio")]
-        min_ratio: f32,
-        #[serde(default, skip_serializing_if = "ValidatorFileSource::is_default")]
-        source: ValidatorFileSource,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        extension: Option<String>,
-    },
-    /// Assert that EVERY file matching `glob` independently meets
-    /// `non_silent_samples / total_samples >= min_ratio`, and that at least
-    /// `require_at_least` files were matched.
-    ///
-    /// Complements [`ValidatorSpec::AudioNonSilent`], which only requires a
-    /// single match to pass. The whole-file variant cannot catch a single
-    /// silent segment in a multi-segment podcast — the silent gap gets
-    /// averaged out by the surrounding speech in the final mix. By validating
-    /// each intermediate segment independently, `PerFileNonSilent` rejects a
-    /// silent segment before delivery, surfacing the offending filename in
-    /// the failure message so the spawn task can rerun the failing TTS call
-    /// on the next round.
-    ///
-    /// `${args.<key>}` interpolation is supported in the glob via
-    /// `interpolate_args_path` (path-traversal segments are rejected,
-    /// absolute-path values are rejected). `${output.<key>}` substitution is
-    /// intentionally NOT supported in this variant — see the
-    /// `decode_non_silent_ratio` doc-string for rationale.
-    ///
-    /// Field semantics:
-    /// * `glob` — workspace-relative glob matched via [`glob::glob`]. WAV and
-    ///   MP3 extensions are decoded; other extensions yield per-file errors.
-    /// * `min_ratio` — applied to EACH matched file. Defaults to
-    ///   [`default_non_silent_ratio`] (0.3).
-    /// * `require_at_least` — minimum number of files that MUST match.
-    ///   `0` (the serde default) disables the minimum so the validator can
-    ///   still pass when no files matched (consistent with optional
-    ///   intermediate artifacts that may not exist in every run).
-    PerFileNonSilent {
-        #[serde(default)]
-        glob: String,
-        #[serde(default = "default_non_silent_ratio")]
-        min_ratio: f32,
-        #[serde(default)]
-        require_at_least: usize,
-        /// Where to source the candidate file list. See [`ValidatorFileSource`]
-        /// for the opt-in `spawn_only_files` mode (octos #1034) that bypasses
-        /// the glob and consumes the plugin's `files_to_send` list verbatim.
-        #[serde(default, skip_serializing_if = "ValidatorFileSource::is_default")]
-        source: ValidatorFileSource,
-        /// Optional extension filter applied to the file list when
-        /// `source = "spawn_only_files"`. Ignored when `source = "glob"`.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        extension: Option<String>,
     },
     /// Assert each file matching `glob` has the magic-byte prefix for the
     /// declared `format`. Catches "tool wrote 0 bytes" or "tool wrote an
@@ -557,10 +490,6 @@ fn default_http_probe_until_deadline_ms() -> u64 {
     30_000
 }
 
-fn default_non_silent_ratio() -> f32 {
-    0.3
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspacePolicyWorkspace {
     pub kind: WorkspacePolicyKind,
@@ -569,8 +498,6 @@ pub struct WorkspacePolicyWorkspace {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum WorkspacePolicyKind {
-    Slides,
-    Sites,
     Session,
     /// Coding workspaces — projects with a recognised manifest
     /// (Cargo.toml / package.json / pyproject.toml). Inherits the
@@ -584,23 +511,8 @@ pub enum WorkspacePolicyKind {
 impl WorkspacePolicyKind {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Slides => "slides",
-            Self::Sites => "sites",
             Self::Session => "session",
             Self::Coding => "coding",
-        }
-    }
-
-    pub fn matches_project_kind(self, kind: WorkspaceProjectKind) -> bool {
-        self == Self::from(kind)
-    }
-}
-
-impl From<WorkspaceProjectKind> for WorkspacePolicyKind {
-    fn from(value: WorkspaceProjectKind) -> Self {
-        match value {
-            WorkspaceProjectKind::Slides => Self::Slides,
-            WorkspaceProjectKind::Sites => Self::Sites,
         }
     }
 }
@@ -717,622 +629,7 @@ impl WorkspaceSpawnTaskPolicy {
 }
 
 impl WorkspacePolicy {
-    pub fn for_kind(kind: WorkspaceProjectKind) -> Self {
-        match kind {
-            WorkspaceProjectKind::Slides => Self {
-                schema_version: WORKSPACE_POLICY_SCHEMA_VERSION,
-                workspace: WorkspacePolicyWorkspace {
-                    kind: WorkspacePolicyKind::Slides,
-                },
-                version_control: WorkspaceVersionControlPolicy {
-                    provider: WorkspaceVersionControlProvider::Git,
-                    auto_init: true,
-                    trigger: WorkspaceSnapshotTrigger::TurnEnd,
-                    fail_on_error: true,
-                },
-                tracking: WorkspaceTrackingPolicy {
-                    ignore: vec![
-                        "history/**".into(),
-                        "output/**".into(),
-                        "skill-output/**".into(),
-                        "*.pptx".into(),
-                        "*.tmp".into(),
-                        ".DS_Store".into(),
-                    ],
-                },
-                validation: ValidationPolicy {
-                    on_turn_end: vec![
-                        "file_exists:script.js".into(),
-                        "file_exists:memory.md".into(),
-                        "file_exists:changelog.md".into(),
-                    ],
-                    on_source_change: Vec::new(),
-                    // Path-based `file_exists` checks were removed: the
-                    // deck lands under `<workspace>/skill-output/slides/<slug>/`
-                    // via the host's plugin work-dir rebind (outside the
-                    // project dir), so the previous `file_exists:output/...`
-                    // could never match in production. The MagicBytes
-                    // validator below now consumes the plugin's
-                    // `files_to_send` list via the SpawnOnlyFiles source
-                    // — the same path set the session-scope
-                    // `mofa_slides_contract` uses.
-                    on_completion: Vec::new(),
-                    // octos #997: gate the slides project on the PPTX
-                    // magic-bytes signature so an HTML "success" deck
-                    // trips the contract. Uses `SpawnOnlyFiles` source
-                    // — the spawn loop wires `files_to_send` through to
-                    // `run_project_root_validators`, which filters to
-                    // files belonging to this project
-                    // (`<session>/skill-output/slides/<slug>/` or the
-                    // legacy `<session>/slides/<slug>/`) before passing
-                    // them to the validator runner.
-                    validators: vec![Validator {
-                        id: "slides.mofa_slides.pptx_magic_bytes".into(),
-                        required: true,
-                        soft_fail: false,
-                        timeout_ms: None,
-                        phase: ValidatorPhaseKind::Completion,
-                        spec: ValidatorSpec::MagicBytes {
-                            glob: String::new(),
-                            format: MagicByteKind::Pptx,
-                            source: ValidatorFileSource::SpawnOnlyFiles,
-                            extension: Some("pptx".into()),
-                        },
-                    }],
-                },
-                artifacts: WorkspaceArtifactsPolicy {
-                    entries: BTreeMap::from([
-                        ("primary".into(), "output/deck.pptx".into()),
-                        ("deck".into(), "output/deck.pptx".into()),
-                        ("previews".into(), "output/**/slide-*.png".into()),
-                    ]),
-                },
-                spawn_tasks: BTreeMap::new(),
-                compaction: None,
-            },
-            WorkspaceProjectKind::Sites => Self {
-                schema_version: WORKSPACE_POLICY_SCHEMA_VERSION,
-                workspace: WorkspacePolicyWorkspace {
-                    kind: WorkspacePolicyKind::Sites,
-                },
-                version_control: WorkspaceVersionControlPolicy {
-                    provider: WorkspaceVersionControlProvider::Git,
-                    auto_init: true,
-                    trigger: WorkspaceSnapshotTrigger::TurnEnd,
-                    fail_on_error: true,
-                },
-                tracking: WorkspaceTrackingPolicy {
-                    ignore: vec![
-                        "node_modules/**".into(),
-                        "dist/**".into(),
-                        "out/**".into(),
-                        "docs/**".into(),
-                        "build/**".into(),
-                        ".astro/**".into(),
-                        ".next/**".into(),
-                        ".quarto/**".into(),
-                        "*.log".into(),
-                        ".DS_Store".into(),
-                    ],
-                },
-                validation: ValidationPolicy::default(),
-                artifacts: WorkspaceArtifactsPolicy::default(),
-                spawn_tasks: BTreeMap::new(),
-                compaction: None,
-            },
-        }
-    }
-
     pub fn for_session() -> Self {
-        let mut artifacts = BTreeMap::new();
-        artifacts.insert("primary_audio".into(), "*.mp3".into());
-        artifacts.insert("podcast_audio".into(), "**/podcast_full_*.*".into());
-        // Issue #998: `mofa_slides` plugin emits a `.pptx` via `files_to_send`
-        // (auto-detected by `PluginTool::detect_output_file` from the
-        // skill's "Generated PPTX: <path>" stdout marker or an explicit
-        // `out` arg — see `plugins/tool.rs:550-625, 1321-1361`). The
-        // contract layer's `bind_explicit_files_to_artifacts` requires a
-        // named artifact source to bind the reported file into
-        // `ActionContext`; without one it returns "workspace contract has
-        // no artifact source" (`workspace_contract.rs:333-336`) on every
-        // successful slides run. Declaring the artifact here gives the
-        // mofa_slides contract a target name to reference and matches the
-        // recursive `**/*.pptx` glob already used by the MagicBytes(Pptx)
-        // validator on `on_completion`.
-        artifacts.insert("slides_pptx".into(), "**/*.pptx".into());
-        // octos #1040 (follow-up to #1035 / #1037): `mofa_comic`,
-        // `mofa_infographic`, and `mofa_frame` all emit a single PNG via
-        // `files_to_send`. The `image_png` artifact gives those contracts
-        // a target name so `bind_explicit_files_to_artifacts` can bind the
-        // reported PNG path into `ActionContext` without erroring on "no
-        // artifact source" the same way `slides_pptx` does for slides.
-        artifacts.insert("image_png".into(), "**/*.png".into());
-
-        // fm_tts emits a single MP3 deliverable via the plugin protocol's
-        // files_to_send list. Validate that exact reported file instead of a
-        // broad workspace glob, which can match stale audio from an earlier
-        // call in the same session workspace.
-        let tts_contract = WorkspaceSpawnTaskPolicy {
-            artifact: Some("primary_audio".into()),
-            artifacts: Vec::new(),
-            on_verify: vec![
-                "file_exists:$artifact".into(),
-                "file_size_min:$artifact:1024".into(),
-            ],
-            on_complete: vec![],
-            on_deliver: vec![],
-            on_failure: vec!["notify_user:TTS generation failed".into()],
-            on_completion: vec![SpawnTaskValidatorSpec::Bare(
-                ValidatorSpec::AudioNonSilent {
-                    glob: String::new(),
-                    min_ratio: default_non_silent_ratio(),
-                    source: ValidatorFileSource::SpawnOnlyFiles,
-                    extension: Some("mp3".into()),
-                },
-            )],
-        };
-
-        let podcast_contract = WorkspaceSpawnTaskPolicy {
-            artifact: Some("podcast_audio".into()),
-            artifacts: Vec::new(),
-            on_verify: vec![
-                "file_exists:$artifact".into(),
-                "file_size_min:$artifact:4096".into(),
-            ],
-            on_complete: vec![],
-            on_deliver: vec![],
-            on_failure: vec!["notify_user:Podcast generation failed".into()],
-            // Catch the three user-visible failure modes from the silent-MP3
-            // bug class:
-            //   1. tool wrote zero bytes / an HTML error page in place of
-            //      audio (MagicBytes).
-            //   2. tool generated a valid MP3 header but a silent decoded
-            //      stream (AudioNonSilent — whole final mix).
-            //
-            // octos #1034: switched (1) and (2) to consume the plugin's
-            // `files_to_send` list (the canonical authoritative path set
-            // emitted by the JSON envelope on stdout). The prior hardcoded
-            // glob `skill-output/mofa-podcast/**/*.mp3` could not match
-            // topic-suffixed output directories (e.g. `mofa-podcast-zhuyu/`
-            // for the chat topic 《逐玉》), and PR #1014's `*→**` widening
-            // did not cure the prefix mismatch. `files_to_send` carries
-            // the exact path the plugin wrote, so the validator no longer
-            // races the plugin's directory-naming logic.
-            //
-            // The historical (3) was a `PerFileNonSilent` gate over
-            // `**/segments/seg_*.wav` to catch the silent-segment dropout
-            // class that whole-file AudioNonSilent can mask. It was dropped
-            // here: the deployed `mofa-podcast` plugin does not preserve
-            // `seg_*.wav` segment files on disk after assembly, so the
-            // gate matched zero files and the `require_at_least:1` floor
-            // hard-failed every podcast call (regression observed live on
-            // mini3 2026-05-18: `per_file_non_silent: expected >=1 audio
-            // files, found 0`). The plugin's silent-segment failure mode
-            // can be re-armed in a future contract once the skill emits
-            // segment scratch files (or carries them in `files_to_send`).
-            on_completion: vec![
-                SpawnTaskValidatorSpec::Bare(ValidatorSpec::MagicBytes {
-                    glob: String::new(),
-                    format: MagicByteKind::Mp3,
-                    source: ValidatorFileSource::SpawnOnlyFiles,
-                    extension: Some("mp3".into()),
-                }),
-                SpawnTaskValidatorSpec::Bare(ValidatorSpec::AudioNonSilent {
-                    glob: String::new(),
-                    min_ratio: default_non_silent_ratio(),
-                    source: ValidatorFileSource::SpawnOnlyFiles,
-                    extension: Some("mp3".into()),
-                }),
-            ],
-        };
-
-        // Voice synthesis (LLM-driven TTS): assert the decoded audio is not
-        // silent. Catches the "render produced empty audio" failure path.
-        //
-        // octos #1038 (follow-up to #1037): consume the plugin's
-        // `files_to_send` envelope so the AudioNonSilent check runs against
-        // the exact audio path the skill reported, not whatever happens to
-        // match a recursive `skill-output/voice/**/*.{mp3,wav}` glob. The
-        // voice skill writes to `skill-output/voice/<timestamp>.{wav,mp3}`,
-        // so a recursive glob could match a stale file from an earlier run
-        // in the same session workspace and falsely satisfy the contract
-        // for a freshly-failed call — the same structural fragility we
-        // already closed for `podcast_generate` (#1034) and `mofa_slides`
-        // (#1036).
-        //
-        // `extension = None` — the voice plugin emits a single audio path
-        // per call (`try_convert_to_mp3` deletes the .wav when ffmpeg
-        // succeeds, so the .mp3 and .wav cannot co-exist by construction).
-        // We need to accept either extension since the macOS Say fallback
-        // path also routes through `try_convert_to_mp3` and ffmpeg may not
-        // be installed, in which case `final_path` stays a .wav.
-        //
-        // PR #1037 originally swept this contract alongside `mofa_slides`
-        // but the voice half was reverted at 772783e7 — the plugin
-        // emitted a `Generated audio: <path>` success line that
-        // `PluginTool::detect_output_file` did not recognise. PR #1039
-        // (this PR's predecessor on the stack) fixed the plugin to emit
-        // `Generated: <path>` on its own line, so the detector now
-        // populates `files_to_send` and this flip is finally safe.
-        let voice_synthesize_contract = WorkspaceSpawnTaskPolicy {
-            artifact: Some("primary_audio".into()),
-            artifacts: Vec::new(),
-            on_verify: vec![
-                "file_exists:$artifact".into(),
-                "file_size_min:$artifact:1024".into(),
-            ],
-            on_complete: vec![],
-            on_deliver: vec![],
-            on_failure: vec!["notify_user:Voice synthesis failed".into()],
-            on_completion: vec![SpawnTaskValidatorSpec::Bare(
-                ValidatorSpec::AudioNonSilent {
-                    glob: String::new(),
-                    min_ratio: default_non_silent_ratio(),
-                    source: ValidatorFileSource::SpawnOnlyFiles,
-                    extension: None,
-                },
-            )],
-        };
-
-        // Voice save (custom voice registration): assert the voice was
-        // actually registered with ominix-api AND the WAV landed in the
-        // canonical `voice_profiles` directory. Closes the yangmi gap
-        // where fm_voice_save returns success but the API has no record
-        // — plus catches the parallel disk-side failure where the voice
-        // file never reached `voice_profiles/<name>.wav`.
-        //
-        // The FileExists path uses `${args.name}` interpolation against
-        // the spawn task's input args; mofa-fm writes the WAV to
-        // `${OCTOS_VOICE_DIR:-${OCTOS_DATA_DIR}/voice_profiles}/<name>.wav`,
-        // which under the default session workspace resolves relative to
-        // the workspace root via `voice_profiles/<name>.wav`. Operators
-        // who pin a non-default `OCTOS_VOICE_DIR` can override the path
-        // in their workspace policy.
-        let fm_voice_save_contract = WorkspaceSpawnTaskPolicy {
-            artifact: None,
-            artifacts: Vec::new(),
-            on_verify: Vec::new(),
-            on_complete: vec![],
-            on_deliver: vec![],
-            on_failure: vec!["notify_user:Voice registration failed".into()],
-            on_completion: vec![
-                SpawnTaskValidatorSpec::Bare(ValidatorSpec::OminixVoiceExists {
-                    name_arg: "name".into(),
-                }),
-                SpawnTaskValidatorSpec::Bare(ValidatorSpec::FileExists {
-                    path: "voice_profiles/${args.name}.wav".into(),
-                    min_bytes: Some(1024),
-                }),
-            ],
-        };
-
-        // Slides (mofa_slides spawn task): the user-visible failure mode is
-        // a "success" reply with an HTML error page in place of the PPTX.
-        // MagicBytes (Pptx) rejects that at the contract gate by asserting
-        // the local-file-header / end-of-central-directory ZIP signature
-        // is present at byte 0. The glob runs recursively so the policy
-        // also catches slides written to nested subdirectories.
-        //
-        // Issue #998: the slides plugin reports its generated PPTX via
-        // `files_to_send` (parsed at `plugins/tool.rs:1321-1361` from a
-        // JSON envelope OR auto-detected from a "Generated PPTX: <path>"
-        // stdout marker — see `plugins/tool.rs:550-625` and the test at
-        // `plugins/tool.rs:2064-2103`). The contract layer's
-        // `bind_explicit_files_to_artifacts` (`workspace_contract.rs:329-357`)
-        // requires `artifact_sources()` to be non-empty so it can bind the
-        // reported PPTX into a named slot in `ActionContext`. Declaring
-        // `artifact: Some("slides_pptx")` matches the artifact entry
-        // registered above (`for_session` artifacts map) whose glob
-        // (`**/*.pptx`) is the same recursive pattern the on-completion
-        // MagicBytes validator uses, so the two checks see a consistent
-        // set of paths.
-        //
-        // octos #1036 (follow-up to #1034 / PR #1035): consume the plugin's
-        // `files_to_send` envelope so the MagicBytes check runs against the
-        // exact PPTX path the skill reported, not whatever happens to match
-        // a recursive `**/*.pptx` glob. Two failure modes the prior glob
-        // could mask:
-        //   1. A stale `.pptx` from an earlier run in the same session
-        //      workspace passing the contract for a freshly-failed call.
-        //   2. The plugin writing the deck to a non-default subdirectory
-        //      that an operator-customised workspace policy would otherwise
-        //      need to anticipate in its glob.
-        // The `extension = "pptx"` filter narrows the file list to slide
-        // decks if the skill also surfaces auxiliary files (preview PNGs,
-        // etc.) via `files_to_send`.
-        let mofa_slides_contract = WorkspaceSpawnTaskPolicy {
-            artifact: Some("slides_pptx".into()),
-            artifacts: Vec::new(),
-            on_verify: Vec::new(),
-            on_complete: vec![],
-            on_deliver: vec![],
-            on_failure: vec!["notify_user:Slide generation failed".into()],
-            on_completion: vec![SpawnTaskValidatorSpec::Bare(ValidatorSpec::MagicBytes {
-                glob: String::new(),
-                format: MagicByteKind::Pptx,
-                source: ValidatorFileSource::SpawnOnlyFiles,
-                extension: Some("pptx".into()),
-            })],
-        };
-
-        // mofa_cards writes one PNG per card into a `card_dir` and now
-        // reports every generated PNG via `files_to_send` (octos #1041).
-        // Consume that explicit list so stale PNGs elsewhere in the
-        // workspace cannot satisfy a failed card run.
-        let mofa_cards_contract = WorkspaceSpawnTaskPolicy {
-            artifact: Some("image_png".into()),
-            artifacts: Vec::new(),
-            on_verify: Vec::new(),
-            on_complete: vec![],
-            on_deliver: vec![],
-            on_failure: vec!["notify_user:Card generation failed".into()],
-            on_completion: vec![SpawnTaskValidatorSpec::Bare(ValidatorSpec::MagicBytes {
-                glob: String::new(),
-                format: MagicByteKind::Png,
-                source: ValidatorFileSource::SpawnOnlyFiles,
-                extension: Some("png".into()),
-            })],
-        };
-
-        // mofa_comic and mofa_infographic each take a required `out` arg
-        // pointing at a single PNG file. The contract asserts BOTH that
-        // the file landed at the declared path (FileExists with
-        // `${args.out}`, which already supports template interpolation)
-        // AND that the file at the plugin-reported path carries a valid
-        // PNG header (MagicBytes against the `spawn_only_files` source —
-        // octos #1040, follow-up to #1035 / #1037).
-        //
-        // `detect_output_file` in `plugins/tool.rs:556-577` populates
-        // `files_to_send` from the `args.out` argument when the plugin's
-        // success envelope omits it. mofa-cli's `plugin_comic` /
-        // `plugin_infographic` emit `"Generated comic: <path>"` /
-        // `"Generated infographic: <path>"` (no `Generated:` marker),
-        // but the `args.out` branch fires first so the validator always
-        // sees the exact PNG path the skill wrote. The `extension =
-        // "png"` filter narrows the list if a future revision of the
-        // plugin starts surfacing auxiliary files (intermediate panel
-        // PNGs in `work_dir`, layout previews, etc.) via
-        // `files_to_send`.
-        //
-        // FileExists still does the per-task path check (mismatches
-        // between `args.out` and what the plugin actually wrote);
-        // MagicBytes still does the bytes-are-actually-a-PNG check.
-        let mofa_comic_contract = WorkspaceSpawnTaskPolicy {
-            artifact: Some("image_png".into()),
-            artifacts: Vec::new(),
-            on_verify: Vec::new(),
-            on_complete: vec![],
-            on_deliver: vec![],
-            on_failure: vec!["notify_user:Comic generation failed".into()],
-            on_completion: vec![
-                SpawnTaskValidatorSpec::Bare(ValidatorSpec::FileExists {
-                    path: "${args.out}".into(),
-                    min_bytes: Some(1024),
-                }),
-                SpawnTaskValidatorSpec::Bare(ValidatorSpec::MagicBytes {
-                    glob: String::new(),
-                    format: MagicByteKind::Png,
-                    source: ValidatorFileSource::SpawnOnlyFiles,
-                    extension: Some("png".into()),
-                }),
-            ],
-        };
-
-        let mofa_infographic_contract = WorkspaceSpawnTaskPolicy {
-            artifact: Some("image_png".into()),
-            artifacts: Vec::new(),
-            on_verify: Vec::new(),
-            on_complete: vec![],
-            on_deliver: vec![],
-            on_failure: vec!["notify_user:Infographic generation failed".into()],
-            on_completion: vec![
-                SpawnTaskValidatorSpec::Bare(ValidatorSpec::FileExists {
-                    path: "${args.out}".into(),
-                    min_bytes: Some(1024),
-                }),
-                SpawnTaskValidatorSpec::Bare(ValidatorSpec::MagicBytes {
-                    glob: String::new(),
-                    format: MagicByteKind::Png,
-                    source: ValidatorFileSource::SpawnOnlyFiles,
-                    extension: Some("png".into()),
-                }),
-            ],
-        };
-
-        // mofa_frame is NOT spawn_only today (so this contract is dormant
-        // for the current manifest), but the audit's section-5 missing
-        // table lists it as an artifact-producing tool whose contract
-        // should be wired even if the gate is not yet fired. Recording
-        // the entry here lets the next spawn_only flip pick up the
-        // contract automatically.
-        //
-        // octos #1040: preemptively use the `spawn_only_files` source so
-        // the contract is on the right shape the moment the manifest
-        // flips. The mofa-frame plugin script
-        // (`mofa-skills/mofa-frame/main`) already emits `files_to_send`
-        // in its JSON envelope (the final `jq` call surfaces the
-        // generated PNG path), so no plugin work is needed.
-        let mofa_frame_contract = WorkspaceSpawnTaskPolicy {
-            artifact: Some("image_png".into()),
-            artifacts: Vec::new(),
-            on_verify: Vec::new(),
-            on_complete: vec![],
-            on_deliver: vec![],
-            on_failure: vec!["notify_user:Frame extraction failed".into()],
-            on_completion: vec![SpawnTaskValidatorSpec::Bare(ValidatorSpec::MagicBytes {
-                glob: String::new(),
-                format: MagicByteKind::Png,
-                source: ValidatorFileSource::SpawnOnlyFiles,
-                extension: Some("png".into()),
-            })],
-        };
-
-        // mofa_publish (audit P0-3): probe the live `deploy_url` the skill
-        // emits via `named_outputs.deploy_url` after a successful publish.
-        // The probe asserts both a 200 status AND that the body carries an
-        // `<!DOCTYPE` prefix — guarding against the "200 OK with a soft
-        // 404 / SPA-shell error page" failure mode the audit calls out.
-        //
-        // `required = false` (NOT the default of true) because:
-        //
-        // 1. The mofa_publish skill in `mofa-skills/mofa-publish/` does
-        //    not yet emit `named_outputs.deploy_url`. Once that lands
-        //    (separate PR in the mofa-skills repo) this entry flips to
-        //    `required = true` so the canonical probe blocks bad
-        //    deployments.
-        // 2. Surfacing `${output.deploy_url}` against an empty
-        //    `named_outputs` map would produce a hard `Error` outcome on
-        //    every mofa_publish call until the skill catches up; setting
-        //    `required = false` keeps the validator running as a
-        //    diagnostic (recorded to the ledger) without blocking.
-        let mofa_publish_contract = WorkspaceSpawnTaskPolicy {
-            artifact: None,
-            artifacts: Vec::new(),
-            on_verify: Vec::new(),
-            on_complete: vec![],
-            on_deliver: vec![],
-            on_failure: vec!["notify_user:Publish probe failed".into()],
-            on_completion: vec![SpawnTaskValidatorSpec::Full(Validator {
-                id: "mofa_publish.deploy_url_probe".into(),
-                required: false,
-                soft_fail: false,
-                timeout_ms: None,
-                phase: ValidatorPhaseKind::Completion,
-                spec: ValidatorSpec::HttpProbe {
-                    url_template: "${output.deploy_url}".into(),
-                    expected_status: 200,
-                    // Sentinel rejecting a 200-with-soft-404 body. mofa_publish
-                    // ships an HTML site; the document type prefix should
-                    // always be present on a real deployed page.
-                    expected_contains: Some("<!DOCTYPE".into()),
-                },
-            })],
-        };
-
-        // Wave-3a wire target for the new `Sha256Match` variant.
-        //
-        // `manage_skills` is NOT spawn_only today, so this entry is dormant
-        // until either (a) the harness wires an `AfterTool` phase (audit
-        // Gap-1) that fires post-call validators against the synchronous
-        // tool, or (b) `manage_skills` itself flips to spawn_only. Recording
-        // it now means the canonical SHA-256 check is declared in one place
-        // and the inline `download_binary` check at
-        // `tools/manage_skills.rs:836` can be retired in a follow-up PR.
-        //
-        // The glob is scoped to *this* invocation's installed skill via
-        // `${args.skill_dir}` so a workspace with multiple installed skills
-        // is not spuriously failed against an unrelated binary's digest.
-        // The expected digest is interpolated through
-        // `${args.expected_sha256}` so the spawn-task input args carry the
-        // manifest-declared hash — no per-skill workspace policy edit
-        // needed.
-        //
-        // Caveat: this matches the *final extracted binary*, not the
-        // downloaded archive. For tarball-distributed skills, the manifest
-        // digest of the archive will NOT match a `Sha256Match` on
-        // `${args.skill_dir}/main`. The inline `download_binary` check in
-        // `tools/manage_skills.rs` is the source-of-truth for archive
-        // verification; this validator is complementary and asserts the
-        // post-extraction binary integrity for raw-binary distributions.
-
-        // Wave-3a wire target for the `soft_fail` tier.
-        //
-        // Both `synthesize_research` and `deep_search` produce a primary
-        // report (hard-required) plus optional sub-artifacts. Today neither
-        // tool is spawn_only, so these contracts are dormant until either
-        // the runtime flips them or a follow-up wires the post-tool
-        // validator phase. The shape — a hard FileExists for the primary
-        // plus a soft FileExists for any sub-artifact — is the canonical
-        // template for partial-artifact contracts.
-        //
-        // `${args.research_dir}` lets the contract scope the check to the
-        // research subdirectory each invocation produces, without baking a
-        // global path into the policy. The same shape works for the
-        // deep_search index file at `${args.research_dir}/_search_results.md`.
-        let synthesize_research_contract = WorkspaceSpawnTaskPolicy {
-            artifact: None,
-            artifacts: Vec::new(),
-            on_verify: Vec::new(),
-            on_complete: vec![],
-            on_deliver: vec![],
-            on_failure: vec!["notify_user:Research synthesis failed".into()],
-            on_completion: vec![
-                // Primary report — block delivery if it's missing.
-                SpawnTaskValidatorSpec::Full(Validator {
-                    id: "synthesize_research.primary_report".into(),
-                    required: true,
-                    soft_fail: false,
-                    timeout_ms: None,
-                    phase: ValidatorPhaseKind::Completion,
-                    spec: ValidatorSpec::FileExists {
-                        path: "${args.research_dir}/synthesis.md".into(),
-                        min_bytes: Some(256),
-                    },
-                }),
-                // Sub-artifacts — warn but don't demote on absence.
-                SpawnTaskValidatorSpec::Full(Validator {
-                    id: "synthesize_research.partials_warn".into(),
-                    required: true,
-                    soft_fail: true,
-                    timeout_ms: None,
-                    phase: ValidatorPhaseKind::Completion,
-                    spec: ValidatorSpec::FileExists {
-                        path: "${args.research_dir}/_search_results.md".into(),
-                        min_bytes: None,
-                    },
-                }),
-            ],
-        };
-
-        let deep_search_contract = WorkspaceSpawnTaskPolicy {
-            artifact: None,
-            artifacts: Vec::new(),
-            on_verify: Vec::new(),
-            on_complete: vec![],
-            on_deliver: vec![],
-            on_failure: vec!["notify_user:Deep search failed".into()],
-            on_completion: vec![
-                // Primary index — block delivery if it's missing.
-                SpawnTaskValidatorSpec::Full(Validator {
-                    id: "deep_search.primary_index".into(),
-                    required: true,
-                    soft_fail: false,
-                    timeout_ms: None,
-                    phase: ValidatorPhaseKind::Completion,
-                    spec: ValidatorSpec::FileExists {
-                        path: "${args.research_dir}/_search_results.md".into(),
-                        min_bytes: None,
-                    },
-                }),
-                // Per-source sub-artifacts — warn but don't demote.
-                SpawnTaskValidatorSpec::Full(Validator {
-                    id: "deep_search.sources_warn".into(),
-                    required: true,
-                    soft_fail: true,
-                    timeout_ms: None,
-                    phase: ValidatorPhaseKind::Completion,
-                    spec: ValidatorSpec::FileExists {
-                        path: "${args.research_dir}/01_source.md".into(),
-                        min_bytes: None,
-                    },
-                }),
-            ],
-        };
-
-        let mut spawn_tasks = BTreeMap::new();
-        spawn_tasks.insert("fm_tts".into(), tts_contract.clone());
-        spawn_tasks.insert("voice_synthesize".into(), voice_synthesize_contract);
-        spawn_tasks.insert("podcast_generate".into(), podcast_contract);
-        spawn_tasks.insert("fm_voice_save".into(), fm_voice_save_contract);
-        spawn_tasks.insert("mofa_slides".into(), mofa_slides_contract);
-        spawn_tasks.insert("mofa_cards".into(), mofa_cards_contract);
-        spawn_tasks.insert("mofa_comic".into(), mofa_comic_contract);
-        spawn_tasks.insert("mofa_infographic".into(), mofa_infographic_contract);
-        spawn_tasks.insert("mofa_frame".into(), mofa_frame_contract);
-        spawn_tasks.insert("mofa_publish".into(), mofa_publish_contract);
-        spawn_tasks.insert("synthesize_research".into(), synthesize_research_contract);
-        spawn_tasks.insert("deep_search".into(), deep_search_contract);
-
         Self {
             schema_version: WORKSPACE_POLICY_SCHEMA_VERSION,
             workspace: WorkspacePolicyWorkspace {
@@ -1348,20 +645,19 @@ impl WorkspacePolicy {
                 ignore: vec!["tmp/**".into(), ".DS_Store".into()],
             },
             validation: ValidationPolicy::default(),
-            artifacts: WorkspaceArtifactsPolicy { entries: artifacts },
-            spawn_tasks,
+            artifacts: WorkspaceArtifactsPolicy::default(),
+            spawn_tasks: BTreeMap::new(),
             compaction: None,
         }
     }
 
     /// Default policy for a coding workspace (Audit Gap-1 + section 7 Q3).
     ///
-    /// Inherits the [`for_session`] spawn-task contracts (so a coding workspace
-    /// that still spawns slides / podcast / fm_voice_save tasks keeps the
-    /// per-skill contract gates) and overlays only the `kind = Coding`
-    /// marker. The AfterTool `cargo check` / `eslint` / `ruff` hooks live in
-    /// [`coding_default_hooks`] so the host (chat.rs / gateway.rs / serve.rs)
-    /// can merge them into its `HookExecutor` without forking the hook runner.
+    /// Inherits the [`for_session`] baseline and overlays only the
+    /// `kind = Coding` marker. The AfterTool `cargo check` / `eslint` /
+    /// `ruff` hooks live in [`coding_default_hooks`] so the host (chat.rs /
+    /// gateway.rs / serve.rs) can merge them into its `HookExecutor` without
+    /// forking the hook runner.
     ///
     /// The split is deliberate: hooks are runtime side-effects executed by
     /// the agent, while `WorkspacePolicy` is a serialized declaration shared
@@ -1372,29 +668,6 @@ impl WorkspacePolicy {
     pub fn for_coding() -> Self {
         let mut policy = Self::for_session();
         policy.workspace.kind = WorkspacePolicyKind::Coding;
-        policy
-    }
-    pub fn for_site_build_output(build_output_dir: &str) -> Self {
-        let mut policy = Self::for_kind(WorkspaceProjectKind::Sites);
-        policy.validation = ValidationPolicy {
-            on_turn_end: vec![
-                "file_exists:mofa-site-session.json".into(),
-                "file_exists:site-plan.json".into(),
-                "file_exists:optimized-prompt.md".into(),
-            ],
-            on_source_change: Vec::new(),
-            on_completion: vec![format!("file_exists:{build_output_dir}/index.html")],
-            validators: Vec::new(),
-        };
-        policy.artifacts = WorkspaceArtifactsPolicy {
-            entries: BTreeMap::from([
-                ("primary".into(), format!("{build_output_dir}/index.html")),
-                (
-                    "entrypoint".into(),
-                    format!("{build_output_dir}/index.html"),
-                ),
-            ]),
-        };
         policy
     }
 }
@@ -1499,7 +772,7 @@ pub fn read_workspace_policy(project_root: &Path) -> Result<Option<WorkspacePoli
 
     let raw = std::fs::read_to_string(&path)
         .wrap_err_with(|| format!("read workspace policy failed: {}", path.display()))?;
-    let mut policy: WorkspacePolicy = toml::from_str(&raw)
+    let policy: WorkspacePolicy = toml::from_str(&raw)
         .wrap_err_with(|| format!("parse workspace policy failed: {}", path.display()))?;
     check_supported(
         "WorkspacePolicy",
@@ -1508,103 +781,7 @@ pub fn read_workspace_policy(project_root: &Path) -> Result<Option<WorkspacePoli
     )
     .wrap_err_with(|| format!("incompatible workspace policy: {}", path.display()))?;
 
-    // Auto-migrate pre-#997-round-3 slides policies on read. Existing
-    // deployments (e.g. mini3 dspfac) carry `.octos-workspace.toml` files
-    // with `file_exists:output/deck.pptx` on_completion entries and/or
-    // Glob-source MagicBytes validators — neither matches the production
-    // location (deck lands under `<workspace>/skill-output/...` via the
-    // host's plugin work-dir rebind). Detect those markers, rebuild the
-    // policy with slug-aware skill-output artifact paths + a
-    // SpawnOnlyFiles MagicBytes validator, and persist back to disk so
-    // the next read is cheap and the on-disk policy reflects the new
-    // contract.
-    if policy.workspace.kind == WorkspacePolicyKind::Slides && is_legacy_slides_policy(&policy) {
-        if let Some(slug) = project_root.file_name().and_then(|n| n.to_str()) {
-            let upgraded = build_modern_slides_policy(slug);
-            // Best-effort persist — a write failure (read-only mount,
-            // race with another writer) should not block the policy
-            // load; the in-memory upgrade still applies for this caller.
-            if let Err(error) = write_workspace_policy_force(project_root, &upgraded) {
-                tracing::warn!(
-                    project_root = %project_root.display(),
-                    error = %error,
-                    "auto-migration of slides policy: failed to persist upgrade"
-                );
-            } else {
-                tracing::info!(
-                    project_root = %project_root.display(),
-                    "migrated legacy slides workspace policy to skill-output / SpawnOnlyFiles contract"
-                );
-            }
-            policy = upgraded;
-        }
-    }
-
     Ok(Some(policy))
-}
-
-/// Detect a pre-#997-round-3 slides policy: declares
-/// `file_exists:output/...` `on_completion` checks (the broken project-
-/// rooted path that the host's plugin rebind never satisfies) OR carries
-/// a Glob-source MagicBytes validator (which can't see decks under
-/// `skill-output/`).
-fn is_legacy_slides_policy(policy: &WorkspacePolicy) -> bool {
-    let has_legacy_on_completion = policy
-        .validation
-        .on_completion
-        .iter()
-        .any(|s| s.starts_with("file_exists:output/"));
-    let has_glob_pptx_validator = policy.validation.validators.iter().any(|v| {
-        matches!(
-            &v.spec,
-            ValidatorSpec::MagicBytes {
-                format: MagicByteKind::Pptx,
-                source: ValidatorFileSource::Glob,
-                ..
-            }
-        )
-    });
-    has_legacy_on_completion || has_glob_pptx_validator
-}
-
-/// Build the post-migration slides policy with slug-aware skill-output
-/// artifact paths and the SpawnOnlyFiles MagicBytes validator. Mirrors
-/// what `slides_delivery::workspace_policy_for_slug(Some(slug))` returns
-/// from the CLI crate, kept inline here to avoid a layer flip
-/// (octos-agent must not depend on octos-cli).
-fn build_modern_slides_policy(slug: &str) -> WorkspacePolicy {
-    let mut policy = WorkspacePolicy::for_kind(WorkspaceProjectKind::Slides);
-    policy.artifacts = WorkspaceArtifactsPolicy {
-        entries: BTreeMap::from([
-            (
-                "primary".into(),
-                format!("skill-output/slides/{slug}/output/deck.pptx"),
-            ),
-            (
-                "deck".into(),
-                format!("skill-output/slides/{slug}/output/deck.pptx"),
-            ),
-            (
-                "previews".into(),
-                format!("skill-output/slides/{slug}/output/**/slide-*.png"),
-            ),
-        ]),
-    };
-    policy
-}
-
-/// `write_workspace_policy` without the `create_new` guard — used by the
-/// auto-migration path to OVERWRITE an existing legacy file.
-fn write_workspace_policy_force(project_root: &Path, policy: &WorkspacePolicy) -> Result<()> {
-    let path = workspace_policy_path(project_root);
-    let rendered = toml::to_string_pretty(policy)
-        .wrap_err_with(|| format!("serialize workspace policy failed: {}", path.display()))?;
-    let tmp_path = path.with_extension("toml.tmp");
-    std::fs::write(&tmp_path, rendered.as_bytes())
-        .wrap_err_with(|| format!("write workspace policy tmp failed: {}", tmp_path.display()))?;
-    std::fs::rename(&tmp_path, &path)
-        .wrap_err_with(|| format!("rename workspace policy failed: {}", path.display()))?;
-    Ok(())
 }
 
 pub fn write_workspace_policy(project_root: &Path, policy: &WorkspacePolicy) -> Result<()> {
@@ -1662,192 +839,9 @@ pub fn write_workspace_policy_if_absent(
     }
 }
 
-pub fn upgrade_workspace_policy_if_legacy(
-    policy: &WorkspacePolicy,
-    kind: WorkspaceProjectKind,
-) -> Option<WorkspacePolicy> {
-    match kind {
-        WorkspaceProjectKind::Slides if *policy == legacy_slides_workspace_policy() => {
-            Some(WorkspacePolicy::for_kind(WorkspaceProjectKind::Slides))
-        }
-        WorkspaceProjectKind::Slides | WorkspaceProjectKind::Sites => None,
-    }
-}
-
-fn legacy_slides_workspace_policy() -> WorkspacePolicy {
-    let mut policy = WorkspacePolicy::for_kind(WorkspaceProjectKind::Slides);
-    policy.validation = ValidationPolicy::default();
-    policy.artifacts = WorkspaceArtifactsPolicy::default();
-    policy.spawn_tasks.clear();
-    policy
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn writes_and_reads_slides_policy() {
-        let temp = tempfile::tempdir().unwrap();
-        let policy = WorkspacePolicy::for_kind(WorkspaceProjectKind::Slides);
-
-        write_workspace_policy(temp.path(), &policy).unwrap();
-
-        let path = workspace_policy_path(temp.path());
-        assert!(path.is_file());
-
-        let rendered = std::fs::read_to_string(&path).unwrap();
-        assert!(rendered.contains("kind = \"slides\""));
-        assert!(rendered.contains("provider = \"git\""));
-        assert!(rendered.contains("trigger = \"turn_end\""));
-        assert!(rendered.contains("\"output/**\""));
-
-        let roundtrip = read_workspace_policy(temp.path()).unwrap().unwrap();
-        assert_eq!(roundtrip, policy);
-    }
-
-    #[test]
-    fn slides_policy_has_default_contract() {
-        let policy = WorkspacePolicy::for_kind(WorkspaceProjectKind::Slides);
-
-        assert_eq!(
-            policy.validation.on_turn_end,
-            vec![
-                "file_exists:script.js",
-                "file_exists:memory.md",
-                "file_exists:changelog.md",
-            ]
-        );
-        // `on_completion` no longer declares project-relative
-        // `file_exists` checks — the deck lands under
-        // `<workspace>/skill-output/...` via the host's plugin
-        // work-dir rebind, outside the project dir. Artifact gating
-        // moved to the SpawnOnlyFiles MagicBytes validator below.
-        assert!(policy.validation.on_completion.is_empty());
-        assert_eq!(policy.validation.validators.len(), 1);
-        assert_eq!(
-            policy.validation.validators[0].id,
-            "slides.mofa_slides.pptx_magic_bytes"
-        );
-        // Artifact descriptors retained as the default for_kind(Slides)
-        // policy (slug-aware paths land in the per-project persisted
-        // policy via `slides_delivery::workspace_policy_for_slug`).
-        assert_eq!(
-            policy.artifacts.entries.get("primary").map(String::as_str),
-            Some("output/deck.pptx")
-        );
-        assert_eq!(
-            policy.artifacts.entries.get("deck").map(String::as_str),
-            Some("output/deck.pptx")
-        );
-        assert_eq!(
-            policy.artifacts.entries.get("previews").map(String::as_str),
-            Some("output/**/slide-*.png")
-        );
-    }
-
-    #[test]
-    fn default_site_policy_tracks_build_outputs_as_ignored() {
-        let policy = WorkspacePolicy::for_kind(WorkspaceProjectKind::Sites);
-        assert!(policy.tracking.ignore.iter().any(|item| item == "dist/**"));
-        assert!(policy.tracking.ignore.iter().any(|item| item == ".next/**"));
-    }
-
-    #[test]
-    fn site_build_output_policy_requires_entrypoint() {
-        let policy = WorkspacePolicy::for_site_build_output("dist");
-        assert_eq!(
-            policy.validation.on_turn_end,
-            vec![
-                "file_exists:mofa-site-session.json",
-                "file_exists:site-plan.json",
-                "file_exists:optimized-prompt.md",
-            ]
-        );
-        assert_eq!(
-            policy.validation.on_completion,
-            vec!["file_exists:dist/index.html"]
-        );
-        assert_eq!(
-            policy.artifacts.entries.get("primary").map(String::as_str),
-            Some("dist/index.html")
-        );
-        assert_eq!(
-            policy
-                .artifacts
-                .entries
-                .get("entrypoint")
-                .map(String::as_str),
-            Some("dist/index.html")
-        );
-    }
-
-    #[test]
-    fn session_policy_declares_tts_contract() {
-        let policy = WorkspacePolicy::for_session();
-        assert_eq!(policy.workspace.kind, WorkspacePolicyKind::Session);
-        assert_eq!(
-            policy
-                .artifacts
-                .entries
-                .get("primary_audio")
-                .map(String::as_str),
-            Some("*.mp3")
-        );
-        let task = policy.spawn_tasks.get("fm_tts").expect("fm_tts contract");
-        assert_eq!(task.artifact.as_deref(), Some("primary_audio"));
-        assert!(task.artifacts.is_empty());
-        assert!(task.on_complete.is_empty());
-        assert!(task.on_deliver.is_empty());
-        let mut saw_tts_audio = false;
-        for entry in &task.on_completion {
-            if let SpawnTaskValidatorSpec::Bare(ValidatorSpec::AudioNonSilent {
-                source,
-                extension,
-                glob,
-                ..
-            }) = entry
-            {
-                assert_eq!(
-                    *source,
-                    ValidatorFileSource::SpawnOnlyFiles,
-                    "fm_tts AudioNonSilent must consume plugin-reported files_to_send"
-                );
-                assert_eq!(
-                    extension.as_deref(),
-                    Some("mp3"),
-                    "fm_tts AudioNonSilent must validate the delivered MP3 artifact"
-                );
-                assert!(
-                    glob.is_empty(),
-                    "fm_tts must not use a workspace glob that can match stale audio: {glob}"
-                );
-                saw_tts_audio = true;
-            }
-        }
-        assert!(saw_tts_audio, "fm_tts contract must declare AudioNonSilent");
-        assert_eq!(
-            policy
-                .artifacts
-                .entries
-                .get("podcast_audio")
-                .map(String::as_str),
-            Some("**/podcast_full_*.*")
-        );
-        let podcast_task = policy
-            .spawn_tasks
-            .get("podcast_generate")
-            .expect("podcast_generate contract");
-        assert_eq!(podcast_task.artifact.as_deref(), Some("podcast_audio"));
-        assert!(podcast_task.artifacts.is_empty());
-        assert!(
-            podcast_task
-                .on_verify
-                .iter()
-                .any(|action| action == "file_size_min:$artifact:4096")
-        );
-        assert!(podcast_task.on_deliver.is_empty());
-    }
 
     #[test]
     fn spawn_task_artifact_sources_prefer_multi_artifact_list() {
@@ -1931,33 +925,11 @@ mod tests {
     }
 
     #[test]
-    fn upgrades_legacy_slides_policy_to_default_contract() {
-        let legacy = legacy_slides_workspace_policy();
-        let upgraded = upgrade_workspace_policy_if_legacy(&legacy, WorkspaceProjectKind::Slides)
-            .expect("legacy slides policy should upgrade");
-
-        assert_eq!(
-            upgraded,
-            WorkspacePolicy::for_kind(WorkspaceProjectKind::Slides)
-        );
-    }
-
-    #[test]
-    fn does_not_upgrade_non_legacy_slides_policy() {
-        let current = WorkspacePolicy::for_kind(WorkspaceProjectKind::Slides);
-        assert!(
-            upgrade_workspace_policy_if_legacy(&current, WorkspaceProjectKind::Slides).is_none()
-        );
-    }
-
-    #[test]
-    fn should_stamp_current_schema_version_when_building_for_kind() {
-        let slides = WorkspacePolicy::for_kind(WorkspaceProjectKind::Slides);
-        let sites = WorkspacePolicy::for_kind(WorkspaceProjectKind::Sites);
+    fn should_stamp_current_schema_version_when_building_defaults() {
         let session = WorkspacePolicy::for_session();
-        assert_eq!(slides.schema_version, WORKSPACE_POLICY_SCHEMA_VERSION);
-        assert_eq!(sites.schema_version, WORKSPACE_POLICY_SCHEMA_VERSION);
+        let coding = WorkspacePolicy::for_coding();
         assert_eq!(session.schema_version, WORKSPACE_POLICY_SCHEMA_VERSION);
+        assert_eq!(coding.schema_version, WORKSPACE_POLICY_SCHEMA_VERSION);
     }
 
     #[test]
@@ -1965,7 +937,7 @@ mod tests {
         // A TOML emitted before M4.6 — no `schema_version` line.
         let legacy = r#"
 [workspace]
-kind = "slides"
+kind = "session"
 
 [version_control]
 provider = "git"
@@ -1978,7 +950,7 @@ ignore = ["output/**"]
 "#;
         let parsed: WorkspacePolicy = toml::from_str(legacy).expect("legacy policy should parse");
         assert_eq!(parsed.schema_version, WORKSPACE_POLICY_SCHEMA_VERSION);
-        assert_eq!(parsed.workspace.kind, WorkspacePolicyKind::Slides);
+        assert_eq!(parsed.workspace.kind, WorkspacePolicyKind::Session);
     }
 
     #[test]
@@ -1989,7 +961,7 @@ ignore = ["output/**"]
 schema_version = {}
 
 [workspace]
-kind = "slides"
+kind = "session"
 
 [version_control]
 provider = "git"
@@ -2013,7 +985,7 @@ ignore = []
 
     #[test]
     fn should_roundtrip_typed_validators_through_toml() {
-        let mut policy = WorkspacePolicy::for_kind(WorkspaceProjectKind::Slides);
+        let mut policy = WorkspacePolicy::for_session();
         policy.validation.validators = vec![
             Validator {
                 id: "cmd".into(),
@@ -2137,508 +1109,6 @@ ignore = []
         assert!(!MagicByteKind::Pptx.matches(b"<!DOCTYPE html>"));
     }
 
-    /// octos #1034: the podcast contract's MagicBytes + AudioNonSilent
-    /// validators must be declared with `source = SpawnOnlyFiles` so the
-    /// plugin's reported `files_to_send` list drives the check rather than
-    /// a hardcoded glob that misses topic-suffixed output directories
-    /// (e.g. `mofa-podcast-zhuyu/` for the chat topic 《逐玉》). The
-    /// historical `PerFileNonSilent` per-segment gate was dropped — the
-    /// deployed mofa-podcast plugin does not preserve `seg_*.wav` segment
-    /// files after assembly, so the gate hard-failed every podcast call
-    /// (mini3 live regression 2026-05-18).
-    #[test]
-    fn session_policy_podcast_validators_consume_spawn_only_files_for_octos_1034() {
-        let policy = WorkspacePolicy::for_session();
-        let podcast = policy
-            .spawn_tasks
-            .get("podcast_generate")
-            .expect("podcast contract");
-
-        let mut saw_magic = false;
-        let mut saw_audio = false;
-        for entry in &podcast.on_completion {
-            match entry {
-                SpawnTaskValidatorSpec::Bare(ValidatorSpec::MagicBytes {
-                    source,
-                    extension,
-                    ..
-                }) => {
-                    assert_eq!(
-                        *source,
-                        ValidatorFileSource::SpawnOnlyFiles,
-                        "podcast MagicBytes must opt into spawn_only_files (octos #1034)"
-                    );
-                    assert_eq!(
-                        extension.as_deref(),
-                        Some("mp3"),
-                        "podcast MagicBytes must filter to mp3 outputs"
-                    );
-                    saw_magic = true;
-                }
-                SpawnTaskValidatorSpec::Bare(ValidatorSpec::AudioNonSilent {
-                    source,
-                    extension,
-                    ..
-                }) => {
-                    assert_eq!(
-                        *source,
-                        ValidatorFileSource::SpawnOnlyFiles,
-                        "podcast AudioNonSilent must opt into spawn_only_files (octos #1034)"
-                    );
-                    assert_eq!(
-                        extension.as_deref(),
-                        Some("mp3"),
-                        "podcast AudioNonSilent must filter to mp3 outputs"
-                    );
-                    saw_audio = true;
-                }
-                SpawnTaskValidatorSpec::Bare(ValidatorSpec::PerFileNonSilent { .. }) => {
-                    panic!(
-                        "podcast contract must NOT declare PerFileNonSilent: the deployed \
-                         mofa-podcast plugin does not preserve `seg_*.wav` segment files, \
-                         so the validator hard-fails 100% of podcast calls (live mini3 \
-                         regression observed 2026-05-18). Re-arm only when the plugin \
-                         emits segment scratch files or carries them in files_to_send."
-                    );
-                }
-                _ => {}
-            }
-        }
-        assert!(saw_magic, "podcast contract must declare MagicBytes");
-        assert!(saw_audio, "podcast contract must declare AudioNonSilent");
-    }
-
-    #[test]
-    fn session_policy_declares_new_domain_validators_for_silent_failure_paths() {
-        let policy = WorkspacePolicy::for_session();
-        let podcast = policy
-            .spawn_tasks
-            .get("podcast_generate")
-            .expect("podcast contract");
-        // The two whole-file domain validators must be declared so the
-        // "silent MP3" / "wrote HTML instead of MP3" failure modes are
-        // caught at the contract gate.
-        assert!(podcast.on_completion.iter().any(|entry| matches!(
-            entry,
-            SpawnTaskValidatorSpec::Bare(ValidatorSpec::AudioNonSilent { .. })
-        )));
-        assert!(podcast.on_completion.iter().any(|entry| matches!(
-            entry,
-            SpawnTaskValidatorSpec::Bare(ValidatorSpec::MagicBytes { .. })
-        )));
-        // The per-segment gate (`PerFileNonSilent`) used to live here but
-        // was dropped: the deployed mofa-podcast plugin does not preserve
-        // `seg_*.wav` segments after assembly, so the `require_at_least:1`
-        // floor hard-failed every podcast call (mini3 live regression
-        // 2026-05-18). The whole-file `AudioNonSilent` above still gates
-        // against silent final mixes. Re-arm only when the plugin emits
-        // segment scratch files (or carries them in `files_to_send`).
-        assert!(
-            !podcast.on_completion.iter().any(|entry| matches!(
-                entry,
-                SpawnTaskValidatorSpec::Bare(ValidatorSpec::PerFileNonSilent { .. })
-            )),
-            "podcast contract must NOT declare PerFileNonSilent (see comment above)"
-        );
-
-        let voice_save = policy
-            .spawn_tasks
-            .get("fm_voice_save")
-            .expect("fm_voice_save contract");
-        assert!(voice_save.on_completion.iter().any(|entry| matches!(
-            entry,
-            SpawnTaskValidatorSpec::Bare(ValidatorSpec::OminixVoiceExists { .. })
-        )));
-
-        let voice_synth = policy
-            .spawn_tasks
-            .get("voice_synthesize")
-            .expect("voice_synthesize contract");
-        assert!(voice_synth.on_completion.iter().any(|entry| matches!(
-            entry,
-            SpawnTaskValidatorSpec::Bare(ValidatorSpec::AudioNonSilent { .. })
-        )));
-    }
-
-    #[test]
-    fn session_policy_declares_voice_wav_file_exists_for_fm_voice_save() {
-        // P0-1 follow-on: fm_voice_save must also assert the voice WAV
-        // landed in the canonical voice_profiles directory. The path
-        // template uses `${args.name}` interpolation against the spawn
-        // task's input args, mirroring how the existing
-        // `OminixVoiceExists` validator interpolates the name.
-        let policy = WorkspacePolicy::for_session();
-        let voice_save = policy
-            .spawn_tasks
-            .get("fm_voice_save")
-            .expect("fm_voice_save contract");
-        let has_file_exists = voice_save.on_completion.iter().any(|entry| {
-            matches!(
-                entry,
-                SpawnTaskValidatorSpec::Bare(ValidatorSpec::FileExists { path, .. })
-                    if path.contains("${args.name}") && path.ends_with(".wav")
-            )
-        });
-        assert!(
-            has_file_exists,
-            "fm_voice_save should declare FileExists with ${{args.name}}.wav template; got {:?}",
-            voice_save.on_completion
-        );
-    }
-
-    #[test]
-    fn session_policy_declares_pptx_magic_bytes_for_mofa_slides() {
-        // P1-4: mofa_slides emits a .pptx artifact. The default session
-        // policy must declare a MagicBytes (Pptx) validator so a tool that
-        // wrote an HTML error page in place of the PPTX is rejected at
-        // the harness gate rather than declared "success" by the LLM.
-        let policy = WorkspacePolicy::for_session();
-        let slides = policy
-            .spawn_tasks
-            .get("mofa_slides")
-            .expect("mofa_slides contract");
-        assert!(slides.on_completion.iter().any(|entry| matches!(
-            entry,
-            SpawnTaskValidatorSpec::Bare(ValidatorSpec::MagicBytes {
-                format: MagicByteKind::Pptx,
-                ..
-            })
-        )));
-    }
-
-    /// octos #1036 (follow-up to #1034 / PR #1035): `mofa_slides` must
-    /// consume the plugin's `files_to_send` envelope rather than a
-    /// hardcoded glob. The legacy `**/*.pptx` glob silently matched stale
-    /// PPTXs from earlier runs in the same session workspace, the same
-    /// structural fragility we already fixed for `podcast_generate`.
-    ///
-    /// `voice_synthesize` was originally part of this sweep but was
-    /// dropped after codex review caught that the voice plugin's
-    /// `succeed()` path emits only `{output, success}` (no
-    /// `files_to_send`) and the success text `"Generated audio: <path>"`
-    /// is not one of the prefixes `PluginTool::detect_output_file`
-    /// recognises. The voice marker was fixed in PR #1039, and the
-    /// voice_synthesize half is re-pinned by
-    /// `session_policy_voice_synthesize_consumes_spawn_only_files_for_octos_1038`
-    /// below.
-    #[test]
-    fn session_policy_mofa_slides_consumes_spawn_only_files_for_octos_1036() {
-        let policy = WorkspacePolicy::for_session();
-        let slides = policy
-            .spawn_tasks
-            .get("mofa_slides")
-            .expect("mofa_slides contract");
-
-        let mut saw_magic = false;
-        for entry in &slides.on_completion {
-            if let SpawnTaskValidatorSpec::Bare(ValidatorSpec::MagicBytes {
-                source,
-                extension,
-                format,
-                glob,
-                ..
-            }) = entry
-            {
-                assert_eq!(*format, MagicByteKind::Pptx);
-                assert_eq!(
-                    *source,
-                    ValidatorFileSource::SpawnOnlyFiles,
-                    "mofa_slides MagicBytes must opt into spawn_only_files (octos #1036)"
-                );
-                assert_eq!(
-                    extension.as_deref(),
-                    Some("pptx"),
-                    "mofa_slides MagicBytes must filter to pptx outputs so auxiliary \
-                     files in files_to_send don't trip the check"
-                );
-                assert!(
-                    !glob.contains("**/*.pptx"),
-                    "mofa_slides must NOT pin a `**/*.pptx` glob — the spawn_only_files \
-                     source consumes the reported path directly; got: {glob}"
-                );
-                saw_magic = true;
-            }
-        }
-        assert!(
-            saw_magic,
-            "mofa_slides contract must declare MagicBytes(Pptx)"
-        );
-    }
-
-    /// octos #1038 (follow-up to #1037 / PR #1039): `voice_synthesize` must
-    /// consume the plugin's `files_to_send` envelope rather than the
-    /// hardcoded `skill-output/voice/**/*.{mp3,wav}` glob. The recursive
-    /// glob silently matched stale audio from earlier runs in the same
-    /// session workspace, the same structural fragility we already fixed
-    /// for `podcast_generate` (#1034) and `mofa_slides` (#1036).
-    ///
-    /// PR #1037 originally swept this contract but the voice half was
-    /// reverted at 772783e7 because the plugin's `succeed()` path
-    /// emitted `Generated audio: <path>` — a prefix
-    /// `PluginTool::detect_output_file` did not recognise — so
-    /// `files_to_send` stayed empty. PR #1039 fixed the plugin to emit
-    /// `Generated: <path>` on its own line, unblocking this re-sweep.
-    ///
-    /// `extension = None`: the voice plugin emits exactly one audio path
-    /// per call (`try_convert_to_mp3` deletes the .wav on success), and
-    /// we accept either .mp3 or .wav since the macOS Say fallback may
-    /// keep the .wav when ffmpeg is unavailable. The validator decodes
-    /// both formats natively (WAV) or via the `audio_mp3` feature.
-    #[test]
-    fn session_policy_voice_synthesize_consumes_spawn_only_files_for_octos_1038() {
-        let policy = WorkspacePolicy::for_session();
-        let voice = policy
-            .spawn_tasks
-            .get("voice_synthesize")
-            .expect("voice_synthesize contract");
-
-        let mut saw_audio = false;
-        for entry in &voice.on_completion {
-            if let SpawnTaskValidatorSpec::Bare(ValidatorSpec::AudioNonSilent {
-                source,
-                extension,
-                glob,
-                ..
-            }) = entry
-            {
-                assert_eq!(
-                    *source,
-                    ValidatorFileSource::SpawnOnlyFiles,
-                    "voice_synthesize AudioNonSilent must opt into spawn_only_files (octos #1038)"
-                );
-                assert!(
-                    extension.is_none(),
-                    "voice_synthesize must accept both .mp3 and .wav — \
-                     the macOS Say fallback may emit either; got extension = {extension:?}"
-                );
-                assert!(
-                    !glob.contains("skill-output/voice"),
-                    "voice_synthesize must NOT pin a `skill-output/voice/**/*` glob — \
-                     the spawn_only_files source consumes the reported path directly; got: {glob}"
-                );
-                saw_audio = true;
-            }
-        }
-        assert!(
-            saw_audio,
-            "voice_synthesize contract must declare AudioNonSilent"
-        );
-    }
-
-    #[test]
-    fn session_policy_declares_png_magic_bytes_for_image_skills() {
-        // P1-5: every spawn-only image-emitting skill carries a MagicBytes
-        // (Png) post-condition so a corrupted / HTML error page in place
-        // of the rendered card/comic/infographic is rejected at the
-        // harness gate. `mofa_frame` is included too (covered by the
-        // audit's section 5 "What's missing" table) so that, if/when it
-        // becomes spawn_only, the contract is already wired.
-        let policy = WorkspacePolicy::for_session();
-        for tool in ["mofa_cards", "mofa_comic", "mofa_infographic", "mofa_frame"] {
-            let entry = policy
-                .spawn_tasks
-                .get(tool)
-                .unwrap_or_else(|| panic!("policy missing spawn task for {tool}"));
-            assert!(
-                entry.on_completion.iter().any(|spec| matches!(
-                    spec,
-                    SpawnTaskValidatorSpec::Bare(ValidatorSpec::MagicBytes {
-                        format: MagicByteKind::Png,
-                        ..
-                    })
-                )),
-                "{tool} should declare MagicBytes (png); got {:?}",
-                entry.on_completion
-            );
-        }
-    }
-
-    #[test]
-    fn session_policy_declares_http_probe_for_mofa_publish() {
-        // P0-3 (audit): mofa_publish emits a live `deploy_url` via
-        // named_outputs; the contract must declare an HttpProbe against
-        // `${output.deploy_url}` so a 200-with-soft-404 deployment is
-        // rejected at the harness gate. The validator runs as
-        // non-required pending the mofa-skills repo follow-up that
-        // teaches the skill to emit `named_outputs.deploy_url`.
-        let policy = WorkspacePolicy::for_session();
-        let publish = policy
-            .spawn_tasks
-            .get("mofa_publish")
-            .expect("policy must declare mofa_publish spawn task");
-        let probe = publish
-            .on_completion
-            .iter()
-            .find_map(|entry| match entry {
-                SpawnTaskValidatorSpec::Full(validator) => match &validator.spec {
-                    ValidatorSpec::HttpProbe {
-                        url_template,
-                        expected_status,
-                        expected_contains,
-                    } => Some((
-                        validator.required,
-                        url_template.clone(),
-                        *expected_status,
-                        expected_contains.clone(),
-                    )),
-                    _ => None,
-                },
-                _ => None,
-            })
-            .expect("mofa_publish must declare an HttpProbe Full validator");
-        assert_eq!(
-            probe.1, "${output.deploy_url}",
-            "HttpProbe must target the tool-emitted deploy_url",
-        );
-        assert_eq!(probe.2, 200, "must assert 200 status");
-        assert!(
-            probe
-                .3
-                .as_deref()
-                .map(|needle| needle.contains("<!DOCTYPE"))
-                .unwrap_or(false),
-            "expected_contains must carry the <!DOCTYPE soft-404 sentinel; got {:?}",
-            probe.3,
-        );
-        assert!(
-            !probe.0,
-            "validator must be non-required until the mofa-skills repo teaches \
-             mofa_publish to emit named_outputs.deploy_url",
-        );
-        assert_eq!(
-            publish
-                .on_failure
-                .iter()
-                .find(|action| action.starts_with("notify_user:"))
-                .cloned(),
-            Some("notify_user:Publish probe failed".to_string()),
-            "on_failure should surface a notify_user hint",
-        );
-    }
-
-    #[test]
-    fn session_policy_mofa_comic_infographic_frame_consume_spawn_only_files_for_octos_1040() {
-        // octos #1040 (follow-up to #1035 / #1037): the MagicBytes
-        // validator on each of mofa_comic, mofa_infographic, and
-        // mofa_frame must opt into `spawn_only_files` so the validator
-        // consumes the plugin-reported `files_to_send` path directly
-        // instead of any `**/*.png` match in the session workspace
-        // (which could pass on a stale PNG from an earlier turn). The
-        // `extension = "png"` filter narrows the file list if the
-        // skill surfaces auxiliary files (intermediate panel PNGs,
-        // layout previews, etc.) via `files_to_send`.
-        //
-        let policy = WorkspacePolicy::for_session();
-        for tool in ["mofa_cards", "mofa_comic", "mofa_infographic", "mofa_frame"] {
-            let entry = policy
-                .spawn_tasks
-                .get(tool)
-                .unwrap_or_else(|| panic!("policy missing spawn task for {tool}"));
-
-            let mut saw_magic = false;
-            for spec in &entry.on_completion {
-                if let SpawnTaskValidatorSpec::Bare(ValidatorSpec::MagicBytes {
-                    source,
-                    extension,
-                    format,
-                    glob,
-                    ..
-                }) = spec
-                {
-                    assert_eq!(*format, MagicByteKind::Png);
-                    assert_eq!(
-                        *source,
-                        ValidatorFileSource::SpawnOnlyFiles,
-                        "{tool} MagicBytes must opt into spawn_only_files (octos #1040)"
-                    );
-                    assert_eq!(
-                        extension.as_deref(),
-                        Some("png"),
-                        "{tool} MagicBytes must filter to png outputs so auxiliary files \
-                         in files_to_send don't trip the check"
-                    );
-                    assert!(
-                        !glob.contains("**/*.png"),
-                        "{tool} must NOT pin a `**/*.png` glob — the spawn_only_files source \
-                         consumes the reported path directly; got: {glob}"
-                    );
-                    saw_magic = true;
-                }
-            }
-            assert!(saw_magic, "{tool} contract must declare MagicBytes(Png)");
-        }
-    }
-
-    #[test]
-    fn session_policy_mofa_cards_consumes_spawn_only_files_for_octos_1041() {
-        // octos #1041: the deployed mofa_cards plugin emits all generated
-        // PNGs via files_to_send, so the contract must consume that list
-        // instead of a recursive workspace glob that could match stale
-        // PNGs from a previous turn.
-        let policy = WorkspacePolicy::for_session();
-        let cards = policy
-            .spawn_tasks
-            .get("mofa_cards")
-            .expect("policy must declare mofa_cards spawn task");
-
-        let magic = cards.on_completion.iter().find_map(|spec| match spec {
-            SpawnTaskValidatorSpec::Bare(ValidatorSpec::MagicBytes {
-                source,
-                extension,
-                format,
-                glob,
-                ..
-            }) => Some((*format, *source, extension.clone(), glob.clone())),
-            _ => None,
-        });
-
-        let (format, source, extension, glob) = magic.expect(
-            "mofa_cards contract must declare MagicBytes(Png) — see workspace_policy.rs:1043",
-        );
-        assert_eq!(format, MagicByteKind::Png);
-        assert_eq!(
-            source,
-            ValidatorFileSource::SpawnOnlyFiles,
-            "mofa_cards MagicBytes must opt into spawn_only_files (octos #1041)"
-        );
-        assert_eq!(
-            extension.as_deref(),
-            Some("png"),
-            "mofa_cards MagicBytes must filter to png outputs"
-        );
-        assert!(
-            !glob.contains("**/*.png"),
-            "mofa_cards must not pin a recursive PNG glob; got: {glob}"
-        );
-    }
-
-    #[test]
-    fn session_policy_declares_file_exists_for_single_file_image_skills() {
-        // mofa_comic and mofa_infographic both take a required `out` arg
-        // pointing at a single PNG file. The contract should assert the
-        // declared output landed at that path via FileExists +
-        // `${args.out}` interpolation.
-        let policy = WorkspacePolicy::for_session();
-        for tool in ["mofa_comic", "mofa_infographic"] {
-            let entry = policy
-                .spawn_tasks
-                .get(tool)
-                .unwrap_or_else(|| panic!("policy missing spawn task for {tool}"));
-            let has_file_exists = entry.on_completion.iter().any(|spec| {
-                matches!(
-                    spec,
-                    SpawnTaskValidatorSpec::Bare(ValidatorSpec::FileExists { path, .. })
-                        if path.contains("${args.out}")
-                )
-            });
-            assert!(
-                has_file_exists,
-                "{tool} should declare FileExists with ${{args.out}} template; got {:?}",
-                entry.on_completion
-            );
-        }
-    }
-
     #[test]
     fn spawn_task_validator_spec_roundtrips_through_toml_bare_and_full_forms() {
         // Bare form: just the spec table. id, required, phase auto-filled.
@@ -2738,72 +1208,6 @@ ignore = []
     }
 
     #[test]
-    fn per_file_non_silent_roundtrips_through_toml() {
-        // Operator-visible TOML shape. `require_at_least` is the
-        // distinguishing field vs. AudioNonSilent — defaulted via serde so
-        // an operator can omit it and still get sensible behaviour.
-        let toml = r#"
-            id = "podcast_segments_non_silent"
-            kind = "per_file_non_silent"
-            glob = "**/segments/seg_*.wav"
-            min_ratio = 0.3
-            require_at_least = 1
-        "#;
-        let parsed: Validator = toml::from_str(toml).unwrap();
-        match parsed.spec {
-            ValidatorSpec::PerFileNonSilent {
-                ref glob,
-                min_ratio,
-                require_at_least,
-                ..
-            } => {
-                assert_eq!(glob, "**/segments/seg_*.wav");
-                assert!((min_ratio - 0.3).abs() < f32::EPSILON);
-                assert_eq!(require_at_least, 1);
-            }
-            ref other => panic!("expected PerFileNonSilent, got {other:?}"),
-        }
-        // Round-trip the validator through TOML to confirm fields survive.
-        let rendered = toml::to_string_pretty(&parsed).unwrap();
-        let reparsed: Validator = toml::from_str(&rendered).unwrap();
-        assert_eq!(parsed, reparsed);
-    }
-
-    #[test]
-    fn per_file_non_silent_defaults_require_at_least_and_min_ratio_when_omitted() {
-        // `require_at_least` and `min_ratio` are both `#[serde(default)]`
-        // so operator policies can declare just the glob and inherit the
-        // harness-wide defaults (0 / 0.3). This keeps the TOML shape
-        // minimal for the common "optional intermediate artifact" case.
-        let toml = r#"
-            id = "podcast_segments_non_silent"
-            kind = "per_file_non_silent"
-            glob = "**/segments/seg_*.wav"
-        "#;
-        let parsed: Validator = toml::from_str(toml).unwrap();
-        match parsed.spec {
-            ValidatorSpec::PerFileNonSilent {
-                ref glob,
-                min_ratio,
-                require_at_least,
-                ..
-            } => {
-                assert_eq!(glob, "**/segments/seg_*.wav");
-                assert!(
-                    (min_ratio - default_non_silent_ratio()).abs() < f32::EPSILON,
-                    "min_ratio must default to {} when omitted, got {min_ratio}",
-                    default_non_silent_ratio()
-                );
-                assert_eq!(
-                    require_at_least, 0,
-                    "require_at_least must default to 0 when omitted"
-                );
-            }
-            ref other => panic!("expected PerFileNonSilent, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn soft_fail_validator_roundtrips_through_toml() {
         // The soft_fail companion field is the Wave-3a serde contract for
         // partial-artifact contracts: hard-required validators that should
@@ -2868,44 +1272,6 @@ ignore = []
         assert_eq!(make(false, true).tier(), Required::Soft);
     }
 
-    // -----------------------------------------------------------------
-    // Wave-3a: `for_session()` wire targets
-    // -----------------------------------------------------------------
-
-    #[test]
-    fn session_policy_declares_soft_fail_sub_artifacts_for_research_skills() {
-        // Wire target for the Wave-3a `soft_fail` tier: `synthesize_research`
-        // and `deep_search` produce a primary report PLUS optional sub-
-        // artifacts. The primary is hard-required (block delivery if it's
-        // missing); the sub-artifacts are soft-fail so a partial-artifact
-        // run still completes with operator-visible warnings.
-        let policy = WorkspacePolicy::for_session();
-        for tool in ["synthesize_research", "deep_search"] {
-            let task = policy
-                .spawn_tasks
-                .get(tool)
-                .unwrap_or_else(|| panic!("policy missing spawn task for {tool}"));
-            let mut saw_hard = false;
-            let mut saw_soft = false;
-            for entry in &task.on_completion {
-                let validator = entry.clone().into_validator(tool, 0);
-                match validator.tier() {
-                    Required::Hard => saw_hard = true,
-                    Required::Soft => saw_soft = true,
-                    Required::None => {}
-                }
-            }
-            assert!(
-                saw_hard,
-                "{tool} contract should declare a hard-required validator for the primary report"
-            );
-            assert!(
-                saw_soft,
-                "{tool} contract should declare a soft-fail validator for optional sub-artifacts"
-            );
-        }
-    }
-
     // ----- WorkspacePolicyKind::Coding (Audit Gap-1 + section 7 Q3) -----
 
     #[test]
@@ -2953,10 +1319,9 @@ ignore = []
     fn should_return_coding_policy_marker_for_coding_kind() {
         let policy = WorkspacePolicy::for_coding();
         assert_eq!(policy.workspace.kind, WorkspacePolicyKind::Coding);
-        // Inherits session spawn-task contracts so coding workspaces that
-        // still spawn slides/podcast keep the per-skill gate.
-        assert!(policy.spawn_tasks.contains_key("fm_tts"));
-        assert!(policy.spawn_tasks.contains_key("mofa_slides"));
+        // The coding policy shares the session baseline (no bundled
+        // spawn-task contracts in the slimmed coding-agent build).
+        assert!(policy.spawn_tasks.is_empty());
     }
 
     #[test]
@@ -3025,76 +1390,6 @@ ignore = []
             rendered.contains("kind = \"coding\""),
             "expected kebab-case 'coding' in serialized policy:\n{rendered}"
         );
-    }
-
-    /// Migration: a slides project whose persisted policy was written
-    /// before #997 round-3 should be auto-upgraded on
-    /// `read_workspace_policy`, and the upgrade should rewrite the file
-    /// on disk so subsequent reads are cheap.
-    ///
-    /// The legacy shape still carries `file_exists:output/deck.pptx`
-    /// plus a Glob-source MagicBytes validator.
-    #[test]
-    fn read_workspace_policy_auto_migrates_legacy_slides_policy() {
-        let tmp = tempfile::tempdir().unwrap();
-        let project_root = tmp.path().join("slides").join("demo-slug");
-        std::fs::create_dir_all(&project_root).unwrap();
-
-        // Hand-build a pre-migration slides policy that mirrors what
-        // mini3 dspfac has on disk: project-relative file_exists +
-        // Glob-source MagicBytes(Pptx).
-        let mut legacy = WorkspacePolicy::for_kind(WorkspaceProjectKind::Slides);
-        legacy.validation.on_completion = vec![
-            "file_exists:output/deck.pptx".into(),
-            "file_exists:output/**/slide-*.png".into(),
-        ];
-        legacy.validation.validators = vec![Validator {
-            id: "slides.mofa_slides.pptx_magic_bytes".into(),
-            required: true,
-            soft_fail: false,
-            timeout_ms: None,
-            phase: ValidatorPhaseKind::Completion,
-            spec: ValidatorSpec::MagicBytes {
-                glob: "**/*.pptx".into(),
-                format: MagicByteKind::Pptx,
-                source: ValidatorFileSource::Glob,
-                extension: None,
-            },
-        }];
-        legacy.artifacts = WorkspaceArtifactsPolicy {
-            entries: BTreeMap::from([
-                ("primary".into(), "output/deck.pptx".into()),
-                ("deck".into(), "output/deck.pptx".into()),
-                ("previews".into(), "output/**/slide-*.png".into()),
-            ]),
-        };
-        // Write the legacy policy via the *force* variant (skip the
-        // create_new guard) so we're guaranteed to start from the
-        // pre-migration state.
-        write_workspace_policy_force(&project_root, &legacy).unwrap();
-
-        // Read should auto-upgrade.
-        let upgraded = read_workspace_policy(&project_root).unwrap().unwrap();
-
-        // on_completion stripped + validator switched to SpawnOnlyFiles.
-        assert!(upgraded.validation.on_completion.is_empty());
-        assert_eq!(upgraded.validation.validators.len(), 1);
-        match &upgraded.validation.validators[0].spec {
-            ValidatorSpec::MagicBytes { source, .. } => {
-                assert_eq!(*source, ValidatorFileSource::SpawnOnlyFiles);
-            }
-            _ => panic!("expected MagicBytes validator"),
-        }
-        // Slug-aware artifact paths.
-        assert_eq!(
-            upgraded.artifacts.entries.get("deck").map(String::as_str),
-            Some("skill-output/slides/demo-slug/output/deck.pptx")
-        );
-
-        // Upgrade was persisted: a second read parses the modern policy
-        // without re-running the migration branch.
-        let reread = read_workspace_policy(&project_root).unwrap().unwrap();
-        assert_eq!(reread, upgraded);
     }
 
     /// #2129: the session bootstrap path routes a detected coding workspace

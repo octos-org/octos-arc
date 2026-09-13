@@ -124,74 +124,6 @@ fn compose_turn_user_content(
     }
 }
 
-/// Audit Gap-8 helper: consult the workspace-contract layer at EndTurn time
-/// and return a human-readable summary of failing validators when the
-/// contract is NOT ready. Returns `None` when the workspace has no
-/// policy-managed repos under `working_dir` (today's silent-success path).
-///
-/// This is the harness-side mirror of the LLM-callable
-/// `check_workspace_contract` tool — same source of truth
-/// (`inspect_workspace_contracts`), no parallel framework. Errors from the
-/// underlying inspector are swallowed with a warning so a transient git
-/// failure (e.g. corrupt `.git` directory) cannot block an otherwise
-/// successful task; the previous behaviour is preserved on inspector error.
-fn inspect_workspace_contract_failures(working_dir: &std::path::Path) -> Option<String> {
-    let contracts = match crate::workspace_git::inspect_workspace_contracts(working_dir) {
-        Ok(contracts) => contracts,
-        Err(err) => {
-            warn!(
-                workspace_root = %working_dir.display(),
-                error = %err,
-                "workspace contract inspector failed at EndTurn; treating as no-policy"
-            );
-            return None;
-        }
-    };
-
-    // Only fail on policy-managed repos that aren't ready.
-    let failing: Vec<_> = contracts
-        .iter()
-        .filter(|status| status.policy_managed && !status.ready)
-        .collect();
-    if failing.is_empty() {
-        return None;
-    }
-
-    let mut lines = Vec::with_capacity(failing.len() * 2);
-    // Lowercase "workspace contract" so the message matches the same
-    // grep predicate used by the existing spawn-task contract failure
-    // assertions (`error.contains("workspace contract")` in spawn.rs).
-    lines.push(format!(
-        "workspace contract not ready for {} repo(s):",
-        failing.len()
-    ));
-    for status in failing {
-        lines.push(format!("- {} (kind={})", status.repo_label, status.kind));
-        if let Some(ref error) = status.error {
-            lines.push(format!("    error: {error}"));
-        }
-        for check in &status.completion_checks {
-            if !check.passed {
-                let reason = check.reason.as_deref().unwrap_or("(no reason given)");
-                lines.push(format!("    completion failed: {} — {reason}", check.spec));
-            }
-        }
-        for check in &status.turn_end_checks {
-            if !check.passed {
-                let reason = check.reason.as_deref().unwrap_or("(no reason given)");
-                lines.push(format!("    turn_end failed: {} — {reason}", check.spec));
-            }
-        }
-        for missing in status.artifacts.iter().filter(|a| !a.present) {
-            lines.push(format!(
-                "    artifact missing: {} (pattern={})",
-                missing.name, missing.pattern
-            ));
-        }
-    }
-    Some(lines.join("\n"))
-}
-
 fn split_tool_calls(
     tool_calls: &[octos_core::ToolCall],
     batch_size: usize,
@@ -2796,49 +2728,8 @@ impl Agent {
 
                         self.emit_cost_update(&turn, &final_response, attributed_cost);
 
-                        // Audit Gap-8: auto-fire `check_workspace_contract`
-                        // on Completion. The LLM-callable wrapper stays for
-                        // introspection but no longer the only enforcement
-                        // path — the harness consults the contract before
-                        // declaring SUCCESS.
-                        //
-                        // Workspaces without a policy-managed repo under the
-                        // working_dir stay Success unchanged (returns
-                        // `None`). When at least one policy-managed repo is
-                        // not ready, the result is demoted to `success =
-                        // false` and the failing validators are appended to
-                        // the result output so the caller (or LLM next turn)
-                        // sees the contract failure.
-                        //
-                        // octos #997 (round-2 fix): RUN declared project-root
-                        // validators BEFORE inspecting the contract. The
-                        // contract gate reads
-                        // `<kind>/<slug>/.octos/validator_outcomes.jsonl` — a
-                        // path that was never written to in production
-                        // pre-round-2 because the declared validator chain
-                        // was only invoked at the SESSION root. Without this
-                        // call, a real valid deck whose project policy
-                        // declares a hard-required validator (octos #997:
-                        // `slides.mofa_slides.pptx_magic_bytes`) shows
-                        // `ready = false` purely because the persisted
-                        // outcome is missing.
-                        let _project_root_report =
-                            crate::workspace_contract::run_project_root_validators(
-                                self.tools.as_ref(),
-                                &task.context.working_dir,
-                                None,
-                                &files_to_send,
-                                // #1607: the Agent's own registry is built
-                                // sandboxed in `session_actor`, so its stored
-                                // sandbox is the session backend.
-                                self.tools.sandbox(),
-                            )
-                            .await;
-                        let contract_failures =
-                            inspect_workspace_contract_failures(&task.context.working_dir);
-
                         self.reporter().report(ProgressEvent::TaskCompleted {
-                            success: contract_failures.is_none(),
+                            success: true,
                             iterations: iteration,
                             duration: task_start.elapsed(),
                         });
@@ -2849,27 +2740,14 @@ impl Agent {
                             iterations = iteration,
                             files_modified = files_modified.len(),
                             duration_ms = task_start.elapsed().as_millis() as u64,
-                            contract_failed = contract_failures.is_some(),
                             "task completed"
                         );
-                        let mut result = self.build_result(
+                        let result = self.build_result(
                             &final_response,
                             turn.total_usage().clone(),
                             files_modified,
                             files_to_send,
                         );
-                        if let Some(failure_msg) = contract_failures {
-                            warn!(
-                                workspace_root = %task.context.working_dir.display(),
-                                "task EndTurn but workspace contract is not ready; demoting to ContractFailed"
-                            );
-                            result.success = false;
-                            if result.output.is_empty() {
-                                result.output = failure_msg;
-                            } else {
-                                result.output = format!("{}\n\n{}", result.output, failure_msg);
-                            }
-                        }
                         return Ok(result);
                     }
                     StopReason::ToolUse => {

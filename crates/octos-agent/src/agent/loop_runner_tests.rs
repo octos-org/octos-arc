@@ -5233,11 +5233,9 @@ fn doom_loop_terminal_message_is_model_and_user_facing() {
     );
 }
 
-// ----- Audit Gap-8: auto-fire check_workspace_contract on Completion -----
-
-/// LLM stub that always returns a single EndTurn — used by the
-/// Gap-8 tests to drive `run_task` straight to the contract-check
-/// branch without iterating through tool calls.
+/// LLM stub that always returns a single EndTurn — used to drive
+/// `run_task` straight to the completion branch without iterating
+/// through tool calls.
 struct EndTurnOnlyProvider;
 #[async_trait]
 impl LlmProvider for EndTurnOnlyProvider {
@@ -5264,173 +5262,6 @@ impl LlmProvider for EndTurnOnlyProvider {
     fn provider_name(&self) -> &str {
         "mock"
     }
-}
-
-/// Build a slides workspace fixture, optionally fully-ready.
-///
-/// Pure-filesystem setup. Callers that want a "ready" deck must also
-/// invoke [`run_managed_slides_workspace_validators`] (async) or
-/// [`run_managed_slides_workspace_validators_sync`] (blocking) to
-/// exercise the PRODUCTION project-root validator helper. Splitting
-/// the helper this way avoids the "Cannot start a runtime from within a
-/// runtime" panic when async tests call the fixture inside their own
-/// Tokio runtime.
-fn make_managed_slides_workspace(tmp_root: &std::path::Path, slug: &str, ready: bool) {
-    use crate::workspace_git::WorkspaceProjectKind;
-    use crate::workspace_policy::{WorkspacePolicy, write_workspace_policy};
-    let repo_root = tmp_root.join("slides").join(slug);
-    std::fs::create_dir_all(&repo_root).unwrap();
-    write_workspace_policy(
-        &repo_root,
-        &WorkspacePolicy::for_kind(WorkspaceProjectKind::Slides),
-    )
-    .unwrap();
-    // Every slides workspace requires script.js / memory.md / changelog.md
-    // for turn_end + output/deck.pptx + slide png for completion.
-    std::fs::write(repo_root.join("script.js"), "// slides").unwrap();
-    std::fs::write(repo_root.join("memory.md"), "# memory").unwrap();
-    std::fs::write(repo_root.join("changelog.md"), "# changelog").unwrap();
-    if ready {
-        std::fs::create_dir_all(repo_root.join("output/imgs")).unwrap();
-        // octos #997: write real PPTX magic bytes so the project-scope
-        // PPTX `MagicBytes` validator wired in
-        // `WorkspacePolicy::for_kind(Slides)` does not fail the gate.
-        let mut pptx = vec![0x50, 0x4B, 0x03, 0x04];
-        pptx.extend_from_slice(&[0u8; 32]);
-        std::fs::write(repo_root.join("output/deck.pptx"), &pptx).unwrap();
-        std::fs::write(repo_root.join("output/imgs/slide-01.png"), "fake-png").unwrap();
-        // NOTE: caller must invoke
-        // `run_managed_slides_workspace_validators[_sync]` to write the
-        // slides-kind PPTX MagicBytes Pass row.
-    }
-}
-
-/// octos #997 (round-2 fix): async variant — exercise the production
-/// project-root validator helper so the ready fixture writes a Pass row
-/// into the same project ledger that the spawn loop writes to in
-/// production. Pre-round-2 the fixture manually `ledger.append(...)`ed a
-/// fake Pass; codex flagged that as masking the gap (the validator was
-/// declared but never RUN at the project root in production).
-async fn run_managed_slides_workspace_validators(tmp_root: &std::path::Path, slug: &str) {
-    use crate::workspace_git::WorkspaceProjectKind;
-    let registry = std::sync::Arc::new(crate::ToolRegistry::new());
-    // Mirror production: the spawn loop hands the plugin's
-    // `files_to_send` list through. The fixture stages the deck at
-    // the legacy in-project path so the filter accepts it.
-    let files_to_send = vec![tmp_root.join("slides").join(slug).join("output/deck.pptx")];
-    let _ = crate::workspace_contract::run_project_root_validators(
-        &registry,
-        tmp_root,
-        Some(WorkspaceProjectKind::Slides),
-        &files_to_send,
-        std::sync::Arc::new(crate::sandbox::NoSandbox),
-    )
-    .await;
-}
-
-/// Sync variant of [`run_managed_slides_workspace_validators`] for
-/// non-async `#[test]` callers that don't already have a Tokio runtime
-/// (and can therefore build one without nesting).
-fn run_managed_slides_workspace_validators_sync(tmp_root: &std::path::Path, slug: &str) {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("build tokio runtime for fixture validator run");
-    runtime.block_on(run_managed_slides_workspace_validators(tmp_root, slug));
-}
-
-#[test]
-fn should_return_none_when_workspace_has_no_policy_managed_repos() {
-    // Bare working_dir with no `slides/` or `sites/` subdir →
-    // inspect_workspace_contracts yields an empty Vec → helper returns
-    // None → loop_runner keeps Success.
-    let tmp = tempfile::tempdir().unwrap();
-    assert!(inspect_workspace_contract_failures(tmp.path()).is_none());
-}
-
-#[test]
-fn should_return_none_when_all_managed_repos_are_ready() {
-    let tmp = tempfile::tempdir().unwrap();
-    make_managed_slides_workspace(tmp.path(), "demo", true);
-    run_managed_slides_workspace_validators_sync(tmp.path(), "demo");
-
-    let failures = inspect_workspace_contract_failures(tmp.path());
-    assert!(
-        failures.is_none(),
-        "ready workspace should not produce contract failure summary: {failures:?}"
-    );
-}
-
-#[test]
-fn should_return_failure_summary_when_managed_repo_is_not_ready() {
-    let tmp = tempfile::tempdir().unwrap();
-    // slug=broken with NO output/ artifacts → completion checks fail.
-    make_managed_slides_workspace(tmp.path(), "broken", false);
-
-    let failures = inspect_workspace_contract_failures(tmp.path())
-        .expect("broken workspace must produce contract failure summary");
-    assert!(
-        failures.contains("slides/broken"),
-        "summary should name the failing repo:\n{failures}"
-    );
-    assert!(
-        failures.contains("completion failed") || failures.contains("artifact missing"),
-        "summary should describe what failed:\n{failures}"
-    );
-}
-
-#[test]
-fn should_return_failure_summary_with_mixed_repos() {
-    let tmp = tempfile::tempdir().unwrap();
-    make_managed_slides_workspace(tmp.path(), "ready-deck", true);
-    make_managed_slides_workspace(tmp.path(), "broken-deck", false);
-    run_managed_slides_workspace_validators_sync(tmp.path(), "ready-deck");
-
-    let failures = inspect_workspace_contract_failures(tmp.path())
-        .expect("at least one broken repo must produce failures");
-    assert!(failures.contains("slides/broken-deck"));
-    // Only the broken repo should appear in the failures listing —
-    // ready-deck is not in the failing set.
-    assert!(
-        !failures.contains("ready-deck") || failures.contains("broken-deck"),
-        "ready-deck should not appear as a failure:\n{failures}"
-    );
-}
-
-#[tokio::test]
-async fn run_task_demotes_success_when_contract_fails() {
-    // End-to-end integration: an EndTurn that would otherwise be Success
-    // gets demoted to success=false when the working_dir contains a
-    // policy-managed repo that is not ready.
-    let dir = tempfile::tempdir().unwrap();
-    // Pre-populate a broken slides repo so contract != ready.
-    make_managed_slides_workspace(dir.path(), "demo", false);
-
-    let tools = ToolRegistry::with_builtins(dir.path());
-    let provider: Arc<dyn LlmProvider> = Arc::new(EndTurnOnlyProvider);
-    let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
-    let agent = Agent::new(AgentId::new("contract-demote"), provider, tools, memory);
-    let task = Task::new(
-        TaskKind::Code {
-            instruction: "Build it".into(),
-            files: vec![],
-        },
-        TaskContext {
-            working_dir: dir.path().to_path_buf(),
-            ..Default::default()
-        },
-    );
-
-    let result = agent.run_task(&task).await.unwrap();
-    assert!(
-        !result.success,
-        "broken workspace contract must demote task to failure"
-    );
-    assert!(
-        result.output.contains("workspace contract") || result.output.contains("slides/demo"),
-        "result output should explain the contract failure: {:?}",
-        result.output
-    );
 }
 
 #[tokio::test]
@@ -6323,43 +6154,6 @@ async fn synth_ack_suppressed_when_failing_tool_has_sanitized_id() {
         !original_colonized_msg,
         "no tool-result should carry the original colon-bearing id; \
              sanitization should have rewritten it"
-    );
-}
-
-#[ignore = "Pre-migration test: the SpawnOnlyFiles-source MagicBytes validator \
-                (post-#997 round-3) rejects no-files-emitted tasks at the project-scope \
-                gate. This test's `EndTurnOnlyProvider` agent never calls a plugin tool, \
-                so `files_to_send` stays empty and the loop_runner's project-scope \
-                validator run after run_task fails the freshly-staged ready workspace. \
-                Re-enable by giving the agent a stub plugin tool that returns the staged \
-                deck in `tool_result.files_to_send`."]
-#[tokio::test]
-async fn run_task_keeps_success_when_contract_passes() {
-    let dir = tempfile::tempdir().unwrap();
-    // Fully-ready workspace.
-    make_managed_slides_workspace(dir.path(), "ready", true);
-    run_managed_slides_workspace_validators(dir.path(), "ready").await;
-
-    let tools = ToolRegistry::with_builtins(dir.path());
-    let provider: Arc<dyn LlmProvider> = Arc::new(EndTurnOnlyProvider);
-    let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
-    let agent = Agent::new(AgentId::new("contract-ok"), provider, tools, memory);
-    let task = Task::new(
-        TaskKind::Code {
-            instruction: "All good".into(),
-            files: vec![],
-        },
-        TaskContext {
-            working_dir: dir.path().to_path_buf(),
-            ..Default::default()
-        },
-    );
-
-    let result = agent.run_task(&task).await.unwrap();
-    assert!(
-        result.success,
-        "ready workspace must keep Success (got {:?})",
-        result.output
     );
 }
 

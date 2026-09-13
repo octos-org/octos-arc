@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use eyre::{Result, WrapErr};
 use serde::Deserialize;
-use tracing::warn;
 
 use super::{ConcurrencyClass, Tool, ToolContext, ToolResult};
 use crate::policy::{FileAccessMode, FilesystemScope};
@@ -173,16 +172,6 @@ impl Tool for DiffEditTool {
         // mtime just changed.
         if let Some(cache) = ctx.file_state_cache.as_ref() {
             cache.invalidate(&path);
-        }
-
-        if let Err(error) =
-            crate::workspace_git::snapshot_workspace_change(&self.base_dir, &path, "diff_edit")
-        {
-            warn!(
-                path = %input.path,
-                error = %error,
-                "workspace git snapshot failed after diff_edit"
-            );
         }
 
         Ok(ToolResult {
