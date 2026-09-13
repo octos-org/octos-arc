@@ -128,7 +128,7 @@ class CodegenPromptTests(unittest.TestCase):
     def test_should_format_without_placeholder_errors_and_keep_build_command(self):
         import main as m
         text = m.CODEGEN_PROMPT.format(node_id="REQ-1", description="S", spec="T", port=3000, size_rule="R")
-        self.assertIn("mkdirSync('dist',{recursive:true})", text)
+        self.assertIn("do not output them", text)
         self.assertIn("REQ-1", text)
 
 
@@ -143,3 +143,15 @@ class AlreadyPassingProbeTests(unittest.TestCase):
                    "b.spec.ts": SimpleNamespace(error=None, total=2, passed=1, all_passed=False)}
         flow.run_specs = lambda specs, **kw: results[specs[0]]
         self.assertEqual(flow.already_passing_nodes(["REQ-1", "REQ-2", "REQ-3"]), {"REQ-1"})
+
+
+class CodegenManifestTests(unittest.TestCase):
+    def test_should_write_missing_manifests_once(self):
+        import json, tempfile
+        from pathlib import Path
+        root = Path(tempfile.mkdtemp())
+        self.assertEqual(m.write_codegen_manifests(root), ["frontend/package.json", "backend/package.json"])
+        self.assertEqual(m.write_codegen_manifests(root), [])
+        fe = json.loads((root / "frontend/package.json").read_text())
+        self.assertIn("mkdirSync('dist',{recursive:true})", fe["scripts"]["build"])
+        self.assertEqual(json.loads((root / "backend/package.json").read_text())["scripts"]["start"], "node server.js")
