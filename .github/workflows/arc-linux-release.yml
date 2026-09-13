@@ -70,6 +70,26 @@ jobs:
             echo "binary_version=$(target/release/octos --version)"
           } | tee release-metadata.txt
 
+      - name: B5 container stdio smoke test
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --security-opt=no-new-privileges \
+            --cap-drop=ALL \
+            --pids-limit=128 \
+            -v "$GITHUB_WORKSPACE":/src \
+            -w /src \
+            python:3.12-slim-bookworm \
+            python3 /src/scripts/container-stdio-smoke.py
+
+      - name: Upload B5 container evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arc-b5-container-smoke
+          path: b5-container-smoke.log
+          if-no-files-found: ignore
+
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
