@@ -81,3 +81,22 @@ class RepairFlattenedJsTests(unittest.TestCase):
         p.write_text(good)
         self.assertFalse(repair_flattened_js(p))
         self.assertEqual(p.read_text(), good)
+
+
+class DedupeNavLinksTests(unittest.TestCase):
+    def test_should_strip_static_nav_links_only_when_server_fills_placeholder(self):
+        import tempfile
+        from pathlib import Path
+        from codegen import dedupe_nav_links
+        root = Path(tempfile.mkdtemp())
+        (root / "frontend/src").mkdir(parents=True); (root / "backend").mkdir()
+        page = '<body><!--NAV-->\n<a href="/register">Register</a>\n<a href="/about">About</a></body>'
+        (root / "frontend/src/index.html").write_text(page)
+        (root / "backend/server.js").write_text("x")
+        self.assertEqual(dedupe_nav_links(root), [])
+        (root / "backend/server.js").write_text("html.replace('<!--NAV-->', nav)")
+        self.assertEqual(dedupe_nav_links(root), ["index.html"])
+        out = (root / "frontend/src/index.html").read_text()
+        self.assertNotIn('href="/register"', out)
+        self.assertIn('href="/about"', out)
+        self.assertIn("<!--NAV-->", out)

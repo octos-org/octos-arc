@@ -106,6 +106,34 @@ def repair_flattened_js(path: Path) -> bool:
     return False
 
 
+NAV_PLACEHOLDER = "<!--NAV-->"
+NAV_LINK = re.compile(r"""<a\b[^>]*href=["'](?:/login|/register|/logout)["'][^>]*>.*?</a>\s*""", re.IGNORECASE | re.DOTALL)
+
+
+def dedupe_nav_links(root: Path) -> list[str]:
+    """The multi-node prompt mandates one navigation mechanism: pages carry the
+    NAV placeholder, the server fills it. Models keep adding static copies of the
+    same links next to it (local s2/s3/s15: strict-mode violation, 0/6). When the
+    server implements the placeholder, drop the static duplicates from pages that
+    carry it."""
+    server = root / "backend" / "server.js"
+    try:
+        if NAV_PLACEHOLDER not in server.read_text(encoding="utf-8", errors="replace"):
+            return []
+    except OSError:
+        return []
+    changed = []
+    for page in sorted((root / "frontend" / "src").glob("*.html")):
+        text = page.read_text(encoding="utf-8", errors="replace")
+        if NAV_PLACEHOLDER not in text:
+            continue
+        cleaned = NAV_LINK.sub("", text)
+        if cleaned != text:
+            page.write_text(cleaned, encoding="utf-8")
+            changed.append(page.name)
+    return changed
+
+
 def write_files(root: Path, files: dict[str, str]) -> list[str]:
     written = []
     for rel, body in files.items():
