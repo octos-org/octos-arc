@@ -346,3 +346,18 @@ rehearsal) verifies those ports are bound; if not, the run counts as a startup f
 Round 23 cloud (C): Evolution best ¥0.0044 / ¥0.0042 (≈¥0.0086 total, leader ¥0.0188); Smoke ¥0.0050 / ¥0.0044
 (¥0.0095). The two polluted Evolution runs (63,877 / 26,591 tokens with a 1-request log) were foreign usage on the
 shared key at the window start; from now on, check `pgrep -f run-task-local` before requesting a window.
+
+## Round 25 — speed rule in the codegen prompt
+
+Cloud round 24 (C): TB e79b1160d081 9/10 ¥0.332 and d24f1c3d1c84 9/10 ¥0.251 (cost real-agent #1; leader
+¥0.81 at 90%). The fixable miss was a whole-test 10 s timeout inside the registration helper while the same
+spec passed in the run's own suite — a slow page/backend under the grader's 4 parallel browsers, not a
+missing field. The codegen prompt now states the speed budget: no slow hashing (bcrypt/scrypt/pbkdf2/argon),
+no timers, no per-keystroke work, state rendered server-side or from the initial HTML.
+
+| task (local) | result |
+|---|---|
+| Ticket Booking | 2 requests, 12,451 prompt / 13,881 completion (7,573 reasoning), 6/6 + 4/4 first pass, full suite 10/10, grade 100 |
+| Counter | 1 request, 578/358 = 936 tokens, 1/1, grade 100 |
+
+Cloud: 未评测.
