@@ -16,7 +16,7 @@
 //! Today (2026-05-23) octos has three separate places computing a
 //! session-or-tenant CWD: `chat.rs` for solo, `serve.rs`/`handlers.rs`
 //! for the AppUI/serve path, and an ad-hoc `working_dir: PathBuf`
-//! pinned at construction time inside `RunPipelineTool`. Plugins
+//! pinned at construction time inside the pipeline tool. Plugins
 //! (mofa-podcast, mofa-research, etc.) make their own `current_dir`
 //! choices. The five-round PR #1186 path-traversal saga, PR #1189
 //! workspace-root rescue, and PR #1192/#1195/#1197 memory-contamination

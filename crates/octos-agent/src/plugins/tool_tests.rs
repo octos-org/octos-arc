@@ -1370,7 +1370,7 @@ async fn execute_structured_progress_event_updates_task_supervisor() {
     let script_path = dir.path().join("script.sh");
     write_test_script(
         &script_path,
-        "#!/bin/sh\ncat >/dev/null\nprintf '{\"schema\":\"octos.harness.event.v1\",\"kind\":\"progress\",\"session_id\":\"%s\",\"task_id\":\"%s\",\"workflow\":\"deep_research\",\"phase\":\"fetching_sources\",\"message\":\"Fetching source 3/12\",\"progress\":0.42}\\n' \"$OCTOS_SESSION_ID\" \"$OCTOS_TASK_ID\" >> \"$OCTOS_EVENT_SINK\"\nprintf '{\"output\":\"ok\",\"success\":true}'\n",
+        "#!/bin/sh\ncat >/dev/null\nprintf '{\"schema\":\"octos.harness.event.v1\",\"kind\":\"progress\",\"session_id\":\"%s\",\"task_id\":\"%s\",\"workflow\":\"bg_research\",\"phase\":\"fetching_sources\",\"message\":\"Fetching source 3/12\",\"progress\":0.42}\\n' \"$OCTOS_SESSION_ID\" \"$OCTOS_TASK_ID\" >> \"$OCTOS_EVENT_SINK\"\nprintf '{\"output\":\"ok\",\"success\":true}'\n",
     );
 
     let def = make_tool_def("structured_tool", "writes harness events");
@@ -1412,7 +1412,7 @@ async fn execute_structured_progress_event_updates_task_supervisor() {
 
     let detail: serde_json::Value =
         serde_json::from_str(updated.runtime_detail.as_deref().unwrap()).unwrap();
-    assert_eq!(detail["workflow_kind"], "deep_research");
+    assert_eq!(detail["workflow_kind"], "bg_research");
     assert_eq!(detail["current_phase"], "fetching_sources");
     assert_eq!(detail["progress_message"], "Fetching source 3/12");
     assert_eq!(updated.status, crate::task_supervisor::TaskStatus::Running);

@@ -5305,7 +5305,7 @@ fn is_error_tool_message_classifies_error_envelopes() {
     // crate::agent::execution must classify as an error.
     assert!(is_error_tool_message("Error: tool dispatch failed"));
     assert!(is_error_tool_message(
-        "[VALIDATION FAILED] Tool 'run_pipeline' rejected input: bad DOT"
+        "[VALIDATION FAILED] Tool 'bg_research' rejected input: bad DOT"
     ));
     assert!(is_error_tool_message(
         "[POLICY DENIED] Tool 'foo' is blocked by provider policy (deny)"
@@ -5413,10 +5413,10 @@ fn any_tool_invocation_errored_false_when_all_results_successful() {
 
 #[test]
 fn any_tool_invocation_errored_detects_validation_failed_envelope() {
-    let response = spawn_only_chat_response(vec![spawn_only_tool_call("call_1", "run_pipeline")]);
+    let response = spawn_only_chat_response(vec![spawn_only_tool_call("call_1", "bg_research")]);
     let messages = vec![spawn_only_tool_result(
         "call_1",
-        "[VALIDATION FAILED] Tool 'run_pipeline' rejected input: bad arg\n\nFix the input and retry.",
+        "[VALIDATION FAILED] Tool 'bg_research' rejected input: bad arg\n\nFix the input and retry.",
     )];
 
     assert!(any_tool_invocation_errored(&messages, &response, &[]));
@@ -5431,7 +5431,7 @@ fn any_tool_invocation_errored_mixed_batch_one_failed() {
     // ack is suppressed — otherwise the user sees a successful-looking
     // ack alongside the red error chip from the sibling tool.
     let response = spawn_only_chat_response(vec![
-        spawn_only_tool_call("call_pipeline", "run_pipeline"),
+        spawn_only_tool_call("call_pipeline", "bg_research"),
         spawn_only_tool_call("call_shell", "shell"),
     ]);
     let messages = vec![
@@ -5800,7 +5800,7 @@ impl LlmProvider for StickyFlagThreeIterProvider {
 /// via [`ToolRegistry::is_spawn_only`].
 ///
 /// This test models a 3-iteration turn:
-///   iter 1: run_pipeline (spawn_only) + erroring sibling
+///   iter 1: bg_research (spawn_only) + erroring sibling
 ///           — existing B4 gate suppresses the synth-ack
 ///   iter 2: read_task_output (regular) returns happy output
 ///           — sticky flag would re-fire the gate without the fix
@@ -5817,10 +5817,10 @@ async fn spawn_only_sticky_flag_does_not_synthesize_ack_in_later_regular_iterati
     // Iter 1: spawn_only tool (succeeds on foreground; returns handle
     // envelope — sets `spawn_only_was_invoked` AtomicBool to true).
     tools.register(NamedEchoTool {
-        name: "run_pipeline",
+        name: "bg_research",
         output: "unused (foreground returns the handle envelope)",
     });
-    tools.mark_spawn_only("run_pipeline", None);
+    tools.mark_spawn_only("bg_research", None);
     // Iter 1 sibling: erroring tool — the existing B4 gate suppresses
     // the iter-1 synth-ack because of THIS error, allowing the loop
     // to actually reach iter 2 where the sticky-flag bug fires.
@@ -5837,7 +5837,7 @@ async fn spawn_only_sticky_flag_does_not_synthesize_ack_in_later_regular_iterati
 
     let provider: Arc<dyn LlmProvider> = Arc::new(StickyFlagThreeIterProvider {
         calls: AtomicUsize::new(0),
-        spawn_only_name: "run_pipeline",
+        spawn_only_name: "bg_research",
         erroring_sibling_name: "shell",
         iter2_regular_name: "read_task_output",
         final_content: "Pipeline launched; shell-helper failed; read_task_output is clean — done.",
@@ -5855,7 +5855,7 @@ async fn spawn_only_sticky_flag_does_not_synthesize_ack_in_later_regular_iterati
     // Iter 2's regular tool MUST NOT trigger the synth-ack — the
     // CURRENT iteration's response contains no spawn_only call. With
     // the sticky-flag bug, the harness fabricates a "Background work
-    // started for `run_pipeline`." bubble at iter 2 even though iter
+    // started for `bg_research`." bubble at iter 2 even though iter
     // 2 only called read_task_output (a regular tool).
     assert!(
         !result.content.starts_with("Background work started"),
@@ -5881,8 +5881,8 @@ async fn spawn_only_sticky_flag_does_not_synthesize_ack_in_later_regular_iterati
 /// another iteration to react to the error and produce a real reply.
 ///
 /// Fleet-UX soak finding B4 (mini1 / dspfac, 2026-05-22): dspfac saw
-/// `× run_pipeline error: required tool(s) not available on this host:
-/// run_pipeline` AND a fake "已后台启动 …" outline bubble
+/// `× bg_research error: required tool(s) not available on this host:
+/// bg_research` AND a fake "已后台启动 …" outline bubble
 /// simultaneously; the harness emitted the synthesised ack as the
 /// turn-final assistant content even though a tool in the same batch
 /// reported a failure result that the LLM still needed to acknowledge.
@@ -5892,12 +5892,12 @@ async fn spawn_only_branch_skipped_when_invocation_returned_error() {
     let mut tools = ToolRegistry::with_builtins(dir.path());
     // The spawn_only tool succeeds on the foreground (returns the
     // canonical handle envelope) and sets the `spawn_only_was_invoked`
-    // flag — exactly as `run_pipeline` does in production.
+    // flag — exactly as `bg_research` does in production.
     tools.register(NamedEchoTool {
-        name: "run_pipeline",
+        name: "bg_research",
         output: "unused (foreground returns the handle envelope, not this)",
     });
-    tools.mark_spawn_only("run_pipeline", None);
+    tools.mark_spawn_only("bg_research", None);
     // The sibling tool errors synchronously; the dispatcher wraps the
     // eyre into `"Error: <reason>"` on the tool-result message.
     tools.register(ErroringTool {
@@ -5907,7 +5907,7 @@ async fn spawn_only_branch_skipped_when_invocation_returned_error() {
 
     let provider: Arc<dyn LlmProvider> = Arc::new(MixedBatchSpawnOnlyAndErroringProvider {
         calls: AtomicUsize::new(0),
-        spawn_only_name: "run_pipeline",
+        spawn_only_name: "bg_research",
         erroring_name: "shell",
         final_content: "Pipeline launched; shell-helper failed and I cannot proceed without it.",
     });
@@ -6062,10 +6062,10 @@ async fn synth_ack_suppressed_when_failing_tool_has_sanitized_id() {
     // spawn_only foreground returns the handle envelope (success=true)
     // and flips the spawn_only-was-invoked flag.
     tools.register(NamedEchoTool {
-        name: "run_pipeline",
+        name: "bg_research",
         output: "unused (foreground returns the handle envelope, not this)",
     });
-    tools.mark_spawn_only("run_pipeline", None);
+    tools.mark_spawn_only("bg_research", None);
     // Sibling tool errors; dispatcher keys the success-bit entry by
     // the SANITIZED tool_call_id (the LLM-supplied id had a colon).
     tools.register(ErroringTool {
@@ -6075,7 +6075,7 @@ async fn synth_ack_suppressed_when_failing_tool_has_sanitized_id() {
 
     let provider: Arc<dyn LlmProvider> = Arc::new(SanitizedIdSpawnOnlyAndErroringProvider {
         calls: AtomicUsize::new(0),
-        spawn_only_name: "run_pipeline",
+        spawn_only_name: "bg_research",
         erroring_name: "shell",
         erroring_raw_id: "admin_view_sessions:11",
         final_content: "Pipeline launched; shell-helper failed — cannot proceed.",
@@ -6095,7 +6095,7 @@ async fn synth_ack_suppressed_when_failing_tool_has_sanitized_id() {
 
     // With the pre-fix code, the gate misses the sanitized-id
     // success=false entry and the synth-ack fires:
-    //   result.content starts with "Background work started for `run_pipeline`."
+    //   result.content starts with "Background work started for `bg_research`."
     //   result.synthesized_from_spawn_only == true
     //
     // With the round-3 fix, the gate sees the sanitized id, finds

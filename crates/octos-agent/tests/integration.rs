@@ -181,7 +181,7 @@ async fn test_agent_max_iterations() {
         .unwrap();
     // Regression: the bare "Reached max iterations." stub was replaced
     // with an actionable message that names the iteration count and
-    // hints at `run_pipeline` as the canonical multi-step research path.
+    // hints at `bg_research` as the canonical multi-step research path.
     // See `crates/octos-agent/src/agent/budget.rs::BudgetStop::message`.
     assert!(
         resp.content.contains('3'),
@@ -194,8 +194,8 @@ async fn test_agent_max_iterations() {
         resp.content
     );
     assert!(
-        resp.content.contains("run_pipeline"),
-        "expected a hint about 'run_pipeline' in: {}",
+        resp.content.contains("spawn"),
+        "expected a hint about 'spawn' in: {}",
         resp.content
     );
 }

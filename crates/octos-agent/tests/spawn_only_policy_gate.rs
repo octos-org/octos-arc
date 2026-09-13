@@ -1,6 +1,6 @@
 //! Tests for the spawn_only ToolPolicy gate.
 //!
-//! Origin: PR #688 (run_pipeline → spawn_only) shipped two latent bypasses:
+//! Origin: PR #688 (bg_research → spawn_only) shipped two latent bypasses:
 //!
 //! - **MEDIUM #3**: the spawn_only intercept site in
 //!   `crates/octos-agent/src/agent/execution.rs` runs BEFORE the registry's
@@ -10,8 +10,8 @@
 //!   the LLM had no signal to stop retrying.
 //!
 //! - **MEDIUM #4**: the gateway / session ActorFactory path registers
-//!   `run_pipeline` AFTER the base `tool_policy` was applied, so a
-//!   `tool_policy.deny: ["run_pipeline"]` configured globally was ignored
+//!   `bg_research` AFTER the base `tool_policy` was applied, so a
+//!   `tool_policy.deny: ["bg_research"]` configured globally was ignored
 //!   on gateway-spawned actors. (The CLI `chat.rs` path does not have this
 //!   bug because it applies policy AFTER mark_spawn_only.)
 //!
@@ -159,7 +159,7 @@ fn tc(id: &str, name: &str) -> ToolCall {
 // =========================================================================
 
 #[tokio::test]
-async fn policy_denies_run_pipeline_via_spawn_only_path() {
+async fn policy_denies_bg_research_via_spawn_only_path() {
     let memory_dir = TempDir::new().unwrap();
 
     let invocations = Arc::new(AtomicU32::new(0));
@@ -237,7 +237,7 @@ async fn policy_denies_run_pipeline_via_spawn_only_path() {
 // This is the registry-level contract that the session_actor.rs
 // re-application (PR #688 follow-up MEDIUM #4 fix) depends on:
 //   `apply_policy` must drop a denied tool even if it was already marked
-//   spawn_only — otherwise the re-application after run_pipeline
+//   spawn_only — otherwise the re-application after bg_research
 //   registration would be a no-op.
 // =========================================================================
 
@@ -265,7 +265,7 @@ fn apply_policy_after_mark_spawn_only_removes_denied_tool() {
 
     // The tool must be evicted by apply_policy regardless of its
     // spawn_only marker. Without this, MEDIUM #4's re-application after
-    // ActorFactory registration would not remove `run_pipeline`.
+    // ActorFactory registration would not remove `bg_research`.
     assert!(
         tools.get("lateral_pipeline").is_none(),
         "apply_policy must drop a denied tool even when spawn_only"
@@ -289,7 +289,7 @@ fn apply_policy_after_mark_spawn_only_removes_denied_tool() {
 // Setup:
 //   - Register a tool, mark it spawn_only.
 //   - `apply_policy` denies it (this is the gateway/session_actor path
-//     where `run_pipeline` was registered first then policy applied).
+//     where `bg_research` was registered first then policy applied).
 //   - Script the LLM to call the now-removed tool (a stale call).
 //
 // Expected:

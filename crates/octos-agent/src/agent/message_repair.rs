@@ -501,7 +501,7 @@ pub(crate) fn synthesize_missing_tool_results(messages: &mut Vec<Message>) -> bo
 /// Truncate long tool result messages from prior conversation rounds.
 ///
 /// When a session contains multi-round conversations, old tool results
-/// (e.g. a 10,000-word research report from `run_pipeline`) dominate the
+/// (e.g. a 10,000-word research report from `bg_research`) dominate the
 /// context window and cause the LLM to re-engage with prior questions
 /// instead of focusing on the latest user message.
 ///
@@ -905,7 +905,7 @@ mod tests {
         assert_eq!(msgs[3].role, MessageRole::User);
     }
 
-    /// NEW-11 regression: when a spawn_only `run_pipeline` invocation
+    /// NEW-11 regression: when a spawn_only `bg_research` invocation
     /// kicks off in iteration N, the execution-loop intercept returns
     /// a handle Tool row adjacent to its assistant. The windowed scan
     /// must observe that adjacent Tool row and skip re-fabrication —
@@ -937,7 +937,7 @@ mod tests {
             // pairing check.
             Message {
                 role: MessageRole::Assistant,
-                content: "✗ run_pipeline failed: pipeline timed out after 1200s".to_string(),
+                content: "✗ bg_research failed: pipeline timed out after 1200s".to_string(),
                 media: vec![],
                 tool_calls: None,
                 tool_call_id: None,
@@ -1172,7 +1172,7 @@ mod tests {
             assistant_with_tools(&["call_0_120"]),
             Message {
                 role: MessageRole::Tool,
-                content: "[Tool 'run_pipeline' result was lost — no output available]".to_string(),
+                content: "[Tool 'bg_research' result was lost — no output available]".to_string(),
                 media: vec![],
                 tool_calls: None,
                 tool_call_id: Some("call_0_120".to_string()),

@@ -623,7 +623,7 @@ struct WorkflowMetadata {
     /// Coarse progress fraction in [0.0, 1.0] for this phase. Populated
     /// on every workflow_runtime-driven `mark_runtime_state` so the
     /// dashboard `runtime_detail.progress` field is non-null even for
-    /// workflows whose internal tools (e.g. `run_pipeline`) do not emit
+    /// workflows whose internal tools (e.g. `bg_research`) do not emit
     /// per-event `HarnessEvent::progress`. Increments roughly with phase
     /// transitions: 0.05 at workflow start (`research`/initial phase),
     /// 0.95 when the runtime advances to `deliver_result`. The
@@ -1093,7 +1093,7 @@ pub struct SpawnTool {
     /// both saves episodes (`AgentConfig::default().save_episodes`) and
     /// lacked an embedder — workers stored episodes UNEMBEDDED and their
     /// `build_initial_messages` recall silently skipped (the same NEW-06
-    /// class of gap `RunPipelineTool::with_embedder` closed for
+    /// class of gap `pipeline-era embedder wiring` closed for
     /// pipeline workers).
     embedder: Option<Arc<dyn octos_llm::EmbeddingProvider>>,
     /// Optional MCP-backed sub-agent used when callers pick
@@ -2050,7 +2050,7 @@ fn encode_workflow_detail(workflow: &WorkflowMetadata) -> Option<String> {
 /// pass validation — so the curve is deliberately coarse: the runtime
 /// stamps a small starting value at spawn and a near-terminal value at
 /// the deliver_result transition. Finer-grained values come from the
-/// inner tools (e.g. `deep_search` inside `run_pipeline`) emitting
+/// inner tools (e.g. `deep_search` inside `bg_research`) emitting
 /// `HarnessEvent::progress`, which `task_supervisor::apply_harness_event`
 /// folds into the same `runtime_detail.progress` field.
 ///
@@ -3523,7 +3523,7 @@ impl Tool for SpawnTool {
             // supervisor would (a) let `newest_spawned_task` mis-correlate
             // across CONCURRENT sibling spawners racing the same map,
             // (b) give the child's task-control aliases (wait/close/resume)
-            // session-wide reach, and (c) leak a child's own `run_pipeline`
+            // session-wide reach, and (c) leak a child's own `bg_research`
             // node tasks into the persisted session ledger. The trade-off:
             // grandchildren are not surfaced in the session task/list and the
             // fan-out cap is per-subtree, not global. The grandchild's RESULT
@@ -3982,7 +3982,7 @@ impl Tool for SpawnTool {
                         // (and the e2e live-progress gate) see
                         // `runtime_detail.progress == null` for the entire
                         // initial phase on workflows that drive a
-                        // `run_pipeline` graph rather than emitting their
+                        // `bg_research` graph rather than emitting their
                         // own `HarnessEvent::progress`. The deep_search
                         // built-in still overwrites this with finer values
                         // (~0.1, 0.4, 0.8, 1.0) as the pipeline cycles.

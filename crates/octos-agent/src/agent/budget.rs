@@ -18,7 +18,7 @@ pub(super) enum BudgetStop {
     /// number of iterations that elapsed and the user (or downstream
     /// tool) can recognise this as the iteration-cap path rather than
     /// the bare "Reached max iterations." stub that pre-2026-05 builds
-    /// emitted. See the silent-failure bug where a missing `run_pipeline`
+    /// emitted. See the silent-failure bug where a missing `bg_research`
     /// pipeline rejection cascaded into ~20 rounds of manual `web_fetch`
     /// until the loop hit `max_iterations` and persisted only "Reached
     /// max iterations." as the assistant reply.
@@ -47,15 +47,15 @@ impl BudgetStop {
                 // max iterations." string left users with no signal
                 // about what the agent was trying to do, whether any
                 // partial work landed, or how to retry. The hint about
-                // `run_pipeline` is intentional — the common path into
-                // this stop is a manual `web_fetch` / `web_search` loop
-                // that should have been a single `run_pipeline` call.
+                // `spawn` is intentional — the common path into this
+                // stop is a manual `web_fetch` / `web_search` loop that
+                // should have been delegated to a spawned sub-agent.
                 format!(
                     "The agent did not complete within {limit} iterations. \
                      The task may be too broad for a single turn — try \
                      breaking it into smaller steps, or, if this was a \
-                     research/multi-step task, ask the agent to use \
-                     `run_pipeline` (deep research) which delegates the \
+                     research/multi-step task, ask the agent to `spawn` a \
+                     sub-agent which delegates the \
                      work to specialised sub-agents instead of iterating \
                      one tool call at a time. If this ran as a spawned \
                      sub-agent (e.g. a repo-scale review), re-spawn it with a \
@@ -230,7 +230,7 @@ mod tests {
 
     #[test]
     fn default_tool_timeout_matches_max_so_long_running_tools_have_room() {
-        // Long-running tools like run_pipeline can legitimately take up to MAX_TOOL_TIMEOUT_SECS.
+        // Long-running tools like bg_research can legitimately take up to MAX_TOOL_TIMEOUT_SECS.
         // If DEFAULT < MAX, the LLM must remember to pass `timeout_secs` to use the headroom,
         // and forgetting silently caps the call. Keep them equal so the default is the ceiling.
         use super::super::{DEFAULT_TOOL_TIMEOUT_SECS, MAX_TOOL_TIMEOUT_SECS};
@@ -270,9 +270,9 @@ mod tests {
         // path, and no actionable next step. The fixture below pins the
         // new message contract: (1) the iteration count is named so the
         // user can tell whether the cap was 5 or 500, and (2) a hint
-        // about `run_pipeline` is included because the common path into
-        // this stop is an LLM that should have called `run_pipeline`
-        // once, didn't, and burned its iteration budget on manual
+        // about `spawn` is included because the common path into this
+        // stop is an LLM that should have delegated to a spawned
+        // sub-agent, didn't, and burned its iteration budget on manual
         // `web_fetch` / `web_search` instead.
         let msg = BudgetStop::MaxIterations { limit: 50 }.message();
         assert!(
@@ -284,9 +284,9 @@ mod tests {
             "expected the word 'iteration' in: {msg}"
         );
         assert!(
-            msg.contains("run_pipeline"),
-            "expected a hint about 'run_pipeline' (the canonical \
-             multi-step research path) in: {msg}"
+            msg.contains("spawn"),
+            "expected a hint about 'spawn' (the canonical \
+             multi-step delegation path) in: {msg}"
         );
         // Self-correcting hint: a capped SPAWNED sub-agent's parent must learn
         // it can re-spawn with a higher budget — otherwise the `max_iterations`

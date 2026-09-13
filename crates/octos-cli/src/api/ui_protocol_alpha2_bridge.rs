@@ -226,7 +226,7 @@ mod tests {
         ));
 
         // Fire a single ProgressEvent::ToolProgress, identical to what
-        // deep_research emits during a long-running spawn_only run.
+        // bg_research emits during a long-running spawn_only run.
         bridged.report(ProgressEvent::ToolProgress {
             name: "search".into(),
             tool_id: "call_42".into(),
@@ -289,7 +289,7 @@ mod tests {
         );
 
         reporter.report(ProgressEvent::ToolProgress {
-            name: "run_pipeline".into(),
+            name: "bg_research".into(),
             tool_id: "call_silent".into(),
             message: "still progressing".into(),
         });

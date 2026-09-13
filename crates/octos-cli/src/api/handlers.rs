@@ -4064,7 +4064,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_task_returns_200_when_running_task_is_cancelled() {
         let (store, _supervisor, task_id) =
-            build_task_store_with_running_task("api-cancel-1", "run_pipeline", "call-x");
+            build_task_store_with_running_task("api-cancel-1", "bg_research", "call-x");
         let state = Arc::new(AppState {
             task_query_store: Some(store),
             ..AppState::empty_for_tests()
@@ -4106,7 +4106,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_task_returns_409_when_already_terminal() {
         let supervisor = Arc::new(octos_agent::TaskSupervisor::new());
-        let task_id = supervisor.register("run_pipeline", "call-409", Some("session"));
+        let task_id = supervisor.register("bg_research", "call-409", Some("session"));
         supervisor.mark_completed(&task_id, vec![]);
 
         let store = crate::session_actor::SessionTaskQueryStore::default();
@@ -4145,7 +4145,7 @@ mod tests {
     #[tokio::test]
     async fn restart_task_from_node_returns_200_with_new_task_id() {
         let supervisor = Arc::new(octos_agent::TaskSupervisor::new());
-        let task_id = supervisor.register("run_pipeline", "call-restart", Some("session"));
+        let task_id = supervisor.register("bg_research", "call-restart", Some("session"));
         supervisor.mark_running(&task_id);
         supervisor.mark_failed(&task_id, "design phase failed".to_string());
 
@@ -4188,7 +4188,7 @@ mod tests {
         assert_eq!(original.status, octos_agent::TaskStatus::Failed);
         let new_id = json["new_task_id"].as_str().unwrap();
         let successor = supervisor.get_task(new_id).unwrap();
-        assert_eq!(successor.tool_name, "run_pipeline");
+        assert_eq!(successor.tool_name, "bg_research");
     }
 
     #[tokio::test]
@@ -4212,7 +4212,7 @@ mod tests {
     #[tokio::test]
     async fn restart_task_from_node_returns_409_for_active_task() {
         let (store, _supervisor, task_id) =
-            build_task_store_with_running_task("api-restart-409", "run_pipeline", "call-y");
+            build_task_store_with_running_task("api-restart-409", "bg_research", "call-y");
         let state = Arc::new(AppState {
             task_query_store: Some(store),
             ..AppState::empty_for_tests()

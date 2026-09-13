@@ -1077,7 +1077,7 @@ async fn test_sync_spawn_registers_child_tool_factory_before_preflight() {
     )
     .with_child_tool_factory(Arc::new(|| {
         Arc::new(StaticTestTool {
-            name: "run_pipeline",
+            name: "bg_research",
         })
     }));
 
@@ -1086,7 +1086,7 @@ async fn test_sync_spawn_registers_child_tool_factory_before_preflight() {
             "task": "Use the injected pipeline tool if needed",
             "label": "Deep research",
             "mode": "sync",
-            "allowed_tools": ["run_pipeline"]
+            "allowed_tools": ["bg_research"]
         }))
         .await
         .unwrap();
@@ -1634,7 +1634,7 @@ async fn child_session_lifecycle_dispatch_defaults_to_not_joined_without_sender(
             instruction: "Do work".to_string(),
             parent_session_key: "api:parent".to_string(),
             child_session_key: "api:parent#child-task-123".to_string(),
-            workflow_kind: Some("deep_research".to_string()),
+            workflow_kind: Some("bg_research".to_string()),
             current_phase: Some("execute".to_string()),
             output_files: Vec::new(),
             failure_action: None,

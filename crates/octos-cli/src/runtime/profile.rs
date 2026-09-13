@@ -87,8 +87,8 @@ impl Drop for ProfileRuntimeLifecycle {
 }
 
 /// Build an ISOLATED per-node pipeline provider router from the profile's
-/// `sub_providers` (e.g. the `deep_research` pipeline's `cheap`/`strong`
-/// nodes, resolved via `RunPipelineTool`'s provider router).
+/// `sub_providers` (e.g. the `bg_research` pipeline's `cheap`/`strong`
+/// nodes, resolved via the pipeline tool's provider router).
 ///
 /// Registers ONLY the declared sub-providers — never the coding primary or its
 /// fallbacks — so a research-lane failover (`FallbackProvider` +
@@ -599,9 +599,6 @@ impl ProfileRuntime {
         }
         if let Some(profile) = &self.agent_profile {
             tools.filter_by_profile(&profile.tools);
-            if !profile.tools.allows("run_pipeline") {
-                tools.retain(|name| name != "run_pipeline");
-            }
         }
     }
 
@@ -1060,25 +1057,25 @@ impl ProfileRuntime {
             tools.register(octos_agent::MemoryNoteTool::new(memory_store.clone()));
         }
 
-        // REG-7 follow-up: register `run_pipeline` at profile scope so
+        // REG-7 follow-up: register `bg_research` at profile scope so
         // the serve path (`/api/sessions/*`, UI Protocol WS) exposes
         // it just like the gateway path does at
         // `crates/octos-cli/src/session_actor.rs:2283-2305`. The serve
         // path is the one `octos serve` mounts for web clients; prior
         // to this, only the gateway (octos chat / bus channels)
-        // registered `run_pipeline`, so the LLM in serve mode received
-        // `"No tools matched"` when it tried `activate_tools(["run_pipeline"])`
+        // registered `bg_research`, so the LLM in serve mode received
+        // `"No tools matched"` when it tried `activate_tools(["bg_research"])`
         // for `深度研究X` queries (per PR #930's ACT-DIRECTLY rule).
         //
         // The original M11-D split-out at `e01a07e4` (PR #764) called
         // this gap out as a follow-up but never landed; PR #903
         // restored 6 of 10 regressions and explicitly deferred this
         // one. PR #930's prompt rewrite — which makes the LLM call
-        // `run_pipeline` directly rather than wrapping it in `spawn`
+        // `bg_research` directly rather than wrapping it in `spawn`
         // — turned the latent gap into an observable production
         // failure on the dspfac profile (May 13 2026).
         //
-        // Profile scope is sufficient: `RunPipelineTool` only captures
+        // Profile scope is sufficient: the pipeline tool only captures
         // `llm` / `memory` / `data_dir` / `plugin_dirs` / optional
         // `adaptive_router` / `provider_policy`, all of which are
         // profile-level. Per-session workspace context is threaded
@@ -1089,7 +1086,7 @@ impl ProfileRuntime {
         // tells the execution loop to background the call so the chat
         // bubble doesn't block on the long-running pipeline. The
         // message text mirrors session_actor.rs:2287-2291 verbatim.
-        // `RunPipelineTool::with_provider_router` takes
+        // `the pipeline tool's with_provider_router` takes
         // `octos_llm::ProviderRouter` (a sub-provider routing
         // registry assembled from `config.sub_providers` in the
         // gateway path). The serve path doesn't build that table
@@ -1108,17 +1105,17 @@ impl ProfileRuntime {
         // so the serve spawn/delegate wiring hands every worker the exact same
         // embed-on-save + hybrid-recall behaviour.
 
-        // NEW-07: hoist the per-instance `RunPipelineTool` builder
+        // NEW-07: hoist the per-instance the pipeline tool builder
         // into a [`crate::session_actor::PipelineToolFactory`] impl
         // so the WS / UI Protocol spawn-wiring site can hand a fresh
-        // `run_pipeline` instance to every spawned child registry
+        // `bg_research` instance to every spawned child registry
         // (mirroring the gateway path at `session_actor.rs:2744-2748`).
         // Without this, an LLM emitting
-        // `spawn(allowed_tools=["run_pipeline"])` on the WS path
+        // `spawn(allowed_tools=["bg_research"])` on the WS path
         // failed the spawn preflight
         // (`spawn.rs::ensure_subagent_tools_available`) with
-        // `"required tool(s) not available on this host: run_pipeline"`
-        // — reproduced by mini1 `deep_research` round-7 soak (binary
+        // `"required tool(s) not available on this host: bg_research"`
+        // — reproduced by mini1 `bg_research` round-7 soak (binary
         // `5cfd85f3`).
         // M11-F regression fix REG-2: restore the CronTool registration.
         //

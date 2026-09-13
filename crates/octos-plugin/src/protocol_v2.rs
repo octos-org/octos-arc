@@ -163,7 +163,7 @@ pub struct LogEvent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResultSummary {
     /// Discriminator for the summary variant. Reserved kinds documented in
-    /// `protocol-v2.md`: `deep_research`, `crawl`, `plugin:<name>:<phase>`.
+    /// `protocol-v2.md`: `bg_research`, `crawl`, `plugin:<name>:<phase>`.
     pub kind: String,
     /// One-line headline rendered in the parent's tool-call pill.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -483,7 +483,7 @@ mod tests {
     #[test]
     fn result_summary_round_trips() {
         let s = ResultSummary {
-            kind: "deep_research".to_string(),
+            kind: "bg_research".to_string(),
             headline: "5 sources answering 'foo'".to_string(),
             confidence: Some(0.78),
             sources: vec![ResultSource {
@@ -502,7 +502,7 @@ mod tests {
     #[test]
     fn result_summary_skips_empty_optional_fields() {
         let s = ResultSummary {
-            kind: "deep_research".to_string(),
+            kind: "bg_research".to_string(),
             headline: String::new(),
             confidence: None,
             sources: vec![],
@@ -510,7 +510,7 @@ mod tests {
         };
         let json = serde_json::to_string(&s).unwrap();
         // Should serialize to just the kind discriminator.
-        assert_eq!(json, r#"{"kind":"deep_research"}"#);
+        assert_eq!(json, r#"{"kind":"bg_research"}"#);
     }
 
     #[test]
@@ -521,7 +521,7 @@ mod tests {
             Value::Number(serde_json::Number::from(3)),
         );
         let s = ResultSummary {
-            kind: "deep_research".to_string(),
+            kind: "bg_research".to_string(),
             headline: "x".to_string(),
             confidence: None,
             sources: vec![],

@@ -79,7 +79,7 @@ pub struct AgentConfig {
     /// Default timeout (seconds) for a batch of ordinary interactive/fast
     /// tools (`glob`, `list_dir`, `read_file`, `grep`, ...) when the LLM does
     /// NOT request a per-call `timeout_secs`. Genuinely long-running tools
-    /// (`shell`, `spawn`, `run_pipeline`, `browser`, deep research/crawl)
+    /// (`shell`, `spawn`, `bg_research`, `browser`, deep research/crawl)
     /// keep `tool_timeout_secs` / `MAX_TOOL_TIMEOUT_SECS` instead.
     ///
     /// Default 120s; env override `OCTOS_INTERACTIVE_TOOL_TIMEOUT_SECS`
@@ -205,7 +205,7 @@ fn env_secs_u64_or(var: &str, default_secs: u64) -> u64 {
 }
 
 /// Default tool execution timeout in seconds.
-/// Matches `MAX_TOOL_TIMEOUT_SECS` so long-running tools like `run_pipeline`
+/// Matches `MAX_TOOL_TIMEOUT_SECS` so long-running tools like `bg_research`
 /// (default 1800s) are not silently capped when the LLM omits `timeout_secs`
 /// in the tool call.
 pub const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 1800;
@@ -295,7 +295,7 @@ pub struct ConversationResponse {
     pub assistant_segments: AssistantSegmentProvenance,
     /// Structured side-channel metadata surfaced by tools that ran during
     /// this conversation, keyed by `tool_call_id`. Used today for per-node
-    /// cost rows from `run_pipeline` (`{"node_costs": [...]}`); the session
+    /// cost rows from `bg_research` (`{"node_costs": [...]}`); the session
     /// actor pulls these into the SSE `done` event so the W1.G4 cost panel
     /// can render real per-node attribution. Empty when no tool opted in.
     pub tool_results: Vec<(String, serde_json::Value)>,

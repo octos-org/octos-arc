@@ -57,7 +57,7 @@ const RELEVANT_EXPERIENCES_INJECT_LIMIT: usize = 6;
 ///
 /// **Why this exists (the misdiagnostic-WARN fix).** The previous
 /// no-embedder branch logged at `warn!` and told the operator to
-/// "investigate the `RunPipelineTool::with_embedder` wiring (NEW-06)".
+/// "investigate the `pipeline-era embedder wiring` wiring (NEW-06)".
 /// That advice is wrong for the common case: on a host with no embedder
 /// configured at all (the soak hosts), `create_embedder()` returns
 /// `None` and `self.embedder` is legitimately `None` — the wiring is
@@ -676,7 +676,7 @@ mod tests {
     // ---- Fix #1: the no-embedder log must not misattribute to wiring ----
 
     /// The neutral no-embedder log line must NOT tell the operator to
-    /// investigate the `RunPipelineTool::with_embedder` wiring (the prior
+    /// investigate the `pipeline-era embedder wiring` wiring (the prior
     /// misdiagnostic WARN). The only state knowable on that path is
     /// "this agent has no embedder", which is the expected condition on
     /// an unconfigured host — not evidence of a wiring bug — so the
@@ -686,7 +686,7 @@ mod tests {
         let msg = NO_EMBEDDER_RECALL_SKIPPED_MSG.to_ascii_lowercase();
         assert!(
             !msg.contains("with_embedder"),
-            "no-embedder log must not blame RunPipelineTool::with_embedder wiring: {NO_EMBEDDER_RECALL_SKIPPED_MSG}"
+            "no-embedder log must not blame pipeline-era embedder wiring wiring: {NO_EMBEDDER_RECALL_SKIPPED_MSG}"
         );
         assert!(
             !msg.contains("new-06"),

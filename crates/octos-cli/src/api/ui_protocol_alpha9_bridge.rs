@@ -893,7 +893,7 @@ mod tests {
         );
     }
 
-    /// Multi-artefact delivery (e.g. deep_research `_report.md` +
+    /// Multi-artefact delivery (e.g. bg_research `_report.md` +
     /// `outline.json`) emits one envelope per file, with stable order
     /// matching the iteration order of the input slices. Empty entries
     /// are filtered (defensive against producers that emit a sentinel

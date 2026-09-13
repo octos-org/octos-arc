@@ -87,7 +87,7 @@ use crate::workspace_contract::{
 /// files the tool wants auto-delivered to the user, optional sub-agent
 /// token usage, a per-call `success` bit used by the serial scheduler to
 /// trigger the M8.8 error cascade, and the optional structured side-channel
-/// metadata the tool surfaced (today: per-node cost rows from `run_pipeline`).
+/// metadata the tool surfaced (today: per-node cost rows from `bg_research`).
 type ToolCallResult = (
     Message,
     Vec<std::path::PathBuf>,
@@ -126,7 +126,6 @@ fn should_auto_send_tool_files(
 /// Names verified against the registered `Tool::name()` impls:
 /// - `shell` (`tools/shell.rs`), `bash` alias
 /// - `spawn` (`tools/spawn.rs`), `spawn_agent` alias
-/// - `run_pipeline` (spawn_only pipeline tool registered via manifest)
 /// - `delegate_task` (`tools/delegate.rs`)
 /// - `check` (`tools/check.rs`): a cold `cargo check` legitimately compiles
 ///   the dependency graph; the tool enforces its own 120s child timeout,
@@ -146,7 +145,6 @@ const LONG_RUNNING_TOOLS: &[&str] = &[
     "bash",
     "spawn",
     "spawn_agent",
-    "run_pipeline",
     "delegate_task",
     "check",
 ];
@@ -807,7 +805,7 @@ impl Agent {
                 }
 
                 // Pre-flight validation: catch known-bad arguments (e.g.
-                // structurally invalid DOT for `run_pipeline`) synchronously
+                // structurally invalid DOT for `bg_research`) synchronously
                 // so the LLM gets the error as a tool_result in this
                 // iteration and can retry with corrected input. Without
                 // this, the foreground would return "started in background"
@@ -830,7 +828,7 @@ impl Agent {
                         // normal completion paths, so emit the matching
                         // ToolCompleted the ToolStarted (above) requires. Without
                         // it the TUI shows a phantom "Using <tool>" chip forever
-                        // (reproduced live on mini5: a bad run_pipeline name left
+                        // (reproduced live on mini5: a bad bg_research name left
                         // an "Orchestrating… (1 active)" chip stuck 15+ min).
                         reporter.report(ProgressEvent::ToolCompleted {
                             name: tc_name.clone(),
@@ -1030,7 +1028,7 @@ impl Agent {
                 // supervisor's per-task cancel token in the FOREGROUND (so it
                 // exists before any `supervisor.cancel(task_id)` race) and move
                 // it into the detached worker. Without this the spawn_only
-                // background task — a `run_pipeline` / `deep_research` fan-out —
+                // background task — a `bg_research` / `bg_research` fan-out —
                 // runs to completion regardless of a turn interrupt: aborting
                 // the foreground agent loop never touches this independent
                 // `tokio::spawn`, and the body never polled a cancel signal. We
@@ -1291,7 +1289,7 @@ impl Agent {
                             {
                                 SpawnTaskContractResult::Satisfied { output_files } => {
                                     // When the tool emitted real text output
-                                    // (run_pipeline synthesize summary, plugin
+                                    // (bg_research synthesize summary, plugin
                                     // structured result), surface it in the
                                     // chat bubble alongside any file
                                     // attachments — otherwise the user sees an
@@ -1363,7 +1361,7 @@ impl Agent {
                                         // text — otherwise the chat would
                                         // render TWO assistant bubbles in a
                                         // row (summary, then a redundant
-                                        // file-list notice). For run_pipeline
+                                        // file-list notice). For bg_research
                                         // the synthesize node already supplied
                                         // a user-readable executive summary
                                         // in `r.output`, so we suppress the
@@ -1768,14 +1766,14 @@ impl Agent {
                                                 // `Satisfied`-branch fix
                                                 // above: when the tool has
                                                 // produced a real textual
-                                                // result (e.g. run_pipeline's
+                                                // result (e.g. bg_research's
                                                 // synthesize node returning a
                                                 // 5K-char executive summary
                                                 // in `r.output`), surface
                                                 // that as the chat bubble
                                                 // content. Without this, the
                                                 // user gets the bare ack
-                                                // `"✓ run_pipeline completed
+                                                // `"✓ bg_research completed
                                                 // (research.md)"` while the
                                                 // summary lives only inside
                                                 // the attached file. The
@@ -2047,7 +2045,7 @@ impl Agent {
                 permissions: permissions.clone(),
                 // M8 parity (W1.A1/A3/A4): thread the shared router /
                 // summary generator / task supervisor / cost accountant
-                // through to foreground tool calls so run_pipeline (and
+                // through to foreground tool calls so bg_research (and
                 // the spawn tool) can pick them up via TOOL_CTX and
                 // hand them down to background workers.
                 subagent_output_router: subagent_output_router.clone(),
@@ -3208,13 +3206,13 @@ mod tests {
     /// path that runs unconditionally after the `match result` block.
     #[test]
     fn spawn_only_failure_arm_bubble_format_pins_pipeline_timeout_text() {
-        let bg_name = "run_pipeline";
+        let bg_name = "bg_research";
         let pipeline_output = "pipeline timed out after 1200s";
         let bubble = format!("✗ {bg_name} failed: {pipeline_output}");
         assert_eq!(
-            bubble, "✗ run_pipeline failed: pipeline timed out after 1200s",
+            bubble, "✗ bg_research failed: pipeline timed out after 1200s",
             "the bubble surface text the WS client renders on a \
-             run_pipeline timeout must match the soak-evidence \
+             spawn_only timeout must match the soak-evidence \
              reference exactly — any wording drift breaks the harness's \
              `isFinalArrived` heuristic plus any downstream regex \
              matchers in dashboards / debugging tooling"
@@ -3230,14 +3228,7 @@ mod tests {
     #[test]
     fn long_running_tools_are_recognised() {
         // The genuinely-long-running set keeps the 1800s ceiling.
-        for name in [
-            "shell",
-            "bash",
-            "spawn",
-            "spawn_agent",
-            "run_pipeline",
-            "delegate_task",
-        ] {
+        for name in ["shell", "bash", "spawn", "spawn_agent", "delegate_task"] {
             assert!(
                 is_long_running_tool(name),
                 "{name} should be classified long-running"
@@ -3388,7 +3379,7 @@ mod tests {
 
     #[test]
     fn batch_with_a_long_running_tool_keeps_the_long_ceiling() {
-        // A `shell` (or `run_pipeline`) in the batch keeps the long
+        // A `shell` (or `bg_research`) in the batch keeps the long
         // config-default timeout when the LLM omits `timeout_secs`.
         let secs = compute_batch_timeout_secs(
             &["glob", "shell"],

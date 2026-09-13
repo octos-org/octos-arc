@@ -1395,7 +1395,7 @@ mod tests {
         let session_id = SessionKey("local:demo".into());
         let task = octos_agent::BackgroundTask {
             id: "01900000-0000-7000-8000-000000000099".into(),
-            tool_name: "run_pipeline".into(),
+            tool_name: "bg_research".into(),
             tool_call_id: "call-replay".into(),
             parent_session_key: Some("local:demo".into()),
             child_session_key: None,
@@ -1435,7 +1435,7 @@ mod tests {
             updated.task_id.to_string(),
             "01900000-0000-7000-8000-000000000099"
         );
-        assert_eq!(updated.title, "run_pipeline");
+        assert_eq!(updated.title, "bg_research");
         assert_eq!(updated.tool_call_id.as_deref(), Some("call-replay"));
         assert_eq!(updated.state, UiTaskRuntimeState::Running);
         assert_eq!(updated.session_id, session_id);

@@ -265,7 +265,7 @@ pub struct DelegateTool {
     worker_config: Option<AgentConfig>,
     /// Parent's embedding provider, propagated onto child workers so
     /// their saved episodes are embedded and their episodic recall runs
-    /// (same NEW-06 propagation contract as SpawnTool / RunPipelineTool).
+    /// (same NEW-06 propagation contract as SpawnTool and the pipeline tool).
     embedder: Option<Arc<dyn octos_llm::EmbeddingProvider>>,
     /// Caller-owned context-manager factory for delegated child agents.
     child_prompt_context_manager_factory: Option<ChildPromptContextManagerFactory>,

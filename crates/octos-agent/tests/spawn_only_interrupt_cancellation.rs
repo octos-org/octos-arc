@@ -5,10 +5,10 @@
 //!
 //! Origin: the user-reported "pressing Esc / `/stop` does not break a running
 //! turn" bug. The serve `turn/interrupt` handler aborts the foreground agent
-//! loop, but a `spawn_only` tool (`run_pipeline` / `deep_research`) detaches
+//! loop, but a `spawn_only` tool (`bg_research` / `mofa_slides`) detaches
 //! into its OWN `tokio::spawn` task whose `JoinHandle` is dropped, not awaited.
 //! Aborting the agent loop never touched it, and the background body never
-//! polled the supervisor's per-task cancel token — so a hung `deep_research`
+//! polled the supervisor's per-task cancel token — so a hung `bg_research`
 //! pipeline kept running for minutes after the user asked to stop.
 //!
 //! Contract pinned here: when the supervisor cancels a running spawn_only
@@ -82,7 +82,7 @@ impl Drop for AbortSentinel {
 }
 
 /// A spawn_only tool whose `execute` blocks for a long time (simulating a hung
-/// `deep_research` pipeline). It sets `entered` once it starts and `completed`
+/// `bg_research` pipeline). It sets `entered` once it starts and `completed`
 /// only if it runs all the way to the end without being aborted. The
 /// `AbortSentinel` independently records whether the future was DROPPED
 /// mid-flight (the real-abort signal) vs. merely left running.
@@ -111,7 +111,7 @@ impl Tool for HangingTool {
             finished: false,
         };
         self.entered.store(true, Ordering::SeqCst);
-        // Simulate a long-running pipeline (deep_research fan-out). A
+        // Simulate a long-running pipeline (bg_research fan-out). A
         // cooperative cancel must DROP this future before it finishes.
         tokio::time::sleep(self.block_for).await;
         sentinel.finished = true;

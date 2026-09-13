@@ -10119,7 +10119,7 @@ fn appui_task_state_with_running_task(
 ) -> (Arc<AppState>, Arc<octos_agent::TaskSupervisor>, TaskId) {
     let supervisor = Arc::new(octos_agent::TaskSupervisor::new());
     let task_id = supervisor.register(
-        "run_pipeline",
+        "bg_research",
         "call-appui-task",
         Some(&session_id.to_string()),
     );
@@ -10210,7 +10210,7 @@ fn task_list_entry_from_value_tolerates_legacy_supervisor_json() {
     let now = Utc::now();
     let raw = json!({
         "id": "0190d000-0000-7000-8000-000000000002",
-        "tool_name": "run_pipeline",
+        "tool_name": "bg_research",
         "tool_call_id": "call-2",
         "status": "completed",
         "lifecycle_state": "ready",
@@ -10313,7 +10313,7 @@ async fn appui_task_restart_from_node_uses_relaunch_path() {
         .expect("new task id");
     assert_ne!(new_task_id, task_id.to_string());
     let successor = supervisor.get_task(new_task_id).expect("successor task");
-    assert_eq!(successor.tool_name, "run_pipeline");
+    assert_eq!(successor.tool_name, "bg_research");
 }
 
 #[test]
@@ -15838,7 +15838,7 @@ fn final_assistant_carrier_trimmed_equality_rejects_non_assistant_roles() {
 ///      stays scheduled.
 #[test]
 fn captured_final_reply_on_synth_ack_skip_picks_preamble_when_available() {
-    let ack = "Background work started for `run_pipeline`. \
+    let ack = "Background work started for `bg_research`. \
                    The final result will be delivered automatically when it is ready."
         .to_string();
     let preamble = "Starting the pipeline now. <<loop-next-in: 60s>>";
@@ -16007,8 +16007,8 @@ async fn abort_connection_turns_removes_only_matching_active_turns() {
 #[tokio::test]
 async fn interrupt_cancels_running_spawn_only_tasks_for_session() {
     // Root-cause regression: `turn/interrupt` must cancel the session's
-    // still-running spawn_only background tasks (a hung `run_pipeline` /
-    // `deep_research`), not only abort the foreground agent loop. The
+    // still-running spawn_only background tasks (a hung `bg_research` /
+    // `bg_research`), not only abort the foreground agent loop. The
     // interrupt path calls `cancel_session_spawn_only_tasks`, which fires
     // each task's supervisor cancel token so the detached worker drops its
     // in-flight pipeline future at the next poll.
@@ -16019,19 +16019,19 @@ async fn interrupt_cancels_running_spawn_only_tasks_for_session() {
     // Two live spawn_only tasks for THIS session and one for another
     // session that must survive (turns are per-session; a sibling
     // session's background work is unrelated to this interrupt).
-    let running_a = supervisor.register("run_pipeline", "tc-a", Some(&session_key));
-    let running_b = supervisor.register("deep_research", "tc-b", Some(&session_key));
+    let running_a = supervisor.register("bg_research", "tc-a", Some(&session_key));
+    let running_b = supervisor.register("bg_research", "tc-b", Some(&session_key));
     supervisor.mark_running(&running_a);
     supervisor.mark_running(&running_b);
 
     let other_session = SessionKey("api:profile/local:other".into());
     let other_running =
-        supervisor.register("run_pipeline", "tc-c", Some(&other_session.to_string()));
+        supervisor.register("bg_research", "tc-c", Some(&other_session.to_string()));
     supervisor.mark_running(&other_running);
 
     // An already-terminal task for this session: cancel must skip it
     // (idempotent — `cancel` would otherwise return `AlreadyTerminal`).
-    let done = supervisor.register("run_pipeline", "tc-d", Some(&session_key));
+    let done = supervisor.register("bg_research", "tc-d", Some(&session_key));
     supervisor.mark_completed(&done, vec![]);
 
     cancel_session_spawn_only_tasks(&supervisor, &session_id);
@@ -20196,7 +20196,7 @@ async fn session_hydrate_surfaces_replayed_envelopes_for_negotiated_client() {
         let now = spawn_ack_ts - chrono::Duration::milliseconds(10);
         session.messages.push(Message {
             role: MessageRole::User,
-            content: "kick off deep_research".into(),
+            content: "kick off bg_research".into(),
             media: vec![],
             tool_calls: None,
             tool_call_id: None,
@@ -20221,7 +20221,7 @@ async fn session_hydrate_surfaces_replayed_envelopes_for_negotiated_client() {
         // Background completion row.
         session.messages.push(Message {
             role: MessageRole::Assistant,
-            content: "deep_research delivered.".into(),
+            content: "bg_research delivered.".into(),
             media: vec!["research/_report.md".into()],
             tool_calls: None,
             tool_call_id: None,
@@ -20252,7 +20252,7 @@ async fn session_hydrate_surfaces_replayed_envelopes_for_negotiated_client() {
                 parent_turn_id: parent_turn_id.into(),
                 response_to_client_message_id: Some("cmid-user-1".into()),
                 task_id: "task_abc".into(),
-                content: "deep_research delivered.".into(),
+                content: "bg_research delivered.".into(),
                 tool_call_id: None,
                 message_id: spawn_ack_message_id.clone(),
                 source: "background".into(),
@@ -20367,7 +20367,7 @@ async fn session_hydrate_surfaces_replayed_envelopes_for_negotiated_client() {
     assert_eq!(envelopes[0]["payload"]["data"]["task_id"], "task_abc");
     assert_eq!(
         envelopes[0]["payload"]["data"]["content"],
-        "deep_research delivered."
+        "bg_research delivered."
     );
     assert_eq!(
         envelopes[0]["payload"]["data"]["media"],
@@ -23159,8 +23159,8 @@ async fn synth_ack_not_persisted_to_jsonl_when_spawn_only() {
         content: preamble_text.clone(),
         media: vec![],
         tool_calls: Some(vec![octos_core::ToolCall {
-            id: "tc-run_pipeline-1".into(),
-            name: "run_pipeline".into(),
+            id: "tc-bg_research-1".into(),
+            name: "bg_research".into(),
             arguments: serde_json::json!({}),
             metadata: None,
         }]),
@@ -23184,7 +23184,7 @@ async fn synth_ack_not_persisted_to_jsonl_when_spawn_only() {
     // synthesised ack) but we DO NOT persist it.
     let _ack_that_must_not_persist = Message {
         role: MessageRole::Assistant,
-        content: "Background work started for `run_pipeline`. \
+        content: "Background work started for `bg_research`. \
                  The final result will be delivered automatically when it is ready."
             .to_string(),
         media: vec![],
@@ -23272,7 +23272,7 @@ async fn synth_ack_not_persisted_to_jsonl_when_spawn_only() {
 /// flag whenever the CURRENT iteration contains any tool call
 /// where `tools.is_spawn_only(tc.name)` returns true — so
 /// EVERY plugin/manifest-declared spawn_only tool plus the
-/// builtin `run_pipeline` (registered with `mark_spawn_only` in
+/// builtin `bg_research` (registered with `mark_spawn_only` in
 /// `runtime/profile.rs`) flows through the same skip path.
 ///
 /// Codex P2 (round-2 review) on PR #1193 caught the first
@@ -23285,7 +23285,7 @@ async fn synth_ack_not_persisted_to_jsonl_when_spawn_only() {
 /// name (e.g. `if tc.name == "podcast_generate" { skip }`) WOULD
 /// flip this test red.
 #[test]
-fn synth_ack_not_persisted_for_run_pipeline_or_podcast_voices() {
+fn synth_ack_not_persisted_for_bg_research_or_podcast_voices() {
     // Cover every spawn_only tool name observed in the round-2
     // soak (`e2e/test-results-fleet-ux-soak/mini{1,3,5}/iter-1/`)
     // plus a couple of names that ARE marked spawn_only in the
@@ -23293,7 +23293,7 @@ fn synth_ack_not_persisted_for_run_pipeline_or_podcast_voices() {
     // synthetic generic name. A tool-name-specific regression
     // would only let one of these through.
     let tool_names = [
-        "run_pipeline",
+        "bg_research",
         "podcast_voices",
         "podcast_generate",
         "mofa_slides",
@@ -23360,7 +23360,7 @@ async fn synth_ack_skip_invariants_hold_for_each_spawn_only_tool_name() {
     // tool-name-specific regression would flip this test red on
     // every name except the hard-coded one.
     let tool_names = [
-        "run_pipeline",
+        "bg_research",
         "podcast_voices",
         "podcast_generate",
         "mofa_slides",

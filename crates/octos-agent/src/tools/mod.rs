@@ -299,7 +299,7 @@ pub struct ToolContext {
     pub llm_provider: Arc<dyn octos_llm::LlmProvider>,
     /// M8 parity (W1.A3): per-session task supervisor. Pipeline node
     /// workers register a child task in this supervisor so the admin
-    /// dashboard sees the substructure under the parent run_pipeline
+    /// dashboard sees the substructure under the parent bg_research
     /// invocation.
     pub task_supervisor: Option<Arc<crate::task_supervisor::TaskSupervisor>>,
     /// M8 parity (W1.A4): shared cost accountant. Pipeline workers
@@ -326,7 +326,7 @@ pub struct ToolContext {
     /// against the same scope.
     ///
     /// `Optional` because Phase 1 is additive — no consumer reads this
-    /// yet. Phase 2 PRs will migrate `RunPipelineTool.working_dir`,
+    /// yet. Phase 2 PRs will migrate the pipeline tool's working_dir,
     /// plugin tool `work_dir`, file tools, shell, etc. to read from
     /// this field; Phase 3 will retire bespoke validators like
     /// `api_session_workspace_dirs` in favour of
@@ -569,7 +569,7 @@ pub struct ToolResult {
     pub tokens_used: Option<TokenUsage>,
     /// Optional structured side-channel for tool-specific metadata the host
     /// wants to surface beyond plain output text. Used today for per-node
-    /// cost rows from `run_pipeline` (`{"node_costs": [...]}`); the session
+    /// cost rows from `bg_research` (`{"node_costs": [...]}`); the session
     /// actor pulls this back into the SSE `done` event so the W1.G4 cost
     /// panel can render real per-node attribution. Absent (`None`) for
     /// every tool that does not opt in — keeps legacy callers byte-identical.
@@ -697,7 +697,7 @@ pub trait Tool: Send + Sync {
     /// error as a normal tool_result `Message` (mirroring the policy-deny
     /// path) so the LLM sees the failure in its next iteration and can
     /// retry with corrected arguments. Without this, an LLM-generated bad
-    /// argument (e.g. a structurally invalid DOT graph for `run_pipeline`)
+    /// argument (e.g. a structurally invalid DOT graph for `bg_research`)
     /// fails inside the background task with no chance for the agent to
     /// re-engage — the user sees an error bubble but the LLM thinks it
     /// succeeded.

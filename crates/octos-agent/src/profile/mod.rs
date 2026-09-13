@@ -141,7 +141,7 @@ impl ProfileTools {
     /// wildcards, exact names, and the empty-allow-list pass-through —
     /// but deliberately WITHOUT the spawn_only carve-out. Once a
     /// spawn_only tool is registered it can never be evicted by the
-    /// filter, so bootstrap sites (chat/acp `run_pipeline`) consult this
+    /// filter, so bootstrap sites (chat/acp `bg_research`) consult this
     /// predicate FIRST and skip registration when the profile excludes
     /// the tool.
     pub fn allows(&self, tool_name: &str) -> bool {
@@ -707,14 +707,7 @@ mod tests {
                 // `group:fs` alias (fs named explicitly to exclude apply_patch),
                 // and the media / pipeline surfaces (restored via
                 // `--profile coding-full`).
-                for excluded in [
-                    "group:fs",
-                    "apply_patch",
-                    "group:media",
-                    "run_pipeline",
-                    "message",
-                    "cron",
-                ] {
+                for excluded in ["group:fs", "apply_patch", "group:media", "message", "cron"] {
                     assert!(
                         !tools.contains(&excluded.to_string()),
                         "coding allow list must not name {excluded}",
@@ -865,9 +858,9 @@ mod tests {
     fn spawn_only_tools_survive_filter_so_bootstrap_gates_on_allows() {
         let mut tools = ToolRegistry::new();
         tools.register(StubTool {
-            name: "run_pipeline",
+            name: "podcast_generate",
         });
-        tools.mark_spawn_only("run_pipeline", None);
+        tools.mark_spawn_only("podcast_generate", None);
         tools.register(StubTool { name: "read_file" });
 
         let coding = ProfileDefinition::builtin("coding").expect("coding");
@@ -878,15 +871,15 @@ mod tests {
         // evicted by `filter_by_profile` — they carry background-execution
         // wiring the runtime depends on once registered...
         assert!(
-            names.contains(&"run_pipeline".to_string()),
+            names.contains(&"podcast_generate".to_string()),
             "spawn_only carve-out regressed: {names:?}",
         );
         // ...which is exactly why the chat/acp bootstrap must consult
         // `ProfileTools::allows` BEFORE registering + marking a spawn_only
         // tool. The lean coding profile says no; coding-full says yes.
-        assert!(!coding.tools.allows("run_pipeline"));
+        assert!(!coding.tools.allows("podcast_generate"));
         let full = ProfileDefinition::builtin("coding-full").expect("coding-full");
-        assert!(full.tools.allows("run_pipeline"));
+        assert!(full.tools.allows("podcast_generate"));
     }
 
     #[test]

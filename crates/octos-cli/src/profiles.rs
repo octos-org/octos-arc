@@ -183,7 +183,7 @@ pub struct ProfileConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm: Option<LlmProfileConfig>,
     /// Named provider lanes for per-node pipeline routing (e.g. the
-    /// `deep_research` pipeline's `cheap`/`strong` nodes) and sub-agent model
+    /// `bg_research` pipeline's `cheap`/`strong` nodes) and sub-agent model
     /// selection. These are ISOLATED from the primary coding provider: the serve
     /// path builds a `ProviderRouter` from these entries ONLY (never the coding
     /// primary/fallbacks), so a research-lane failover trips its own circuit
@@ -276,9 +276,9 @@ pub struct ProfileConfig {
     /// NOTE on the mechanism: this goes through `ToolRegistry::apply_policy`
     /// (deny-wins, then an allow-list `retain`), NOT the built-in profile's
     /// `filter_by_profile`. The difference: `apply_policy` has NO `spawn_only`
-    /// carve-out (by design, so a `deny: ["run_pipeline"]` actually works). So
+    /// carve-out (by design, so a `deny: ["bg_research"]` actually works). So
     /// an `allow` list here also drops the per-session serve tools that are not
-    /// in it — `run_pipeline` (spawn_only), `send_file`,
+    /// in it — `bg_research` (spawn_only), `send_file`,
     /// `read_task_output`, `check_background_tasks`, `recall`,
     /// `cron`. For a lean *coding* surface that is fine; for a general serve
     /// profile prefer a **`deny`** list of the heavy web/research/media tools,
@@ -3691,7 +3691,7 @@ mod tests {
 
     #[test]
     fn config_from_profile_maps_sub_providers_for_isolated_pipeline_lanes() {
-        // The `deep_research` pipeline's `cheap`/`strong` nodes resolve through
+        // The `bg_research` pipeline's `cheap`/`strong` nodes resolve through
         // the profile's `sub_providers`; `config_from_profile` must carry them
         // into the runtime `Config`. It used to hard-zero them (`vec![]`), so
         // serve-mode pipelines could never reach an isolated research lane.

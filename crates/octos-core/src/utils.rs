@@ -189,7 +189,6 @@ pub fn tool_output_limit(tool_name: &str) -> usize {
         // contract slot kept as a defensive alias for future variants.
         "search" => 200_000,
         "deep_search" => 200_000,
-        "deep_research" => 50_000,
         "news_fetch" => 200_000,
         "spawn" => 50_000,
         _ => 50_000, // global default

@@ -1933,7 +1933,7 @@ mod tests {
         let event = HarnessEvent::progress(
             "session-1",
             "task-1",
-            Some("deep_research"),
+            Some("bg_research"),
             "fetching_sources",
             Some("Fetching source 3/12"),
             Some(0.42),
@@ -1947,11 +1947,11 @@ mod tests {
         assert_eq!(parsed.schema, HARNESS_EVENT_SCHEMA_V1);
         assert_eq!(parsed.session_id(), "session-1");
         assert_eq!(parsed.task_id(), "task-1");
-        assert_eq!(parsed.workflow(), Some("deep_research"));
+        assert_eq!(parsed.workflow(), Some("bg_research"));
         assert_eq!(parsed.phase(), Some("fetching_sources"));
 
         let detail = parsed.runtime_detail_value(None, None);
-        assert_eq!(detail["workflow_kind"], "deep_research");
+        assert_eq!(detail["workflow_kind"], "bg_research");
         assert_eq!(detail["current_phase"], "fetching_sources");
         assert_eq!(detail["progress_message"], "Fetching source 3/12");
     }
@@ -2296,7 +2296,7 @@ mod tests {
             "kind": "progress",
             "session_id": "session-1",
             "task_id": "task-1",
-            "workflow": "deep_research",
+            "workflow": "bg_research",
             "phase": "search",
             "message": "Searching",
             "progress_fraction": 0.25
@@ -2314,7 +2314,7 @@ mod tests {
             "kind": "progress",
             "session_id": "session-1",
             "task_id": "task-1",
-            "workflow": "deep_research",
+            "workflow": "bg_research",
             "phase": "fetch",
             "message": "Fetching",
             "progress": 0.4
@@ -2529,7 +2529,7 @@ mod tests {
         let oversized = HarnessEvent::progress(
             "session-1",
             "task-1",
-            Some("deep_research"),
+            Some("bg_research"),
             "fetching_sources",
             Some("x".repeat(MAX_MESSAGE_BYTES + 1)),
             Some(0.42),
@@ -2539,7 +2539,7 @@ mod tests {
         let invalid_phase = HarnessEvent::progress(
             "session-1",
             "task-1",
-            Some("deep_research"),
+            Some("bg_research"),
             "FetchSources",
             Some("ok"),
             Some(0.42),
@@ -2565,7 +2565,7 @@ mod tests {
         let wrong_task = HarnessEvent::progress(
             "api:session",
             other_task_id.clone(),
-            Some("deep_research"),
+            Some("bg_research"),
             "search",
             Some("wrong task"),
             Some(0.2),
@@ -2573,7 +2573,7 @@ mod tests {
         let wrong_session = HarnessEvent::progress(
             "api:other",
             task_id.clone(),
-            Some("deep_research"),
+            Some("bg_research"),
             "search",
             Some("wrong session"),
             Some(0.3),
@@ -2581,7 +2581,7 @@ mod tests {
         let correct = HarnessEvent::progress(
             "api:session",
             task_id.clone(),
-            Some("deep_research"),
+            Some("bg_research"),
             "fetch",
             Some("Fetching 4 pages"),
             Some(0.4),

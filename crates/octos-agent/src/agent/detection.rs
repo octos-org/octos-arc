@@ -21,8 +21,8 @@ use super::Agent;
 /// the orphan-sweep liveness gate's tool_call_id-family exemption
 /// (fix/orphan-sweep-liveness-gate) all key on it. A per-response positional
 /// index reset every turn, so two first-position inline calls to the SAME tool
-/// (e.g. `run_pipeline`) in different turns both got
-/// `call_inline_0_run_pipeline` — colliding, which could match a stale
+/// (e.g. `bg_research`) in different turns both got
+/// `call_inline_0_bg_research` — colliding, which could match a stale
 /// synth-ack or let a live task's tcid falsely exempt a dead one from orphan
 /// reaping. A process-global monotonic counter never repeats within the
 /// process; the `call_inline_` prefix keeps it disjoint from the other two
@@ -734,13 +734,13 @@ mod tests {
     /// `<invoke>` tool-call ids must be PROCESS-UNIQUE, not positional. The id
     /// previously embedded the within-response index, so the FIRST inline call
     /// to a given tool in any response was always `call_inline_0_<tool>`. Two
-    /// separate responses each calling `run_pipeline` first thus collided —
+    /// separate responses each calling `bg_research` first thus collided —
     /// breaking the tool_call_id-uniqueness invariant the supervisor's
     /// synth-ack set, the `mark_descendants_failed` pipeline cascade, and the
     /// orphan-sweep tool_call_id-family exemption all rely on.
     #[test]
     fn inline_invoke_ids_are_unique_across_responses() {
-        let body = "<invoke name=\"run_pipeline\">{\"k\":\"deep_research\"}</invoke>";
+        let body = "<invoke name=\"bg_research\">{\"k\":\"bg_research\"}</invoke>";
         let (_, calls1) = extract_inline_invokes(body);
         let (_, calls2) = extract_inline_invokes(body);
         assert_eq!(calls1.len(), 1);
@@ -751,7 +751,7 @@ mod tests {
             calls1[0].id
         );
         assert!(
-            calls1[0].id.ends_with("_run_pipeline"),
+            calls1[0].id.ends_with("_bg_research"),
             "keeps the readable tool-name suffix: {}",
             calls1[0].id
         );

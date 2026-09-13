@@ -367,7 +367,7 @@ fn generate_tools(count: usize) -> Vec<ToolSpec> {
             }),
         ),
         (
-            "run_pipeline",
+            "bg_research",
             "Execute a multi-step pipeline defined as DOT graph",
             serde_json::json!({
                 "type": "object",

@@ -1519,7 +1519,7 @@ mod tests {
         for i in 0..20 {
             store
                 .store(make_episode(
-                    "deep_research gravitational lensing JWST",
+                    "bg_research gravitational lensing JWST",
                     &format!("/foreign-cwd-{i}"),
                 ))
                 .await
@@ -1528,7 +1528,7 @@ mod tests {
         // Single local episode that also clears the floor.
         store
             .store(make_episode(
-                "deep_research gravitational lensing JWST",
+                "bg_research gravitational lensing JWST",
                 "/proj",
             ))
             .await
@@ -1537,7 +1537,7 @@ mod tests {
         let results = store
             .find_relevant_filtered(
                 Path::new("/proj"),
-                "deep_research gravitational lensing JWST",
+                "bg_research gravitational lensing JWST",
                 1,
                 Some(0.5),
             )

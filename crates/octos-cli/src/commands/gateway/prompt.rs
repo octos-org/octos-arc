@@ -136,7 +136,7 @@ mod tests {
     //!
     //! 1. Adds an `ACT-DIRECTLY for registered specialist tools` rule
     //!    BEFORE the menu, naming `news_fetch`, `get_weather`, `get_time`,
-    //!    `podcast_generate`, `voice_synthesize`, `run_pipeline`.
+    //!    `podcast_generate`, `voice_synthesize`.
     //! 2. Narrows the menu catch-all to "open-ended research/lookup
     //!    requests WITHOUT a matching specialist tool", with an explicit
     //!    counter-example pointing at the news case.
@@ -224,33 +224,6 @@ mod tests {
             PROMPT.contains("`voice_synthesize`"),
             "prompt must mention `voice_synthesize` for TTS / read-aloud \
              requests"
-        );
-    }
-
-    #[test]
-    fn should_route_deep_research_to_named_pipeline_not_inline_dot() {
-        // Contract-drift guard. When the unsafe inline-DOT path was removed
-        // (feat/pipeline-reject-inline-dot), this prompt still mandated
-        // "run_pipeline with an inline DOT graph" and "do NOT pass a pipeline
-        // name like deep_research" — the exact inverse of the new contract.
-        // A live deepseek-v4-pro mini5 soak then authored inline DOT, hit
-        // [VALIDATION FAILED], and fell back to web_search (the inline-web-tools
-        // regression). The prompt MUST name the sanctioned pipeline and MUST
-        // NOT instruct authoring inline DOT.
-        assert!(
-            PROMPT.contains("pipeline=\"deep_research\""),
-            "prompt must route deep research to the sanctioned name \
-             `pipeline=\"deep_research\"`"
-        );
-        assert!(
-            !PROMPT.contains("do NOT pass a pipeline name"),
-            "stale inline-DOT mandate must not return: telling the model to \
-             avoid the pipeline name + author inline DOT is the inverse of the \
-             current contract (inline DOT is rejected by run_pipeline)"
-        );
-        assert!(
-            !PROMPT.contains("inline DOT graph** (digraph)"),
-            "prompt must not mandate authoring an inline DOT graph — rejected"
         );
     }
 

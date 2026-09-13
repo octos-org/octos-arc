@@ -204,7 +204,7 @@ fn should_emit_memory_snapshot(context: &str) -> bool {
 const APPUI_METHOD_PROFILE_LLM_TEST: &str = "profile/llm/test";
 const APPUI_METHOD_PROFILE_LLM_FETCH_MODELS: &str = "profile/llm/fetch_models";
 /// Named provider lanes (`sub_providers`) for per-node pipeline routing (e.g.
-/// `deep_research`'s `cheap`/`strong` lanes). `/research` in the TUI reads +
+/// `bg_research`'s `cheap`/`strong` lanes). `/research` in the TUI reads +
 /// edits these; they persist to `profile.config.sub_providers` and rebuild the
 /// isolated research router at the next `ProfileRuntime` bootstrap (restart to
 /// apply for a pinned solo profile).
@@ -13387,8 +13387,8 @@ async fn handle_session_open(
     // event that lands while we're still computing replay/opened sits in the
     // broadcast buffer and gets emitted by the forwarder once we hand it off
     // (filtered to seq > replay snapshot head to avoid duplicating replay).
-    // Issue #760: without this, late background-task artifacts (deep_research
-    // result, mofa podcast, run_pipeline output, TTS audio) reach the ledger
+    // Issue #760: without this, late background-task artifacts (bg_research
+    // result, mofa podcast, bg_research output, TTS audio) reach the ledger
     // but never push to the live WS.
     let session_id_for_subscribe = params.session_id.clone();
     let live_rx = ledger.subscribe(&session_id_for_subscribe);
@@ -23019,7 +23019,7 @@ async fn run_standalone_turn(
     // like every other turn.
     // Re-apply the profile tool_policy AFTER this turn's per-session
     // channel/dispatcher tools were registered (send_file, peer_*, spawn,
-    // run_pipeline, …). The snapshot at the top of the turn (31061) inherited
+    // bg_research, …). The snapshot at the top of the turn (31061) inherited
     // the profile-BOOTSTRAP policy, but these tools are added here at
     // turn-build time and would otherwise bypass an allow/deny list — so a
     // profile `tool_policy` only constrained the bootstrap roster, not the
@@ -23057,7 +23057,7 @@ async fn run_standalone_turn(
     // are mirrored onto the M9 ledger as `tool/progress.v1` notifications.
     // Without this wrap the heartbeat publishes into the channel-only path
     // and the SPA's tool-status bubble never refreshes for long-running
-    // spawn_only tools (run_pipeline, podcast_generate, mofa_slides, ...).
+    // spawn_only tools (bg_research, podcast_generate, mofa_slides, ...).
     let inner_reporter: Arc<dyn octos_agent::ProgressReporter> =
         Arc::new(MetricsReporter::new(Arc::new(
             BoundedChannelReporter::new(progress_tx.clone(), progress_dropped.clone())
@@ -23229,7 +23229,7 @@ async fn run_standalone_turn(
     // `runtime/session.rs::bootstrap` onto this per-turn rebuilt agent.
     // Without this, every WS turn served by `Agent::new_shared` here
     // would observe `session_scope: None` and the Phase-2-A/B/C/D
-    // consumers (run_pipeline working dir, plugin work_dir + path
+    // consumers (bg_research working dir, plugin work_dir + path
     // validation, file tools' base_dir + path classification, shell +
     // spawn child CWD) would silently fall through to legacy paths —
     // re-introducing the mini5 NEW-06 contamination class on the WS
@@ -24637,7 +24637,7 @@ async fn run_standalone_turn(
         // Stop the agent so any in-flight LLM/tool await unblocks promptly.
         agent_task.abort();
         // Esc/`/stop`/`turn/interrupt` did not used to break a still-running
-        // `spawn_only` background task (e.g. `run_pipeline` / `deep_research`):
+        // `spawn_only` background task (e.g. `bg_research` / `bg_research`):
         // those detach into their OWN `tokio::spawn` whose `JoinHandle` is
         // dropped, not awaited, so `agent_task.abort()` above never touched
         // them and a hung pipeline kept running for minutes after the user
@@ -24822,7 +24822,7 @@ async fn run_standalone_turn(
     stop_failover_forwarder(failover_forwarder).await;
 
     // Issue #961: when the LLM invoked a `spawn_only` tool (e.g.
-    // `run_pipeline`), the agent's main loop emits `done`/`error` and the
+    // `bg_research`), the agent's main loop emits `done`/`error` and the
     // function would otherwise return — but the spawned background task
     // continues running for minutes, emitting `tool/progress` and
     // `task/updated` events via the supervisor's `set_on_change` hook.
@@ -25047,8 +25047,8 @@ fn build_turn_session_result_from_done(event: &Value) -> Option<TurnSessionResul
 /// Cancel every still-running `spawn_only` background task this session
 /// registered, on `turn/interrupt`.
 ///
-/// Root cause this closes: a `spawn_only` tool (`run_pipeline` /
-/// `deep_research`) detaches into its OWN `tokio::spawn` whose `JoinHandle` is
+/// Root cause this closes: a `spawn_only` tool (`bg_research` /
+/// `bg_research`) detaches into its OWN `tokio::spawn` whose `JoinHandle` is
 /// dropped, not awaited. The interrupt path's `agent_task.abort()` only stops
 /// the foreground agent loop, so a hung pipeline kept running for minutes
 /// after the user pressed Esc / `/stop`. `supervisor.cancel` fires each task's
@@ -26227,10 +26227,10 @@ fn captured_final_reply_for_synth_ack_skip(
 ///   tool call where `tools.is_spawn_only(tc.name)` returns true
 ///   (`agent/loop_runner.rs::process_message_inner`). Any
 ///   plugin/manifest-declared spawn_only tool, plus the builtin
-///   `run_pipeline` registered with `mark_spawn_only` in
+///   `bg_research` registered with `mark_spawn_only` in
 ///   `runtime/profile.rs`, flips this bit — so the gate naturally
 ///   covers `podcast_generate`, `podcast_voices` (if spawn_only-marked
-///   by its manifest), `run_pipeline`, `mofa_slides`, `bg_research`,
+///   by its manifest), `bg_research`, `mofa_slides`, `bg_research`,
 ///   and any future spawn_only tool with no change here.
 /// - `final_assistant_in_scope`: the local
 ///   `final_assistant_message(...)` returned `Some(_)` — i.e. the

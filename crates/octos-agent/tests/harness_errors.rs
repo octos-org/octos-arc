@@ -156,12 +156,7 @@ fn should_round_trip_harness_error_through_sink() {
     let sink_path: PathBuf = temp.path().to_path_buf();
 
     let classified = HarnessError::from(LlmError::from_status(400, "context_length_exceeded"));
-    let event = classified.to_event(
-        "session-ctx",
-        "task-ctx",
-        Some("deep_research"),
-        Some("plan"),
-    );
+    let event = classified.to_event("session-ctx", "task-ctx", Some("bg_research"), Some("plan"));
 
     write_event_to_sink(sink_path.display().to_string(), &event)
         .expect("write error event to sink");
@@ -178,7 +173,7 @@ fn should_round_trip_harness_error_through_sink() {
     assert_eq!(data.recovery, "compact_context");
     assert_eq!(data.session_id, "session-ctx");
     assert_eq!(data.task_id, "task-ctx");
-    assert_eq!(data.workflow.as_deref(), Some("deep_research"));
+    assert_eq!(data.workflow.as_deref(), Some("bg_research"));
     assert_eq!(data.phase.as_deref(), Some("plan"));
     assert_eq!(data.schema_version, HARNESS_ERROR_SCHEMA_VERSION);
 }

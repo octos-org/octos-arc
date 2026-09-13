@@ -998,7 +998,7 @@ impl Agent {
                 let mut files_to_send = Vec::new();
                 // Accumulate the structured side-channel metadata that tools
                 // surface during this turn (today: `node_costs` from
-                // `run_pipeline`). Threaded into every `ConversationResponse`
+                // `bg_research`). Threaded into every `ConversationResponse`
                 // built below so the session actor can plumb it into the SSE
                 // `done` event for the W1.G4 cost panel.
                 let mut tool_structured_metadata: Vec<(String, serde_json::Value)> = Vec::new();
@@ -2184,7 +2184,7 @@ impl Agent {
                             // spawn_only tool. Once flipped it stays true
                             // until the next turn begins, so on a
                             // multi-iteration turn the LLM could call
-                            // run_pipeline (spawn_only) in iter 1, get an
+                            // bg_research (spawn_only) in iter 1, get an
                             // error response, react by calling read_file
                             // (regular) in iter 2, then EndTurn in iter 3 —
                             // and the iter-2 ToolUse arm would still see

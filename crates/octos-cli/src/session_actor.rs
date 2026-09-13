@@ -160,7 +160,7 @@ impl SessionTaskQueryStore {
     /// descendant session. The walk follows each task's
     /// [`octos_agent::BackgroundTask::child_session_key`] to the next
     /// supervisor (when one is registered and still alive) so that, e.g., a
-    /// `run_pipeline` task running inside a child session shows up in its
+    /// `bg_research` task running inside a child session shows up in its
     /// parent's `/api/sessions/:id/tasks` view. Without this, UIs cannot
     /// correlate the parent's rendered tool_call_id bubble with the actual
     /// child-session task.
@@ -357,7 +357,7 @@ mod tests {
         std::fs::create_dir_all(&data_dir).unwrap();
 
         let supervisor = Arc::new(TaskSupervisor::new());
-        let task_id = supervisor.register("run_pipeline", "call-1", Some("api:session"));
+        let task_id = supervisor.register("bg_research", "call-1", Some("api:session"));
         supervisor.mark_running(&task_id);
 
         let store = SessionTaskQueryStore::default();
@@ -368,7 +368,7 @@ mod tests {
         assert_eq!(tasks.len(), 1, "the running task must be surfaced");
         let (task, returned_data_dir) = &tasks[0];
         assert_eq!(task.id, task_id);
-        assert_eq!(task.tool_name, "run_pipeline");
+        assert_eq!(task.tool_name, "bg_research");
         assert_eq!(task.tool_call_id, "call-1");
         assert_eq!(task.status, octos_agent::TaskStatus::Running);
         assert_eq!(returned_data_dir, &data_dir);
@@ -396,7 +396,7 @@ mod tests {
         let session_key = SessionKey::new("api", "session");
 
         let sup1 = Arc::new(TaskSupervisor::new());
-        let task_id = sup1.register("run_pipeline", "call-1", Some("api:session"));
+        let task_id = sup1.register("bg_research", "call-1", Some("api:session"));
         sup1.mark_running(&task_id);
         let live_token = sup1.cancel_token(&task_id);
         assert!(!live_token.is_cancelled());
@@ -431,7 +431,7 @@ mod tests {
 
         let sup1 = Arc::new(TaskSupervisor::new());
         sup1.enable_persistence(&ledger).unwrap();
-        let t1 = sup1.register("run_pipeline", "call-1", Some("api:session"));
+        let t1 = sup1.register("bg_research", "call-1", Some("api:session"));
         sup1.mark_running(&t1);
 
         // A later turn's supervisor restores T1 (same id) from the shared
@@ -476,7 +476,7 @@ mod tests {
 
         let sup1 = Arc::new(TaskSupervisor::new());
         sup1.enable_persistence(&ledger).unwrap();
-        let t1 = sup1.register("run_pipeline", "call-1", Some("api:session"));
+        let t1 = sup1.register("bg_research", "call-1", Some("api:session"));
         sup1.mark_running(&t1);
 
         let sup2 = Arc::new(TaskSupervisor::new());
@@ -516,7 +516,7 @@ mod tests {
 
         let sup1 = Arc::new(TaskSupervisor::new());
         sup1.enable_persistence(&ledger).unwrap();
-        let t1 = sup1.register("run_pipeline", "call-1", Some("api:session"));
+        let t1 = sup1.register("bg_research", "call-1", Some("api:session"));
         sup1.mark_running(&t1);
 
         let sup2 = Arc::new(TaskSupervisor::new());
@@ -585,7 +585,7 @@ mod tests {
         // Both live, both persist to the shared ledger.
         let sup1 = Arc::new(TaskSupervisor::new());
         sup1.enable_persistence(&ledger).unwrap();
-        let t1 = sup1.register("run_pipeline", "call-1", Some("api:session"));
+        let t1 = sup1.register("bg_research", "call-1", Some("api:session"));
         sup1.mark_running(&t1);
 
         let sup2 = Arc::new(TaskSupervisor::new());
@@ -749,7 +749,7 @@ mod tests {
         let event = octos_agent::HarnessEvent::progress(
             "api:session",
             task_id.clone(),
-            Some("deep_research"),
+            Some("bg_research"),
             "fetch",
             Some("Fetching 4 pages"),
             Some(0.4),
@@ -765,7 +765,7 @@ mod tests {
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0]["id"], task_id);
         assert_eq!(tasks[0]["session_key"], "api:session");
-        assert_eq!(tasks[0]["workflow_kind"], "deep_research");
+        assert_eq!(tasks[0]["workflow_kind"], "bg_research");
         assert_eq!(tasks[0]["current_phase"], "fetch");
         assert_eq!(tasks[0]["runtime_detail"]["session_id"], "api:session");
         assert_eq!(
@@ -915,10 +915,10 @@ mod tests {
     fn query_json_includes_descendant_session_tasks() {
         // Server-side bug fix: `/api/sessions/:id/tasks` previously
         // returned ONLY the parent session's tasks. When a workflow runs
-        // `run_pipeline` in a CHILD session (parent spawns child via
+        // `bg_research` in a CHILD session (parent spawns child via
         // spawn_only), that task was invisible from the parent view —
         // blocking UIs that cross-correlate the rendered tool_call_id
-        // bubble with the actual run_pipeline task.
+        // bubble with the actual bg_research task.
         //
         // After the fix, query_json walks the parent's session_key and
         // every reachable descendant (via each task's `child_session_key`)
@@ -956,14 +956,14 @@ mod tests {
             .expect("register_with_lineage derives a child key");
         let child_session_key = SessionKey(child_session_key_str.clone());
 
-        // Child session: register its own supervisor with a `run_pipeline`
+        // Child session: register its own supervisor with a `bg_research`
         // task (the workflow whose tool_call_id the UI wants to correlate
         // back from the parent).
         let child_supervisor = Arc::new(TaskSupervisor::new());
         let child_ledger = data_dir.join("child-tasks.jsonl");
         child_supervisor.enable_persistence(&child_ledger).unwrap();
         let child_task_id = child_supervisor.register_with_lineage(
-            "run_pipeline",
+            "bg_research",
             "call-pipeline",
             Some(&child_session_key_str),
             Some(child_ledger.to_str().unwrap()),
@@ -983,7 +983,7 @@ mod tests {
         assert_eq!(
             tasks.len(),
             2,
-            "parent /tasks must surface its own task plus the child's run_pipeline task"
+            "parent /tasks must surface its own task plus the child's bg_research task"
         );
 
         let parent_entry = tasks
@@ -998,8 +998,8 @@ mod tests {
 
         let child_entry = tasks
             .iter()
-            .find(|t| t["tool_name"] == "run_pipeline")
-            .expect("child run_pipeline task surfaces from parent view");
+            .find(|t| t["tool_name"] == "bg_research")
+            .expect("child bg_research task surfaces from parent view");
         assert_eq!(child_entry["session_key"], child_session_key_str);
         assert_eq!(child_entry["tool_call_id"], "call-pipeline");
     }
@@ -1007,7 +1007,7 @@ mod tests {
     #[test]
     fn query_json_walks_multi_level_descendants_without_cycling() {
         // The traversal must follow chains deeper than one level
-        // (parent -> spawn -> run_pipeline can go 3+ levels in
+        // (parent -> spawn -> bg_research can go 3+ levels in
         // research/podcast workflows) and must terminate even when a
         // child's child_session_key happens to point back to an already
         // visited session.
@@ -1056,7 +1056,7 @@ mod tests {
         let leaf_ledger = data_dir.join("leaf.jsonl");
         leaf_supervisor.enable_persistence(&leaf_ledger).unwrap();
         let leaf_id = leaf_supervisor.register_with_lineage(
-            "run_pipeline",
+            "bg_research",
             "call-l3",
             Some(&level2_child_key),
             Some(leaf_ledger.to_str().unwrap()),
@@ -1089,6 +1089,6 @@ mod tests {
             .filter_map(|t| t["tool_name"].as_str())
             .collect();
         assert!(tool_names.contains("spawn"));
-        assert!(tool_names.contains("run_pipeline"));
+        assert!(tool_names.contains("bg_research"));
     }
 }
