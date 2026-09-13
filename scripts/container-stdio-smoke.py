@@ -111,6 +111,10 @@ def main() -> int:
     env["B5_FAKE_API_KEY"] = "fixture-only"
     env["OPENAI_BASE_URL"] = f"http://127.0.0.1:{server.server_port}/v1"
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    # The container intentionally receives only the octos executable, not the
+    # sibling octos-sandbox helper. Make the auto-degrade warning observable
+    # in captured stderr instead of relying on the runner's default filter.
+    env["RUST_LOG"] = "warn"
     events: list[tuple[str, dict]] = []
     session: OctosStdioSession | None = None
     stderr = ""
@@ -156,9 +160,12 @@ def main() -> int:
 
     marker_value = marker.read_text(encoding="utf-8") if marker.is_file() else ""
     container_marker = Path("/.dockerenv").is_file()
+    octos_bin = Path(os.environ.get("B5_OCTOS_BIN", "/src/target/release/octos"))
+    helper_absent = not octos_bin.with_name("octos-sandbox").exists()
     sandbox_log = any("sandbox" in line.lower() for line in stderr.splitlines())
     report = {
         "container_marker": container_marker,
+        "helper_absent": helper_absent,
         "fixture_requests": FixtureHandler.request_count,
         "turn_ok": ok,
         "reply": text,
@@ -172,6 +179,8 @@ def main() -> int:
         raise SystemExit("B5 failed: /.dockerenv was not present")
     if not ok or marker_value != "b5-sandbox-exec":
         raise SystemExit("B5 failed: stdio turn did not execute the shell marker")
+    if not helper_absent:
+        raise SystemExit("B5 failed: octos-sandbox helper was unexpectedly present")
     if not sandbox_log:
         raise SystemExit("B5 failed: sandbox decision was not visible in stderr")
     return 0
