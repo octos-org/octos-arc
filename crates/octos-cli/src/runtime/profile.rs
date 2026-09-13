@@ -661,11 +661,7 @@ async fn build_profile_plugin_layer(
             }
             Err(error) => warn!(profile_id, %error, "plugin loading failed"),
         }
-        octos_agent::plugins::register_http_skills_on_startup(&mut tools, &reload.plugin_dirs)
-            .await
-            .wrap_err_with(|| {
-                format!("HTTP tool discovery failed during profile {profile_id} plugin reload")
-            })?;
+;
     }
 
     if !plugin_result.mcp_servers.is_empty() {

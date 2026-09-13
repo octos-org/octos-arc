@@ -1396,22 +1396,6 @@ mod tests {
     }
 
     #[test]
-    fn tool_discovery_http_parses() {
-        let json = r#"{
-            "name": "test-skill",
-            "version": "0.1.0",
-            "tool_discovery": {"type": "http", "base_url": "http://localhost:8765"}
-        }"#;
-        let manifest: PluginManifest = serde_json::from_str(json).unwrap();
-        match manifest.tool_discovery {
-            ToolDiscovery::Http { base_url } => {
-                assert_eq!(base_url, "http://localhost:8765");
-            }
-            other => panic!("expected Http, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn required_safety_tier_defaults_to_observe() {
         let json = r#"{ "name": "s", "version": "0.1.0" }"#;
         let manifest: PluginManifest = serde_json::from_str(json).unwrap();

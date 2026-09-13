@@ -18,13 +18,6 @@ pub enum ToolDiscovery {
     /// Existing behaviour — tools enumerated in `manifest.tools`.
     #[default]
     Static,
-    /// Pull the tool list from `<base_url>/tools` at install time.
-    /// SSRF: the loader will reject any `base_url` that does not resolve
-    /// to a loopback address (127.0.0.0/8 or ::1).
-    Http {
-        /// Bridge HTTP root, e.g. `http://localhost:8765`.
-        base_url: String,
-    },
 }
 
 /// The type of plugin.
