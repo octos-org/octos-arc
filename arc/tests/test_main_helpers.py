@@ -171,3 +171,19 @@ class ExtraPortsBoundTests(unittest.TestCase):
         self.assertIn("ERR_CONNECTION_REFUSED", err)
         srv.extra_ports = []
         self.assertIsNone(srv.extra_ports_bound(wait_seconds=0.1))
+
+
+class SnapshotSourcesTests(unittest.TestCase):
+    def test_should_copy_sources_but_not_node_modules(self):
+        import argparse, tempfile
+        from pathlib import Path
+        root = Path(tempfile.mkdtemp())
+        (root / "frontend/src").mkdir(parents=True); (root / "backend/node_modules/x").mkdir(parents=True)
+        (root / "frontend/src/index.html").write_text("<p>")
+        (root / "backend/server.js").write_text("x")
+        (root / "backend/node_modules/x/i.js").write_text("y")
+        flow = m.Flow(argparse.Namespace(web_port=1), root, root)
+        dest = flow.snapshot_sources("REQ-1", 0)
+        self.assertTrue((dest / "frontend/src/index.html").is_file())
+        self.assertTrue((dest / "backend/server.js").is_file())
+        self.assertFalse((dest / "backend/node_modules").exists())
