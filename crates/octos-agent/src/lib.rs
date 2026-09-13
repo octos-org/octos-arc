@@ -221,7 +221,6 @@ pub use tools::{
     ToolApprovalDecision, ToolApprovalRequest, ToolApprovalRequester, ToolConfigStore, ToolPolicy,
     ToolRegistry, ToolResult, TurnAttachmentContext, UserQuestionOutcome, UserQuestionRequest,
 
-    admin::{AdminApiContext, register_admin_api_tools},
     build_backend_from_config, build_delegated_child_policy, build_dispatch_event_payload,
     dispatch_with_metrics, install_robot_registry, keep_tool_in_slides_session,
     make_dispatcher_with_entries, record_dispatch,

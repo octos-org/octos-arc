@@ -859,7 +859,6 @@ pub mod spawn;
 pub mod write_file;
 pub mod write_grant;
 
-pub mod admin;
 pub mod check;
 pub mod check_background_tasks;
 pub mod check_workspace_contract;
