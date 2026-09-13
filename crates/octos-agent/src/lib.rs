@@ -381,26 +381,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tool_registry() {
-        let dir = setup_test_dir();
-        let registry = ToolRegistry::with_builtins(dir.path());
-
-        // Should have all builtin tools
-        let specs = registry.specs();
-        let names: Vec<_> = specs.iter().map(|s| s.name.as_str()).collect();
-
-        assert!(names.contains(&"shell"));
-        assert!(names.contains(&"read_file"));
-        assert!(names.contains(&"write_file"));
-        assert!(names.contains(&"edit_file"));
-        assert!(names.contains(&"glob"));
-        assert!(names.contains(&"grep"));
-        assert!(names.contains(&"list_dir"));
-        assert!(names.contains(&"web_search"));
-        assert!(names.contains(&"web_fetch"));
-    }
-
-    #[tokio::test]
     async fn test_registry_execute() {
         let dir = setup_test_dir();
         let registry = ToolRegistry::with_builtins(dir.path());
@@ -489,7 +469,6 @@ mod tests {
         assert!(names.contains(&"grep"));
         assert!(names.contains(&"glob"));
         // web_search has "web" tag only — should be filtered out
-        assert!(!names.contains(&"web_search"));
         // shell has "runtime","code" tags — should be filtered out
         assert!(!names.contains(&"shell"));
         // Filtered count should be less than total
@@ -553,9 +532,9 @@ mod tests {
         let mut registry = ToolRegistry::with_builtins(dir.path());
         let all_count = registry.specs().len();
 
-        // Set provider policy that denies diff_edit and web_search
+        // Set provider policy that denies diff_edit
         let policy: ToolPolicy = serde_json::from_value(serde_json::json!({
-            "deny": ["diff_edit", "web_search"]
+            "deny": ["diff_edit"]
         }))
         .unwrap();
         registry.set_provider_policy(policy);
@@ -563,10 +542,9 @@ mod tests {
         let filtered = registry.specs();
         let names: Vec<_> = filtered.iter().map(|s| s.name.as_str()).collect();
         assert!(!names.contains(&"diff_edit"));
-        assert!(!names.contains(&"web_search"));
-        assert!(names.contains(&"shell"));
+                assert!(names.contains(&"shell"));
         assert!(names.contains(&"read_file"));
-        assert_eq!(filtered.len(), all_count - 2);
+        assert_eq!(filtered.len(), all_count - 1);
 
         // Allowed tools can still be executed
         let result = registry

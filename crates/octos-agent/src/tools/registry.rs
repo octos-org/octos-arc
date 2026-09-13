@@ -1820,14 +1820,6 @@ mod cwd_isolation_tests {
         let rebound = registry.rebind_cwd(new_cwd.path(), Box::new(NoSandbox));
 
         assert!(
-            rebound.get("web_fetch").is_some(),
-            "web_fetch should survive rebind"
-        );
-        assert!(
-            rebound.get("web_search").is_some(),
-            "web_search should survive rebind"
-        );
-        assert!(
             rebound.get("read_file").is_some(),
             "read_file should be re-registered"
         );

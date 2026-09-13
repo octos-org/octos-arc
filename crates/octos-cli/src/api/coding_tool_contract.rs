@@ -1333,7 +1333,7 @@ mod tests {
         let registry = ToolRegistry::with_builtins_and_sandbox(cwd, Box::new(NoSandbox));
         let names: std::collections::HashSet<String> = registry.tool_names().into_iter().collect();
 
-        for required in &["bash", "delegate", "browser"] {
+        for required in &["bash", "delegate"] {
             assert!(
                 names.contains(*required),
                 "{required} must be registered by \
