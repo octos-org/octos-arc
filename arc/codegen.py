@@ -46,11 +46,31 @@ def parse_file_blocks(text: str) -> dict[str, str]:
     return files
 
 
+CHARSET_META = '<meta charset="utf-8">'
+
+
+def ensure_charset(text: str) -> str:
+    """Pages without a charset declaration were decoded as Latin-1 by Chromium
+    (the servers send `text/html` without charset), so every Chinese string the
+    specs look for turned into mojibake (local s5/s10: 0/6). Inject the meta tag."""
+    if re.search(r"<meta[^>]+charset", text, re.IGNORECASE):
+        return text
+    m = re.search(r"<head[^>]*>", text, re.IGNORECASE)
+    if m:
+        return text[:m.end()] + CHARSET_META + text[m.end():]
+    m = re.search(r"<html[^>]*>", text, re.IGNORECASE)
+    if m:
+        return text[:m.end()] + "<head>" + CHARSET_META + "</head>" + text[m.end():]
+    return CHARSET_META + "\n" + text
+
+
 def write_files(root: Path, files: dict[str, str]) -> list[str]:
     written = []
     for rel, body in files.items():
         dest = root / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.suffix.lower() in (".html", ".htm"):
+            body = ensure_charset(body)
         dest.write_text(body, encoding="utf-8")
         written.append(rel)
     return written

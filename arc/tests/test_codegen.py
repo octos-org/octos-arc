@@ -26,3 +26,27 @@ class ParseTests(unittest.TestCase):
             written = write_files(Path(tmp), {"backend/server.js": "x\n"})
             self.assertEqual(written, ["backend/server.js"])
             self.assertEqual((Path(tmp) / "backend" / "server.js").read_text(), "x\n")
+
+
+class EnsureCharsetTests(unittest.TestCase):
+    def test_should_inject_meta_charset_when_missing(self):
+        from codegen import ensure_charset
+        self.assertEqual(ensure_charset("<html><head><title>x</title></head><body>账户</body></html>"),
+                         '<html><head><meta charset="utf-8"><title>x</title></head><body>账户</body></html>')
+        self.assertEqual(ensure_charset("<html><body>x</body></html>"),
+                         '<html><head><meta charset="utf-8"></head><body>x</body></html>')
+        self.assertEqual(ensure_charset("<p>x</p>"), '<meta charset="utf-8">\n<p>x</p>')
+
+    def test_should_keep_existing_charset(self):
+        from codegen import ensure_charset
+        page = '<html><head><meta charset="UTF-8"></head></html>'
+        self.assertEqual(ensure_charset(page), page)
+
+    def test_should_apply_to_written_html_files(self):
+        import tempfile
+        from pathlib import Path
+        from codegen import write_files
+        root = Path(tempfile.mkdtemp())
+        write_files(root, {"frontend/src/index.html": "<html><head></head><body></body></html>", "backend/server.js": "x"})
+        self.assertIn('<meta charset="utf-8">', (root / "frontend/src/index.html").read_text())
+        self.assertEqual((root / "backend/server.js").read_text(), "x")
