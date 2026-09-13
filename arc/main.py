@@ -762,14 +762,16 @@ Rules: texts, button names, labels and test ids exactly as in the test; the init
 """
 
 CODEGEN_SIZE_SMALL = "index.html <= 20 lines, server.js <= 20 lines."
-CODEGEN_SIZE_FULL = ("As short as the tests allow; one page file per route. Visibility: an element the test expects visible "
-                     "must have a non-empty box (never an empty div/span: give meters and feedback areas text) and the "
-                     "signed-in/out header (username, 退出登录/登录 links) is rendered into the HTML by the server from the "
-                     "session cookie, not by a fetch after load; error feedback stays in the DOM with the role the test queries. "
-                     "No HTML5 validation attributes (required/pattern/minlength/type=email: the browser would block the submit "
-                     "and the test expects the server's message): validate on the server, show its message in the page. "
-                     "Session cookie: `Path=/; HttpOnly; SameSite=Lax` (no Secure, no Domain). Each navigation link "
-                     "(register, login, sign-out) appears exactly once per page.")
+CODEGEN_SIZE_FULL = ("As short as the tests allow; one page file per route. Mechanisms (follow exactly): "
+                     "(1) every page contains the literal `<!--NAV-->` and no other navigation links; the server replaces it "
+                     "with `<a href=\"/login\">登录</a> <a href=\"/register\">Register</a>` when signed out or "
+                     "`<span>USERNAME</span> <a href=\"/logout\">退出登录</a>` when signed in (read from the cookie) before sending. "
+                     "(2) Session cookie exactly `session=TOKEN; Path=/; HttpOnly; SameSite=Lax`; sign-out clears it and redirects to /. "
+                     "(3) Validation: the values produced by the test helpers (see the support file) are valid input and MUST be "
+                     "accepted (names with spaces, any document number, phone, email the helper uses); reject only the cases the "
+                     "tests assert are rejected, with the message the test expects, shown in a persistent `role=alert` element. "
+                     "(4) Elements the test expects visible have a non-empty box (never an empty div/span). "
+                     "(5) No HTML5 validation attributes (required/pattern/type=email): the server validates.")
 
 UI_CONTRACT_DATA = """\
 - Concrete example values in the requirement (seed records, option labels, sample accounts, nationalities, seat classes) are FIXTURE DATA: they must exist verbatim as <option>s / seed rows. When a control's values are described but not listed, offer a broad standard set.
