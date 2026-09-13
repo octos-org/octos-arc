@@ -109,6 +109,7 @@ def main() -> int:
     thread.start()
     env = os.environ.copy()
     env["B5_FAKE_API_KEY"] = "fixture-only"
+    env["OPENAI_BASE_URL"] = f"http://127.0.0.1:{server.server_port}/v1"
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     events: list[tuple[str, dict]] = []
     session: OctosStdioSession | None = None
@@ -123,13 +124,16 @@ def main() -> int:
                 env,
                 Path(data_dir),
                 on_event=lambda method, params: events.append((method, params)),
-            )
-            session.bootstrap_profile(
-                provider="openai",
-                model="fixture",
-                base_url=f"http://127.0.0.1:{server.server_port}/v1",
-                api_key_env="B5_FAKE_API_KEY",
-                timeout=60.0,
+                extra_args=[
+                    "--cwd",
+                    str(workspace),
+                    "--provider",
+                    "openai",
+                    "--model",
+                    "fixture",
+                    "--auth-token",
+                    "fixture-only",
+                ],
             )
             session.open(timeout=120.0)
             ok, text = session.run_turn(

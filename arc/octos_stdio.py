@@ -24,11 +24,13 @@ class OctosProtocolError(RuntimeError):
 
 class OctosStdioSession:
     def __init__(self, octos_bin: str, cwd: Path, env: dict, data_dir: Path,
-                 on_event: Callable[[str, dict], None] | None = None) -> None:
+                 on_event: Callable[[str, dict], None] | None = None,
+                 extra_args: list[str] | None = None) -> None:
         self.cwd = str(cwd)
         self.data_dir = Path(data_dir)
         self.on_event = on_event or (lambda method, params: None)
         cmd = [octos_bin, "serve", "--stdio", "--solo", "--data-dir", str(data_dir)]
+        cmd.extend(extra_args or [])
         if env.get("OCTOS_DANGER_FULL_ACCESS") == "1":
             cmd.append("--danger-full-access")
         self.proc = subprocess.Popen(
