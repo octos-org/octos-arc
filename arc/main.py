@@ -767,7 +767,9 @@ CODEGEN_SIZE_FULL = ("As short as the tests allow; one page file per route. Visi
                      "signed-in/out header (username, 退出登录/登录 links) is rendered into the HTML by the server from the "
                      "session cookie, not by a fetch after load; error feedback stays in the DOM with the role the test queries. "
                      "No HTML5 validation attributes (required/pattern/minlength/type=email: the browser would block the submit "
-                     "and the test expects the server's message): validate on the server, show its message in the page.")
+                     "and the test expects the server's message): validate on the server, show its message in the page. "
+                     "Session cookie: `Path=/; HttpOnly; SameSite=Lax` (no Secure, no Domain). Each navigation link "
+                     "(register, login, sign-out) appears exactly once per page.")
 
 UI_CONTRACT_DATA = """\
 - Concrete example values in the requirement (seed records, option labels, sample accounts, nationalities, seat classes) are FIXTURE DATA: they must exist verbatim as <option>s / seed rows. When a control's values are described but not listed, offer a broad standard set.
