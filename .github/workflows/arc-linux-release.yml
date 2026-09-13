@@ -79,7 +79,7 @@ jobs:
             --pids-limit=128 \
             -v "$GITHUB_WORKSPACE":/src \
             -w /src \
-            python:3.12-slim-bookworm \
+            python:3.13-slim-trixie \
             python3 /src/scripts/container-stdio-smoke.py
 
       - name: Upload B5 container evidence
