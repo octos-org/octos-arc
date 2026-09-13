@@ -782,12 +782,7 @@ impl ProfileActorFactoryBuilder {
                     .to_string(),
             );
             tools.inject_tool_config(self.tool_config.clone());
-            if let Some(secs) = effective_profile.config.gateway.browser_timeout_secs {
-                tools.register(
-                    octos_agent::BrowserTool::with_timeout(std::time::Duration::from_secs(secs))
-                        .with_config(self.tool_config.clone()),
-                );
-            }
+
 
             if !profile_config.mcp_servers.is_empty() {
                 match octos_agent::McpClient::start(&profile_config.mcp_servers).await {
@@ -844,27 +839,9 @@ impl ProfileActorFactoryBuilder {
                     }
                     Err(e) => warn!(profile_id, "child bot plugin loading failed: {e}"),
                 }
-;
             }
             actor_plugin_dirs = plugin_dirs.clone();
             actor_plugin_env = plugin_env;
-            let search_provider_keys = profile_search_provider_keys(&effective_profile);
-            if !search_provider_keys.is_empty() {
-                tools.register(
-                    octos_agent::WebSearchTool::new()
-                        .with_config(self.tool_config.clone())
-                        .with_provider_keys(search_provider_keys.clone()),
-                );
-            }
-
-            tools.register(
-                octos_agent::DeepSearchTool::new(profile_data_dir.join("research"))
-                    .with_provider_keys(search_provider_keys),
-            );
-            tools.register(octos_agent::SynthesizeResearchTool::new(
-                llm.clone(),
-                profile_data_dir.clone(),
-            ));
             tools.register(octos_agent::ManageSkillsTool::new(
                 profile_data_dir.join("skills"),
             ));

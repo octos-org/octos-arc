@@ -10465,52 +10465,6 @@ fn collect_owned_peer_results_filters_by_originator_and_excludes_closed() {
     );
 }
 
-/// Peer-fleet auto-synthesis — the per-master `.synthesized` stamp FILE's
-/// lifecycle: create/exists/remove round-trips, distinct masters are independent
-/// (`safe_filename`), removing an absent stamp is a no-op, and the colocated
-/// stamp file is never mistaken for a staged peer.
-///
-/// This covers the file only. What the stamp SAYS — per-peer summarized rounds
-/// since #2024 — is covered by
-/// `peer_fleet_synthesis_marks_round_trip_through_the_stamp_file`.
-#[test]
-fn peer_fleet_synthesized_stamp_file_lifecycle() {
-    let tmp = tempfile::tempdir().unwrap();
-    let peers_root = tmp.path();
-    let master_a = "tenant-a:api:master-1";
-    let master_b = "tenant-a:api:master-2";
-
-    assert!(!peer_fleet_synthesized_stamp_exists(peers_root, master_a));
-
-    // Create. Content is irrelevant here — `..._exists` gates only the
-    // ClearStamp tidy-up, which does not read the record.
-    crate::memory_consolidate::apply::atomic_write(
-        &peer_fleet_synthesized_stamp_path(peers_root, master_a),
-        "1721900000",
-    )
-    .unwrap();
-    assert!(peer_fleet_synthesized_stamp_exists(peers_root, master_a));
-    // A different master is independent.
-    assert!(!peer_fleet_synthesized_stamp_exists(peers_root, master_b));
-
-    // Remove clears it; removing an absent marker is a no-op (no panic).
-    remove_peer_fleet_synthesized_stamp(peers_root, master_a);
-    assert!(!peer_fleet_synthesized_stamp_exists(peers_root, master_a));
-    remove_peer_fleet_synthesized_stamp(peers_root, master_b);
-
-    // The colocated marker file is NOT mistaken for a staged peer.
-    crate::memory_consolidate::apply::atomic_write(
-        &peer_fleet_synthesized_stamp_path(peers_root, master_a),
-        "x",
-    )
-    .unwrap();
-    assert!(
-        collect_owned_peer_results(peers_root, master_a)
-            .expect("peers dir readable")
-            .is_empty()
-    );
-}
-
 /// Bug 2 (reset edge) — `collect_owned_peer_results` distinguishes a
 /// genuinely-EMPTY readable directory (`Some(vec![])`) from a `peers/` scan
 /// FAILURE (`None`), so a transient read error is never mistaken for a cleared
@@ -26328,7 +26282,6 @@ async fn make_m11e_profile_with_llm_and_sandbox(
         embedder: None,
         memory_inject_tokens: 2500,
         memory_refresh_enabled: false,
-        memory_refresh: None,
         tool_config,
         cron_service: None,
         runtime_lifecycle: None,

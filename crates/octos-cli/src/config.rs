@@ -770,43 +770,6 @@ pub struct MemoryRefreshConfig {
     pub max_extract_input_tokens: Option<usize>,
 }
 
-impl MemoryRefreshConfig {
-    /// Resolve the sweep knobs, applying design defaults for unset fields.
-    pub fn knobs(config: Option<&MemoryConfig>) -> crate::memory_refresh::RefreshKnobs {
-        let refresh = config.and_then(|m| m.refresh.as_ref());
-        let get = |f: fn(&MemoryRefreshConfig) -> Option<u64>, default: u64| {
-            refresh.and_then(f).unwrap_or(default)
-        };
-        crate::memory_refresh::RefreshKnobs {
-            min_idle: std::time::Duration::from_secs(60 * get(|r| r.min_idle_minutes, 30)),
-            max_session_age: std::time::Duration::from_secs(
-                60 * 60 * 24 * get(|r| r.max_session_age_days, 10),
-            ),
-            max_sessions_per_pass: refresh.and_then(|r| r.max_sessions_per_pass).unwrap_or(2),
-            max_extractions_per_day: refresh
-                .and_then(|r| r.max_extractions_per_day)
-                .unwrap_or(20),
-            max_daily_tokens: get(|r| r.max_daily_tokens, 200_000),
-            interval: std::time::Duration::from_secs(
-                60 * get(|r| r.consolidate_interval_minutes, 30),
-            ),
-            max_extract_input_tokens: refresh
-                .and_then(|r| r.max_extract_input_tokens)
-                .unwrap_or(24_000),
-            max_inject_tokens: MemoryConfig::effective_max_inject_tokens(config),
-            max_consolidations_per_day: refresh
-                .and_then(|r| r.max_consolidations_per_day)
-                .unwrap_or(12),
-            debounce: std::time::Duration::from_secs(get(|r| r.debounce_seconds, 90)),
-            max_memory_file_tokens: refresh
-                .and_then(|r| r.max_memory_file_tokens)
-                .unwrap_or(8_000),
-            unused_days: refresh.and_then(|r| r.unused_days).unwrap_or(30),
-            pending_confirm_days: refresh.and_then(|r| r.pending_confirm_days).unwrap_or(7),
-        }
-    }
-}
-
 impl MemoryConfig {
     /// Effective injection budget, applying the default when unset.
     pub fn effective_max_inject_tokens(config: Option<&MemoryConfig>) -> usize {

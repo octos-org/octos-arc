@@ -59,8 +59,6 @@ pub(crate) mod conversation_outcome;
 pub(crate) mod contracts;
 pub mod cron_tool;
 pub mod gateway_dispatcher;
-pub mod memory_consolidate;
-pub mod memory_refresh;
 #[cfg(feature = "api")]
 #[cfg_attr(not(feature = "api"), allow(dead_code))]
 pub(crate) mod obs_events;

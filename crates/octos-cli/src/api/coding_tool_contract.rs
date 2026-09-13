@@ -1349,7 +1349,7 @@ mod tests {
     /// can't render the new aliases.
     #[test]
     fn codex_naming_aliases_appear_in_contract_tools_array() {
-        let available = &["bash", "delegate", "browser"];
+        let available = &["bash", "delegate"];
         let context = ToolStatusListContext {
             available_model_tools: available,
             ..ToolStatusListContext::default_for_session("coding:test")

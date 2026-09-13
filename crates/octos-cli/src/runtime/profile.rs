@@ -498,11 +498,6 @@ pub struct ProfileRuntime {
     /// Resolved `memory.refresh.enabled` — gates the capture-policy text in
     /// the memory segment and the per-turn refresh provider.
     pub memory_refresh_enabled: bool,
-    /// Background memory-refresh sweep (extraction over idle sessions).
-    /// `Some` only when `memory.refresh.enabled` and this process won the
-    /// profile's refresh lock; dropping the runtime stops the sweep and
-    /// releases the lock.
-    pub memory_refresh: Option<Arc<crate::memory_refresh::MemoryRefreshService>>,
 
     /// Shared [`ToolConfigStore`] for the profile (per-tool
     /// runtime overrides, e.g. `deep_crawl.page_settle_ms`).
@@ -815,7 +810,6 @@ impl ProfileRuntime {
             embedder: self.embedder.clone(),
             memory_inject_tokens: self.memory_inject_tokens,
             memory_refresh_enabled: self.memory_refresh_enabled,
-            memory_refresh: self.memory_refresh.clone(),
             tool_config: self.tool_config.clone(),
             cron_service: self.cron_service.clone(),
             runtime_lifecycle: self.runtime_lifecycle.clone(),
@@ -1053,28 +1047,6 @@ impl ProfileRuntime {
         let mut tools = ToolRegistry::with_builtins_and_sandbox(data_dir, sandbox);
         tools.set_output_dir_hint(data_dir.join("skill-output").to_string_lossy().into_owned());
         tools.inject_tool_config(tool_config.clone());
-
-        // Step 10: WebSearchTool with the profile's search provider
-        // keys (when configured). The default builtin WebSearchTool
-        // is already registered by `with_builtins_and_sandbox`; we
-        // re-register here only when the profile carries explicit
-        // provider keys to override.
-        let search_keys = profile_search_provider_keys(profile);
-        if !search_keys.is_empty() {
-            tools.register(
-                octos_agent::WebSearchTool::new()
-                    .with_config(tool_config.clone())
-                    .with_provider_keys(search_keys),
-            );
-        }
-
-        // Step 11: BrowserTool with profile-configured timeout.
-        if let Some(secs) = profile.config.gateway.browser_timeout_secs {
-            tools.register(
-                octos_agent::BrowserTool::with_timeout(std::time::Duration::from_secs(secs))
-                    .with_config(tool_config.clone()),
-            );
-        }
 
         // Step 12: MCP servers from the profile's config (typically
         // empty for profile-only deployments; gateway / serve top-
@@ -1405,30 +1377,7 @@ impl ProfileRuntime {
                 .wrap_err("invalid profile approval_policy")?;
         }
 
-        // Start the background memory-refresh sweep when enabled. The
-        // flock decides ownership when serve and gateway share a profile
-        // dir; the loser just logs and skips.
-        let memory_refresh = if memory_refresh_enabled {
-            let refresh_cfg = config.memory.as_ref().and_then(|m| m.refresh.as_ref());
-            crate::memory_refresh::MemoryRefreshService::try_start(
-                data_dir.to_path_buf(),
-                memory_store.clone(),
-                crate::memory_refresh::resolve_refresh_provider(
-                    &config,
-                    llm.clone(),
-                    refresh_cfg.and_then(|r| r.extract_model.as_deref()),
-                ),
-                crate::memory_refresh::resolve_refresh_provider(
-                    &config,
-                    llm.clone(),
-                    refresh_cfg.and_then(|r| r.consolidate_model.as_deref()),
-                ),
-                crate::config::MemoryRefreshConfig::knobs(config.memory.as_ref()),
-            )
-            .map(Arc::new)
-        } else {
-            None
-        };
+
 
         Ok(Arc::new(Self {
             profile_id: profile.id.clone(),
@@ -1473,9 +1422,7 @@ impl ProfileRuntime {
             memory_refresh_enabled,
             memory,
             memory_store,
-            embedder,
-            memory_refresh,
-            tool_config,
+            embedder,            tool_config,
             cron_service: Some(cron_service),
             runtime_lifecycle,
             hook_executor,

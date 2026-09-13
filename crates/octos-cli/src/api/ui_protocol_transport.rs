@@ -14815,11 +14815,8 @@ fn write_peer_fleet_synthesis_marks(
         }
         body.push_str(&format!("{round} {slug}\n"));
     }
-    crate::memory_consolidate::apply::atomic_write(
-        &peer_fleet_synthesized_stamp_path(peers_root, master),
-        &body,
-    )
-    .map_err(|err| std::io::Error::other(err.to_string()))
+    std::fs::write(peer_fleet_synthesized_stamp_path(peers_root, master), body)
+        .map_err(|err| std::io::Error::other(err.to_string()))
 }
 
 /// Remove the per-master `.synthesized` marker (best-effort). Absent is not an
