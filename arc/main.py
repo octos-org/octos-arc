@@ -755,7 +755,7 @@ Requirement {node_id}: {description}
 
 Acceptance test (ground truth):
 {spec}
-Files: frontend/src/index.html (+ one html per further route); backend/server.js = Node http server on process.env.PORT||{port} serving ../frontend/dist files (index.html for /, <name>.html for /<name>) plus any API routes the requirement needs (in-memory state), 404 for anything else, wrapped in try/catch and process.on('uncaughtException'). Both package.json files already exist (build copies src/* to dist; start runs server.js): do not output them.
+Files: frontend/src/index.html (+ one html per further route); backend/server.js = Node http server on process.env.PORT||{port} serving ../frontend/dist files (index.html for /, <name>.html for /<name>) plus any API routes the requirement needs (in-memory state), 404 for anything else, wrapped in try/catch and process.on('uncaughtException').{ports} Both package.json files already exist (build copies src/* to dist; start runs server.js): do not output them.
 Rules: texts, button names, labels and test ids exactly as in the test; the initial state is literally in the HTML; state lives in the page script unless the requirement says it is persisted; no external resources, no CSS, no comments, no notes; Playwright strict mode: every locator in the test must match exactly one element on the served page (no duplicate links, labels, texts or ids; each label's for= resolves to its own control). {size_rule}
 """
 
@@ -1147,6 +1147,14 @@ class Flow:
             log(f"[codegen] {label}: reply contained no file blocks")
             return False, "codegen reply contained no <<<FILE>>> blocks"
         return ok, text
+
+    def codegen_ports_clause(self) -> str:
+        extra = [p for p in spec_base_ports(self.tests_dir) if p != self.web_port]
+        if not extra:
+            return ""
+        ports = ", ".join(map(str, extra))
+        return (f" The tests default to port(s) {ports} while the grader sets only PORT: ALSO listen on {ports} with a "
+                f"separate http.createServer(handler) (same handler) unless process.env.ARC_EXTRA_PORTS === '0'.")
 
     def spec_bodies(self, node_id: str | None) -> str:
         """Just the spec file contents for a node (codegen prompts)."""
@@ -1555,7 +1563,7 @@ class Flow:
         implement_timeout = min(self.node_timeout, self.implement_fraction * node_budget, deadline - time.time())
         if self.codegen_mode():
             compact = CODEGEN_PROMPT.format(node_id=node_id, description=str(node.get("description") or "").strip(),
-                                            spec=self.spec_bodies(node_id), port=self.web_port,
+                                            spec=self.spec_bodies(node_id), port=self.web_port, ports=self.codegen_ports_clause(),
                                             size_rule=CODEGEN_SIZE_SMALL if self.n_nodes <= 1 else CODEGEN_SIZE_FULL)
             if self.has_app():  # evolution: keep the existing app, return every changed file complete
                 compact = (compact.replace("Files:", "Existing app below; keep everything that works and output "

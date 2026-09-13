@@ -127,7 +127,7 @@ class FailureNormalizationTests(unittest.TestCase):
 class CodegenPromptTests(unittest.TestCase):
     def test_should_format_without_placeholder_errors_and_keep_build_command(self):
         import main as m
-        text = m.CODEGEN_PROMPT.format(node_id="REQ-1", description="S", spec="T", port=3000, size_rule="R")
+        text = m.CODEGEN_PROMPT.format(node_id="REQ-1", description="S", spec="T", port=3000, ports=" P", size_rule="R")
         self.assertIn("do not output them", text)
         self.assertIn("REQ-1", text)
 
@@ -155,3 +155,17 @@ class CodegenManifestTests(unittest.TestCase):
         fe = json.loads((root / "frontend/package.json").read_text())
         self.assertIn("mkdirSync('dist',{recursive:true})", fe["scripts"]["build"])
         self.assertEqual(json.loads((root / "backend/package.json").read_text())["scripts"]["start"], "node server.js")
+
+
+class ExtraPortsBoundTests(unittest.TestCase):
+    def test_should_report_unbound_spec_ports_in_grader_like_mode(self):
+        import tempfile
+        from pathlib import Path
+        from acceptance import AppServer
+        srv = AppServer(Path(tempfile.mkdtemp()), 3100, lambda s: None, grader_like=True, extra_ports=[3301])
+        srv.port = 3100
+        err = srv.extra_ports_bound(wait_seconds=0.3)
+        self.assertIn("3301", err)
+        self.assertIn("ERR_CONNECTION_REFUSED", err)
+        srv.extra_ports = []
+        self.assertIsNone(srv.extra_ports_bound(wait_seconds=0.1))

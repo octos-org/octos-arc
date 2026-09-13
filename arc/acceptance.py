@@ -551,6 +551,10 @@ class AppServer:
                         f"{self.log_file.read_text(errors='replace')[-1500:]}")
             if port_open(self.port):
                 err = robustness_probe(self.port, self.proc)
+                if not err and self.grader_like and self.extra_ports:
+                    # Cloud 3f0124e82113: the specs default to :3301, the grader sets only PORT,
+                    # the backend bound PORT alone -> 10x ERR_CONNECTION_REFUSED. Same handler on both.
+                    err = self.extra_ports_bound()
                 if err:
                     tail = self.tail(800)
                     self.stop()
@@ -560,6 +564,22 @@ class AppServer:
         self.stop()
         return f"backend did not bind port {self.port} within {wait_seconds}s:\n" + \
             (self.log_file.read_text(errors="replace")[-1500:] if self.log_file else "")
+
+    def extra_ports_bound(self, wait_seconds: float = 5.0) -> str | None:
+        """Grader-like start: every port the specs default to must answer too."""
+        deadline = time.time() + wait_seconds
+        missing = list(self.extra_ports)
+        while missing and time.time() < deadline:
+            missing = [p for p in missing if not port_open(p)]
+            if missing:
+                time.sleep(0.25)
+        if not missing:
+            return None
+        ports = ", ".join(map(str, missing))
+        return (f"PORT CONTRACT violated: the acceptance specs default to http://127.0.0.1:{ports} and the grader "
+                f"starts the backend with only PORT={self.port}; the backend bound PORT but not port(s) {ports} "
+                f"(every test would fail with ERR_CONNECTION_REFUSED). Serve the same handler on each of these "
+                f"ports with a separate http.createServer(handler).listen(port) unless process.env.ARC_EXTRA_PORTS === '0'.")
 
     def tail(self, n: int = 1500) -> str:
         try:
