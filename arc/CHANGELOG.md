@@ -378,3 +378,16 @@ backend/package.json now has `"type": "commonjs"` and the prompt says "CommonJS 
 
 Leaderboard (C, round 24 submission): all three tracks real-agent #1 — Smoke ¥0.0095, Evolution ¥0.0086,
 TB ¥0.251 / 9/10. Cloud for round 26: 未评测.
+
+## Platform-side issues (for the coordinator to report; not fixable in arc/)
+
+- Ticket Booking grading: 4 of 6 runs (rounds 23–26) lost one test to `Target crashed` (Playwright renderer
+  process crash) — e.g. d24f1c3d1c84, 27de75de0cd0. Container is a 512 MiB cgroup running 4 browsers.
+- Ticket Booking grading: whole-test 10 s timeouts inside the registration helper (e79b1160d081,
+  84444321d4f7) with no slow code in the app (C inspected server.js/register.html): cumulative latency of
+  page.goto + 8 fills under 4 parallel browsers.
+- Web track: 4 Chromium workers OOM under the 512 MiB limit (earlier rounds), so the track cannot be graded.
+- Feature-rate matching by test-title prefix (`REQ-1.1` vs node `REQ-1`) undercounts features.
+
+Cloud round 26 (C): TB 27de75de0cd0 9/10 ¥0.609 (first pass 0/6 → 13 requests; the loss was `Target crashed`);
+no ESM startup crash. Leaderboard keeps the round-24 submission (¥0.251, 9/10).
