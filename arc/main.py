@@ -1513,6 +1513,7 @@ class Flow:
     def node_cycle(self, node: dict, ordered: list[dict], index: int, total: int) -> None:
         node_id = str(node.get("id"))
         specs = list(self.spec_map.get(node_id) or [])
+        self.codegen_blocked = False  # a previous node's fallback to tool mode must not leak into this one
         nodes_left = total - index + 1
         node_budget = min(self.node_budget_cap, max(240, self.remaining() / nodes_left))
         deadline = time.time() + node_budget

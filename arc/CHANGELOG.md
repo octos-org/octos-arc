@@ -306,3 +306,26 @@ sources of the existing app.
 | Evolution (counter) | 1 req, 1,843 / 708 = 2,551 | 1 req, 798 / 379 = 1,177, 1/1 (grade 2/2) |
 
 Cloud: 未评测 (C to rerun). Expected ≈ ¥0.0045 per Smoke task at the observed ¥4.6/M rate.
+
+## Round 23 — Evolution without snapshots; Ticket Booking as two codegen requests
+
+- Evolution probe: the platform template carries no `.arc/traceability` records, so cloud runs
+  (9a1b1944a73e, 6232223b9863) re-implemented both nodes in tool mode (~18k tokens, ¥0.034–0.043).
+  Now each candidate node's specs are run against the existing app first (no LLM); fully passing
+  nodes are unchanged and the probe result doubles as their regression run.
+- Codegen for small trees (≤2 nodes, `OCTOS_ARC_CODEGEN_MAX_NODES`) regardless of how many nodes are
+  left; spec bodies include the `support/` helpers; size caps only for one-node tasks.
+- One codegen repair (failure digest + quoted html/js) before falling back to tool mode
+  (`OCTOS_ARC_CODEGEN_REPAIRS`, default 1); the codegen rewrite prompt is the lean one.
+- The harness writes both package.json manifests (model never outputs them); Playwright strict-mode
+  rule (no duplicate links/labels/ids) in the codegen prompt.
+- `codegen_blocked` reset per node (REQ-2 no longer inherits REQ-1's tool-mode fallback).
+
+| task (local) | before | after |
+|---|---|---|
+| Evolution counter, template without traceability | 2 nodes in tool mode (cloud ¥0.034) | probe + 1 request 812/379 = 1,191 tokens, 2/2, grade 100 |
+| Ticket Booking | 13–33 requests, 8–9/10 on cloud | 2 requests, 12,701 prompt / 21,686 completion (15,045 reasoning), 10/10, grade 100 |
+| Counter | 960 tokens | 504/368 = 872 tokens, 1/1, grade 100 |
+
+Ticket Booking with `OCTOS_ARC_REASONING=none`: first pass 2/6, 11 requests, 122k prompt — kept
+`auto` (low for multi-node). Cloud: 未评测.
