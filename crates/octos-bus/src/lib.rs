@@ -12,6 +12,7 @@ pub mod heartbeat;
 pub mod markdown_html;
 pub mod media;
 pub mod resume_policy;
+#[cfg(feature = "api")]
 pub mod api_channel;
 pub mod session;
 
