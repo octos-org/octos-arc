@@ -1600,6 +1600,22 @@ class Flow:
         elif verdict is False:
             self.mark("test_failed", node_id, "acceptance specs still failing after repair rounds")
 
+    def already_passing_nodes(self, node_ids: list[str]) -> set[str]:
+        """Evolution probe: run each candidate node's specs against the existing app
+        (no LLM); nodes that fully pass need no implementation turn."""
+        out: set[str] = set()
+        for node_id in node_ids:
+            specs = list(self.spec_map.get(node_id) or [])
+            if not specs:
+                continue
+            summary = self.run_specs(specs)
+            if summary.error or not summary.total:
+                continue
+            log(f"[acceptance] probe {node_id}: {summary.passed}/{summary.total} against the existing app")
+            if summary.all_passed:
+                out.add(node_id)
+        return out
+
     def regression_cycle(self, node: dict) -> None:
         """Evolution: unchanged node — carry the design/impl over, re-run its specs."""
         node_id = str(node.get("id"))
@@ -1779,6 +1795,14 @@ class Flow:
 
             self.runtime.git.ensure_repo()
             self.setup_playwright()
+            if self.evolution and self.runner is not None:
+                # The platform's template app carries no traceability records, so
+                # fingerprints cannot tell what is new. A node whose specs already
+                # pass against the existing app is unchanged — no LLM turn for it.
+                unchanged |= self.already_passing_nodes([n for n in node_ids if n not in unchanged])
+                self.nodes_to_implement = len([n for n in node_ids if n not in unchanged])
+                log(f"[flow] evolution mode after probing the existing app: unchanged {sorted(unchanged)}, "
+                    f"to implement {[i for i in node_ids if i not in unchanged]}")
 
             octos_bin = find_octos()
             log(f"[octos] binary {octos_bin}")

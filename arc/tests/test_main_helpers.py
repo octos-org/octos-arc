@@ -1,6 +1,7 @@
 import unittest
 
 from main import OctosDriver, describe_node, folder_descendants, inline_sources, inline_spec_text, unchanged_node_ids
+import main as m
 
 
 def node(node_id, description, deps=()):
@@ -129,3 +130,16 @@ class CodegenPromptTests(unittest.TestCase):
         text = m.CODEGEN_PROMPT.format(node_id="REQ-1", description="S", spec="T", port=3000, size_rule="R")
         self.assertIn("mkdirSync('dist',{recursive:true})", text)
         self.assertIn("REQ-1", text)
+
+
+class AlreadyPassingProbeTests(unittest.TestCase):
+    def test_should_mark_only_fully_passing_nodes_as_unchanged(self):
+        import argparse
+        from pathlib import Path
+        from types import SimpleNamespace
+        flow = m.Flow(argparse.Namespace(web_port=1), Path("."), Path("."))
+        flow.spec_map = {"REQ-1": ["a.spec.ts"], "REQ-2": ["b.spec.ts"], "REQ-3": [], None: []}
+        results = {"a.spec.ts": SimpleNamespace(error=None, total=2, passed=2, all_passed=True),
+                   "b.spec.ts": SimpleNamespace(error=None, total=2, passed=1, all_passed=False)}
+        flow.run_specs = lambda specs, **kw: results[specs[0]]
+        self.assertEqual(flow.already_passing_nodes(["REQ-1", "REQ-2", "REQ-3"]), {"REQ-1"})
