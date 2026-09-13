@@ -290,3 +290,19 @@ OCTOS_FINAL_REPAIR_ROUNDS=2     # 全套并行验收后的修复轮
 **第七版（Smoke 冲榜首）**：刷榜后 Evolution、TB 已是真实 agent 第 1，Smoke 第 2（榜首 ¥0.02 / 10 s，我们 ¥0.04 / 23 s）。单节点题改用紧凑 codegen 提示词（3.3k 字符，含内嵌 spec）并要求最小输出（无 CSS/注释/README，package.json 只含 name+scripts，一行 build 脚本，≤15 行内联脚本）。本机（arc.11 内核）：Counter 1 请求 / 1,327 prompt / 546 completion / 10 s / 1/1；Dice 1 请求 / 1,229 / 562 / 9 s / 1/1；Evolution 1 请求 / 1,843 / 708 / 2/2。相对第六版（2.2k / 1.4k）输出 Token 降 60%。另：TB 云端 060a3debc450 失败的 spec 第 71 行是密码强度指示器 outerHTML 轮询，不是 reload；契约加入「实时指示器在 input 事件里同步更新自身元素」。
 
 **云端 v10（main@251eea6d，C 串行，2026-09-13）**：smoke--counter 1868c77f82cb ¥0.0091 / 36 s、c6c35b0d1eab ¥0.0089 / 19 s；smoke--dice c967b38e457c ¥0.0092 / 20 s、db8980f15123 ¥0.0091 / 46 s——每次 1 请求、1.9k token、无修复轮；提交 854d34e7067d 合计 ≈¥0.018，低于真实 agent 榜首 ¥0.02。TB 709788da672e 8/10、¥0.514 / 352 s（上一版 9/10、¥0.365；失败文本待 C 回传）。
+
+## Round 22 — codegen prompt diet (Smoke ≤ ¥0.007 target)
+
+Codegen turns (single-node tasks and Evolution) now send a one-line system prompt (the proxy
+replaces the kernel worker prompt, which is all tool guidance and useless in a tool-less turn),
+a leaner user prompt (requirement description + spec file body only; no scenarios, no
+tests-dir paragraph, fixed file layout, 20-line caps), and Evolution quotes only the html/js
+sources of the existing app.
+
+| task | before (round 21, local) | after (local) |
+|---|---|---|
+| Counter | 1 req, 1,396 prompt / 561 completion = 1,957 | 1 req, 508 / 452 = 960, 1/1 |
+| Dice | 1 req, ~1.9k | 1 req, 435 / 417 = 852, 1/1 |
+| Evolution (counter) | 1 req, 1,843 / 708 = 2,551 | 1 req, 798 / 379 = 1,177, 1/1 (grade 2/2) |
+
+Cloud: 未评测 (C to rerun). Expected ≈ ¥0.0045 per Smoke task at the observed ¥4.6/M rate.
