@@ -54,6 +54,7 @@ jobs:
           cargo build --locked --release -p octos-cli --features "$FEATURES"
           cargo build --locked --release -p octos-sandbox
           cargo build --locked --release $SKILL_CRATES
+          cargo build --locked --release -p voice
 
       - name: Create bundle
         run: |
