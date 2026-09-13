@@ -1558,14 +1558,37 @@ mod tag_lookup_tests {
     use super::*;
 
     #[test]
-    fn should_return_app_reply_tool_names_when_tag_matches() {
-        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+    fn should_return_tagged_tool_names_when_tag_matches() {
+        struct TaggedStubTool;
+
+        #[async_trait::async_trait]
+        impl Tool for TaggedStubTool {
+            fn name(&self) -> &str {
+                "tagged_stub"
+            }
+            fn description(&self) -> &str {
+                "test-only tagged tool"
+            }
+            fn tags(&self) -> &[&str] {
+                &["gateway", "app_reply"]
+            }
+            fn input_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(&self, _args: &serde_json::Value) -> Result<ToolResult> {
+                Ok(ToolResult {
+                    output: String::new(),
+                    success: true,
+                    ..Default::default()
+                })
+            }
+        }
+
         let mut registry = ToolRegistry::new();
-        registry.register(crate::tools::SendAppCardTool::new(tx.clone()));
-        registry.register(crate::tools::MessageTool::new(tx));
+        registry.register(TaggedStubTool);
 
         let names = registry.names_with_tag("app_reply");
-        assert_eq!(names, vec!["send_app_card".to_string()]);
+        assert_eq!(names, vec!["tagged_stub".to_string()]);
         assert!(registry.names_with_tag("no_such_tag").is_empty());
     }
 }

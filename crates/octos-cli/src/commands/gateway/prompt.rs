@@ -118,31 +118,6 @@ pub async fn build_system_prompt(
     }
 }
 
-/// Extract a string value from channel settings JSON, with a default fallback.
-#[cfg(any(
-    feature = "telegram",
-    feature = "discord",
-    feature = "dingtalk",
-    feature = "slack",
-    feature = "whatsapp",
-    feature = "email",
-    feature = "feishu",
-    feature = "twilio",
-    feature = "wecom",
-    feature = "wecom-bot",
-    feature = "line",
-    feature = "matrix",
-    feature = "qq-bot",
-    feature = "wechat"
-))]
-pub fn settings_str(settings: &serde_json::Value, key: &str, default: &str) -> String {
-    settings
-        .get(key)
-        .and_then(|v| v.as_str())
-        .unwrap_or(default)
-        .to_string()
-}
-
 #[cfg(test)]
 mod tests {
     //! Regression tests for the compiled-in gateway system prompt.

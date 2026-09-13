@@ -18,8 +18,8 @@ use octos_agent::tools::spawn::{
     ChildSessionLifecyclePayload,
 };
 use octos_agent::tools::{
-    BackgroundResultKind, BackgroundResultPayload, CheckBackgroundTasksTool, MessageTool,
-    ReadTaskOutputTool, SendFileTool, SpawnTool, ToolPolicy, ToolRegistry,
+    BackgroundResultKind, BackgroundResultPayload, CheckBackgroundTasksTool, ReadTaskOutputTool,
+    SendFileTool, SpawnTool, ToolPolicy, ToolRegistry,
 };
 use octos_agent::{
     Agent, AgentConfig, AgentVerifierConfig, ApprovalDecision, ApprovalRequestEnvelope,
@@ -2647,7 +2647,7 @@ pub struct ActorFactory {
 /// policies, etc.) so the actor module doesn't depend on all those details.
 pub trait ToolRegistryFactory: Send + Sync {
     /// Create a base ToolRegistry with all non-session-specific tools registered.
-    /// The caller will add session-specific tools (MessageTool, SendFileTool, etc.)
+    /// The caller will add session-specific tools (SendFileTool, etc.)
     fn create_base_registry(&self) -> ToolRegistry;
 
     /// Create a base ToolRegistry with cwd-bound tools re-bound to a per-user
@@ -2805,9 +2805,6 @@ impl ActorFactory {
         // forwarding task checks whether this session is active and either
         // delivers immediately or buffers for later.
         let (proxy_tx, proxy_rx) = mpsc::channel::<OutboundMessage>(64);
-
-        // Per-session tools — they write to proxy_tx, not the real out_tx
-        let message_tool = MessageTool::with_context(proxy_tx.clone(), channel, chat_id);
 
         // Build per-user workspace directory for file isolation.
         // Each user's tools are restricted to their own workspace via
@@ -3112,13 +3109,7 @@ impl ActorFactory {
         tools.register(octos_agent::tools::RecallTool::new(Arc::new(
             SessionToolOutputLedger(context_manager.clone()),
         )));
-        tools.register(message_tool);
         tools.register(send_file_tool);
-        tools.register(octos_agent::SendAppCardTool::with_context(
-            proxy_tx.clone(),
-            channel,
-            chat_id,
-        ));
 
         // M8 Runtime Parity W2.B1: build the same M8.7 summary generator
         // that goes onto the parent Agent so the child workers we spawn

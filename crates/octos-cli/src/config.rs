@@ -1260,21 +1260,6 @@ pub struct MonitorConfig {
     /// Max auto-restart attempts before giving up (default: 3).
     #[serde(default = "monitor_default_max_restart")]
     pub max_restart_attempts: u32,
-    /// Env var name for Telegram bot token used for alerts.
-    #[serde(default)]
-    pub telegram_token_env: Option<String>,
-    /// Telegram chat IDs to send alerts to.
-    #[serde(default)]
-    pub telegram_alert_chat_ids: Vec<i64>,
-    /// Env var name for Feishu app ID.
-    #[serde(default)]
-    pub feishu_app_id_env: Option<String>,
-    /// Env var name for Feishu app secret.
-    #[serde(default)]
-    pub feishu_app_secret_env: Option<String>,
-    /// Feishu user IDs to send alerts to.
-    #[serde(default)]
-    pub feishu_alert_user_ids: Vec<String>,
 }
 
 #[cfg(feature = "api")]

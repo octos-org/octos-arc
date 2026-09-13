@@ -125,11 +125,7 @@ keyring = { workspace = true, features = ["windows-native"] }
 # chat, ACP and serve use one OUP dispatcher. Minimal library builds can opt
 # out, but never silently fall back to independent chat/ACP agent loops.
 default = ["api"]
-# `matrix` is pulled in unconditionally: the `/api/my/profile/matrix/*`
-# handlers and the admin dashboard's Matrix invite UI reference matrix-only
-# types (e.g. `octos_bus::MatrixInviteStore`), so the API cannot compile
-# without it.
-api = ["dep:axum", "dep:tower-http", "dep:tokio-util", "dep:futures", "dep:tokio-tungstenite", "dep:rustls", "dep:rustls-native-certs", "dep:rust-embed", "dep:metrics-exporter-prometheus", "dep:lettre", "dep:rand", "dep:sysinfo", "dep:subtle", "octos-bus/api"]
+api = ["dep:axum", "dep:tower-http", "dep:tokio-util", "dep:futures", "dep:tokio-tungstenite", "dep:rustls", "dep:rustls-native-certs", "dep:rust-embed", "dep:metrics-exporter-prometheus", "dep:lettre", "dep:rand", "dep:sysinfo", "dep:subtle"]
 admin-bot = ["dep:teloxide", "dep:futures", "api"]
 git = ["octos-agent/git"]
 ast = ["octos-agent/ast"]

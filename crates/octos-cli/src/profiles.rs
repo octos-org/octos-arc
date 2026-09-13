@@ -278,8 +278,8 @@ pub struct ProfileConfig {
     /// `filter_by_profile`. The difference: `apply_policy` has NO `spawn_only`
     /// carve-out (by design, so a `deny: ["run_pipeline"]` actually works). So
     /// an `allow` list here also drops the per-session serve tools that are not
-    /// in it — `run_pipeline` (spawn_only), `message`, `send_file`,
-    /// `send_app_card`, `read_task_output`, `check_background_tasks`, `recall`,
+    /// in it — `run_pipeline` (spawn_only), `send_file`,
+    /// `read_task_output`, `check_background_tasks`, `recall`,
     /// `cron`. For a lean *coding* surface that is fine; for a general serve
     /// profile prefer a **`deny`** list of the heavy web/research/media tools,
     /// which keeps every coding + channel + task tool intact.

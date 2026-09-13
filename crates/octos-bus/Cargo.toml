@@ -4,17 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Message bus, channels, and session management for octos gateway"
-
-[features]
-default = []
-api = ["axum"]
+description = "Session persistence and cron scheduling for the octos chat runtime"
 
 [dependencies]
 octos-core = { workspace = true }
 tokio = { workspace = true }
 lru = { workspace = true }
-async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
@@ -24,27 +19,11 @@ cron = { workspace = true }
 eyre = { workspace = true }
 tracing = { workspace = true }
 metrics = { workspace = true }
-futures = { workspace = true }
-reqwest = { workspace = true }
-serde_yml = { workspace = true }
-subtle = { workspace = true }
-sha2 = { workspace = true }
-aes = { workspace = true }
-cbc = { workspace = true }
 base64 = { workspace = true }
-
-# Optional: channel integrations
-axum = { workspace = true, optional = true }
-
-# Optional: email / wecom-bot TLS
-rustls = { workspace = true, optional = true }
 
 [lints]
 workspace = true
 
 [dev-dependencies]
-axum = { workspace = true }
-tokio-test = { workspace = true }
+futures = { workspace = true }
 tempfile = { workspace = true }
-tower = { workspace = true }
-proptest = { workspace = true }
