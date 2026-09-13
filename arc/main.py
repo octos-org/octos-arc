@@ -765,7 +765,9 @@ CODEGEN_SIZE_SMALL = "index.html <= 20 lines, server.js <= 20 lines."
 CODEGEN_SIZE_FULL = ("As short as the tests allow; one page file per route. Visibility: an element the test expects visible "
                      "must have a non-empty box (never an empty div/span: give meters and feedback areas text) and the "
                      "signed-in/out header (username, 退出登录/登录 links) is rendered into the HTML by the server from the "
-                     "session cookie, not by a fetch after load; error feedback stays in the DOM with the role the test queries.")
+                     "session cookie, not by a fetch after load; error feedback stays in the DOM with the role the test queries. "
+                     "No HTML5 validation attributes (required/pattern/minlength/type=email: the browser would block the submit "
+                     "and the test expects the server's message): validate on the server, show its message in the page.")
 
 UI_CONTRACT_DATA = """\
 - Concrete example values in the requirement (seed records, option labels, sample accounts, nationalities, seat classes) are FIXTURE DATA: they must exist verbatim as <option>s / seed rows. When a control's values are described but not listed, offer a broad standard set.
