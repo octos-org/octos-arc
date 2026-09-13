@@ -83,6 +83,8 @@ pub use lane::{
     default_lane_candidates, resolve_lane_for_topic, topic_prefix, with_lane_context,
 };
 pub use local_context_probe::LocalContextProbe;
+pub mod middleware;
+pub use middleware::MiddlewareStack;
 pub use provider::{
     ApiStyle, DEFAULT_EMBEDDING_CONNECT_TIMEOUT_SECS, DEFAULT_EMBEDDING_TIMEOUT_SECS,
     DEFAULT_LLM_CONNECT_TIMEOUT_SECS, DEFAULT_LLM_TIMEOUT_SECS, LaneFailure, LlmProvider,
