@@ -1420,7 +1420,7 @@ class Flow:
                     "the served HTML instead of after a fetch), and check the spec's locator against your markup.")
                 log(f"[flow] {node_id}: identical failure twice; switching repairs to tool mode")
             previous_failures = normalized
-            if attempt >= int(os.environ.get("OCTOS_ARC_CODEGEN_REPAIRS", "1")) and passed < summary.total \
+            if attempt >= int(os.environ.get("OCTOS_ARC_CODEGEN_REPAIRS", "2")) and passed < summary.total \
                     and self.codegen_mode():
                 # Cloud 91aaecaf31af / 5747e6bcf530: repeated codegen repairs re-emit the same files.
                 # One cheap codegen repair (failure digest + quoted sources) is allowed; then tools.

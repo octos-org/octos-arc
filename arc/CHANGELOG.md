@@ -316,7 +316,7 @@ Cloud: 未评测 (C to rerun). Expected ≈ ¥0.0045 per Smoke task at the obser
 - Codegen for small trees (≤2 nodes, `OCTOS_ARC_CODEGEN_MAX_NODES`) regardless of how many nodes are
   left; spec bodies include the `support/` helpers; size caps only for one-node tasks.
 - One codegen repair (failure digest + quoted html/js) before falling back to tool mode
-  (`OCTOS_ARC_CODEGEN_REPAIRS`, default 1); the codegen rewrite prompt is the lean one.
+  (`OCTOS_ARC_CODEGEN_REPAIRS`, default 2 since round 28); the codegen rewrite prompt is the lean one.
 - The harness writes both package.json manifests (model never outputs them); Playwright strict-mode
   rule (no duplicate links/labels/ids) in the codegen prompt.
 - `codegen_blocked` reset per node (REQ-2 no longer inherits REQ-1's tool-mode fallback).
