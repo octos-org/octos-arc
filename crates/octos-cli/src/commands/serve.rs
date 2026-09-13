@@ -10,9 +10,7 @@ use eyre::{Result, WrapErr};
 use octos_bus::SessionManager;
 
 use super::Executable;
-use crate::api::{
-    AppState, build_router, init_metrics, resolve_appui_allowed_origins,
-};
+use crate::api::{AppState, build_router, init_metrics, resolve_appui_allowed_origins};
 use crate::config::Config;
 
 // #1857 PR 5a — fleet worker pool defaults (serve boot). Conservative single-
@@ -418,7 +416,6 @@ impl ServeCommand {
             }
         };
 
-
         // M11-F: per-profile LLM, credentials, tool registry, plugins,
         // MCP, and memory are built once per profile below via
         // `ProfileRuntime::bootstrap`. There is no longer a
@@ -644,7 +641,6 @@ impl ServeCommand {
         let user_store = Arc::new(
             crate::user_store::UserStore::open(&data_dir).wrap_err("failed to open user store")?,
         );
-;
 
         // Spawn auth cleanup task if auth manager is active
         // Pre-create watchdog/alerts flags for both Monitor and AppState
@@ -1293,5 +1289,4 @@ mod tests {
 
         assert_eq!(config.mode, crate::config::DeploymentMode::Cloud);
     }
-
 }

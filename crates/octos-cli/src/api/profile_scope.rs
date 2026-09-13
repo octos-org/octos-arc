@@ -3,17 +3,17 @@
 //! machinery was removed with the multi-tenant dashboard; authorization is
 //! local-trust (all local callers are admin-equivalent).
 
-use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
 use axum::Extension;
 use axum::Json;
+use axum::extract::{Path, State};
+use axum::http::{HeaderMap, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use super::AppState;
 use super::handlers::response_path_for_profile_file;
 use super::router::AuthIdentity;
-use super::AppState;
 
 pub const ADMIN_PROFILE_ID: &str = "admin";
 
@@ -26,8 +26,6 @@ pub(crate) fn is_top_level_profile_id(state: &AppState, profile_id: &str) -> boo
         .unwrap_or(false)
 }
 
-
-
 pub(crate) fn scoped_host_allows_profile_id(
     _state: &AppState,
     scoped_profile_id: &str,
@@ -35,8 +33,6 @@ pub(crate) fn scoped_host_allows_profile_id(
 ) -> bool {
     scoped_profile_id == candidate_profile_id
 }
-
-
 
 fn request_host(headers: &HeaderMap) -> Option<String> {
     let raw = headers
@@ -53,8 +49,6 @@ fn request_host(headers: &HeaderMap) -> Option<String> {
     }
     Some(strip_port_from_host(&raw).to_string())
 }
-
-
 
 /// The endpoint URL a scanning client should dial: original authority
 /// (host AND port — `request_host` strips the port, which would send
@@ -90,8 +84,6 @@ fn request_endpoint(headers: &HeaderMap) -> Option<String> {
     Some(format!("{scheme}://{authority}"))
 }
 
-
-
 fn strip_port_from_host(host: &str) -> &str {
     if let Some(stripped) = host.strip_prefix('[') {
         return stripped.split(']').next().unwrap_or(host);
@@ -104,13 +96,9 @@ fn strip_port_from_host(host: &str) -> &str {
     host
 }
 
-
-
 fn is_local_request_host(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
-
-
 
 fn resolve_routed_profile_id_candidate(state: &AppState, candidate: &str) -> Option<String> {
     let candidate = candidate.trim();
@@ -129,8 +117,6 @@ fn resolve_routed_profile_id_candidate(state: &AppState, candidate: &str) -> Opt
         .and_then(|store| store.resolve_routable_profile_id(candidate).ok().flatten())
 }
 
-
-
 fn resolve_trusted_local_profile_id_candidate(state: &AppState, candidate: &str) -> Option<String> {
     let candidate = candidate.trim();
     if candidate.is_empty() {
@@ -146,8 +132,6 @@ fn resolve_trusted_local_profile_id_candidate(state: &AppState, candidate: &str)
     })
 }
 
-
-
 fn host_scoped_profile_id(state: &AppState, headers: &HeaderMap) -> Option<String> {
     let host = request_host(headers)?;
     if is_local_request_host(&host) {
@@ -157,8 +141,6 @@ fn host_scoped_profile_id(state: &AppState, headers: &HeaderMap) -> Option<Strin
     let candidate = host.split('.').next()?;
     resolve_routed_profile_id_candidate(state, candidate)
 }
-
-
 
 fn trusted_auth_scope_profile_id(state: &AppState, headers: &HeaderMap) -> Option<String> {
     if let Some(profile_id) = host_scoped_profile_id(state, headers) {
@@ -177,8 +159,6 @@ fn trusted_auth_scope_profile_id(state: &AppState, headers: &HeaderMap) -> Optio
         .filter(|value| !value.is_empty())
         .and_then(|candidate| resolve_trusted_local_profile_id_candidate(state, candidate))
 }
-
-
 
 /// Return `true` iff the authenticated identity is allowed to act as the
 /// given profile id for `/api/my/*` endpoints.
@@ -217,8 +197,6 @@ pub(crate) fn is_authorized_for_profile(
     }
 }
 
-
-
 /// Resolve the full profile for "my" endpoints.
 fn resolve_my_profile(
     identity: &AuthIdentity,
@@ -231,8 +209,6 @@ fn resolve_my_profile(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)
 }
-
-
 
 /// Ensure an admin profile exists in the store, creating one if needed.
 fn ensure_admin_profile(ps: &crate::profiles::ProfileStore) -> Result<(), StatusCode> {
@@ -255,8 +231,6 @@ fn ensure_admin_profile(ps: &crate::profiles::ProfileStore) -> Result<(), Status
         StatusCode::INTERNAL_SERVER_ERROR
     })
 }
-
-
 
 /// Resolve the profile ID for "my" endpoints.
 ///
@@ -299,8 +273,6 @@ pub(crate) fn resolve_my_profile_id(
         AuthIdentity::User { id, .. } => Ok(id.clone()),
     }
 }
-
-
 
 // Helper for `ui_protocol_transport::handle_content_list` (M12 Phase D-5).
 // The REST route `GET /api/my/content` was retired in this milestone; the
@@ -382,8 +354,6 @@ pub(super) async fn my_content(
     }))
 }
 
-
-
 // Helper for `ui_protocol_transport::handle_content_delete` (M12 Phase D-5).
 // The REST route `DELETE /api/my/content/{id}` was retired in this
 // milestone; the function survives as a private helper backing the
@@ -425,8 +395,6 @@ pub(super) async fn delete_my_content(
     }))
 }
 
-
-
 // Helper for `ui_protocol_transport::handle_content_bulk_delete` (M12 Phase D-5).
 // The REST route `POST /api/my/content/bulk-delete` was retired in this
 // milestone; the function survives as a private helper backing the
@@ -464,14 +432,10 @@ pub(super) async fn bulk_delete_my_content(
     }))
 }
 
-
-
 #[derive(Deserialize)]
 pub(super) struct BulkDeleteRequest {
     pub ids: Vec<String>,
 }
-
-
 
 #[derive(Serialize)]
 pub struct ActionResponse {
@@ -479,8 +443,6 @@ pub struct ActionResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 }
-
-
 
 /// Truncate a string to `max_len` chars (used by panel surfaces).
 pub(crate) fn truncate_str(s: &str, max_len: usize) -> String {

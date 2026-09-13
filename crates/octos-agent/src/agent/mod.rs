@@ -18,7 +18,6 @@ pub mod memory;
 mod message_repair;
 mod prompt_cache;
 pub mod prompt_segments;
-pub mod realtime;
 pub mod rich_output;
 mod streaming;
 pub mod turn_failure;
@@ -44,7 +43,6 @@ use crate::tools::ToolRegistry;
 use verifier::AgentVerifierConfig;
 
 pub use message_repair::normalize_tool_call_id;
-pub use realtime::RealtimeController;
 pub use turn_state::PartialTurnUsage;
 
 tokio::task_local! {
@@ -404,10 +402,6 @@ pub struct Agent {
     pub(super) session_limits: Option<SessionLimits>,
     /// Mutable usage tracked against `session_limits`.
     pub(super) session_usage: std::sync::Mutex<SessionUsage>,
-    /// Optional realtime controller (heartbeat + sensor context injector) for
-    /// robotics operators. Absent by default -- the agent loop behaves exactly
-    /// as before when this is `None`.
-    pub(super) realtime: Option<Arc<RealtimeController>>,
     /// Harness M6.3 compaction contract. When present, the loop performs
     /// preflight compaction before the first LLM call, swaps the summarizer
     /// flavour declared in policy, prunes old tool results to typed
@@ -640,7 +634,6 @@ impl Agent {
             loop_detected_recently: Arc::new(AtomicBool::new(false)),
             session_limits: None,
             session_usage: std::sync::Mutex::new(SessionUsage::default()),
-            realtime: None,
             compaction_runner: None,
             compaction_workspace: None,
             persistent_retry_state: None,
@@ -726,7 +719,6 @@ impl Agent {
             loop_detected_recently: Arc::new(AtomicBool::new(false)),
             session_limits: None,
             session_usage: std::sync::Mutex::new(SessionUsage::default()),
-            realtime: None,
             compaction_runner: None,
             compaction_workspace: None,
             persistent_retry_state: None,
@@ -1243,20 +1235,6 @@ impl Agent {
         self
     }
 
-    /// Attach a realtime controller so each loop iteration beats the
-    /// heartbeat, checks for stalls, and (if configured) injects a bounded
-    /// sensor summary into the system prompt.
-    pub fn with_realtime(mut self, controller: Arc<RealtimeController>) -> Self {
-        self.realtime = Some(controller);
-        self
-    }
-
-    /// Returns the attached realtime controller, if any. Tools and tests
-    /// reach through this to inspect heartbeat state.
-    pub fn realtime_controller(&self) -> Option<Arc<RealtimeController>> {
-        self.realtime.clone()
-    }
-
     /// Wire the declarative compaction runner (harness M6.3). Optional — when
     /// absent, the loop falls back to the legacy extractive trim path.
     pub fn with_compaction_runner(
@@ -1334,49 +1312,6 @@ impl Agent {
         &self,
     ) -> Option<Arc<crate::compaction_tiered::TieredCompactionRunner>> {
         self.tiered_compaction.clone()
-    }
-
-    /// Beat the heartbeat once (if a realtime controller is attached) and
-    /// return `Err(AgentError::HeartbeatStalled)` when the controller reports
-    /// a stall. Callers invoke this at the top of each loop iteration so that
-    /// a hung LLM or I/O call can surface a typed error instead of silently
-    /// freezing the robot.
-    pub(super) fn beat_heartbeat(&self, iteration: u32) -> eyre::Result<()> {
-        use realtime::{AgentError, HeartbeatState};
-
-        let Some(controller) = self.realtime.as_ref() else {
-            return Ok(());
-        };
-        if !controller.config().enabled {
-            return Ok(());
-        }
-        match controller.beat_and_check() {
-            HeartbeatState::Alive => Ok(()),
-            HeartbeatState::Stalled => {
-                let timeout_ms = controller.config().heartbeat_timeout_ms;
-                tracing::warn!(
-                    iteration,
-                    timeout_ms,
-                    "realtime heartbeat stalled, aborting iteration"
-                );
-                Err(eyre::Report::new(AgentError::HeartbeatStalled {
-                    iteration,
-                    timeout_ms,
-                }))
-            }
-        }
-    }
-
-    /// Render the sensor context summary (bounded by the configured token
-    /// budget) for the current system prompt, if the realtime controller is
-    /// enabled and has an injector. Returns `None` when realtime is off, the
-    /// injector has no data, or the source is empty.
-    pub(super) fn realtime_sensor_summary(&self) -> Option<String> {
-        let controller = self.realtime.as_ref()?;
-        if !controller.config().enabled {
-            return None;
-        }
-        controller.sensor_summary()
     }
 
     /// Update the session ID in the hook context (call before each message).

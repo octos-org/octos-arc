@@ -721,8 +721,6 @@ mod tests {
         axum::Extension(AuthIdentity::User { id: id.into() })
     }
 
-
-
     use crate::profiles::ProfileStore;
     use crate::user_store::UserRole;
 

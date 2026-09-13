@@ -608,7 +608,6 @@ pub(crate) fn relocate_keychain_backed_secrets(
     Ok(())
 }
 
-
 pub async fn list_sessions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -5021,5 +5020,4 @@ mod tests {
             .expect_err("no identity AND no header must fail");
         assert_eq!(err.status(), StatusCode::BAD_REQUEST);
     }
-
 }

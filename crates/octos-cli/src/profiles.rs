@@ -237,9 +237,6 @@ pub struct ProfileConfig {
     /// Search provider contract for product-level search behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search: Option<SearchConfig>,
-    /// Deep crawl defaults for deterministic page settling and output bounds.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub deep_crawl: Option<DeepCrawlConfig>,
     /// First-party app configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub apps: Option<AppsConfig>,
@@ -247,9 +244,6 @@ pub struct ProfileConfig {
     /// because Home is a web-owned surface; typed validation lives in octos-web.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub home: Option<serde_json::Value>,
-    /// Robotics runtime configuration (heartbeat + sensor context injection).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub robot: Option<RobotConfig>,
     /// Channel configurations.
     #[serde(default)]
     pub channels: Vec<ChannelCredentials>,
@@ -503,16 +497,6 @@ pub struct SearchProviderConfig {
     pub api_key_env: Option<String>,
 }
 
-/// Deep crawl defaults persisted in the profile contract.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DeepCrawlConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub page_settle_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_output_chars: Option<usize>,
-}
-
 /// First-party app configuration persisted in the profile contract.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -528,20 +512,6 @@ pub struct SlidesAppConfig {
     pub template_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_theme: Option<String>,
-}
-
-/// Robotics-oriented profile configuration.
-///
-/// Currently only hosts the realtime heartbeat + sensor injection contract
-/// added in RP05. Future robotics knobs (e-stop topic, safe-hold behavior)
-/// should nest under this struct so a single `robot: null` patch can strip
-/// all robotics integration in one step.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RobotConfig {
-    /// Realtime heartbeat + sensor-context-injection contract.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub realtime: Option<octos_agent::RealtimeConfig>,
 }
 
 /// Current schema version for [`SwarmSupervisorConfig`].
@@ -751,13 +721,9 @@ pub struct ProfileConfigPatch {
     #[serde(default)]
     pub search: PatchField<SearchConfig>,
     #[serde(default)]
-    pub deep_crawl: PatchField<DeepCrawlConfig>,
-    #[serde(default)]
     pub apps: PatchField<AppsConfig>,
     #[serde(default)]
     pub home: PatchField<serde_json::Value>,
-    #[serde(default)]
-    pub robot: PatchField<RobotConfig>,
     #[serde(default)]
     pub channels: Option<Vec<ChannelCredentials>>,
     #[serde(default)]
@@ -1055,11 +1021,6 @@ impl ProfileConfig {
             PatchField::Clear => self.search = None,
             PatchField::Value(search) => self.search = Some(search),
         }
-        match patch.deep_crawl {
-            PatchField::Absent => {}
-            PatchField::Clear => self.deep_crawl = None,
-            PatchField::Value(deep_crawl) => self.deep_crawl = Some(deep_crawl),
-        }
         match patch.apps {
             PatchField::Absent => {}
             PatchField::Clear => self.apps = None,
@@ -1069,11 +1030,6 @@ impl ProfileConfig {
             PatchField::Absent => {}
             PatchField::Clear => self.home = None,
             PatchField::Value(home) => self.home = Some(home),
-        }
-        match patch.robot {
-            PatchField::Absent => {}
-            PatchField::Clear => self.robot = None,
-            PatchField::Value(robot) => self.robot = Some(robot),
         }
         if let Some(channels) = patch.channels {
             self.channels = channels;
@@ -2430,9 +2386,6 @@ pub fn resolve_effective_profile(
     if ec.search.is_none() {
         ec.search = pc.search.clone();
     }
-    if ec.deep_crawl.is_none() {
-        ec.deep_crawl = pc.deep_crawl.clone();
-    }
     if ec.apps.is_none() {
         ec.apps = pc.apps.clone();
     }
@@ -3192,7 +3145,7 @@ pub enum ProfileChange {
 
 /// Compare two profiles and classify the nature of changes.
 ///
-/// Restart-required: llm, review, search, deep_crawl, apps, robot, channels,
+/// Restart-required: llm, review, search, apps, channels,
 ///   env_vars, email, hooks, sandbox, routing, credential_pool, plugins.
 /// Hot-reloadable: system_prompt, max_history, max_iterations,
 ///   max_concurrent_sessions, browser_timeout_secs.
@@ -3215,14 +3168,8 @@ pub fn diff_profiles(old: &UserProfile, new: &UserProfile) -> ProfileChange {
     if oc.search != nc.search {
         restart_fields.push("search".into());
     }
-    if oc.deep_crawl != nc.deep_crawl {
-        restart_fields.push("deep_crawl".into());
-    }
     if oc.apps != nc.apps {
         restart_fields.push("apps".into());
-    }
-    if oc.robot != nc.robot {
-        restart_fields.push("robot".into());
     }
     if oc.channels != nc.channels {
         restart_fields.push("channels".into());
@@ -4215,10 +4162,6 @@ mod tests {
                 )]
                 .into(),
             }),
-            deep_crawl: PatchField::Value(DeepCrawlConfig {
-                page_settle_ms: Some(1500),
-                max_output_chars: Some(32_000),
-            }),
             apps: PatchField::Value(AppsConfig {
                 slides: Some(SlidesAppConfig {
                     template_dir: Some("/opt/octos/slides".into()),
@@ -4237,13 +4180,6 @@ mod tests {
                 .and_then(|search| search.providers.get("tavily"))
                 .and_then(|provider| provider.api_key_env.as_deref()),
             Some("TAVILY_API_KEY")
-        );
-        assert_eq!(
-            config
-                .deep_crawl
-                .as_ref()
-                .and_then(|cfg| cfg.page_settle_ms),
-            Some(1500)
         );
         assert_eq!(
             config
@@ -5155,10 +5091,6 @@ mod tests {
                     )]
                     .into(),
                 }),
-                deep_crawl: Some(DeepCrawlConfig {
-                    page_settle_ms: Some(1500),
-                    max_output_chars: Some(32_000),
-                }),
                 apps: Some(AppsConfig {
                     slides: Some(SlidesAppConfig {
                         template_dir: Some("/opt/octos/slides".into()),
@@ -5189,10 +5121,6 @@ mod tests {
             )]
             .into(),
         });
-        changed.config.deep_crawl = Some(DeepCrawlConfig {
-            page_settle_ms: Some(2500),
-            max_output_chars: Some(48_000),
-        });
         changed.config.apps = Some(AppsConfig {
             slides: Some(SlidesAppConfig {
                 template_dir: Some("/srv/slides".into()),
@@ -5212,49 +5140,7 @@ mod tests {
             ProfileChange::RestartRequired(fields) => {
                 assert!(fields.contains(&"review".into()));
                 assert!(fields.contains(&"search".into()));
-                assert!(fields.contains(&"deep_crawl".into()));
                 assert!(fields.contains(&"apps".into()));
-            }
-            other => panic!("expected RestartRequired, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn should_classify_realtime_config_as_restart_required() {
-        let base = UserProfile {
-            id: "rp05-diff".into(),
-            name: "RP05".into(),
-            enabled: false,
-            data_dir: None,
-            parent_id: None,
-            public_subdomain: None,
-            config: ProfileConfig {
-                robot: Some(RobotConfig {
-                    realtime: Some(octos_agent::RealtimeConfig {
-                        enabled: false,
-                        ..Default::default()
-                    }),
-                }),
-                ..Default::default()
-            },
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
-        let mut changed = base.clone();
-        changed.config.robot = Some(RobotConfig {
-            realtime: Some(octos_agent::RealtimeConfig {
-                enabled: true,
-                heartbeat_timeout_ms: 250,
-                ..Default::default()
-            }),
-        });
-
-        match diff_profiles(&base, &changed) {
-            ProfileChange::RestartRequired(fields) => {
-                assert!(
-                    fields.iter().any(|f| f == "robot"),
-                    "expected `robot` in restart-required fields, got {fields:?}",
-                );
             }
             other => panic!("expected RestartRequired, got {other:?}"),
         }
@@ -5695,10 +5581,6 @@ mod tests {
                     )]
                     .into(),
                 }),
-                deep_crawl: Some(DeepCrawlConfig {
-                    page_settle_ms: Some(2_000),
-                    max_output_chars: Some(12_000),
-                }),
                 apps: Some(AppsConfig {
                     slides: Some(SlidesAppConfig {
                         template_dir: Some("/srv/slides".into()),
@@ -5734,14 +5616,6 @@ mod tests {
                 .and_then(|search| search.providers.get("brave"))
                 .and_then(|provider| provider.api_key_env.as_deref()),
             Some("BRAVE_API_KEY")
-        );
-        assert_eq!(
-            effective
-                .config
-                .deep_crawl
-                .as_ref()
-                .and_then(|cfg| cfg.max_output_chars),
-            Some(12_000)
         );
         assert_eq!(
             effective
@@ -5848,19 +5722,6 @@ mod tests {
         .expect_err("unknown gateway field should be rejected");
 
         assert!(err.to_string().contains("unknown field `bogus`"));
-    }
-
-    #[test]
-    fn test_profile_config_patch_rejects_unknown_deep_crawl_field() {
-        let err = serde_json::from_value::<ProfileConfigPatch>(serde_json::json!({
-            "deep_crawl": {
-                "page_settle_ms": 1000,
-                "max_chrs": 32000
-            }
-        }))
-        .expect_err("unknown deep_crawl field should be rejected");
-
-        assert!(err.to_string().contains("unknown field `max_chrs`"));
     }
 
     #[test]

@@ -1328,7 +1328,10 @@ mod tests {
 
     #[test]
     fn container_detection_does_not_guess_from_an_unrelated_cgroup() {
-        assert!(!container_markers_present(false, "0::/user.slice/user-1000.slice"));
+        assert!(!container_markers_present(
+            false,
+            "0::/user.slice/user-1000.slice"
+        ));
     }
 
     #[test]

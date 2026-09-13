@@ -337,7 +337,6 @@ fn on_terminal_fires_once_for_success_and_failure_with_correct_payload() {
     );
 }
 
-
 #[test]
 fn terminal_updates_refresh_summary_and_artifact_count() {
     let supervisor = TaskSupervisor::new();
@@ -741,7 +740,6 @@ fn should_ignore_unknown_task_ids() {
     supervisor.mark_failed("nonexistent", "err".to_string());
     assert_eq!(supervisor.task_count(), 0);
 }
-
 
 #[test]
 fn should_restore_completed_and_failed_truth_after_restart() {
@@ -4211,9 +4209,6 @@ async fn foreground_armed_guard_survives_sweep_before_worker_polls() {
 
 // ── issue #2035: liveness for CLIENT-DRIVEN work (peers) ──────────────
 
-
-
-
 // ── issue #1920: heartbeat-based in-flight orphan reaper ──────────────
 
 /// A live worker whose heartbeat (`updated_at`) has been silent for longer
@@ -4677,14 +4672,9 @@ fn snapshot_excluding_child_supervisor_inherits_registration_observers() {
     assert!(child.get_task(&id).is_some());
 }
 
-
 // #21 (round-4, codex #17 B3) — the peer-task registration's FIRST durable
 // row carries the workspace stamp; a failed first write rolls the whole
 // registration back.
-
-
-
-
 
 // #34: equal timestamps are possible for a registered task and its terminal
 // snapshot. Exercise durable merges with exact timestamps, without sleeps.

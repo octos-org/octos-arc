@@ -692,7 +692,7 @@ mod tests {
                     "group:runtime",
                     "group:search",
                     "group:memory",
-                    "spawn",
+                    "group:sessions",
                     "ask_user_question",
                     "check",
                     "update_plan",
@@ -705,16 +705,13 @@ mod tests {
                 }
                 // Dropped or never-included: `apply_patch` (redundant), the
                 // `group:fs` alias (fs named explicitly to exclude apply_patch),
-                // and the heavy web / research / media / pipeline surfaces
-                // (restored via `--profile coding-full`).
+                // and the media / pipeline surfaces (restored via
+                // `--profile coding-full`).
                 for excluded in [
                     "group:fs",
                     "apply_patch",
-                    "group:web",
-                    "group:research",
                     "group:media",
                     "run_pipeline",
-                    "synthesize_research",
                     "message",
                     "cron",
                 ] {
@@ -732,7 +729,6 @@ mod tests {
         assert_eq!(coding.permissions, PermissionMode::Default);
         // Agents preloaded match the M8.2 built-in set so spawn() can
         // resolve them by id.
-        assert!(coding.agents.contains(&"research-worker".to_string()));
         assert!(coding.agents.contains(&"repo-editor".to_string()));
     }
 
@@ -820,7 +816,17 @@ mod tests {
             "glob",
             "grep",
             "list_dir",
+            // group:sessions — the whole subagent family. `spawn` is
+            // registered by the serve/AppUI bootstrap; `spawn_agent` and the
+            // lifecycle companions are with_builtins builtins so plain chat
+            // keeps a subagent entry point.
             "spawn",
+            "spawn_agent",
+            "delegate",
+            "send_input",
+            "resume_agent",
+            "wait_agent",
+            "close_agent",
             "check",
             "update_plan",
             "tool_search",
@@ -833,17 +839,10 @@ mod tests {
         }
         for excluded in [
             // #2133: only apply_patch is dropped (edit_file/diff_edit cover
-            // it); the heavy web/research/media surfaces stay out.
+            // it); media/messaging surfaces stay out.
             "apply_patch",
-            "web_search",
-            "web_fetch",
-            "browser",
             "get_weather",
-            "synthesize_research",
-            "image_generation",
             "workspace_diff",
-            "spawn_agent",
-            "delegate",
         ] {
             assert!(
                 !names.contains(excluded),
@@ -852,10 +851,11 @@ mod tests {
         }
         // Budget pin (#1578 harness review: 48 tools ≈ 9.3K tokens per
         // round in the unfiltered default). The lean surface must stay a
-        // small fraction of that; 24 leaves headroom for the core loop +
-        // shells + memory while failing loudly on accidental bloat.
+        // small fraction of that; 30 leaves headroom for the core loop +
+        // shells + memory + sessions family while failing loudly on
+        // accidental bloat.
         assert!(
-            names.len() <= 24,
+            names.len() <= 30,
             "lean coding profile grew to {} tools: {names:?}",
             names.len(),
         );
@@ -910,15 +910,15 @@ mod tests {
         assert!(empty.allows("web_search"));
 
         let deny = ProfileTools::DenyList {
-            tools: vec!["group:web".into()],
+            tools: vec!["group:search".into()],
         };
-        assert!(!deny.allows("web_fetch"), "denied group member");
+        assert!(!deny.allows("grep"), "denied group member");
         assert!(deny.allows("read_file"));
 
         // Empty deny list denies nothing (mirrors the filter's early
         // return).
         let empty_deny = ProfileTools::DenyList { tools: vec![] };
-        assert!(empty_deny.allows("web_fetch"));
+        assert!(empty_deny.allows("edit_file"));
     }
 
     #[test]
@@ -1022,16 +1022,9 @@ mod tests {
         // showed them as if they were enforced. The fix-first commit
         // stops that. We assert here against the manifest itself so the
         // contract holds even if the application path is reorganised.
-        // Built-in research-worker must NOT carry unimplemented fields
+        // The built-in repo-editor must NOT carry unimplemented fields
         // (max_turns / background) any longer.
         let registry = crate::agents::AgentDefinitions::with_builtins();
-        let research = registry.get("research-worker").expect("research-worker");
-        let unimplemented = research.unimplemented_fields();
-        assert!(
-            unimplemented.is_empty(),
-            "built-in research-worker still carries unimplemented fields: {unimplemented:?}"
-        );
-
         let repo_editor = registry.get("repo-editor").expect("repo-editor");
         let unimplemented = repo_editor.unimplemented_fields();
         assert!(

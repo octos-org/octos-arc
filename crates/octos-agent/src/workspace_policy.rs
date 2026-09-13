@@ -2872,7 +2872,6 @@ ignore = []
     // Wave-3a: `for_session()` wire targets
     // -----------------------------------------------------------------
 
-
     #[test]
     fn session_policy_declares_soft_fail_sub_artifacts_for_research_skills() {
         // Wire target for the Wave-3a `soft_fail` tier: `synthesize_research`

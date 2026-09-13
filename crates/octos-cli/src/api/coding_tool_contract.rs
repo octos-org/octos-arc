@@ -44,21 +44,14 @@ pub(crate) const CODING_SUBAGENT_ALIASES_CAPABILITY_V1: &str = "coding.subagent_
 // `view_image`, `tool_search`, and `tool_suggest` (see
 // `ui_protocol_transport::derived_capabilities`).
 //
-// `image_generation` has no native or skill backend bound to it yet, so the
-// constant exists for vocabulary parity but the capability is not
-// advertised. See UPCR §5: capability-gated fields must be omitted when the
-// corresponding capability is not negotiated.
 pub(crate) const CODING_IMAGE_VIEW_CAPABILITY_V1: &str = "coding.image_view.v1";
 pub(crate) const CODING_DYNAMIC_TOOL_SEARCH_CAPABILITY_V1: &str = "coding.dynamic_tool_search.v1";
-#[allow(dead_code)]
-pub(crate) const CODING_IMAGE_GENERATION_CAPABILITY_V1: &str = "coding.image_generation.v1";
 // #1172 — Codex naming-parity aliases. The underlying capability already
-// rides on `shell` / `exec_command`, `spawn_agent` + `wait_agent`, and the
-// (compile-time) browser tool, so these flags exist to advertise the
-// Codex-compatible spellings to clients negotiating tool surface area.
+// rides on `shell` / `exec_command` and `spawn_agent` + `wait_agent`, so
+// these flags exist to advertise the Codex-compatible spellings to clients
+// negotiating tool surface area.
 pub(crate) const CODING_BASH_CAPABILITY_V1: &str = "coding.bash.v1";
 pub(crate) const CODING_DELEGATE_CAPABILITY_V1: &str = "coding.delegate.v1";
-pub(crate) const CODING_BROWSER_CAPABILITY_V1: &str = "coding.browser.v1";
 
 // UPCR-2026-020 §8 typed error kinds. Used in structured RpcError `data.kind`
 // fields when the corresponding failure mode is hit. Declared centrally so
@@ -72,15 +65,6 @@ pub(crate) const ERROR_KIND_CODING_TOOL_DENIED: &str = "coding_tool_denied";
 pub(crate) const ERROR_KIND_CODING_TOOL_MISSING: &str = "coding_tool_missing";
 #[allow(dead_code)]
 pub(crate) const ERROR_KIND_EXEC_SESSION_UNKNOWN: &str = "exec_session_unknown";
-/// #1149 — typed error kind returned by `image_generation` when the tool
-/// is registered but no native or skill backend is bound for the active
-/// profile. Distinguishes "the contract advertises this name, but no
-/// implementation is available right now" from `coding_tool_missing`
-/// (path/resource not found) and `coding_tool_denied` (policy refusal),
-/// so AppUI clients can surface the right next step (install a skill,
-/// switch provider) instead of generic "tool error".
-#[allow(dead_code)]
-pub(crate) const ERROR_KIND_CODING_TOOL_UNSUPPORTED: &str = "coding_tool_unsupported";
 
 pub(crate) const CODING_P0_REQUIRED_TOOL_NAMES: &[&str] = &[
     "apply_patch",
@@ -114,14 +98,9 @@ pub(crate) const OCTOS_KNOWN_MODEL_VISIBLE_TOOLS: &[&str] = &[
     "glob",
     "grep",
     "list_dir",
-    "web_search",
-    "web_fetch",
-    "browser",
     "spawn",
     "read_task_output",
-    "activate_tools",
     "configure_tool",
-    "manage_skills",
     "check_workspace_contract",
     "workspace_log",
     "workspace_show",
@@ -138,14 +117,6 @@ pub(crate) const OCTOS_KNOWN_MODEL_VISIBLE_TOOLS: &[&str] = &[
     // alongside the canonical primitives.
     "bash",
     "delegate",
-    // #1149 / M14-B P2 — Codex-compatible `image_generation` entry. The
-    // tool is registered so the wire-level contract is complete and the
-    // model gets a typed `coding_tool_unsupported` response instead of a
-    // generic "tool not found", but no native or skill backend is bound
-    // yet. See `crates/octos-agent/src/tools/coding_tools.rs`
-    // (`ImageGenerationTool`) and #1149 for the follow-up to wire a
-    // real backend (OpenAI image API or a bundled skill).
-    "image_generation",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -460,27 +431,6 @@ const OCTOS_TOOL_SPECS: &[OctosToolSpec] = &[
         detail: None,
     },
     OctosToolSpec {
-        name: "web_search",
-        category: "web",
-        aliases: &[],
-        policy: "allowed",
-        detail: None,
-    },
-    OctosToolSpec {
-        name: "web_fetch",
-        category: "web",
-        aliases: &[],
-        policy: "allowed",
-        detail: None,
-    },
-    OctosToolSpec {
-        name: "browser",
-        category: "web",
-        aliases: &[],
-        policy: "allowed",
-        detail: None,
-    },
-    OctosToolSpec {
         name: "spawn",
         category: "agent",
         aliases: &["spawn_agent"],
@@ -499,27 +449,11 @@ const OCTOS_TOOL_SPECS: &[OctosToolSpec] = &[
         ),
     },
     OctosToolSpec {
-        name: "activate_tools",
-        category: "discovery",
-        aliases: &[],
-        policy: "allowed",
-        detail: None,
-    },
-    OctosToolSpec {
         name: "configure_tool",
         category: "configuration",
         aliases: &[],
         policy: "allowed",
         detail: None,
-    },
-    OctosToolSpec {
-        name: "manage_skills",
-        category: "discovery",
-        aliases: &[],
-        policy: "allowed",
-        detail: Some(
-            "Skill management. Codex dynamic tool discovery aliases live on dedicated tool_search / tool_suggest entries.",
-        ),
     },
     // #972 / M14-B P1: canonical Codex dynamic tool discovery surface.
     OctosToolSpec {
@@ -548,25 +482,6 @@ const OCTOS_TOOL_SPECS: &[OctosToolSpec] = &[
         policy: "allowed",
         detail: Some(
             "Canonical Codex view_image entry. Returns format / MIME / byte length for a workspace image.",
-        ),
-    },
-    // #1149 / M14-B P2: canonical Codex image-generation surface.
-    //
-    // Registered as a model-visible stub so the wire-level contract is
-    // complete; the tool currently returns `coding_tool_unsupported` for
-    // every call because no native or skill backend is bound yet. The
-    // `coding.image_generation.v1` capability is intentionally NOT
-    // advertised in `ui_protocol_transport::advertised_capabilities` so clients
-    // don't render it as usable (UPCR-2026-020 §5: capability-gated
-    // fields are omitted when the implementation isn't bound). Follow-up
-    // to wire a real backend tracked in #1149.
-    OctosToolSpec {
-        name: "image_generation",
-        category: "media",
-        aliases: &[],
-        policy: "allowed",
-        detail: Some(
-            "Canonical Codex image_generation entry. Stub: no native or skill backend bound yet; calls return a typed coding_tool_unsupported response (#1149 follow-up).",
         ),
     },
     OctosToolSpec {
@@ -991,14 +906,9 @@ mod tests {
             CODING_DYNAMIC_TOOL_SEARCH_CAPABILITY_V1,
             "coding.dynamic_tool_search.v1"
         );
-        assert_eq!(
-            CODING_IMAGE_GENERATION_CAPABILITY_V1,
-            "coding.image_generation.v1"
-        );
         // #1172 — Codex naming-parity capability flags.
         assert_eq!(CODING_BASH_CAPABILITY_V1, "coding.bash.v1");
         assert_eq!(CODING_DELEGATE_CAPABILITY_V1, "coding.delegate.v1");
-        assert_eq!(CODING_BROWSER_CAPABILITY_V1, "coding.browser.v1");
 
         // Typed error kinds (UPCR §8).
         assert_eq!(
@@ -1008,14 +918,6 @@ mod tests {
         assert_eq!(ERROR_KIND_CODING_TOOL_DENIED, "coding_tool_denied");
         assert_eq!(ERROR_KIND_CODING_TOOL_MISSING, "coding_tool_missing");
         assert_eq!(ERROR_KIND_EXEC_SESSION_UNKNOWN, "exec_session_unknown");
-        // #1149 — typed error kind for the registered-but-unimplemented
-        // `image_generation` stub. Pinned so a future spec rename
-        // (`coding_tool_unsupported` -> `tool_unsupported`, etc.) becomes a
-        // compile-time diff.
-        assert_eq!(
-            ERROR_KIND_CODING_TOOL_UNSUPPORTED,
-            "coding_tool_unsupported"
-        );
     }
 
     fn required_tool<'a>(contract: &'a Value, name: &str) -> &'a Value {
@@ -1368,47 +1270,6 @@ mod tests {
                 "alias {name} must report `available` when registered",
             );
         }
-    }
-
-    /// #1149 / M14-B P2 — `image_generation` must be registered by
-    /// `ToolRegistry::with_builtins_and_sandbox` as a stub so the
-    /// canonical Codex tool surface is wire-complete. Real backend
-    /// wiring (OpenAI image API / bundled skill) is tracked in #1149.
-    #[test]
-    fn p2_image_generation_is_registered_by_session_builtins() {
-        use octos_agent::ToolRegistry;
-        use octos_agent::sandbox::NoSandbox;
-
-        let cwd = std::path::Path::new("/tmp");
-        let registry = ToolRegistry::with_builtins_and_sandbox(cwd, Box::new(NoSandbox));
-        let names: std::collections::HashSet<String> = registry.tool_names().into_iter().collect();
-
-        assert!(
-            names.contains("image_generation"),
-            "P2 canonical tool image_generation must be registered by \
-             ToolRegistry::with_builtins_and_sandbox so the M14 coding \
-             tool contract can advertise it. Registered tool names: {names:?}"
-        );
-    }
-
-    /// #1149 / M14-B P2 — when the runtime reports `image_generation` as
-    /// available, the contract's `tools` array must surface it through the
-    /// OCTOS_TOOL_SPECS entry (status `available`, category `media`).
-    #[test]
-    fn p2_image_generation_appears_in_contract_tools_array() {
-        let available = &["image_generation"];
-        let context = ToolStatusListContext {
-            available_model_tools: available,
-            ..ToolStatusListContext::default_for_session("coding:test")
-        };
-        let payload = tool_status_list_payload(context);
-        let tools = payload["tools"].as_array().expect("tools array");
-        let entry = tools
-            .iter()
-            .find(|tool| tool["name"] == json!("image_generation"))
-            .expect("image_generation must appear in contract tools array");
-        assert_eq!(entry["status"], json!(TOOL_STATUS_AVAILABLE));
-        assert_eq!(entry["category"], json!("media"));
     }
 
     /// #972 / M14-B P1 — the contract's `tools` array (driven by

@@ -65,7 +65,7 @@ pub async fn build_system_prompt(
              Current host OS: Windows.\n\
              If you use the shell tool, write Windows cmd.exe-compatible commands only.\n\
              Do NOT use Unix-only commands like `ps`, `grep`, `head`, `rm`, `ls`, `cat`, `which`, or `bash`.\n\
-             Prefer built-in tools (`glob`, `grep`, `list_dir`, `read_file`, `deep_search`, `deep_crawl`, `web_search`, `web_fetch`) over shell whenever possible.\n\
+             Prefer built-in tools (`glob`, `grep`, `list_dir`, `read_file`) over shell whenever possible.\n\
              If a task depends on a tool or binary that is not available on this host, say so explicitly and do not retry via shell.",
         );
     }

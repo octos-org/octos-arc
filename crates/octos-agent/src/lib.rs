@@ -86,18 +86,13 @@ pub use agent::{
     Agent, AgentConfig, AssistantSegmentProvenance, ConversationResponse,
     DEFAULT_SESSION_TIMEOUT_SECS, DEFAULT_TOOL_TIMEOUT_SECS, DEFAULT_WORKER_PROMPT,
     IncompleteResponseError, MAX_TOOL_TIMEOUT_SECS, PartialTurnUsage, PromptSegmentProvider,
-    RealtimeController, TASK_REPORTER, TokenTracker,
+    TASK_REPORTER, TokenTracker,
     loop_state::{
         LoopDecision, LoopRetryCounters, LoopRetryLimits, LoopRetryState, OCTOS_LOOP_RETRY_TOTAL,
         SHELL_SPIRAL_VARIANT,
     },
     memory::MIN_EPISODE_SIMILARITY,
-    normalize_tool_call_id,
-    realtime::{
-        AgentError, Heartbeat, HeartbeatState, RealtimeConfig, RealtimeHookEnricher,
-        SensorContextInjector, SensorSnapshot, SensorSource,
-    },
-    rich_output,
+    normalize_tool_call_id, rich_output,
     turn_failure::{TurnFailure, is_voice_empty_response},
     verifier::{
         AgentVerifierConfig, ErrorClass, TURN_LEDGER_SCHEMA_VERSION, TurnLedgerEntry, TurnOutcome,
@@ -197,21 +192,18 @@ pub use task_supervisor::{
     TerminalOutcome, parse_alternatives, task_is_live,
 };
 pub use tools::{
-    AskUserQuestionTool, BackgroundResultKind, BackgroundResultPayload,
-    CheckBackgroundTasksTool, CheckWorkspaceContractTool, ConcurrencyClass, ConfigureToolTool,
-    DEFAULT_DISPATCH_TIMEOUT_SECS, DEFAULT_HTTP_CONNECT_TIMEOUT_SECS,
-    DEFAULT_HTTP_READ_TIMEOUT_SECS, DELEGATED_DENY_GROUP, DELEGATION_METRIC, DelegateTool, DelegationEvent, DelegationOutcome, DepthBudget, DiffEditTool,
+    AskUserQuestionTool, BackgroundResultKind, BackgroundResultPayload, CheckBackgroundTasksTool,
+    CheckWorkspaceContractTool, ConcurrencyClass, ConfigureToolTool, DEFAULT_DISPATCH_TIMEOUT_SECS,
+    DEFAULT_HTTP_CONNECT_TIMEOUT_SECS, DEFAULT_HTTP_READ_TIMEOUT_SECS, DELEGATED_DENY_GROUP,
+    DELEGATION_METRIC, DelegateTool, DelegationEvent, DelegationOutcome, DepthBudget, DiffEditTool,
     DispatchContextContract, DispatchOutcome, DispatchRequest, DispatchResponse, EditFileTool,
-    GlobTool, GrepTool, HttpMcpAgent, ListDirTool, MAX_DEPTH, MakeTypeEntry,
-    McpAgentBackend, McpAgentBackendConfig, MemoryNoteTool, MessageTool,
-    MofaDescribeContentTypeTool, MofaMakeTool,
-    PolicyDecision, ReadFileTool, ReadTaskOutputTool, RecallMemoryTool,
-    RecordMemoryUseTool, SaveMemoryTool, SendAppCardTool, SendFileTool,
-    SharedBackend, ShellTool, SpawnTool, StdioMcpAgent, Tool,
-    UserQuestionRequester, WriteFileTool,
-    ToolApprovalDecision, ToolApprovalRequest, ToolApprovalRequester, ToolConfigStore, ToolPolicy,
-    ToolRegistry, ToolResult, TurnAttachmentContext, UserQuestionOutcome, UserQuestionRequest,
-
+    GlobTool, GrepTool, HttpMcpAgent, ListDirTool, MAX_DEPTH, MakeTypeEntry, McpAgentBackend,
+    McpAgentBackendConfig, MemoryNoteTool, MessageTool, MofaDescribeContentTypeTool, MofaMakeTool,
+    PolicyDecision, ReadFileTool, ReadTaskOutputTool, RecallMemoryTool, RecordMemoryUseTool,
+    SaveMemoryTool, SendAppCardTool, SendFileTool, SharedBackend, ShellTool, SpawnTool,
+    StdioMcpAgent, Tool, ToolApprovalDecision, ToolApprovalRequest, ToolApprovalRequester,
+    ToolConfigStore, ToolPolicy, ToolRegistry, ToolResult, TurnAttachmentContext,
+    UserQuestionOutcome, UserQuestionRequest, UserQuestionRequester, WriteFileTool,
     build_backend_from_config, build_delegated_child_policy, build_dispatch_event_payload,
     dispatch_with_metrics, make_dispatcher_with_entries, record_dispatch,
 };
@@ -531,7 +523,7 @@ mod tests {
         let filtered = registry.specs();
         let names: Vec<_> = filtered.iter().map(|s| s.name.as_str()).collect();
         assert!(!names.contains(&"diff_edit"));
-                assert!(names.contains(&"shell"));
+        assert!(names.contains(&"shell"));
         assert!(names.contains(&"read_file"));
         assert_eq!(filtered.len(), all_count - 1);
 

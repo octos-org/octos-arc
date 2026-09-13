@@ -2351,7 +2351,6 @@ impl TaskSupervisor {
         )
     }
 
-
     #[allow(clippy::too_many_arguments)]
     fn register_full(
         &self,

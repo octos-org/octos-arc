@@ -11,9 +11,7 @@ pub mod manifest;
 pub mod tool;
 
 pub use extras::{SkillExtras, resolve_extras};
-pub use install::{
-    SkillActivateResult, activate_skill, run_shutdown_phase,
-};
+pub use install::{SkillActivateResult, activate_skill, run_shutdown_phase};
 pub use loader::{
     LoadedSkillAction, PluginLoadError, PluginLoadOptions, PluginLoadResult, PluginLoader,
 };

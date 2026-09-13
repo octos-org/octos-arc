@@ -8,6 +8,8 @@ mod completions;
 mod config;
 pub mod gateway;
 
+#[cfg(feature = "api")]
+pub mod agent_factory;
 mod init;
 #[cfg(feature = "api")]
 pub(crate) mod oup_client;
@@ -21,20 +23,18 @@ mod oup_text;
 mod serve;
 pub mod serve_console;
 pub mod skills;
-pub mod acp;
-pub 
-use std::path::PathBuf;
+pub use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use eyre::Result;
 
-pub use octos_arc::ArcCommand;
 pub use auth::AuthCommand;
 pub use cache::CacheCommand;
 pub use chat::ChatCommand;
 pub use clean::CleanCommand;
 pub use completions::CompletionsCommand;
 pub use config::ConfigCommand;
+pub use octos_arc::ArcCommand;
 
 pub use init::InitCommand;
 #[cfg_attr(not(test), allow(unused_imports))]
@@ -111,8 +111,7 @@ pub enum Command {
 /// Every other command keeps its historical stdout console routing untouched.
 pub fn reserve_stdout(command: &Command) -> bool {
     match command {
-        Command::Chat(_)
-        | Command::Arc(_) => true,
+        Command::Chat(_) | Command::Arc(_) => true,
         // `octos cache <sub> --json` emits a machine-readable object meant
         // for scripting / the outer loop's gate check. Without `--json` the
         // human table stays on the historical stdout routing.
@@ -330,7 +329,6 @@ impl Executable for Command {
             Self::Serve(cmd) => cmd.execute(),
             Self::Clean(cmd) => cmd.execute(),
             Self::Completions(cmd) => cmd.execute(),
-
         }
     }
 }
@@ -356,5 +354,4 @@ mod reserve_stdout_tests {
             Args::try_parse_from(["octos", "chat", "--message", "hi"]).expect("`chat` must parse");
         assert!(reserve_stdout(&args.command));
     }
-
 }

@@ -1,11 +1,11 @@
 //! Library surface kept from the retired `octos gateway` command:
 //! the session-key builder shared by the OUP dispatcher.
 
-use octos_core::{SessionKey, MAIN_PROFILE_ID};
+use octos_core::{MAIN_PROFILE_ID, SessionKey};
 
 pub mod profile_factory;
-pub use prompt::build_system_prompt;
 pub use profile_factory::{profile_plugin_env, profile_search_provider_keys};
+pub use prompt::build_system_prompt;
 pub mod prompt;
 pub mod session_ui;
 

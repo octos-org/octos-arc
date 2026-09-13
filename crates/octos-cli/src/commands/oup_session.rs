@@ -564,7 +564,7 @@ mod tests {
         truncated_tool_call: bool,
         final_content: Option<&'static str>,
     ) {
-        use crate::commands::acp::{SessionAgentFactory, TestAgentFactory};
+        use crate::commands::agent_factory::{SessionAgentFactory, TestAgentFactory};
         let data = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         let factory = TestAgentFactory::new(
@@ -664,7 +664,7 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_integrity_close_cancels_only_owned_turns() {
-        use crate::commands::acp::{SessionAgentFactory, TestAgentFactory};
+        use crate::commands::agent_factory::{SessionAgentFactory, TestAgentFactory};
         let data = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         let model = Arc::new(PendingModel {
@@ -747,5 +747,4 @@ mod tests {
             Ok(None)
         }
     }
-
 }

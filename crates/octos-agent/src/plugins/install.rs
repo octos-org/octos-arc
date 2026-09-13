@@ -101,55 +101,52 @@ pub async fn activate_skill(
     // 2) Tool discovery (static binary-protocol is the existing path;
     //    Http triggers GET <base_url>/tools registration).
     let mut tool_names = Vec::new();
-            // Important #2 fix from PR #1260 review: load ONLY this skill,
-        // not its parent directory. The previous `load_into(&[parent])`
-        // scanned every sibling skill folder as a side-effect, leaking
-        // their tools into the registry on install.
-        //
-        // `extras` (MCP servers, hooks, prompts) are intentionally
-        // NOT resolved here — `activate_skill`'s contract is tool
-        // registration only; extras flow through
-        // `PluginLoader::load_into_with_options` at runtime startup.
-        //
-        // Error handling: hard-fail on every `load_plugin` error EXCEPT
-        // "no executable found", which is a legitimate "tools declared
-        // in the manifest but binary deferred" case (matches upstream's
-        // RFC-2 valid-manifest install flow: copy files now, register
-        // tools later at agent boot). Integrity errors (sha256 mismatch,
-        // oversized binary, `require_signed` rejection) MUST propagate
-        // so install rolls back instead of silently parking a broken
-        // skill on disk. Reviewer post-merge feedback (Critical A).
-        match PluginLoader::load_plugin(skill_dir, extra_env) {
-            Ok((tools, _extras)) => {
-                for tool in tools {
-                    let name = tool.name().to_string();
-                    registry.mark_as_plugin(&name);
-                    tool_names.push(name);
-                    registry.register(tool);
-                }
-            }
-            Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("no executable found") {
-                    // Manifest declares `tools: [...]` but ships no
-                    // binary — typical for RFC-2 docs-first skills.
-                    // Tool registration will happen at agent boot if
-                    // a binary appears later; otherwise the skill
-                    // legitimately has no static tools.
-                    info!(
-                        skill = %skill_name,
-                        "skill has no executable; static tool registration deferred to agent boot"
-                    );
-                } else {
-                    return Err(e).wrap_err_with(|| {
-                        format!(
-                            "skill {skill_name} static load_plugin failed; install must roll back"
-                        )
-                    });
-                }
+    // Important #2 fix from PR #1260 review: load ONLY this skill,
+    // not its parent directory. The previous `load_into(&[parent])`
+    // scanned every sibling skill folder as a side-effect, leaking
+    // their tools into the registry on install.
+    //
+    // `extras` (MCP servers, hooks, prompts) are intentionally
+    // NOT resolved here — `activate_skill`'s contract is tool
+    // registration only; extras flow through
+    // `PluginLoader::load_into_with_options` at runtime startup.
+    //
+    // Error handling: hard-fail on every `load_plugin` error EXCEPT
+    // "no executable found", which is a legitimate "tools declared
+    // in the manifest but binary deferred" case (matches upstream's
+    // RFC-2 valid-manifest install flow: copy files now, register
+    // tools later at agent boot). Integrity errors (sha256 mismatch,
+    // oversized binary, `require_signed` rejection) MUST propagate
+    // so install rolls back instead of silently parking a broken
+    // skill on disk. Reviewer post-merge feedback (Critical A).
+    match PluginLoader::load_plugin(skill_dir, extra_env) {
+        Ok((tools, _extras)) => {
+            for tool in tools {
+                let name = tool.name().to_string();
+                registry.mark_as_plugin(&name);
+                tool_names.push(name);
+                registry.register(tool);
             }
         }
-
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("no executable found") {
+                // Manifest declares `tools: [...]` but ships no
+                // binary — typical for RFC-2 docs-first skills.
+                // Tool registration will happen at agent boot if
+                // a binary appears later; otherwise the skill
+                // legitimately has no static tools.
+                info!(
+                    skill = %skill_name,
+                    "skill has no executable; static tool registration deferred to agent boot"
+                );
+            } else {
+                return Err(e).wrap_err_with(|| {
+                    format!("skill {skill_name} static load_plugin failed; install must roll back")
+                });
+            }
+        }
+    }
 
     Ok(SkillActivateResult { tool_names })
 }
@@ -198,4 +195,3 @@ pub async fn run_shutdown_phase(skill_dir: &Path) {
         }
     }
 }
-

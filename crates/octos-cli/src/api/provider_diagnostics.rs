@@ -1,9 +1,9 @@
 //! Provider/LLM diagnostic endpoints shared by the operator `my_api`
 //! surface (moved here from the retired `api::admin` module).
 
+use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::Json;
 use eyre::WrapErr as _;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -30,7 +30,6 @@ pub struct TestProviderRequest {
     pub profile_id: Option<String>,
 }
 
-
 #[derive(Serialize)]
 pub struct TestProviderResponse {
     pub ok: bool,
@@ -39,7 +38,6 @@ pub struct TestProviderResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
-
 
 #[derive(Deserialize)]
 pub struct TestSearchRequest {
@@ -57,7 +55,6 @@ pub struct TestSearchRequest {
     pub profile_id: Option<String>,
 }
 
-
 #[derive(Serialize)]
 pub struct TestSearchResponse {
     pub ok: bool,
@@ -67,14 +64,11 @@ pub struct TestSearchResponse {
     pub error: Option<String>,
 }
 
-
 fn resolve_profile_secret(env_name: &str, stored_value: Option<&str>) -> Option<String> {
     resolve_profile_secret_with_keychain(env_name, stored_value, |name| {
         crate::auth::keychain::get_secret(name).ok().flatten()
     })
 }
-
-
 
 fn resolve_saved_key(
     state: &AppState,
@@ -127,8 +121,6 @@ fn resolve_saved_key(
     Ok(crate::auth::keychain::resolve_value(env_name, &raw).unwrap_or_default())
 }
 
-
-
 fn resolve_saved_search_key(
     state: &AppState,
     identity: &Option<axum::Extension<super::router::AuthIdentity>>,
@@ -166,8 +158,6 @@ fn resolve_saved_search_key(
     Ok(resolve_profile_secret(env_name, stored).unwrap_or_default())
 }
 
-
-
 fn default_search_api_env(provider: &str) -> Option<&'static str> {
     match provider {
         "tavily" => Some("TAVILY_API_KEY"),
@@ -178,8 +168,6 @@ fn default_search_api_env(provider: &str) -> Option<&'static str> {
         _ => None,
     }
 }
-
-
 
 fn resolve_test_search_profile_id(
     identity: &Option<axum::Extension<super::router::AuthIdentity>>,
@@ -211,8 +199,6 @@ fn resolve_test_search_profile_id(
     }
 }
 
-
-
 fn resolve_profile_secret_with_keychain<F>(
     env_name: &str,
     stored_value: Option<&str>,
@@ -233,8 +219,6 @@ where
         .filter(|value| !value.is_empty())
 }
 
-
-
 fn base_url_targets_link_local(base_url: &str) -> bool {
     let Ok(url) = reqwest::Url::parse(base_url) else {
         return false;
@@ -252,9 +236,6 @@ fn base_url_targets_link_local(base_url: &str) -> bool {
         Err(_) => false,
     }
 }
-
-
-
 
 /// POST /api/admin/test-provider or /api/my/test-provider
 ///
@@ -408,7 +389,6 @@ pub async fn test_provider(
     }
 }
 
-
 /// POST /api/my/provider-models — fetch available models from a provider's API.
 pub async fn provider_models(
     State(state): State<Arc<AppState>>,
@@ -486,7 +466,6 @@ pub async fn provider_models(
         )),
     }
 }
-
 
 /// POST /api/my/test-search
 ///
@@ -639,7 +618,6 @@ pub async fn test_search(
     }
 }
 
-
 /// GET /api/admin/model-limits — returns model catalog (runtime source of truth).
 pub async fn model_limits() -> Json<serde_json::Value> {
     // Read the runtime catalog from the profile data dir
@@ -668,5 +646,3 @@ pub async fn model_limits() -> Json<serde_json::Value> {
     }
     Json(serde_json::json!({"models": []}))
 }
-
-

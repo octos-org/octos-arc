@@ -609,7 +609,6 @@ fn parse_question_selection(
     (selected_labels, other_picked)
 }
 
-
 /// Machine-readable result envelope for `octos chat --json --message`.
 ///
 /// Text, answering model and token usage come from OUP's terminal and
@@ -1813,7 +1812,6 @@ fn create_custom_provider(
         other => eyre::bail!("unsupported custom api_type '{other}'; use openai or anthropic"),
     }
 }
-
 
 #[cfg(test)]
 mod custom_provider_tests {

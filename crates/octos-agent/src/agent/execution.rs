@@ -121,16 +121,13 @@ fn should_auto_send_tool_files(
 /// unscoped home dir used to inherit the 1800s ceiling and hang the whole
 /// turn with no output. Fast read-only tools have no business waiting 30
 /// minutes; only genuinely long-running tools (shells, background spawns,
-/// pipelines, browser sessions, deep research/crawl) do.
+/// pipelines) do.
 ///
 /// Names verified against the registered `Tool::name()` impls:
 /// - `shell` (`tools/shell.rs`), `bash` alias
 /// - `spawn` (`tools/spawn.rs`), `spawn_agent` alias
 /// - `run_pipeline` (spawn_only pipeline tool registered via manifest)
-/// - `browser` (`tools/browser.rs`)
 /// - `delegate_task` (`tools/delegate.rs`)
-/// - `search` (`tools/deep_search.rs`), `deep_crawl` (`tools/site_crawl.rs`)
-/// - `synthesize_research` (`tools/synthesize_research.rs`)
 /// - `check` (`tools/check.rs`): a cold `cargo check` legitimately compiles
 ///   the dependency graph; the tool enforces its own 120s child timeout,
 ///   which must fire BEFORE the batch ceiling (the interactive default is
@@ -150,12 +147,7 @@ const LONG_RUNNING_TOOLS: &[&str] = &[
     "spawn",
     "spawn_agent",
     "run_pipeline",
-    "browser",
     "delegate_task",
-    "search",
-    "deep_crawl",
-    "site_crawl",
-    "synthesize_research",
     "check",
 ];
 
@@ -332,14 +324,10 @@ pub(super) fn satisfied_completion_content(output_files: &[String], tool_output:
     }
 }
 
-/// Produce the composite system-prompt text (worker prompt + realtime sensor
-/// summary) used at the top of every agent turn. Centralizing this in
-/// `execution.rs` keeps the message-building policy in a single location so
-/// the conversation loop and task loop compose the same prompt.
-///
-/// Returns the prompt text the caller should paste into the first system
-/// `Message`. When no realtime controller is attached this is byte-identical
-/// to the stored system prompt.
+/// Produce the composite system-prompt text used at the top of every agent
+/// turn. Centralizing this in `execution.rs` keeps the message-building
+/// policy in a single location so the conversation loop and task loop
+/// compose the same prompt.
 /// Generic tool-use discipline appended to every agent's system prompt.
 ///
 /// Weaker models (kimi-k2.5, smaller open-source) exhibit "tool stickiness"
@@ -377,13 +365,6 @@ what's missing.";
 pub(super) fn compose_system_prompt(agent: &Agent) -> String {
     let mut content = agent.system_prompt_snapshot();
     content.push_str(TOOL_USE_DISCIPLINE);
-    if let Some(summary) = agent.realtime_sensor_summary() {
-        if !content.ends_with('\n') {
-            content.push('\n');
-        }
-        content.push('\n');
-        content.push_str(&summary);
-    }
     content
 }
 
@@ -3318,11 +3299,7 @@ mod tests {
             "spawn",
             "spawn_agent",
             "run_pipeline",
-            "browser",
             "delegate_task",
-            "deep_crawl",
-            "search",
-            "synthesize_research",
         ] {
             assert!(
                 is_long_running_tool(name),

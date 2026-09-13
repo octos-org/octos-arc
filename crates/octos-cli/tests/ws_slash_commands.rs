@@ -183,4 +183,3 @@ async fn should_intercept_session_actor_style_commands_on_ws() {
 // ── Scenario 6 — `/new sites <preset>` plural form (round-2 fixup #1015) ──
 
 // ── Scenario 7 — session workspace_root override (round-2 fixup #1015) ──
-

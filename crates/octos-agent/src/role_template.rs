@@ -87,7 +87,6 @@ pub(crate) const SPAWN_BUILTIN_TOOLS: &[&str] = &[
     "apply_patch",
     "ask_user_question",
     "bash",
-    "browser",
     "check_workspace_contract",
     "close_agent",
     "diff_edit",
@@ -106,8 +105,6 @@ pub(crate) const SPAWN_BUILTIN_TOOLS: &[&str] = &[
     "update_plan",
     "view_image",
     "wait_agent",
-    "web_fetch",
-    "web_search",
     "workspace_diff",
     "workspace_log",
     "workspace_show",
@@ -456,30 +453,20 @@ const ROLE_TEMPLATES: &[RoleTemplate] = &[
         description: "Repository / code reviewer. Walks the diff and emits structured findings, \
                       and may WRITE its review report to a file; does not modify the code under \
                       review.",
-        // Reviewers READ files, search, fetch reference docs, and WRITE
-        // their own review report. `write_file` is listed as an EXACT
-        // tool name (never `group:fs`): a reviewer needs to produce a
-        // written deliverable (e.g. `security-review.md`), but must not
-        // gain the code-mutating tools that `group:fs` expands to
+        // Reviewers READ files, search, and WRITE their own review
+        // report. `write_file` is listed as an EXACT tool name (never
+        // `group:fs`): a reviewer needs to produce a written deliverable
+        // (e.g. `security-review.md`), but must not gain the
+        // code-mutating tools that `group:fs` expands to
         // (`edit_file`/`apply_patch`/`diff_edit`). Every OTHER entry is
         // an exact read-only tool name or a group that contains ONLY
         // read-only tools — because if a future caller pipes
         // `allowed_tools` straight into `ToolPolicy.allow`, group
         // expansion would silently grant every member tool. The set
-        // deliberately excludes: `group:fs` (the code-patching tools),
-        // `group:memory` (`save_memory`), `group:web` (`browser`
-        // persists screenshots), and `group:research` (`deep_crawl` /
-        // `search` persist crawled pages and research dirs). A reviewer
-        // writes its REPORT, not the reviewed code.
-        allowed_tools: &[
-            "read_file",
-            "write_file",
-            "group:search",
-            "web_search",
-            "web_fetch",
-            "recall_memory",
-            "synthesize_research",
-        ],
+        // deliberately excludes: `group:fs` (the code-patching tools)
+        // and `group:memory` (`save_memory`). A reviewer writes its
+        // REPORT, not the reviewed code.
+        allowed_tools: &["read_file", "write_file", "group:search", "recall_memory"],
         default_sandbox_mode: SANDBOX_NONE,
         default_approval_policy: APPROVAL_NEVER,
         model_preference: ModelPreference::Coding,
@@ -553,19 +540,9 @@ const ROLE_TEMPLATES: &[RoleTemplate] = &[
         // `group:fs`): the explorer persists its summary but must not
         // gain the code-mutating tools `group:fs` expands to. Every
         // OTHER entry is an exact read-only tool name or a group of
-        // read-only tools. `group:web` is NOT used (browser persists
-        // screenshots); `group:research` is NOT used (deep_crawl /
-        // search persist crawled pages). The explorer writes its
-        // REPORT, not the analysed code.
-        allowed_tools: &[
-            "read_file",
-            "write_file",
-            "group:search",
-            "web_search",
-            "web_fetch",
-            "recall_memory",
-            "synthesize_research",
-        ],
+        // read-only tools. The explorer writes its REPORT, not the
+        // analysed code.
+        allowed_tools: &["read_file", "write_file", "group:search", "recall_memory"],
         default_sandbox_mode: SANDBOX_NONE,
         default_approval_policy: APPROVAL_NEVER,
         model_preference: ModelPreference::Cheap,
@@ -640,10 +617,7 @@ mod tests {
         assert!(tpl.permits("read_file"));
         assert!(tpl.permits("write_file")); // writes its REVIEW REPORT
         assert!(tpl.permits("group:search"));
-        assert!(tpl.permits("web_search"));
-        assert!(tpl.permits("web_fetch"));
         assert!(tpl.permits("recall_memory"));
-        assert!(tpl.permits("synthesize_research"));
         // Denied: the code-patching tool + every mutating group. A
         // reviewer writes its report, never edits the reviewed code.
         assert!(!tpl.permits("edit_file"));
@@ -651,11 +625,7 @@ mod tests {
         assert!(!tpl.permits("group:memory"));
         assert!(!tpl.permits("group:runtime"));
         assert!(!tpl.permits("group:sessions"));
-        assert!(!tpl.permits("group:web"));
-        assert!(!tpl.permits("group:research"));
         assert!(!tpl.permits("save_memory"));
-        assert!(!tpl.permits("browser"));
-        assert!(!tpl.permits("deep_crawl"));
         assert_eq!(tpl.default_sandbox_mode, SANDBOX_NONE);
         assert_eq!(tpl.default_approval_policy, APPROVAL_NEVER);
         assert_eq!(tpl.model_preference, ModelPreference::Coding);
@@ -674,8 +644,6 @@ mod tests {
         assert!(tpl.permits("group:runtime"));
         assert!(tpl.permits("group:sessions"));
         assert!(tpl.permits("group:memory"));
-        assert!(!tpl.permits("group:research"));
-        assert!(!tpl.permits("group:web"));
         assert_eq!(tpl.default_sandbox_mode, SANDBOX_AUTO);
         assert_eq!(tpl.default_approval_policy, APPROVAL_ASK);
         assert_eq!(tpl.model_preference, ModelPreference::Coding);
@@ -698,7 +666,6 @@ mod tests {
         assert!(!tpl.permits("group:fs"));
         assert!(!tpl.permits("group:memory"));
         assert!(!tpl.permits("group:sessions"));
-        assert!(!tpl.permits("group:web"));
         assert!(!tpl.permits("save_memory"));
         assert_eq!(tpl.default_sandbox_mode, SANDBOX_AUTO);
         assert_eq!(tpl.default_approval_policy, APPROVAL_ASK);
@@ -717,20 +684,13 @@ mod tests {
         assert!(tpl.permits("read_file"));
         assert!(tpl.permits("write_file")); // writes its CONTEXT REPORT
         assert!(tpl.permits("group:search"));
-        assert!(tpl.permits("web_search"));
-        assert!(tpl.permits("web_fetch"));
         assert!(tpl.permits("recall_memory"));
-        assert!(tpl.permits("synthesize_research"));
         assert!(!tpl.permits("edit_file"));
         assert!(!tpl.permits("group:fs"));
         assert!(!tpl.permits("group:memory"));
         assert!(!tpl.permits("group:runtime"));
         assert!(!tpl.permits("group:sessions"));
-        assert!(!tpl.permits("group:web"));
-        assert!(!tpl.permits("group:research"));
         assert!(!tpl.permits("save_memory"));
-        assert!(!tpl.permits("browser"));
-        assert!(!tpl.permits("deep_crawl"));
         assert_eq!(tpl.default_sandbox_mode, SANDBOX_NONE);
         assert_eq!(tpl.default_approval_policy, APPROVAL_NEVER);
         assert_eq!(tpl.model_preference, ModelPreference::Cheap);
@@ -747,10 +707,8 @@ mod tests {
     /// - `group:memory` -> save_memory
     /// - `group:runtime` -> shell / exec_command / write_stdin
     /// - `group:sessions` -> spawn / spawn_agent / ...
-    /// - `group:admin` -> manage_skills / configure_tool / model_check
+    /// - `group:admin` -> configure_tool
     /// - `group:media` -> mofa_* / fm_tts (write generated media)
-    /// - `group:web` -> browser (persists screenshots to disk)
-    /// - `group:research` -> deep_crawl / search (persist crawled pages)
     /// - `group:delegated` -> delegate_task / delegate / spawn /
     ///   spawn_agent / send_input / message / save_memory (spawning plus
     ///   messaging and memory writes)
@@ -758,9 +716,7 @@ mod tests {
     /// Read-only roles (`reviewer`, `explorer`) MUST advertise none
     /// of these; `test_worker` is allowed `group:runtime` because
     /// running commands IS the role's job. This catches the codex P1
-    /// (smuggling `group:fs` into a non-mutating role) and the
-    /// follow-up codex P2 (`group:research` / `group:web` smuggling
-    /// in `deep_crawl` / `browser` disk writes).
+    /// (smuggling `group:fs` into a non-mutating role).
     #[test]
     fn read_only_roles_do_not_advertise_mutating_groups() {
         const ALL_MUTATING_GROUPS: &[&str] = &[
@@ -770,8 +726,6 @@ mod tests {
             "group:sessions",
             "group:admin",
             "group:media",
-            "group:web",
-            "group:research",
             "group:delegated",
         ];
         // Reviewer + explorer are documented as fully read-only.
@@ -942,15 +896,7 @@ mod tests {
         assert_eq!(stamp["requested_model"], "fast-coding");
         assert_eq!(
             stamp["allowed_tools"],
-            json!([
-                "read_file",
-                "write_file",
-                "group:search",
-                "web_search",
-                "web_fetch",
-                "recall_memory",
-                "synthesize_research"
-            ])
+            json!(["read_file", "write_file", "group:search", "recall_memory"])
         );
     }
 
@@ -1166,8 +1112,6 @@ mod tests {
             "spawn",
             "spawn_agent",
             "delegate_task",
-            "browser",
-            "deep_crawl",
         ] {
             assert!(
                 !policy.is_allowed(mutator),
@@ -1184,10 +1128,7 @@ mod tests {
             "glob",
             "grep",
             "list_dir",
-            "web_search",
-            "web_fetch",
             "recall_memory",
-            "synthesize_research",
         ] {
             assert!(
                 policy.is_allowed(permitted),
@@ -1249,7 +1190,6 @@ mod tests {
             "save_memory",
             "spawn",
             "spawn_agent",
-            "browser",
         ] {
             assert!(
                 !policy.is_allowed(mutator),

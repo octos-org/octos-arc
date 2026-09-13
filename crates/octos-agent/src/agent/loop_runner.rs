@@ -953,8 +953,7 @@ impl Agent {
 
                 // Build the system prompt via the shared helper in
                 // execution.rs so conversation + task loops compose the same
-                // prompt. This is where realtime sensor summary gets appended
-                // once per turn (bounded by `sensor_budget_tokens`).
+                // prompt.
                 let mut messages = vec![Message {
                     role: MessageRole::System,
                     content: super::execution::compose_system_prompt(self),
@@ -1293,15 +1292,6 @@ impl Agent {
                              your final answer) before you run out."
                         )));
                         budget_reminder_sent = true;
-                    }
-                    // Realtime heartbeat: beat first, then abort the iteration
-                    // with a typed error if the controller reports stalled.
-                    // A None controller / disabled config is a no-op so the
-                    // 830+ existing tests see identical behavior.
-                    // #1969: a heartbeat interrupt/stall is an error EXIT too —
-                    // carry the turn's accumulated usage out with it.
-                    if let Err(e) = self.beat_heartbeat(iteration) {
-                        return Err(attach_partial_usage(e, turn.total_usage().clone()));
                     }
                     self.reporter()
                         .report(ProgressEvent::Thinking { iteration });
@@ -2642,12 +2632,6 @@ impl Agent {
 
                 let iteration = turn.advance_iteration();
                 let iter_start = Instant::now();
-                // Realtime heartbeat beat + stall check (no-op when realtime
-                // is disabled or unattached).
-                // #1969: carry accumulated usage out on an interrupt/stall exit.
-                if let Err(e) = self.beat_heartbeat(iteration) {
-                    return Err(attach_partial_usage(e, turn.total_usage().clone()));
-                }
                 self.reporter()
                     .report(ProgressEvent::Thinking { iteration });
 

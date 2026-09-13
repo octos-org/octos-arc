@@ -10,8 +10,8 @@
 //! two runtimes see the same field names and semantics.
 //!
 //! Every field in the manifest is domain-neutral: nothing about the schema
-//! is coding-specific. A "research-worker" manifest carries the same shape
-//! as a "repo-editor" manifest — only the tool allow-list differs. This is
+//! is coding-specific. Two manifests with different roles carry the same
+//! shape — only the tool allow-list differs. This is
 //! the M8.2 "coding-only" falsification gate for runtime-v0.1.
 //!
 //! # How loading works
@@ -21,10 +21,8 @@
 //! a `name` field it overrides the stem. The loader layers:
 //!
 //! 1. Built-in defaults (shipped under `crates/octos-agent/src/assets/agents/`)
-//!    via [`AgentDefinitions::with_builtins`]. Today these are
-//!    `research-worker` (deep_search / web_fetch / web_search; no
-//!    shell/write/edit) and `repo-editor` (read_file / write_file / edit_file
-//!    / shell / grep / glob; no deep_search).
+//!    via [`AgentDefinitions::with_builtins`]. Today this is `repo-editor`
+//!    (read_file / write_file / edit_file / shell / grep / glob).
 //! 2. Local manifests from the caller-supplied directory, which replace
 //!    any built-in with the same id.
 //!
@@ -214,16 +212,10 @@ fn default_true() -> bool {
 ///
 /// Pairs are `(id, raw JSON text)`. At load time the raw text is parsed via
 /// [`AgentDefinition::from_json_str`].
-const BUILTIN_AGENTS: &[(&str, &str)] = &[
-    (
-        "research-worker",
-        include_str!("../assets/agents/research-worker.json"),
-    ),
-    (
-        "repo-editor",
-        include_str!("../assets/agents/repo-editor.json"),
-    ),
-];
+const BUILTIN_AGENTS: &[(&str, &str)] = &[(
+    "repo-editor",
+    include_str!("../assets/agents/repo-editor.json"),
+)];
 
 impl AgentDefinition {
     /// Parse an [`AgentDefinition`] from JSON text.
@@ -291,8 +283,8 @@ impl AgentDefinitions {
 
     /// Registry containing the crate-shipped built-in manifests only.
     ///
-    /// Today this is `research-worker` and `repo-editor`. The list is an
-    /// implementation detail and may grow over time.
+    /// Today this is `repo-editor`. The list is an implementation detail
+    /// and may grow over time.
     pub fn with_builtins() -> Self {
         let mut reg = Self::new();
         for (id, text) in BUILTIN_AGENTS {
@@ -498,14 +490,14 @@ mod tests {
 
     #[test]
     fn should_merge_builtin_and_local_agents() {
-        // Built-ins provide `research-worker` and `repo-editor`. A local
-        // manifest with the same id must override the built-in.
+        // Built-ins provide `repo-editor`. A local manifest with the same id
+        // must override the built-in.
         let tmp = tempfile::tempdir().expect("tempdir");
-        // Override the research-worker built-in with a local variant that
-        // adds `shell` to the tool list.
+        // Override the repo-editor built-in with a local variant that
+        // drops `shell` from the tool list.
         write(
-            &tmp.path().join("research-worker.json"),
-            r#"{"name":"research-worker","version":1,"tools":["search","shell"]}"#,
+            &tmp.path().join("repo-editor.json"),
+            r#"{"name":"repo-editor","version":1,"tools":["read_file","grep"]}"#,
         );
         // Add a brand-new local-only definition.
         write(
@@ -515,13 +507,12 @@ mod tests {
 
         let reg = AgentDefinitions::load_dir(tmp.path()).expect("load_dir");
 
-        // Built-in that was not overridden remains available.
-        let repo_editor = reg.get("repo-editor").expect("repo-editor");
-        assert!(repo_editor.tools.contains(&"read_file".to_string()));
-
         // Overridden built-in now carries the local fields.
-        let research = reg.get("research-worker").expect("research-worker");
-        assert!(research.tools.contains(&"shell".to_string()));
+        let overridden = reg.get("repo-editor").expect("repo-editor");
+        assert_eq!(
+            overridden.tools,
+            vec!["read_file".to_string(), "grep".to_string()]
+        );
 
         // Local-only definition is present.
         let local = reg.get("local-only").expect("local-only");
@@ -551,7 +542,6 @@ mod tests {
         let reg = AgentDefinitions::load_dir(Path::new("/tmp/does-not-exist-octos-m82-tests"))
             .expect("load_dir");
         // Built-ins are always present even when the caller's dir is missing.
-        assert!(reg.get("research-worker").is_some());
         assert!(reg.get("repo-editor").is_some());
     }
 
@@ -561,22 +551,6 @@ mod tests {
         let err = AgentDefinition::from_json_str(json).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("version"), "expected version error, got {msg}");
-    }
-
-    #[test]
-    fn should_provide_builtin_research_worker() {
-        let reg = AgentDefinitions::with_builtins();
-        let def = reg
-            .get("research-worker")
-            .expect("research-worker built-in");
-        assert_eq!(def.name, "research-worker");
-        assert!(def.tools.contains(&"search".to_string()));
-        assert!(def.tools.contains(&"web_fetch".to_string()));
-        assert!(def.tools.contains(&"web_search".to_string()));
-        // Research worker explicitly denies shell/write/edit.
-        assert!(def.disallowed_tools.contains(&"shell".to_string()));
-        assert!(def.disallowed_tools.contains(&"write_file".to_string()));
-        assert!(def.disallowed_tools.contains(&"edit_file".to_string()));
     }
 
     #[test]
@@ -597,7 +571,5 @@ mod tests {
                 "repo-editor missing {expected}"
             );
         }
-        // Repo editor denies deep_search.
-        assert!(def.disallowed_tools.contains(&"search".to_string()));
     }
 }

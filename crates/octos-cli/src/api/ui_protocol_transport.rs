@@ -33,23 +33,22 @@ use octos_core::ui_protocol::{
     ContextNormalizationReportedEvent, CronListParams, CronToggleParams, EnvelopeTokenUsage,
     EnvelopeV2, EnvelopeV2Notification, FileRef, HydratedMessage, HydratedTurn, InputItem,
     MemoryEntityParams, MemoryOverviewParams, MessageDeltaEvent, MessageMeta, OutputCursor,
-    Payload, PayloadV2, ReplayLossyEvent, RpcError,
-    RpcErrorResponse, RpcRequest, RpcResponse, SESSION_HYDRATE_INCLUDE_MAX,
-    SESSION_MESSAGES_PAGE_DEFAULT_LIMIT, SESSION_MESSAGES_PAGE_MAX_LIMIT,
-    SESSION_MESSAGES_PAGE_MAX_OFFSET, SESSION_TITLE_SET_MAX_CHARS, SessionBtwParams,
-    SessionDeleteParams, SessionFilesListParams, SessionHydrateParams, SessionHydrateResult,
-    SessionListParams, SessionMessagesPageParams, SessionOpenParams, SessionOpenResult,
-    SessionOpened, SessionOrchestrationEvent, SessionRollbackParams, SessionRollbackResult,
-    SessionSnapshotParams, SessionStatusGetParams, SessionTasksListParams, SessionTitleSetParams,
-    SessionWorkspaceGetParams, SkillActionJobUpdatedEvent, SystemStatusGetParams,
-    TaskArtifactListParams, TaskArtifactListResult, TaskArtifactReadParams, TaskArtifactReadResult,
-    TaskArtifactRecord, TaskCancelParams, TaskCancelResult, TaskListEntry, TaskListParams,
-    TaskListResult, TaskOutputDeltaEvent, TaskRestartFromNodeParams, TaskRestartFromNodeResult,
-    TaskRuntimeState as UiTaskRuntimeState, TaskUpdatedEvent, ThreadGraphEntry,
-    ThreadGraphGetParams, ThreadGraphGetResult, ToolCompletedEvent, ToolProgressEvent,
-    ToolStartedEvent, TurnCompletedEvent, TurnErrorEvent, TurnErrorPartialResult, TurnId,
-    TurnInterruptParams, TurnInterruptResult, TurnLifecycleState, TurnSessionResult,
-    TurnStartParams, TurnStateGetParams, TurnStateGetResult, TurnTerminalError,
+    Payload, PayloadV2, ReplayLossyEvent, RpcError, RpcErrorResponse, RpcRequest, RpcResponse,
+    SESSION_HYDRATE_INCLUDE_MAX, SESSION_MESSAGES_PAGE_DEFAULT_LIMIT,
+    SESSION_MESSAGES_PAGE_MAX_LIMIT, SESSION_MESSAGES_PAGE_MAX_OFFSET, SESSION_TITLE_SET_MAX_CHARS,
+    SessionBtwParams, SessionDeleteParams, SessionFilesListParams, SessionHydrateParams,
+    SessionHydrateResult, SessionListParams, SessionMessagesPageParams, SessionOpenParams,
+    SessionOpenResult, SessionOpened, SessionOrchestrationEvent, SessionRollbackParams,
+    SessionRollbackResult, SessionSnapshotParams, SessionStatusGetParams, SessionTasksListParams,
+    SessionTitleSetParams, SessionWorkspaceGetParams, SkillActionJobUpdatedEvent,
+    SystemStatusGetParams, TaskArtifactListParams, TaskArtifactListResult, TaskArtifactReadParams,
+    TaskArtifactReadResult, TaskArtifactRecord, TaskCancelParams, TaskCancelResult, TaskListEntry,
+    TaskListParams, TaskListResult, TaskOutputDeltaEvent, TaskRestartFromNodeParams,
+    TaskRestartFromNodeResult, TaskRuntimeState as UiTaskRuntimeState, TaskUpdatedEvent,
+    ThreadGraphEntry, ThreadGraphGetParams, ThreadGraphGetResult, ToolCompletedEvent,
+    ToolProgressEvent, ToolStartedEvent, TurnCompletedEvent, TurnErrorEvent,
+    TurnErrorPartialResult, TurnId, TurnInterruptParams, TurnInterruptResult, TurnLifecycleState,
+    TurnSessionResult, TurnStartParams, TurnStateGetParams, TurnStateGetResult, TurnTerminalError,
     TurnTerminalOutcome, UI_PROTOCOL_FEATURE_APPROVAL_TYPED_V1,
     UI_PROTOCOL_FEATURE_AUXILIARY_REST_TO_WS_V1, UI_PROTOCOL_FEATURE_BACKGROUND_ACTIVITY_V1,
     UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1, UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1,
@@ -1022,14 +1021,10 @@ struct StoredSessionPermissionProfile {
     approval_policy: Option<octos_agent::ApprovalPolicy>,
 }
 
-
-
-
 #[derive(Default)]
 struct SessionPermissionProfileStore {
     selections: std::sync::Mutex<HashMap<SessionKey, StoredSessionPermissionProfile>>,
 }
-
 
 impl SessionPermissionProfileStore {
     // Read-side convenience pair kept for feature combinations that resolve
@@ -1892,11 +1887,10 @@ impl ConnectionUiFeatures {
             super::coding_tool_contract::CODING_DYNAMIC_TOOL_SEARCH_CAPABILITY_V1,
         );
         // #1172 — Codex naming-parity aliases. The underlying capabilities
-        // ride on `shell` / `exec_command` (for `bash`), `spawn_agent` +
-        // `wait_agent` (for `delegate`), and the compile-time browser tool
-        // (for `browser`). Advertising them lets a Codex-trained client
-        // skip the `tool not found` -> `tool_search` round trip on first
-        // call.
+        // ride on `shell` / `exec_command` (for `bash`) and `spawn_agent` +
+        // `wait_agent` (for `delegate`). Advertising them lets a Codex-trained
+        // client skip the `tool not found` -> `tool_search` round trip on
+        // first call.
         push_capability_feature(
             &mut capabilities.supported_features,
             super::coding_tool_contract::CODING_BASH_CAPABILITY_V1,
@@ -1904,10 +1898,6 @@ impl ConnectionUiFeatures {
         push_capability_feature(
             &mut capabilities.supported_features,
             super::coding_tool_contract::CODING_DELEGATE_CAPABILITY_V1,
-        );
-        push_capability_feature(
-            &mut capabilities.supported_features,
-            super::coding_tool_contract::CODING_BROWSER_CAPABILITY_V1,
         );
         if self.context_lifecycle_available() {
             push_capability_feature(
@@ -5682,10 +5672,9 @@ pub(crate) async fn ws_handler_for_session_ingress(
     };
     let connection_profile_id =
         profile_id.or_else(|| session_id.profile_id().map(ToOwned::to_owned));
-    let auth_identity = connection_profile_id.clone().map(|id| AuthIdentity::User {
-        id,
-
-    });
+    let auth_identity = connection_profile_id
+        .clone()
+        .map(|id| AuthIdentity::User { id });
     let features = ConnectionUiFeatures::from_headers_and_query(&headers, uri.query());
     let scope = SessionIngressScope { session_id, token };
     ws.on_upgrade(move |socket| {
@@ -5941,7 +5930,11 @@ async fn ui_protocol_connection(
         }
 
         match command {
-            UiCommand::SmartHomeStatusGet(_) | UiCommand::SmartHomeDeviceList(_) | UiCommand::SmartHomeDeviceCommand(_) | UiCommand::SmartHomeCameraStreamStart(_) | UiCommand::SmartHomeCameraStreamStop(_) => {}
+            UiCommand::SmartHomeStatusGet(_)
+            | UiCommand::SmartHomeDeviceList(_)
+            | UiCommand::SmartHomeDeviceCommand(_)
+            | UiCommand::SmartHomeCameraStreamStart(_)
+            | UiCommand::SmartHomeCameraStreamStop(_) => {}
             UiCommand::TaskArtifactList(_) | UiCommand::TaskArtifactRead(_) => {}
             UiCommand::ProfileLocalCreate(params) => {
                 match create_or_get_local_solo_profile(&state, params) {
@@ -6667,7 +6660,11 @@ where
             };
 
             match command {
-            UiCommand::SmartHomeStatusGet(_) | UiCommand::SmartHomeDeviceList(_) | UiCommand::SmartHomeDeviceCommand(_) | UiCommand::SmartHomeCameraStreamStart(_) | UiCommand::SmartHomeCameraStreamStop(_) => {}
+                UiCommand::SmartHomeStatusGet(_)
+                | UiCommand::SmartHomeDeviceList(_)
+                | UiCommand::SmartHomeDeviceCommand(_)
+                | UiCommand::SmartHomeCameraStreamStart(_)
+                | UiCommand::SmartHomeCameraStreamStop(_) => {}
                 UiCommand::ProfileLocalCreate(params) => {
                     match create_or_get_local_solo_profile(&state, params) {
                         Ok(result) => {
@@ -7088,7 +7085,7 @@ where
                     )
                     .await;
                 }
-                                }
+            }
         }
         Ok::<(), eyre::Report>(())
     };
@@ -11250,7 +11247,6 @@ async fn raw_skill_action_invoke(
                 &params.session_id,
                 ledger,
             );
-;
             if let Some(store) = state.task_query_store.as_ref() {
                 store.register(
                     &params.session_id,
@@ -11333,7 +11329,6 @@ async fn load_skill_action_job_view(
                 session_id,
                 ledger,
             );
-;
             Ok((
                 profile_id,
                 project_skill_action_jobs(supervisor.get_tasks_for_session(&session_id.0)),
@@ -11868,8 +11863,11 @@ async fn raw_profile_llm_upsert(
     // Relocate keychain-backed secrets (e.g. a Vertex SA JSON supplied as the
     // route api_key) into the OS keychain before persisting, so this RPC can't
     // write a private key to plaintext profile config.
-    crate::api::handlers::relocate_keychain_backed_secrets(&mut profile.config.env_vars, &profile_id)
-        .map_err(|(_, msg)| RpcError::invalid_params(msg))?;
+    crate::api::handlers::relocate_keychain_backed_secrets(
+        &mut profile.config.env_vars,
+        &profile_id,
+    )
+    .map_err(|(_, msg)| RpcError::invalid_params(msg))?;
     profile.updated_at = Utc::now();
     store
         .save_with_merge(&mut profile)
@@ -12854,8 +12852,11 @@ async fn raw_profile_sub_providers_upsert(
         profile.config.sub_providers.push(entry);
     }
 
-    crate::api::handlers::relocate_keychain_backed_secrets(&mut profile.config.env_vars, &profile_id)
-        .map_err(|(_, msg)| RpcError::invalid_params(msg))?;
+    crate::api::handlers::relocate_keychain_backed_secrets(
+        &mut profile.config.env_vars,
+        &profile_id,
+    )
+    .map_err(|(_, msg)| RpcError::invalid_params(msg))?;
     profile.updated_at = Utc::now();
     store
         .save_with_merge(&mut profile)
@@ -12980,9 +12981,6 @@ async fn handle_raw_appui_rpc(
         );
         return true;
     }
-
-
-
 
     let result = match request.method.as_str() {
         APPUI_METHOD_CONFIG_CAPABILITIES_LIST => {
@@ -15688,10 +15686,6 @@ fn directory_is_writable(path: &Path) -> bool {
     }
 }
 
-
-
-
-
 fn session_permission_profiles() -> Arc<SessionPermissionProfileStore> {
     static SESSION_PERMISSION_PROFILES: OnceLock<Arc<SessionPermissionProfileStore>> =
         OnceLock::new();
@@ -15699,8 +15693,6 @@ fn session_permission_profiles() -> Arc<SessionPermissionProfileStore> {
         .get_or_init(|| Arc::new(SessionPermissionProfileStore::default()))
         .clone()
 }
-
-
 
 /// #1057: report `workspace_policy.toml` presence + parse status. We do not
 /// load the policy into the runtime here — that responsibility lives with
@@ -15758,9 +15750,6 @@ fn workspace_profile_scope(profile_id: Option<&str>, session_id: &SessionKey) ->
         .unwrap_or(MAIN_PROFILE_ID)
         .to_owned()
 }
-
-
-
 
 /// Resolve the `ProfileRuntime` for the routed session, mirroring
 /// `chat_sync`'s `state.profiles.get(profile_id)` lookup.
@@ -16842,10 +16831,6 @@ enum TurnSteerDecision {
     /// `NoActiveTurn` → `spawn_task(RegularTask)`).
     NoActiveTurn,
 }
-
-
-
-
 
 /// Snapshot of sessions that currently have an in-flight (non-terminal) turn in
 /// the process-global active-turns registry. One lock acquisition; used to feed
@@ -25907,7 +25892,10 @@ async fn run_standalone_turn(
         None
     };
     let mut voice_streamed_count: usize = 0;
-    let (mut voice_tx, mut voice_handle): (Option<tokio::sync::mpsc::Sender<String>>, Option<tokio::task::JoinHandle<usize>>) = (None, None);
+    let (mut voice_tx, mut voice_handle): (
+        Option<tokio::sync::mpsc::Sender<String>>,
+        Option<tokio::task::JoinHandle<usize>>,
+    ) = (None, None);
     loop {
         // Race progress events against the interrupt signal so an interrupt
         // can wake us out of `progress_rx.recv()` even if the agent task is
@@ -26079,16 +26067,16 @@ async fn run_standalone_turn(
                 // spoken text as the message. Text turns: unchanged.
                 let voice_failure = voice_failure_rx.as_mut().and_then(|rx| rx.try_recv().ok());
                 let (code, wire_msg): (&str, String) = (
-                        event
-                            .get("code")
-                            .and_then(Value::as_str)
-                            .unwrap_or("runtime_error"),
-                        event
-                            .get("message")
-                            .and_then(Value::as_str)
-                            .unwrap_or("turn failed")
-                            .to_string(),
-                    );;
+                    event
+                        .get("code")
+                        .and_then(Value::as_str)
+                        .unwrap_or("runtime_error"),
+                    event
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("turn failed")
+                        .to_string(),
+                );
                 let turn_outcome = if code.contains("rate_limit")
                     || code.contains("rate_limited")
                     || wire_msg.contains("rate_limit")

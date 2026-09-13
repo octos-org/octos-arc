@@ -51,8 +51,6 @@ pub use router::{DEFAULT_BASE_DOMAIN, build_router, cors_allowlist_for_base_doma
 /// the handler-layer HTTP status mapping without spinning up the
 /// full Axum router. Codex round-2 follow-up to issue #996.
 #[doc(hidden)]
-
-
 // #995 follow-up round 3 — Integration tests in
 // `crates/octos-cli/tests/x_profile_id_strip.rs` need to drive
 // `handlers::session_messages` directly: the REST route
@@ -86,8 +84,8 @@ use std::time::Instant;
 use crate::content_catalog::ContentCatalogManager;
 use crate::process_manager::ProcessManager;
 use crate::profiles::ProfileStore;
-use crate::user_store::UserStore;
 use crate::runtime::{ProfileRuntime, SessionRuntimeCache};
+use crate::user_store::UserStore;
 
 /// Serializes skill filesystem mutation and runtime publication per profile.
 ///
@@ -165,14 +163,10 @@ impl Drop for ProfileSkillMutationGuard {
     }
 }
 
-
-
 struct RunIdEntry {
     tenant_id: String,
     expires_at: Instant,
 }
-
-
 
 /// Opaque, per-application OUP persistence resources. Connections share them;
 /// independent in-process applications do not.
@@ -187,7 +181,6 @@ pub struct AppState {
     /// Bootstrap admin auth token from config/env (used only until the
     /// hashed admin-token file is created via dashboard rotation).
     pub auth_token: Option<String>,
-
 
     /// Prometheus metrics handle.
     pub metrics_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,

@@ -177,7 +177,7 @@ pub(crate) fn load_skill_action_jobs(
     session_id: &SessionKey,
 ) -> std::io::Result<Vec<SkillActionJobRecord>> {
     let supervisor = TaskSupervisor::new();
-&supervisor.enable_persistence(task_state_path(data_dir, session_id));
+    &supervisor.enable_persistence(task_state_path(data_dir, session_id));
 
     Ok(project_skill_action_jobs(
         supervisor.get_tasks_for_session(&session_id.0),

@@ -6529,8 +6529,6 @@ pub struct SkillActionJobUpdatedEvent {
     pub job: Value,
 }
 
-
-
 /// #2019 — one background event surfaced to the HUMAN.
 ///
 /// Background events (a monitor's filtered stdout line, a claimed fleet outbox

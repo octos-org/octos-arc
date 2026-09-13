@@ -25,8 +25,8 @@ use super::build_system_prompt;
 use crate::commands::chat::{create_embedder, resolve_provider_policy};
 use crate::config::{Config, detect_provider};
 use crate::session_actor::{
-    ActorFactory, PendingMessages, SessionTaskQueryStore,
-    SnapshotToolRegistryFactory, ToolRegistryFactory,
+    ActorFactory, PendingMessages, SessionTaskQueryStore, SnapshotToolRegistryFactory,
+    ToolRegistryFactory,
 };
 
 const FIRST_PARTY_SKILL_ENV_VARS: &[&str] = &[
@@ -783,7 +783,6 @@ impl ProfileActorFactoryBuilder {
             );
             tools.inject_tool_config(self.tool_config.clone());
 
-
             if !profile_config.mcp_servers.is_empty() {
                 match octos_agent::McpClient::start(&profile_config.mcp_servers).await {
                     Ok(client) => client.register_tools(&mut tools),
@@ -946,14 +945,11 @@ impl ProfileActorFactoryBuilder {
                 tools.apply_policy(policy);
             }
 
-
-
             // NEW-06 fix: the parent ActorFactory's session agent gets
             // its embedder from the shared single resolve below; hand the
             // same handle here so child-profile pipeline workers run on
             // the same contamination-safe hybrid memory path.
             let child_pipeline_embedder = profile_embedder.clone();
-
 
             Arc::new(SnapshotToolRegistryFactory::new(tools))
         };
@@ -1522,7 +1518,8 @@ mod tests {
             out_tx,
             spawn_inbound_tx,
             cron_service,
-            tool_registry_factory: Arc::new(SnapshotToolRegistryFactory::new(ToolRegistry::new())),            max_history: Arc::new(AtomicUsize::new(50)),
+            tool_registry_factory: Arc::new(SnapshotToolRegistryFactory::new(ToolRegistry::new())),
+            max_history: Arc::new(AtomicUsize::new(50)),
             session_timeout_secs: octos_agent::DEFAULT_SESSION_TIMEOUT_SECS,
             shutdown: Arc::new(AtomicBool::new(false)),
             cwd: project_dir.clone(),

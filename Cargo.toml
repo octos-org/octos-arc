@@ -40,7 +40,10 @@ tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
 # Serialization
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# preserve_order: serde_json::Map keeps insertion order. This was previously
+# unified in via the `agent-client-protocol` dep (removed with `octos acp`);
+# the UI-protocol envelopes and several tests rely on stable key order.
+serde_json = { version = "1", features = ["preserve_order"] }
 serde_yml = "0.0.12"
 toml = "0.8"
 base64 = "0.22"

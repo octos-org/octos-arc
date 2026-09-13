@@ -679,5 +679,4 @@ mod tests {
         assert_eq!(retry["type"], "stream_retry");
         assert_eq!(retry["iteration"], 5);
     }
-
 }

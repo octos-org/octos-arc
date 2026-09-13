@@ -513,4 +513,3 @@ fn image_skill_call(
         VisualKind::Html | VisualKind::Illustrated => None,
     }
 }
-

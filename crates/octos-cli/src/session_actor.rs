@@ -174,7 +174,6 @@ const DEFAULT_CONTEXT_COMPACT_RATIO_NUMERATOR: usize = 7;
 const DEFAULT_CONTEXT_COMPACT_RATIO_DENOMINATOR: usize = 10;
 const DEFAULT_CONTEXT_COMPACT_KEEP_ITEMS: usize = 16;
 
-
 #[derive(Debug, Clone, serde::Serialize)]
 struct PersistedSessionMessage {
     seq: usize,
@@ -1685,7 +1684,11 @@ fn sanitize_task_for_response(
 }
 
 // Install the actual gateway change/terminal sinks before persistence restore.
-fn install_gateway_task_status_sinks(supervisor: &TaskSupervisor, tx: mpsc::Sender<ActorMessage>, data_dir: PathBuf) {
+fn install_gateway_task_status_sinks(
+    supervisor: &TaskSupervisor,
+    tx: mpsc::Sender<ActorMessage>,
+    data_dir: PathBuf,
+) {
     supervisor.set_on_change(move |task| {
         forward_task_status_to_actor_inbox(&tx, &data_dir, task);
     });
@@ -4228,8 +4231,6 @@ struct SessionActor {
     /// cleared at the end. `None` outside command handling — `send_reply`
     /// then falls back to legacy behavior (stamping no thread_id).
     current_command_cmid: Option<String>,
-
-
 }
 
 impl SessionActor {
@@ -6369,7 +6370,6 @@ impl SessionActor {
             Err(_) => return,
         };
 
-
         // M16-D2: capture ContextManager-derived prompt history before
         // persisting this turn's user message, because the agent appends the
         // current user message internally.
@@ -8216,7 +8216,6 @@ impl SessionActor {
         let persisted_user_content =
             Self::persisted_user_content(&inbound, &image_media, &attachment_media);
 
-
         // M16-D2: the production pre-turn prompt history comes from the
         // ContextManager. If the active context is over threshold this installs
         // a compacted generation before the model call; raw session history
@@ -8984,5 +8983,3 @@ fn format_thinking_prefix(reasoning: Option<&str>) -> String {
 #[cfg(test)]
 #[path = "session_actor_tests.rs"]
 mod tests;
-
-

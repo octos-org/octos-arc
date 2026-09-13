@@ -735,10 +735,7 @@ mod lane_attribution_helper_tests {
             crate::retry::RetryProvider::new(inner.clone()).api_style(),
             Some(ApiStyle::AnthropicMessages)
         );
-        assert_eq!(
-            inner.api_style(),
-            Some(ApiStyle::AnthropicMessages)
-        );
+        assert_eq!(inner.api_style(), Some(ApiStyle::AnthropicMessages));
         assert_eq!(
             crate::context_override::ContextWindowOverride::new(inner.clone(), 1).api_style(),
             Some(ApiStyle::AnthropicMessages)

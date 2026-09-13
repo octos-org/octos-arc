@@ -523,7 +523,6 @@ pub struct ProfileRuntime {
     /// Shared shutdown owner retained across replacement runtimes.
     pub runtime_lifecycle: Option<Arc<ProfileRuntimeLifecycle>>,
 
-
     /// Pre-built lifecycle hook executor (M11-F regression fix REG-3).
     ///
     /// Pre-M11-F `serve.rs::try_create_agent` merged `config.hooks +
@@ -625,8 +624,7 @@ async fn build_profile_plugin_layer(
                 });
             }
             Err(error) => warn!(profile_id, %error, "plugin loading failed"),
-        }
-;
+        };
     }
 
     if !plugin_result.mcp_servers.is_empty() {
@@ -1377,8 +1375,6 @@ impl ProfileRuntime {
                 .wrap_err("invalid profile approval_policy")?;
         }
 
-
-
         Ok(Arc::new(Self {
             profile_id: profile.id.clone(),
             data_dir: data_dir.to_path_buf(),
@@ -1422,7 +1418,8 @@ impl ProfileRuntime {
             memory_refresh_enabled,
             memory,
             memory_store,
-            embedder,            tool_config,
+            embedder,
+            tool_config,
             cron_service: Some(cron_service),
             runtime_lifecycle,
             hook_executor,
@@ -2537,8 +2534,4 @@ mod tests {
             updated_at: Utc::now(),
         }
     }
-
-
-
 }
-

@@ -534,8 +534,6 @@ fn write_result_md_named(dir: &std::path::Path, name: &str, body: &str) -> std::
     std::fs::rename(&tmp_path, &final_path)
 }
 
-
-
 pub(super) fn checkpoint_budget_exhaustion(
     workdir: Option<&std::path::Path>,
     stop: &BudgetStop,
@@ -606,8 +604,6 @@ pub(super) fn checkpoint_budget_exhaustion(
 #[cfg(test)]
 mod budget_checkpoint_tests {
     use super::*;
-
-
 
     /// #27h-r1 — dir-level ownership through the fs path (this crate's
     /// consumer shape).

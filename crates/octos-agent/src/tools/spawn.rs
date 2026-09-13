@@ -3852,7 +3852,6 @@ impl Tool for SpawnTool {
                         verified_cache_dir: None,
                     },
                 );
-;
             }
             for factory in &self.child_tool_factories {
                 tools.register_arc(factory());

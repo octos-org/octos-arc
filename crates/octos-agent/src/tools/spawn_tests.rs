@@ -2815,8 +2815,8 @@ fn apply_agent_definition_preserves_inline_max_iterations() {
     // is untouched — the manifest carries no iteration budget).
     let registry = crate::agents::AgentDefinitions::with_builtins();
     let mut input = parse_spawn_input(serde_json::json!({
-        "task": "research this topic",
-        "agent_definition_id": "research-worker",
+        "task": "edit the repo files",
+        "agent_definition_id": "repo-editor",
         "max_iterations": 200
     }));
     apply_agent_definition(&mut input, &registry).expect("apply");
@@ -2825,36 +2825,36 @@ fn apply_agent_definition_preserves_inline_max_iterations() {
 
 #[test]
 fn should_resolve_manifest_in_spawn_tool() {
-    // Spawn args reference `research-worker`; the manifest's `tools`
+    // Spawn args reference `repo-editor`; the manifest's `tools`
     // list must flow into the resolved `Input.allowed_tools`. Inline
     // `allowed_tools` is empty so the manifest fills it in.
     let registry = crate::agents::AgentDefinitions::with_builtins();
     let mut input = parse_spawn_input(serde_json::json!({
-        "task": "research this topic",
-        "agent_definition_id": "research-worker"
+        "task": "edit the repo files",
+        "agent_definition_id": "repo-editor"
     }));
     apply_agent_definition(&mut input, &registry).expect("apply");
 
-    // Research-worker manifest lists deep_search + web_fetch + web_search.
-    for expected in ["search", "web_fetch", "web_search"] {
+    // Repo-editor manifest lists the file tools + shell.
+    for expected in [
+        "read_file",
+        "write_file",
+        "edit_file",
+        "shell",
+        "grep",
+        "glob",
+    ] {
         assert!(
             input.allowed_tools.contains(&expected.to_string()),
             "manifest tool {expected} did not flow into allowed_tools"
-        );
-    }
-    // Manifest's disallowed_tools (shell/write/edit) must not appear.
-    for forbidden in ["shell", "write_file", "edit_file"] {
-        assert!(
-            !input.allowed_tools.contains(&forbidden.to_string()),
-            "manifest disallowed_tool {forbidden} leaked into allowed_tools"
         );
     }
 }
 
 #[test]
 fn should_let_inline_fields_override_manifest() {
-    // Inline `model` must beat the manifest's `model`. The manifest
-    // sets no model on `research-worker`, so we use a local manifest
+    // Inline `model` must beat the manifest's `model`. The built-in
+    // manifest sets no model, so we use a local manifest
     // that has one to make the override visible.
     let mut registry = crate::agents::AgentDefinitions::new();
     registry.insert(

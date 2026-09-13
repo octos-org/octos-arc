@@ -5,23 +5,19 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, MatchedPath};
-use axum::http::{HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
-use axum::routing::{delete, get, post, put};
+use axum::routing::{get, post};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use url::Url;
 
 use super::AppState;
-use super::profile_scope;
-use super::provider_diagnostics;
 use super::handlers;
 use super::metrics;
+use super::provider_diagnostics;
 use super::session_ingress;
 use super::ui_protocol_transport;
 use super::usage;
-use super::webhook_proxy;
-use crate::user_store::UserRole;
 
 /// Authentication identity extracted by the auth middleware.
 #[derive(Clone, Debug)]
@@ -252,7 +248,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             .allow_headers(tower_http::cors::AllowHeaders::mirror_request())
     };
 
-
     // Chat + status API (existing)
     //
     // Transport history:
@@ -319,10 +314,22 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     // provider/search diagnostics (shared with the retired admin plane)
     // and the usage ledger reads.
     let my_api = Router::new()
-        .route("/api/my/test-provider", post(provider_diagnostics::test_provider))
-        .route("/api/my/provider-models", post(provider_diagnostics::provider_models))
-        .route("/api/my/test-search", post(provider_diagnostics::test_search))
-        .route("/api/my/model-limits", get(provider_diagnostics::model_limits))
+        .route(
+            "/api/my/test-provider",
+            post(provider_diagnostics::test_provider),
+        )
+        .route(
+            "/api/my/provider-models",
+            post(provider_diagnostics::provider_models),
+        )
+        .route(
+            "/api/my/test-search",
+            post(provider_diagnostics::test_search),
+        )
+        .route(
+            "/api/my/model-limits",
+            get(provider_diagnostics::model_limits),
+        )
         .route("/api/my/usage", get(usage::my_usage))
         .route(
             "/api/my/usage/sessions/{session_id}",
@@ -331,30 +338,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
     // Admin API routes (admin auth only, 1MB body limit)
 
-
     // Auth middleware was removed with the multi-tenant dashboard: all
     // HTTP callers are local-trust. stdio (the ARC path) never enters the
     // router at all.
     let protected = my_api.merge(chat_api);
-
-    // Webhook proxy routes (unauthenticated — Feishu/Twilio servers can't authenticate)
-    let webhook_routes = Router::new()
-        .route(
-            "/webhook/feishu/{profile_id}",
-            post(webhook_proxy::feishu_webhook_proxy),
-        )
-        .route(
-            "/webhook/line/{profile_id}",
-            post(webhook_proxy::line_webhook_proxy),
-        )
-        .route(
-            "/webhook/dingtalk/{profile_id}",
-            post(webhook_proxy::dingtalk_webhook_proxy),
-        )
-        .route(
-            "/webhook/twilio/{profile_id}",
-            post(webhook_proxy::twilio_webhook_proxy),
-        );
 
     // Metrics route — protected when auth is configured, public otherwise
     let metrics_route = Router::new().route("/metrics", get(metrics::metrics_handler));
@@ -364,7 +351,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/version", get(handlers::version))
         .route("/health", get(handlers::health));
 
-    // Unauthenticated routes (static files + auth endpoints + webhook proxy + internal)
+    // Unauthenticated routes (metrics + internal ingress + version)
     //
     // Issue #994 (P0 sev2 cross-tenant data read): `/api/preview/...`
     // used to live here. It now sits on the authenticated `chat_api`
@@ -386,7 +373,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/session_ingress/ws/{session_id}",
             get(session_ingress::ws_handler),
         )
-        .merge(webhook_routes)
         .merge(version_routes);
 
     // Layer 1 defence for issue #995 — the strip middleware runs OUTSIDE
@@ -446,8 +432,6 @@ async fn strip_untrusted_profile_id_middleware(
 
     next.run(req).await
 }
-
-
 
 fn trusted_proxy_cidrs() -> &'static [TrustedProxyCidr] {
     use std::sync::OnceLock;
@@ -603,5 +587,4 @@ mod tests {
             String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
         }
     }
-
 }

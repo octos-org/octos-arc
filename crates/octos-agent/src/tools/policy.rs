@@ -3,7 +3,6 @@
 use metrics::counter;
 use serde::{Deserialize, Serialize};
 
-
 /// Outcome of `ToolPolicy::evaluate`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyDecision {
@@ -150,7 +149,7 @@ pub(crate) fn entry_matches(entry: &str, tool_name: &str) -> bool {
     entry == tool_name
 }
 
-/// Metadata about a named tool group (`group:web`, `group:runtime`, …) used
+/// Metadata about a named tool group (`group:fs`, `group:runtime`, …) used
 /// by [`ToolPolicy`] matching and profile/role tool declarations.
 #[derive(Debug, Clone)]
 pub struct ToolGroupInfo {
@@ -180,11 +179,6 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
         // would still be reachable via `bash(cmd=…)`.
         description: "Shell command execution",
         tools: &["shell", "exec_command", "write_stdin", "bash"],
-    },
-    ToolGroupInfo {
-        name: "group:web",
-        description: "Web search, page fetching, and headless browser",
-        tools: &["web_search", "web_fetch", "browser"],
     },
     ToolGroupInfo {
         name: "group:search",
@@ -222,14 +216,9 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
         ],
     },
     ToolGroupInfo {
-        name: "group:research",
-        description: "Deep multi-round web research and synthesis",
-        tools: &["search", "synthesize_research", "deep_crawl"],
-    },
-    ToolGroupInfo {
         name: "group:admin",
-        description: "Skill management, tool configuration, and model switching",
-        tools: &["manage_skills", "configure_tool", "model_check"],
+        description: "LLM-facing tool configuration",
+        tools: &["configure_tool"],
     },
     ToolGroupInfo {
         name: "group:media",

@@ -37,10 +37,6 @@ fn goal_updated_notification(
     })
 }
 
-
-
-
-
 #[test]
 fn should_reclaim_expired_context_persist_locks_without_splitting_live_writers() {
     let locks = AppUiContextPersistLocks::default();
@@ -365,9 +361,10 @@ async fn compaction_started_precedes_completed_in_lifecycle_batch() {
     // and the started event reports the pre-compaction estimate.
     struct TinyContextProvider;
     #[async_trait::async_trait]
-    impl octos_llm::LlmProvider for TinyContextProvider {    fn provider_name(&self) -> &str {
-        "test-provider"
-    }
+    impl octos_llm::LlmProvider for TinyContextProvider {
+        fn provider_name(&self) -> &str {
+            "test-provider"
+        }
 
         async fn chat(
             &self,
@@ -440,7 +437,8 @@ async fn compaction_started_precedes_completed_in_lifecycle_batch() {
 /// unreachable because the deterministic summarizer never calls the model.
 struct OpenSnapshotTinyProvider;
 #[async_trait::async_trait]
-impl octos_llm::LlmProvider for OpenSnapshotTinyProvider {    fn provider_name(&self) -> &str {
+impl octos_llm::LlmProvider for OpenSnapshotTinyProvider {
+    fn provider_name(&self) -> &str {
         "test-provider"
     }
 
@@ -4896,7 +4894,6 @@ fn codex_naming_aliases_advertise_capability_features() {
     for feature in &[
         super::super::coding_tool_contract::CODING_BASH_CAPABILITY_V1,
         super::super::coding_tool_contract::CODING_DELEGATE_CAPABILITY_V1,
-        super::super::coding_tool_contract::CODING_BROWSER_CAPABILITY_V1,
     ] {
         assert!(
             capabilities.supports_feature(feature),
@@ -9610,7 +9607,6 @@ fn task_output_read_decodes_protocol_params() {
     ));
 }
 
-
 /// PR #1265 follow-up — the slides session `mofa_*` allowlist filter
 /// MUST run on the WS turn path (`run_standalone_turn` in
 /// `handle_turn_start`), not only on the gateway `SessionActor`
@@ -9841,21 +9837,6 @@ fn ws_turn_snapshot_is_constrained_by_reapplied_tool_policy() {
         "the re-applied allow-list must strip the post-snapshot session tool that used to leak",
     );
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 #[test]
 fn coding_tool_status_distinguishes_registered_hidden_tools_from_missing_tools() {
@@ -11588,7 +11569,9 @@ fn numeric_id_envelope_is_rejected_with_parse_error() {
 
 #[test]
 fn authenticated_profile_id_uses_user_identity_only() {
-    let user = AuthIdentity::User { id: "profile-a".into() };
+    let user = AuthIdentity::User {
+        id: "profile-a".into(),
+    };
 
     assert_eq!(authenticated_profile_id(&user), Some("profile-a"));
     assert_eq!(authenticated_profile_id(&AuthIdentity::Admin), None);
@@ -15279,8 +15262,7 @@ struct RecordingOrchestrator {
     calls: std::sync::Mutex<Vec<String>>,
 }
 
-impl RecordingOrchestrator {
-}
+impl RecordingOrchestrator {}
 
 #[test]
 fn aux_rest_to_ws_v1_route_rpc_rejects_methods_when_feature_not_negotiated() {
@@ -15575,9 +15557,10 @@ async fn session_btw_rejects_second_aside_while_first_in_flight() {
 async fn session_btw_answers_via_provider_with_no_tools() {
     struct BtwStubProvider;
     #[async_trait::async_trait]
-    impl octos_llm::LlmProvider for BtwStubProvider {    fn provider_name(&self) -> &str {
-        "test-provider"
-    }
+    impl octos_llm::LlmProvider for BtwStubProvider {
+        fn provider_name(&self) -> &str {
+            "test-provider"
+        }
 
         async fn chat(
             &self,
@@ -15693,9 +15676,10 @@ fn btw_live_draft_is_turn_scoped() {
 async fn session_btw_reads_draft_only_for_a_non_terminal_turn() {
     struct DraftProbeProvider;
     #[async_trait::async_trait]
-    impl octos_llm::LlmProvider for DraftProbeProvider {    fn provider_name(&self) -> &str {
-        "test-provider"
-    }
+    impl octos_llm::LlmProvider for DraftProbeProvider {
+        fn provider_name(&self) -> &str {
+            "test-provider"
+        }
 
         async fn chat(
             &self,
@@ -15844,9 +15828,10 @@ async fn session_btw_reads_draft_only_for_a_non_terminal_turn() {
 async fn session_btw_folds_topic_into_the_session_key() {
     struct TopicStubProvider;
     #[async_trait::async_trait]
-    impl octos_llm::LlmProvider for TopicStubProvider {    fn provider_name(&self) -> &str {
-        "test-provider"
-    }
+    impl octos_llm::LlmProvider for TopicStubProvider {
+        fn provider_name(&self) -> &str {
+            "test-provider"
+        }
 
         async fn chat(
             &self,
@@ -18201,8 +18186,6 @@ async fn approval_request_backpressure_cancels_pending_runtime_waiter() {
     )));
 }
 
-
-
 #[tokio::test]
 async fn ephemeral_drops_are_silent_and_do_not_increment_dropped_count() {
     let (ws, _rx) = ws_connection_for_test(1);
@@ -20295,15 +20278,16 @@ async fn should_keep_spawn_only_sent_files_identity_and_each_hydrated_attachment
 
 #[cfg(unix)]
 async fn check_spawn_only_sent_file_hydration(file_count: usize) {
-    use crate::commands::acp::{SessionAgentFactory, TestAgentFactory};
+    use crate::commands::agent_factory::{SessionAgentFactory, TestAgentFactory};
     use crate::commands::oup_session::{OupFrontend, OupSession};
     use std::os::unix::fs::PermissionsExt;
 
     struct MediaModel(std::sync::atomic::AtomicUsize);
     #[async_trait::async_trait]
-    impl octos_llm::LlmProvider for MediaModel {    fn provider_name(&self) -> &str {
-        "test-provider"
-    }
+    impl octos_llm::LlmProvider for MediaModel {
+        fn provider_name(&self) -> &str {
+            "test-provider"
+        }
 
         async fn chat(
             &self,
@@ -24412,7 +24396,8 @@ struct SegmentIdentityProvider {
 }
 
 #[async_trait::async_trait]
-impl octos_llm::LlmProvider for SegmentIdentityProvider {    fn provider_name(&self) -> &str {
+impl octos_llm::LlmProvider for SegmentIdentityProvider {
+    fn provider_name(&self) -> &str {
         "test-provider"
     }
 
@@ -25231,7 +25216,8 @@ async fn live_forwarder_survives_broadcast_lag_and_keeps_pumping() {
 struct M11EStubLlm;
 
 #[async_trait::async_trait]
-impl octos_llm::LlmProvider for M11EStubLlm {    fn provider_name(&self) -> &str {
+impl octos_llm::LlmProvider for M11EStubLlm {
+    fn provider_name(&self) -> &str {
         "test-provider"
     }
 
@@ -25247,7 +25233,6 @@ impl octos_llm::LlmProvider for M11EStubLlm {    fn provider_name(&self) -> &str
     fn model_id(&self) -> &str {
         "m11e-stub"
     }
-
 }
 
 async fn make_m11e_profile_with_llm_and_sandbox(
@@ -25666,7 +25651,6 @@ async fn cold_scope_should_preserve_new_unopened_session_behavior() {
 // master-continuation scheduler — the exact seam `peer_fleet_synthesis` uses.
 // No live LLM: the requester parks on its oneshot and we cancel it to unwind.
 
-
 // ---- #1842 — close-while-parked: a CLOSED peer must not park ----------------
 //
 // Two independent mechanisms, tested separately (the full close-vs-park
@@ -25680,11 +25664,6 @@ async fn cold_scope_should_preserve_new_unopened_session_behavior() {
 //   (b) every park point GATES on the peer's `(profile, slug)` closed state,
 //       derived from the RESOLVED runtime profile + the VALIDATED `peer-`
 //       topic, with a precheck → register → post-check bracket.
-
-
-
-
-
 
 struct AppuiContinuationLlm {
     response: String,
@@ -25703,7 +25682,8 @@ impl AppuiContinuationLlm {
 }
 
 #[async_trait::async_trait]
-impl octos_llm::LlmProvider for AppuiContinuationLlm {    fn provider_name(&self) -> &str {
+impl octos_llm::LlmProvider for AppuiContinuationLlm {
+    fn provider_name(&self) -> &str {
         "test-provider"
     }
 
@@ -25741,7 +25721,6 @@ impl octos_llm::LlmProvider for AppuiContinuationLlm {    fn provider_name(&self
     fn model_id(&self) -> &str {
         "appui-continuation-stub"
     }
-
 }
 
 async fn wait_for_appui_continuation(provider: &AppuiContinuationLlm) {
@@ -26924,7 +26903,8 @@ struct Wave4AStubProvider {
 }
 
 #[async_trait::async_trait]
-impl octos_llm::LlmProvider for Wave4AStubProvider {    fn provider_name(&self) -> &str {
+impl octos_llm::LlmProvider for Wave4AStubProvider {
+    fn provider_name(&self) -> &str {
         "test-provider"
     }
 
@@ -28218,38 +28198,9 @@ fn per_turn_snapshot_creates_fresh_dispatcher() {
 // peer/prepare (#1800)
 // ---------------------------------------------------------------------------
 
-
-
-
-
-
-
-
-
-
-
-
-
-
 fn peer_consumption_done() -> Value {
     json!({"content":"Actual final answer", "message_id":"persisted-final", "final_assistant_committed_seq":9})
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 // ----------------------------------------------------------------------------
 // #20a — smart worktree fencing: when `peer_handoff` leaves `worktree`
@@ -28259,7 +28210,6 @@ fn peer_consumption_done() -> Value {
 // model-visible warning in `model_note` — and an explicit `true` fences
 // WITHOUT touching the predicate (zero-cost short-circuit).
 // ----------------------------------------------------------------------------
-
 
 /// #20a — make `workspace` a real git repo with one commit so the auto-fence
 /// path's `git clone` (stage_peer) can materialize a fenced worktree. Tests
@@ -28287,11 +28237,6 @@ fn init_git_workspace(workspace: &std::path::Path) {
     run(&["commit", "-m", "init"]);
 }
 
-
-
-
-
-
 // ----------------------------------------------------------------------------
 // #20c — concurrent dual-goal fixtures: the JOINT #20a + #20b behaviour with
 // TWO active goals live in the same profile. 20a's single-predicate tests
@@ -28306,8 +28251,6 @@ fn init_git_workspace(workspace: &std::path::Path) {
 // #peer-model — per-peer model lane (a peer runs its turns on a named
 // `sub_provider` lane configured in the master's profile).
 // ----------------------------------------------------------------------------
-
-
 
 /// A minimal profile config carrying ONE model lane (`key`) whose credential
 /// resolves offline through `env_vars` — enough to exercise lane selection +
@@ -28358,7 +28301,6 @@ fn config_with_zai_lane() -> crate::config::Config {
     config
 }
 
-
 // ---------------------------------------------------------------------------
 // #peer-respond — master answers a BLOCKED peer (human-in-the-loop).
 // The process-global pending STORE is the authority for "awaiting input" — not
@@ -28367,7 +28309,6 @@ fn config_with_zai_lane() -> crate::config::Config {
 // a live LLM. Each test uses a UNIQUE peer slug so the process-global peer-wire
 // registry never collides across parallel tests.
 // ---------------------------------------------------------------------------
-
 
 fn approval_event(session: &octos_core::SessionKey, id: &ApprovalId) -> ApprovalRequestedEvent {
     ApprovalRequestedEvent::generic(
@@ -28424,25 +28365,9 @@ fn choice_question(question: &str, options: &[&str]) -> octos_core::ui_protocol:
     }
 }
 
-
-
 fn no_decided_sink() -> impl Fn(&ApprovalDecidedEvent, Option<&str>) {
     |_event: &ApprovalDecidedEvent, _tool: Option<&str>| {}
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 /// (P1-5) The shared `audit_approval_decided` helper writes a durable audit
 /// entry (the peer_respond production sink calls this alongside the emit).
@@ -28492,17 +28417,6 @@ fn audit_approval_decided_writes_durable_entry() {
     assert_eq!(lines[0]["decision"], json!("approve"));
 }
 
-
-
-
-
-
-
-
-
-
-
-
 /// Layer-2 helper: perform ONE blocking real chat call against the zai lane
 /// provider and return the reply text plus the billed token usage. Kept
 /// separate so the probe body reads as the three acceptance layers.
@@ -28528,17 +28442,6 @@ fn run_zai_real_call(
         (resp.content.unwrap_or_default(), resp.usage)
     })
 }
-
-
-
-
-
-
-
-
-
-
-
 
 // ---------------------------------------------------------------------------
 // Child stream delta coalescing (#1799 follow-up)
@@ -28653,7 +28556,6 @@ fn should_flush_old_window_and_oversized_new_fragment_in_order_when_task_switche
     assert!(!coalescer.has_pending());
 }
 
-
 // --- turn/steer: mid-turn prompt injection (codex parity) ---
 
 fn steer_request(id: &str, params: Value) -> RpcRequest<Value> {
@@ -28767,7 +28669,8 @@ struct GatedSteerLlm {
 }
 
 #[async_trait::async_trait]
-impl octos_llm::LlmProvider for GatedSteerLlm {    fn provider_name(&self) -> &str {
+impl octos_llm::LlmProvider for GatedSteerLlm {
+    fn provider_name(&self) -> &str {
         "test-provider"
     }
 
@@ -28811,7 +28714,6 @@ impl octos_llm::LlmProvider for GatedSteerLlm {    fn provider_name(&self) -> &s
     fn model_id(&self) -> &str {
         "gated-steer-stub"
     }
-
 }
 
 #[test]
@@ -29126,7 +29028,8 @@ struct ScriptedSentinelVerifier {
 }
 
 #[async_trait::async_trait]
-impl octos_llm::LlmProvider for ScriptedSentinelVerifier {    fn provider_name(&self) -> &str {
+impl octos_llm::LlmProvider for ScriptedSentinelVerifier {
+    fn provider_name(&self) -> &str {
         "test-provider"
     }
 
@@ -29885,9 +29788,6 @@ async fn session_open_goal_stdio_lane_retire_leaves_no_inflight_send() {
 // #27f (R3) — result.md single-writer ownership.
 // ----------------------------------------------------------------------------
 
-
-
-
 // ---------------------------------------------------------------------------
 // #48b — serve/UI forwarder path: `fallback_switch` rows from
 // `spawn_router_failover_forwarder` (same shape as the gateway path).
@@ -30097,9 +29997,10 @@ mod obs_malformed_exhausted_48b {
         // appends exactly one malformed_exhausted row to a temp ledger dir.
         struct AlwaysMalformedProvider;
         #[async_trait::async_trait]
-        impl octos_llm::LlmProvider for AlwaysMalformedProvider {    fn provider_name(&self) -> &str {
-        "test-provider"
-    }
+        impl octos_llm::LlmProvider for AlwaysMalformedProvider {
+            fn provider_name(&self) -> &str {
+                "test-provider"
+            }
 
             async fn chat(
                 &self,
@@ -30574,7 +30475,8 @@ fn should_merge_late_background_result_into_current_session_manager_not_stale_tu
 struct ManualCompactTinyProvider;
 
 #[async_trait::async_trait]
-impl octos_llm::LlmProvider for ManualCompactTinyProvider {    fn provider_name(&self) -> &str {
+impl octos_llm::LlmProvider for ManualCompactTinyProvider {
+    fn provider_name(&self) -> &str {
         "test-provider"
     }
 
@@ -31305,16 +31207,6 @@ async fn should_redact_tool_started_secrets_through_the_notification_path() {
     }
 }
 
-
-
-
-
-
-
-
-
-
-
 /// #2246 — structural guard: `run_standalone_turn` rebuilds the turn agent
 /// from `Agent::new_shared`, so the bootstrap agent's hook context does not
 /// carry over; the re-application must stay wired (this is the path
@@ -31373,5 +31265,3 @@ fn background_skill_actions_require_the_job_capability() {
     );
     assert!(skill_action_execution_available(&background, full));
 }
-
-

@@ -2103,8 +2103,6 @@ async fn build_minimal_actor_factory(
     (factory, out_tx, out_rx)
 }
 
-
-
 async fn setup_dispatch_registry(
     dir: &tempfile::TempDir,
 ) -> (ActorRegistry, mpsc::Receiver<OutboundMessage>) {
@@ -5868,7 +5866,6 @@ async fn test_dispatch_routes_to_default_profile() {
     );
 }
 
-
 #[tokio::test]
 async fn test_dispatch_profile_and_main_create_separate_actors() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -8450,4 +8447,3 @@ impl LlmProvider for EmptyReplyVerifier {
         "empty-verifier"
     }
 }
-

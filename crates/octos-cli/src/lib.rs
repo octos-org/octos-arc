@@ -58,7 +58,6 @@ pub(crate) mod conversation_outcome;
 #[cfg_attr(not(feature = "api"), allow(dead_code))]
 pub(crate) mod contracts;
 pub mod cron_tool;
-pub mod gateway_dispatcher;
 #[cfg(feature = "api")]
 #[cfg_attr(not(feature = "api"), allow(dead_code))]
 pub(crate) mod obs_events;
@@ -79,6 +78,5 @@ pub mod status_layers;
 pub mod stream_reporter;
 pub mod tools;
 #[cfg(feature = "api")]
-
 pub mod usage_ledger;
 pub mod user_store;

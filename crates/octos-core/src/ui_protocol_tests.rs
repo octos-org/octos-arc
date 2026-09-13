@@ -3048,7 +3048,6 @@ fn m15_autonomy_notifications_register_methods_and_round_trip() {
     }
 }
 
-
 /// #2019 — `background/activity` is the HUMAN sink over events that today
 /// only wake the model. The routing key is the session that OWNS the emitter,
 /// and it must survive the wire boundary intact: an event that loses (or never
@@ -3125,7 +3124,6 @@ fn should_carry_a_visible_drop_marker_when_background_activity_is_capped() {
         marker
     );
 }
-
 
 #[test]
 fn m15_agent_fixture_notifications_decode_to_typed_variants() {

@@ -17,11 +17,10 @@ use super::policy::{self, ToolPolicy};
 use super::{
     ApplyPatchTool, AskUserQuestionTool, CheckWorkspaceContractTool, CloseAgentTool,
     ConfigureToolTool, DiffEditTool, EditFileTool, ExecCommandTool, GlobTool, GrepTool,
-    ImageGenerationTool, ListDirTool, ReadFileTool, RequestUserInputTool, ResumeAgentTool,
-    SendInputTool, ShellTool, SpawnAgentTool, Tool, ToolCatalogEntry, ToolConfigStore, ToolResult,
-    ToolSearchTool, ToolSuggestTool, UpdatePlanTool, ViewImageTool, WaitAgentTool,
-    WorkspaceDiffTool, WorkspaceLogTool, WorkspaceShowTool, WriteFileTool,
-    WriteStdinTool,
+    ListDirTool, ReadFileTool, RequestUserInputTool, ResumeAgentTool, SendInputTool, ShellTool,
+    SpawnAgentTool, Tool, ToolCatalogEntry, ToolConfigStore, ToolResult, ToolSearchTool,
+    ToolSuggestTool, UpdatePlanTool, ViewImageTool, WaitAgentTool, WorkspaceDiffTool,
+    WorkspaceLogTool, WorkspaceShowTool, WriteFileTool, WriteStdinTool,
 };
 use crate::sandbox::{NoSandbox, Sandbox};
 
@@ -1362,14 +1361,6 @@ impl ToolRegistry {
         let catalog_cell = registry.live_catalog_handle();
         registry.register(ToolSearchTool::new(catalog_cell.clone()));
         registry.register(ToolSuggestTool::new(catalog_cell));
-        // #1149 / M14-B P2: register the canonical Codex
-        // `image_generation` entry. It currently returns a typed
-        // `coding_tool_unsupported` envelope because no native or
-        // skill backend is bound; the wire-level contract is complete
-        // so the model gets a clean error instead of a "tool not
-        // found" miss. Follow-up to wire a real backend lives on
-        // issue #1149.
-        registry.register(ImageGenerationTool::new());
         // Final refresh so the catalog reflects the just-registered
         // search/suggest tools too (cosmetic — they show up in their
         // own search results).

@@ -1,5 +1,7 @@
 //! Message bus, channels, and session management for octos gateway.
 
+#[cfg(feature = "api")]
+pub mod api_channel;
 pub mod bus;
 pub mod channel;
 pub mod cli_channel;
@@ -12,10 +14,7 @@ pub mod heartbeat;
 pub mod markdown_html;
 pub mod media;
 pub mod resume_policy;
-#[cfg(feature = "api")]
-pub mod api_channel;
 pub mod session;
-
 
 pub use bus::{AgentHandle, BusPublisher, create_bus};
 pub use channel::{Channel, ChannelHealth, ChannelManager};
