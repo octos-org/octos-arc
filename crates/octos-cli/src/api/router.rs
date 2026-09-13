@@ -29,10 +29,6 @@ pub enum AuthIdentity {
     User { id: String },
 }
 
-/// Backward-compatible default when the operator has not configured a
-/// base domain via `config.base_domain` or `OCTOS_BASE_DOMAIN`.
-pub const DEFAULT_BASE_DOMAIN: &str = "crew.ominix.io";
-
 /// Return the matched route template for logging, never the raw request path.
 ///
 /// Besides query credentials, some public endpoints carry credentials in path
@@ -62,18 +58,13 @@ fn make_http_trace_span(request: &axum::http::Request<axum::body::Body>) -> trac
     )
 }
 
-/// Compose the CORS allowlist for a given base domain.
+/// Compose the default CORS/browser-origin allowlist.
 ///
-/// The returned list always contains the bare-`ominix.io` entries and
-/// the loopback dev origins, plus the three `app./admin./api.` entries
-/// for the configured base domain. `None` falls back to the legacy
-/// `crew.ominix.io` triple so existing minis keep working without config
-/// changes.
-pub fn cors_allowlist_for_base_domain(base: Option<&str>) -> Vec<String> {
-    let base = base.unwrap_or(DEFAULT_BASE_DOMAIN);
+/// Local development origins only. Deployment origins are operator-supplied
+/// via `appui.allowed_origins` / `OCTOS_APPUI_ALLOWED_ORIGINS` (plus the
+/// bound loopback port, appended automatically at serve startup).
+pub fn default_cors_allowlist() -> Vec<String> {
     vec![
-        "https://api.ominix.io".to_string(),
-        format!("https://api.{base}"),
         "http://localhost:3000".to_string(),
         "http://localhost:5173".to_string(),
         // octos-web Vite dev server (embedded same-origin at /app in prod, so
@@ -85,15 +76,12 @@ pub fn cors_allowlist_for_base_domain(base: Option<&str>) -> Vec<String> {
 /// Compose the exact browser-origin allowlist shared by CORS and both
 /// UI Protocol WebSocket upgrade gates.
 ///
-/// Legacy OminiX/base-domain and Vite development entries remain first for
-/// backward compatibility. Operator-provided, startup-normalized origins are
-/// appended in declaration order, with the first occurrence winning.
-pub(crate) fn browser_origin_allowlist(
-    base: Option<&str>,
-    appui_allowed_origins: &[String],
-) -> Vec<String> {
+/// Local development entries come first; operator-provided,
+/// startup-normalized origins are appended in declaration order, with the
+/// first occurrence winning.
+pub(crate) fn browser_origin_allowlist(appui_allowed_origins: &[String]) -> Vec<String> {
     let mut seen = HashSet::new();
-    cors_allowlist_for_base_domain(base)
+    default_cors_allowlist()
         .into_iter()
         .chain(appui_allowed_origins.iter().cloned())
         .filter(|origin| seen.insert(origin.clone()))
@@ -219,16 +207,15 @@ pub(crate) fn resolve_appui_allowed_origins(
 /// Build the axum router with all API routes.
 pub fn build_router(state: Arc<AppState>) -> Router {
     // Restrict CORS to an explicit allowlist of known origins.
-    // Do NOT use suffix matching (e.g. ends_with(".ominix.io")) — a hijacked
+    // Do NOT use suffix matching (e.g. ends_with(".example.com")) — a hijacked
     // subdomain would pass the check and enable cross-origin requests.
     //
-    // The allowlist combines `state.base_domain` compatibility entries with
-    // the startup-normalized AppUI deployment/loopback origins. The same
-    // composition is used by both WebSocket gates. CORS intentionally does
-    // not call `allow_credentials`: bearer/work-secret auth is an independent
-    // layer and must not become ambient browser authority.
+    // The allowlist combines the local-dev defaults with the
+    // startup-normalized operator origins. The same composition is used by
+    // both WebSocket gates. CORS intentionally does not call
+    // `allow_credentials`: bearer/work-secret auth is an independent layer
+    // and must not become ambient browser authority.
     let allowed_origins: Arc<Vec<String>> = Arc::new(browser_origin_allowlist(
-        state.base_domain.as_deref(),
         &state.appui_allowed_origins,
     ));
     let cors = {

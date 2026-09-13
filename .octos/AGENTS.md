@@ -6,12 +6,6 @@ When working on release-critical tasks, do not drift into broad refactoring,
 adjacent infrastructure work, or speculative cleanup. Work from the synced
 baseline and follow the active tracked contract.
 
-Primary control documents:
-
-- `docs/OCTOS_RELEASE_CONTRACT_2026-04-17.md`
-- `docs/OCTOS_RUNTIME_PHASE3_CONTRACT.md`
-- `docs/OCTOS_HARNESS_MASTER_PLAN.md`
-
 ## Baseline Discipline
 
 - Prefer synced `origin/main` over stale or dirty local worktrees.

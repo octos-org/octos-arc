@@ -5287,8 +5287,7 @@ fn decide_ws_origin_gate(
     match origin.to_str() {
         Ok(origin_str) if origin_str.trim().is_empty() => WsOriginDecision::Allow,
         Ok(origin_str) => {
-            let allowed =
-                super::router::browser_origin_allowlist(base_domain, appui_allowed_origins);
+            let allowed = super::router::browser_origin_allowlist(appui_allowed_origins);
             if allowed.iter().any(|s| s == origin_str) {
                 return WsOriginDecision::Allow;
             }

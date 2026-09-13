@@ -764,8 +764,8 @@ impl ServeCommand {
                 .clone()
                 .or_else(|| std::env::var("TUNNEL_DOMAIN").ok()),
             // `OCTOS_BASE_DOMAIN` (env) takes precedence over config.json so
-            // operators can override without touching the file. `None` falls
-            // back to `crate::api::DEFAULT_BASE_DOMAIN` at read sites.
+            // operators can override without touching the file. `None` leaves
+            // base-domain read sites (status payload, tenant WS gate) unset.
             base_domain: std::env::var("OCTOS_BASE_DOMAIN")
                 .ok()
                 .filter(|s| !s.trim().is_empty())

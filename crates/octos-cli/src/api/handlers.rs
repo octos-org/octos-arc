@@ -2915,11 +2915,9 @@ pub struct StatusResponse {
     pub provider: String,
     pub uptime_secs: i64,
     pub agent_configured: bool,
-    /// Public-facing base domain this mini serves profiles under
-    /// (e.g. `"crew.ominix.io"`, `"bot.ominix.io"`). The dashboard and
-    /// octos-web client consume this to render correct preview URLs
-    /// and infer profile IDs from hostnames. Always a concrete string
-    /// — falls back to `DEFAULT_BASE_DOMAIN` when unconfigured.
+    /// Operator-configured public base domain (via `config.base_domain` /
+    /// `OCTOS_BASE_DOMAIN`). Empty when unconfigured — there is no
+    /// fleet-default domain anymore.
     pub base_domain: String,
 }
 
@@ -2937,10 +2935,7 @@ pub async fn status(State(state): State<Arc<AppState>>) -> Json<StatusResponse> 
         Some(rt) => (rt.primary_model_id.clone(), rt.provider_name.clone()),
         None => ("none".to_string(), "none".to_string()),
     };
-    let base_domain = state
-        .base_domain
-        .clone()
-        .unwrap_or_else(|| crate::api::DEFAULT_BASE_DOMAIN.to_string());
+    let base_domain = state.base_domain.clone().unwrap_or_default();
     Json(StatusResponse {
         version: env!("CARGO_PKG_VERSION").to_string(),
         model,
@@ -3215,7 +3210,7 @@ mod tests {
             provider: "openai".into(),
             uptime_secs: 120,
             agent_configured: true,
-            base_domain: "crew.ominix.io".into(),
+            base_domain: "bot.example.com".into(),
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["version"], "0.1.0");
@@ -3223,7 +3218,7 @@ mod tests {
         assert_eq!(json["provider"], "openai");
         assert_eq!(json["uptime_secs"], 120);
         assert_eq!(json["agent_configured"], true);
-        assert_eq!(json["base_domain"], "crew.ominix.io");
+        assert_eq!(json["base_domain"], "bot.example.com");
     }
 
     #[tokio::test]
@@ -3243,10 +3238,9 @@ mod tests {
             ..crate::api::AppState::empty_for_tests()
         });
         let resp = status(State(state)).await;
-        // Backward compat: `None` surfaces as the historical `crew.ominix.io`
-        // so existing dashboards / web clients keep rendering the right URL
-        // until operators opt in to a per-mini value.
-        assert_eq!(resp.0.base_domain, "crew.ominix.io");
+        // No fleet-default domain: unconfigured deployments surface an empty
+        // `base_domain` instead of a historical default.
+        assert_eq!(resp.0.base_domain, "");
     }
 
     #[test]

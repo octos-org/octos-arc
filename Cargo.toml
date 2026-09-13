@@ -30,11 +30,6 @@ octos-agent = { path = "crates/octos-agent" }
 octos-arc = { path = "crates/octos-arc" }
 octos-bus = { path = "crates/octos-bus" }
 octos-plugin = { path = "crates/octos-plugin" }
-# codex-rs crates (reused)
-codex-execpolicy = { git = "https://github.com/openai/codex", path = "codex-rs/execpolicy" }
-codex-state = { git = "https://github.com/openai/codex", path = "codex-rs/state" }
-codex-file-search = { git = "https://github.com/openai/codex", path = "codex-rs/file-search" }
-codex-linux-sandbox = { git = "https://github.com/openai/codex", path = "codex-rs/linux-sandbox" }
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
@@ -76,7 +71,6 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 htmd = "0.5"
 # Database (pure Rust)
 redb = "2"
-rusqlite = { version = "0.32", features = ["bundled"] }
 bincode = "1"
 # Vector search
 hnsw_rs = "0.3"
@@ -93,7 +87,6 @@ similar = "2"
 # Office file manipulation (DOCX/PPTX/XLSX are ZIP+XML)
 zip = "2"
 quick-xml = "0.37"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 # PDF text extraction (pure Rust; read_file auto-detects %PDF- magic)
 pdf-extract = "0.9"
 # Unix-specific (O_NOFOLLOW for symlink-safe file I/O)
@@ -119,25 +112,10 @@ iana-time-zone = "0.1"
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
 # Async utilities
 futures = "0.3"
-# Browser automation
-chromiumoxide = "0.9"
 which = "7"
-# Channel integrations (optional, pulled in via feature flags)
-teloxide = { version = "0.17", default-features = false, features = ["rustls"] }
-serenity = { version = "0.12", default-features = false, features = ["rustls_backend", "gateway", "client", "http", "model"] }
-tokio-tungstenite = { version = "0.26", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
-# Email channel (optional)
-async-imap = { version = "0.11", default-features = false, features = ["runtime-tokio"] }
-tokio-rustls = { version = "0.26", default-features = false }
-rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
-rustls-native-certs = "0.8"
-webpki-roots = "0.26"
-lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder"] }
-mailparse = "0.16"
 # Web API (optional)
 axum = { version = "0.8", features = ["multipart", "ws"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
-rust-embed = "8"
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
 # Tracing
@@ -146,15 +124,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-appender = "0.2"
 # Archive extraction
 flate2 = "1"
-qrcode = { version = "0.14", default-features = false }
-chacha20poly1305 = "0.10"
-argon2 = "0.5"
 tar = "0.4"
 tower = { version = "0.5", features = ["util"] }
 # URL parsing
 url = "2"
 # Testing
 tokio-test = "0.4"
+# WS test client used by octos-cli's api-feature ingress tests (test-only).
+tokio-tungstenite = { version = "0.26", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 tempfile = "3"
 proptest = "1.11"
 wiremock = "0.6"

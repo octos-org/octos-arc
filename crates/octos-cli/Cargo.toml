@@ -58,7 +58,6 @@ percent-encoding = "2"
 open = { workspace = true }
 zip = { workspace = true }
 quick-xml = { workspace = true }
-image = { workspace = true }
 regex = { workspace = true }
 tempfile = { workspace = true }
 base64 = { workspace = true }
@@ -69,26 +68,17 @@ base64 = { workspace = true }
 toml = { workspace = true }
 keyring = { workspace = true }
 flate2 = { workspace = true }
-qrcode = { workspace = true }
-chacha20poly1305 = { workspace = true }
-argon2 = { workspace = true }
 tar = { workspace = true }
-# Optional deps gated by feature flags (api, admin-bot)
+# Optional deps gated by feature flags (api)
 axum = { workspace = true, optional = true }
 tower-http = { workspace = true, optional = true }
 # CancellationToken shared with the rmcp streamable-HTTP service so Ctrl+C tears
 # down live SSE sessions instead of blocking graceful shutdown.
 tokio-util = { version = "0.7", optional = true }
 futures = { workspace = true, optional = true }
-tokio-tungstenite = { workspace = true, optional = true }
-rustls = { workspace = true, optional = true }
-rustls-native-certs = { workspace = true, optional = true }
-rust-embed = { workspace = true, optional = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true, optional = true }
-lettre = { workspace = true, optional = true }
 rand = { workspace = true, optional = true }
-teloxide = { workspace = true, optional = true }
 sysinfo = { version = "0.34", optional = true }
 redb.workspace = true
 
@@ -125,8 +115,7 @@ keyring = { workspace = true, features = ["windows-native"] }
 # chat, ACP and serve use one OUP dispatcher. Minimal library builds can opt
 # out, but never silently fall back to independent chat/ACP agent loops.
 default = ["api"]
-api = ["dep:axum", "dep:tower-http", "dep:tokio-util", "dep:futures", "dep:tokio-tungstenite", "dep:rustls", "dep:rustls-native-certs", "dep:rust-embed", "dep:metrics-exporter-prometheus", "dep:lettre", "dep:rand", "dep:sysinfo", "dep:subtle"]
-admin-bot = ["dep:teloxide", "dep:futures", "api"]
+api = ["dep:axum", "dep:tower-http", "dep:tokio-util", "dep:futures", "dep:metrics-exporter-prometheus", "dep:rand", "dep:sysinfo", "dep:subtle"]
 git = ["octos-agent/git"]
 ast = ["octos-agent/ast"]
 
@@ -144,9 +133,6 @@ axum = { workspace = true }
 # tests can call `publish_failover_for_subscribers`. Test-only.
 octos-llm = { workspace = true, features = ["test-utils"] }
 wiremock = { workspace = true }
-# #2055 round 3 — the goal-task-row contention tests hold a real SQLite
-# write transaction against the goal ledger while asserting the executor
-# stays responsive and the settle retry converges. Test-only; production
-# SQLite access stays behind octos-fleet.
-rusqlite = { workspace = true }
+# WS test client for the api-feature session-ingress tests (issue #296).
+tokio-tungstenite = { workspace = true }
 

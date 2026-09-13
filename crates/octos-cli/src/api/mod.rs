@@ -42,7 +42,7 @@ pub mod ws_slash;
 
 pub use metrics::init_metrics;
 pub(crate) use router::resolve_appui_allowed_origins;
-pub use router::{DEFAULT_BASE_DOMAIN, build_router, cors_allowlist_for_base_domain};
+pub use router::{build_router, default_cors_allowlist};
 
 /// Test-only re-exports for the build_output_dir validation suite.
 /// Not part of the public API — used by
