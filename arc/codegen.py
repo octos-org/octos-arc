@@ -64,11 +64,23 @@ def ensure_charset(text: str) -> str:
     return CHARSET_META + "\n" + text
 
 
+def unescape_flattened(text: str) -> str:
+    """A file block occasionally arrives with its newlines JSON-escaped (one long
+    line full of literal \\n; local s12: server.js failed to parse at startup).
+    Restore it when the block is clearly flattened; leave normal files alone."""
+    real = text.count("\n")
+    literal = text.count("\\n")
+    if literal >= 10 and literal > 5 * max(real, 1):
+        return text.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\t", "\t")
+    return text
+
+
 def write_files(root: Path, files: dict[str, str]) -> list[str]:
     written = []
     for rel, body in files.items():
         dest = root / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
+        body = unescape_flattened(body)
         if dest.suffix.lower() in (".html", ".htm"):
             body = ensure_charset(body)
         dest.write_text(body, encoding="utf-8")

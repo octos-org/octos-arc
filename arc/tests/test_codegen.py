@@ -50,3 +50,17 @@ class EnsureCharsetTests(unittest.TestCase):
         write_files(root, {"frontend/src/index.html": "<html><head></head><body></body></html>", "backend/server.js": "x"})
         self.assertIn('<meta charset="utf-8">', (root / "frontend/src/index.html").read_text())
         self.assertEqual((root / "backend/server.js").read_text(), "x")
+
+
+class UnescapeFlattenedTests(unittest.TestCase):
+    def test_should_restore_newlines_in_a_flattened_block(self):
+        from codegen import unescape_flattened
+        flat = "const a = 1;\\n" * 12 + "x"
+        out = unescape_flattened(flat)
+        self.assertEqual(out.count("\n"), 12)
+        self.assertNotIn("\\n", out)
+
+    def test_should_leave_normal_files_with_string_escapes_alone(self):
+        from codegen import unescape_flattened
+        normal = "res.end('a\\nb');\n" * 20
+        self.assertEqual(unescape_flattened(normal), normal)
