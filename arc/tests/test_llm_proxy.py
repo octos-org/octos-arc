@@ -142,3 +142,12 @@ class CachedTokensTests(unittest.TestCase):
         payload = json.dumps({"usage": {"prompt_tokens": 4014, "completion_tokens": 2,
                                         "prompt_tokens_details": {"cached_tokens": 3840}}}).encode()
         self.assertEqual(usage_record(payload, 1, "low")["prompt_cache_hit_tokens"], 3840)
+
+
+class SystemOverrideTests(unittest.TestCase):
+    def test_should_replace_all_system_messages_with_one(self):
+        from llm_proxy import replace_system_prompt
+        body = json.dumps({"model": "m", "messages": [{"role": "system", "content": "long"}, {"role": "system", "content": "more"}, {"role": "user", "content": "u"}]}).encode()
+        out = json.loads(replace_system_prompt(body, "short"))
+        self.assertEqual([m["role"] for m in out["messages"]], ["system", "user"])
+        self.assertEqual(out["messages"][0]["content"], "short")

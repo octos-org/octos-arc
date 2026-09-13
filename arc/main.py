@@ -308,7 +308,7 @@ def unchanged_node_ids(nodes: list[dict], previous: dict[str, dict]) -> set[str]
     return out
 
 
-def inline_sources(output_dir: Path, max_chars: int = 40000) -> str:
+def inline_sources(output_dir: Path, max_chars: int = 40000, exts: tuple = (".js", ".mjs", ".cjs", ".html", ".css", ".json")) -> str:
     """Quote the app's source files (frontend sources, backend JS) so a repair
     turn edits immediately instead of spending its request budget on reads.
     Bounded; largest files first are skipped when they would not fit."""
@@ -320,7 +320,7 @@ def inline_sources(output_dir: Path, max_chars: int = 40000) -> str:
                 rel = path.relative_to(output_dir)
                 if any(seg in ("node_modules", "dist", ".git", "data") for seg in rel.parts):
                     continue
-                if path.is_file() and path.suffix in (".js", ".mjs", ".cjs", ".html", ".css", ".json"):
+                if path.is_file() and path.suffix in exts:
                     files.append(path)
     parts, total = [], 0
     for path in sorted(files, key=lambda p: p.stat().st_size):
@@ -728,14 +728,15 @@ UI contract (the hidden Playwright tests depend on these; a violation scores 0):
 - Text only: never OCR reference images. Write files in your first actions.
 """
 
-CODEGEN_PROMPT = """\
-Build a tiny full-stack web app implementing requirement node {node_id}:
+CODEGEN_SYSTEM = "You write complete, minimal web apps. Reply only with file blocks in the requested format."
 
-{node_spec}
-{tests}
-Layout (exact): frontend/src/index.html is the page; frontend/package.json has exactly this build script (idempotent, works on any Node version — do not invent another): "build": "node -e \\"const f=require('fs');f.mkdirSync('dist',{{recursive:true}});for(const n of f.readdirSync('src'))f.copyFileSync('src/'+n,'dist/'+n)\\""; frontend/dist is what gets served; backend/package.json with `start` = `node server.js`, no dependencies; backend/server.js = Node `http` server on process.env.PORT (default {port}) serving frontend/dist at `/` and JSON APIs under /api/, unknown paths 404, missing files 404, never crashes (try/catch, uncaughtException handler).
-Rules: copy every visible text, button name, label and test id from the spec verbatim; the initial state is already in the served HTML (e.g. the element literally contains 0); per-page client state unless the requirement says it is persisted; no external resources; no HTML5 validation attributes.
-Output minimal code: no CSS, no comments, no README, no styling, package.json only name + scripts, one inline <script> of at most 15 lines; the whole reply under 120 lines.
+CODEGEN_PROMPT = """\
+Requirement {node_id}: {description}
+
+Acceptance test (ground truth):
+{spec}
+Files (exact): frontend/src/index.html (the page); frontend/package.json = {{"name":"f","scripts":{{"build":"node -e \\"const f=require('fs');f.mkdirSync('dist',{{recursive:true}});for(const n of f.readdirSync('src'))f.copyFileSync('src/'+n,'dist/'+n)\\""}}}}; backend/package.json = {{"name":"b","scripts":{{"start":"node server.js"}}}}; backend/server.js = Node http server on process.env.PORT||{port} serving ../frontend/dist files at / (index.html for /), 404 for anything else, wrapped in try/catch and process.on('uncaughtException').
+Rules: texts, button names, labels and test ids exactly as in the test; the initial state is literally in the HTML; state lives in the page script unless the requirement says it is persisted; no external resources, no CSS, no comments, no notes. index.html <= 20 lines, server.js <= 20 lines.
 """
 
 UI_CONTRACT_DATA = """\
@@ -1106,11 +1107,13 @@ class Flow:
         """Run a tool-less turn; parse and write the file blocks from the reply."""
         proxy = self.llm_proxy
         proxy.no_tools = True
+        proxy.system_override = CODEGEN_SYSTEM
         try:
             ok, text = self.turn(prompt + "\n" + FORMAT_INSTRUCTIONS, timeout, label, expect_verification=False,
                                  request_budget=int(os.environ.get("OCTOS_ARC_CODEGEN_REQUESTS", "3")))
         finally:
             proxy.no_tools = False
+            proxy.system_override = None
         files = parse_file_blocks(text) if ok else {}
         if files:
             written = write_files(self.output_dir, files)
@@ -1120,6 +1123,19 @@ class Flow:
             log(f"[codegen] {label}: reply contained no file blocks")
             return False, "codegen reply contained no <<<FILE>>> blocks"
         return ok, text
+
+    def spec_bodies(self, node_id: str | None) -> str:
+        """Just the spec file contents for a node (codegen prompts)."""
+        if not self.tests_dir:
+            return "(none)"
+        files = list(self.spec_map.get(node_id) or [])
+        parts = []
+        for rel in files:
+            try:
+                parts.append((self.tests_dir / rel).read_text(encoding="utf-8", errors="replace").strip())
+            except OSError:
+                continue
+        return "\n".join(parts) or "(none)"
 
     def tests_prompt_for(self, node_id: str | None, skeleton: bool = False) -> str:
         if not self.tests_dir:
@@ -1508,10 +1524,12 @@ class Flow:
         prompt = self.corrections_text() + prompt
         implement_timeout = min(self.node_timeout, self.implement_fraction * node_budget, deadline - time.time())
         if self.codegen_mode():
-            compact = CODEGEN_PROMPT.format(node_id=node_id, node_spec=describe_node(node),
-                                            tests=self.tests_prompt_for(node_id), port=self.web_port)
-            if self.has_app():  # evolution: the app exists, quote it
-                compact = compact.replace("Build a tiny full-stack web app implementing", "Extend the existing app (quoted below) to implement", 1) + self.sources_text()
+            compact = CODEGEN_PROMPT.format(node_id=node_id, description=str(node.get("description") or "").strip(),
+                                            spec=self.spec_bodies(node_id), port=self.web_port)
+            if self.has_app():  # evolution: keep the existing app, return every changed file complete
+                compact = (compact.replace("Files (exact):", "Existing app below; keep everything that works and output "
+                                           "every changed file complete. Files (exact):", 1)
+                           + inline_sources(self.output_dir, 12000, exts=(".html", ".js")))
             ok, text = self.codegen_turn(compact, implement_timeout, f"{node_id} implement")
         else:
             ok, text = self.turn(prompt, implement_timeout, f"{node_id} implement")

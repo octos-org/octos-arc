@@ -209,6 +209,20 @@ def ensure_max_tokens(body: bytes, minimum: int) -> bytes:
     return body
 
 
+def replace_system_prompt(body: bytes, text: str) -> bytes:
+    """Codegen turns have no tools; the kernel's worker system prompt (2.4k
+    chars of tool guidance) is dead weight there. Keep one system message."""
+    try:
+        data = json.loads(body)
+    except (ValueError, UnicodeDecodeError):
+        return body
+    if not isinstance(data, dict) or "messages" not in data:
+        return body
+    msgs = [m for m in data.get("messages") or [] if m.get("role") != "system"]
+    data["messages"] = [{"role": "system", "content": text}] + msgs
+    return json.dumps(data, ensure_ascii=False).encode("utf-8")
+
+
 def strip_all_tools(body: bytes) -> bytes:
     try:
         data = json.loads(body)
@@ -307,6 +321,7 @@ class LlmProxy:
         # the flow can take the shell away for one-turn tasks and give it back).
         self.extra_drop_tools: set[str] = set(extra_drop_tools or ())
         self.no_tools = False  # codegen turns: strip every tool schema
+        self.system_override: str | None = None  # codegen turns: replace the kernel system prompt
         # Per-turn request cap (0 = unlimited); the flow calls begin_turn().
         self.turn_budget = 0
         self.turn_requests = 0
@@ -342,6 +357,8 @@ class LlmProxy:
                         body = trim_request(body, (DROP_TOOLS if proxy.trim else set()) | proxy.extra_drop_tools)
                     if proxy.no_tools:
                         body = strip_all_tools(body)
+                    if proxy.system_override:
+                        body = replace_system_prompt(body, proxy.system_override)
                     if proxy.destream:
                         body, was_streaming = destream_request(body)
                     proxy._dump(body)

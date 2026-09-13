@@ -20,11 +20,10 @@ from pathlib import Path
 FILE_BLOCK = re.compile(r"<<<FILE\s+(?P<path>[^\n>]+?)\s*>>>\r?\n(?P<body>.*?)(?:\r?\n)?<<<END FILE>>>", re.S)
 
 FORMAT_INSTRUCTIONS = """\
-OUTPUT FORMAT — this turn has no tools. Reply with the complete files only, each as one block:
+Format, one block per file, nothing else:
 <<<FILE relative/path>>>
-file contents
+contents
 <<<END FILE>>>
-Rules: paths relative to the project root (frontend/..., backend/...); every file complete (no "..." or omitted parts); no markdown fences around the blocks; no text outside the blocks except an optional one-line note at the very end. Include every file the app needs (package.json files with the build/start scripts, sources, build script).
 """
 
 
