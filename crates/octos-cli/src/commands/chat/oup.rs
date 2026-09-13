@@ -20,7 +20,6 @@ struct TerminalFrontend {
     segments: std::sync::Mutex<AssistantTextProjection>,
     input_active: AtomicBool,
     pending_prompts: std::sync::Mutex<Vec<UiNotification>>,
-    peers: Option<crate::commands::oup_peers::OupPeerHost>,
 }
 
 fn finish_turn<T>(result: Result<T>, shutdown: Result<()>) -> Result<T> {
@@ -33,9 +32,6 @@ fn finish_turn<T>(result: Result<T>, shutdown: Result<()>) -> Result<T> {
 #[async_trait::async_trait]
 impl OupFrontend for TerminalFrontend {
     async fn event(&self, event: UiNotification) -> Result<Option<UiCommand>> {
-        if let Some(peers) = &self.peers {
-            peers.event(&event);
-        }
         if self.input_active.load(Ordering::Acquire)
             && matches!(
                 &event,
@@ -182,9 +178,6 @@ impl ChatCommand {
             Err(_) if stored_profile.is_some() => resolve_profile(&None)?.0,
             Err(error) => return Err(error),
         };
-        if self.peers {
-            widen_allow_list(&mut tool_profile.tools, CHAT_PEER_TOOLS);
-        }
         let permissions = resolve_chat_permissions(
             self.dangerously_bypass_approvals_and_sandbox,
             self.sandbox,
@@ -248,9 +241,6 @@ impl ChatCommand {
             segments: std::sync::Mutex::new(AssistantTextProjection::default()),
             input_active: AtomicBool::new(false),
             pending_prompts: std::sync::Mutex::new(Vec::new()),
-            peers: self
-                .peers
-                .then(|| crate::commands::oup_peers::OupPeerHost::new(state, permissions)),
         };
         let cancelled = Arc::new(AtomicBool::new(false));
         let signal = cancelled.clone();
@@ -264,9 +254,6 @@ impl ChatCommand {
         let effort = None;
         if let Some(message) = self.message {
             let result = session.turn(&message, effort, &cancelled, &frontend).await;
-            if let Some(peers) = &frontend.peers {
-                peers.close().await;
-            }
             let result = finish_turn(result, session.close().await)?;
             if result.interrupted {
                 eyre::bail!("turn interrupted");
@@ -357,9 +344,6 @@ impl ChatCommand {
             println!();
         }
         let _ = readline.save_history(&history_path);
-        if let Some(peers) = &frontend.peers {
-            peers.close().await;
-        }
         session.close().await?;
         println!("Goodbye!");
         Ok(())

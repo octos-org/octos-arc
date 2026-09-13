@@ -30166,8 +30166,7 @@ fn ledger_event_cursor(event: &UiProtocolLedgerEvent) -> Option<UiCursor> {
             | UiNotification::ReplayLossy(_)
             // Peer staging/closing carry no cursor (files are the durable
             // record); kept exhaustive while the variants exist.
-            | UiNotification::PeerStaged(_)
-            | UiNotification::PeerClosed(_)
+
             | UiNotification::FileAttached(_)
             // Streamed reply-audio chunks are ephemeral; their ordering lives
             // in the segment_id/seq, not a durable ledger cursor.

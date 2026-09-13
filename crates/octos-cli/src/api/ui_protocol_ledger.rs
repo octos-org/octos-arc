@@ -3764,8 +3764,6 @@ fn notification_session_id(notification: &UiNotification) -> &SessionKey {
         UiNotification::ContextCompactionStarted(event) => &event.session_id,
         UiNotification::ContextNormalizationReported(event) => &event.session_id,
         UiNotification::SessionOrchestration(event) => &event.session_id,
-        UiNotification::PeerStaged(event) => &event.session_id,
-        UiNotification::PeerClosed(event) => &event.session_id,
         // #2019 — the human sink routes on the OWNING session, like everything
         // else here. This is the ledger's routing key, so a wrong answer would
         // land the event on whichever session the client has focused.

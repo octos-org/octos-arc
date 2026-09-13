@@ -66,7 +66,6 @@ pub(crate) mod obs_events;
 // Peer recovery is also used by gateway actors without `api`. The remaining
 // staging and OUP transport helpers are intentionally dormant in that build.
 #[cfg_attr(not(feature = "api"), allow(dead_code))]
-pub(crate) mod peers;
 pub mod persona_service;
 pub mod process_manager;
 pub mod profiles;

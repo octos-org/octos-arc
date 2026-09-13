@@ -113,18 +113,6 @@ pub struct ChatCommand {
     #[arg(long)]
     pub profile: Option<String>,
 
-    /// Enable the PEER tools (`peer_handoff` / `peer_list` / `peer_respond`)
-    /// and host staged peers IN THIS PROCESS.
-    ///
-    /// `peer_handoff` stages a peer under `<data_dir>/peers/<slug>` and chat
-    /// immediately opens a `peer-<slug>` session for it, running its `brief.md`
-    /// as the peer's first turn. A peer that hits a tool approval or an
-    /// `ask_user_question` does NOT prompt this terminal — the terminal belongs
-    /// to you, the master. It PARKS, `peer_list` reports it as
-    /// `awaiting_input`, and you answer it with `peer_respond`.
-    #[arg(long)]
-    pub peers: bool,
-
     /// FULL AUTONOMY ("yolo"): bypass all approvals AND the sandbox — the
     /// agent can edit any file and run any command with network access,
     /// without asking. Equivalent to `--sandbox danger-full-access`. Only
@@ -621,34 +609,6 @@ fn parse_question_selection(
     (selected_labels, other_picked)
 }
 
-/// The peer tools `octos chat --peers` registers, and the exact set added to an
-/// allow-list profile surface.
-///
-/// Preserve the lean default surface. The OUP backend also implements gather,
-/// close and follow-up input for profiles that explicitly allow those tools.
-#[cfg(any(feature = "api", test))]
-const CHAT_PEER_TOOLS: &[&str] = &["peer_handoff", "peer_list", "peer_respond"];
-
-/// Add `wanted` to an ALLOW-LIST profile surface, in place, without duplicates.
-///
-/// Chat's default `coding` profile is an allow list, so REGISTERING a tool is
-/// not enough — `filter_by_profile` drops anything the list does not name and
-/// the model never sees it (observed live in Phase 1: the tool count was
-/// identical with and without `--goals`). A deny list and the pass-through
-/// `Default` mode need no change (none of these names appear in either), and an
-/// EMPTY allow list is already pass-through, so both are left alone.
-#[cfg(any(feature = "api", test))]
-fn widen_allow_list(surface: &mut octos_agent::profile::ProfileTools, wanted: &[&str]) {
-    if let octos_agent::profile::ProfileTools::AllowList { tools } = surface {
-        if !tools.is_empty() {
-            for name in wanted {
-                if !tools.iter().any(|entry| entry == name) {
-                    tools.push((*name).to_owned());
-                }
-            }
-        }
-    }
-}
 
 /// Machine-readable result envelope for `octos chat --json --message`.
 ///
@@ -1854,91 +1814,6 @@ fn create_custom_provider(
     }
 }
 
-#[cfg(test)]
-mod chat_peer_tests {
-    use super::*;
-    use clap::Parser as _;
-    use octos_agent::profile::ProfileTools;
-
-    #[derive(clap::Parser)]
-    struct TestCli {
-        #[command(flatten)]
-        chat: ChatCommand,
-    }
-
-    /// `--peers` is opt-in: the default chat tool surface must be unchanged.
-    #[test]
-    fn should_default_peers_to_off() {
-        assert!(
-            !TestCli::parse_from(["octos-chat"]).chat.peers,
-            "peers must be off by default",
-        );
-        assert!(
-            TestCli::parse_from(["octos-chat", "--peers"]).chat.peers,
-            "--peers must parse on its own",
-        );
-    }
-
-    /// Registering the peer tools is not enough: chat's default `coding`
-    /// profile is an ALLOW LIST, so `filter_by_profile` drops anything it does
-    /// not name and the model never sees the tools (the exact failure Phase 1
-    /// hit with the goal tools). The widening must admit the peer tools AND
-    /// nothing else.
-    #[test]
-    fn should_keep_peer_tools_when_the_profile_surface_is_an_allow_list() {
-        let mut surface = ProfileTools::AllowList {
-            tools: vec![
-                "group:fs".to_owned(),
-                "group:runtime".to_owned(),
-                "spawn".to_owned(),
-            ],
-        };
-        for name in CHAT_PEER_TOOLS {
-            assert!(
-                !surface.allows(name),
-                "{name} must be filtered out before the widening — otherwise \
-                 this test proves nothing",
-            );
-        }
-        widen_allow_list(&mut surface, CHAT_PEER_TOOLS);
-        for name in CHAT_PEER_TOOLS {
-            assert!(surface.allows(name), "{name} must survive the filter");
-        }
-        // The carve is exactly three peer tools — the ones chat can actually
-        // honour. Widening for a tool it never registers would advertise a
-        // capability that fails at call time.
-        assert!(!surface.allows("peer_gather"));
-        assert!(!surface.allows("peer_close"));
-        assert!(!surface.allows("peer_send_input"));
-        assert!(!surface.allows("web_search"));
-    }
-
-    /// The widening must be a no-op for surfaces that are already
-    /// pass-through, so `--peers` cannot accidentally NARROW or mutate a deny
-    /// list / empty allow list.
-    #[test]
-    fn should_leave_non_allow_list_surfaces_untouched() {
-        let mut deny = ProfileTools::DenyList {
-            tools: vec!["shell".to_owned()],
-        };
-        widen_allow_list(&mut deny, CHAT_PEER_TOOLS);
-        assert_eq!(
-            deny,
-            ProfileTools::DenyList {
-                tools: vec!["shell".to_owned()]
-            },
-        );
-
-        let mut empty = ProfileTools::AllowList { tools: Vec::new() };
-        widen_allow_list(&mut empty, CHAT_PEER_TOOLS);
-        assert_eq!(
-            empty,
-            ProfileTools::AllowList { tools: Vec::new() },
-            "an empty allow list is already pass-through — widening it would \
-             turn a permissive surface into a three-tool one",
-        );
-    }
-}
 
 #[cfg(test)]
 mod custom_provider_tests {
