@@ -20,7 +20,6 @@ mod oup_text;
 #[cfg(feature = "api")]
 mod serve;
 pub mod serve_console;
-pub(crate) mod oup_peers;
 pub mod skills;
 pub mod acp;
 pub 

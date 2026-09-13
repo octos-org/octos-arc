@@ -1656,27 +1656,11 @@ impl TaskSupervisor {
                 })
                 .collect()
         };
-        // #27c — park cross-restart TOP-LEVEL orphans for CLIENT
-        // REATTACHMENT instead of failing them: the durable work (a staged
-        // peer's brief + worktree) survives the restart, so a returning
-        // client can adopt the task (`mark_running` revives Parked →
-        // Running). Live evidence: the 2026-08-26/27 f182/a9c4 streams
-        // recorded 24+28 "orphaned across restart" FAILED children whose
-        // work was fully recoverable.
-        //
-        // RED LINE ① — parking is scoped to `peer_handoff` tasks ONLY: a
-        // staged peer has durable state (brief + worktree on disk) that a
-        // returning client can adopt. Every OTHER orphan (pipeline
-        // children, run_pipeline parents, generic spawned work) has no
-        // independent re-attach path, so it keeps the legacy genuine
-        // `Failed` verdict — a real failure must never masquerade as
+        // Cross-restart TOP-LEVEL orphans fail (the peer re-attach path this
+        // used to park for is gone). A real failure must never masquerade as
         // recoverable.
-        for (task_id, _, tool_name) in &orphans {
-            if tool_name == "peer_handoff" {
-                self.mark_parked(task_id, "orphaned across restart".to_string());
-            } else {
-                self.mark_failed(task_id, "orphaned across restart".to_string());
-            }
+        for (task_id, _, _) in &orphans {
+            self.mark_failed(task_id, "orphaned across restart".to_string());
         }
         if !orphans.is_empty() {
             counter!("octos_orphaned_tasks_reaped_total").increment(orphans.len() as u64);
@@ -2367,47 +2351,6 @@ impl TaskSupervisor {
         )
     }
 
-    /// #21 (round-4, codex #17 B3) — STRICT peer-task registration whose
-    /// FIRST durable ledger row already carries the workspace stamp.
-    ///
-    /// The pre-#21 shape (`register` + `set_workspace_root`) persisted the
-    /// task row with `workspace_root: None` first and stamped the workspace
-    /// in a SECOND snapshot append; a crash between the two (or a failed
-    /// second write — which was only warned) left the restored task
-    /// unstamped, and the `/stop` purge / continuation workspace scoping
-    /// fell back to the never-matching `output_files` derivation.
-    ///
-    /// This entry point closes the window structurally: the task is built
-    /// WITH the workspace stamp, and the registration only completes if the
-    /// first `persist_snapshot` write SUCCEEDS. On failure the task is never
-    /// inserted or published to registration observers, and
-    /// [`RegisterTaskError::WorkspacePersistFailed`] is returned. When the
-    /// supervisor has NO persistence path configured the write is trivially
-    /// "successful" (in-memory supervision only) and the registration
-    /// proceeds — the same no-store contract as every other register path.
-    ///
-    /// The stamp accepts a lossless-encoded workspace scope (see
-    /// `peers::workspace_scope_encode`); an empty string is normalized to
-    /// `None` (unstamped, legacy shape).
-    pub fn try_register_peer_with_workspace(
-        &self,
-        tool_name: &str,
-        tool_call_id: &str,
-        session_key: Option<&str>,
-        workspace_scope: Option<&str>,
-    ) -> Result<String, RegisterTaskError> {
-        self.register_full_with_workspace(
-            tool_name,
-            tool_call_id,
-            session_key,
-            None,
-            None,
-            None,
-            None,
-            workspace_scope,
-            true,
-        )
-    }
 
     #[allow(clippy::too_many_arguments)]
     fn register_full(

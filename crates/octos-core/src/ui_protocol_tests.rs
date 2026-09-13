@@ -918,8 +918,6 @@ fn ui_protocol_v1_wire_contract_is_golden() {
             "context/compaction_completed",
             "context/compaction_started",
             "context/normalization_reported",
-            "peer/staged",
-            "peer/closed",
             "background/activity",
         ]
     );
@@ -1136,8 +1134,6 @@ fn ui_protocol_v1_representative_wire_payloads_are_golden() {
                 "context/compaction_completed",
                 "context/compaction_started",
                 "context/normalization_reported",
-                "peer/staged",
-                "peer/closed",
                 "background/activity"
             ],
             "supported_features": [
@@ -3052,49 +3048,6 @@ fn m15_autonomy_notifications_register_methods_and_round_trip() {
     }
 }
 
-/// #1801 v3: `peer/staged` round-trips through the wire boundary with the
-/// originating session as the routing key and the staged peer's topic kept
-/// as an untouched payload field (the topic-stamping pass must NOT overwrite
-/// it with the originating session's own topic).
-#[test]
-fn peer_staged_notification_roundtrips_and_keeps_peer_topic() {
-    let session_id = SessionKey("dev:local:tui#coding".into());
-    let event = PeerStagedEvent {
-        session_id: session_id.clone(),
-        topic: "peer-ci-fix".into(),
-        slug: "ci-fix".into(),
-        brief: "Fix the flaky bus test.".into(),
-        brief_path: "/data/peers/ci-fix/brief.md".into(),
-        cwd: "/work/peers/ci-fix/wt".into(),
-        worktree_branch: Some("peer/ci-fix".into()),
-        profile_id: "dev".into(),
-    };
-    let notification = UiNotification::PeerStaged(event.clone());
-
-    assert_eq!(notification.method(), methods::PEER_STAGED);
-    assert!(UI_PROTOCOL_NOTIFICATION_METHODS.contains(&methods::PEER_STAGED));
-    assert_eq!(notification.session_id(), &session_id);
-    // Routing topic comes from the ORIGINATING session key, not the payload.
-    assert_eq!(notification.topic(), Some("coding"));
-
-    let rpc = notification
-        .clone()
-        .into_rpc_notification()
-        .expect("serialize peer/staged");
-    assert_eq!(rpc.method, methods::PEER_STAGED);
-    assert_eq!(rpc.params["topic"], "peer-ci-fix", "peer topic untouched");
-    let decoded = UiNotification::from_rpc_notification(rpc).expect("decode peer/staged");
-    assert_eq!(decoded, notification);
-
-    // Optional fence field stays off the wire when absent.
-    let plain = UiNotification::PeerStaged(PeerStagedEvent {
-        worktree_branch: None,
-        ..event
-    })
-    .into_rpc_notification()
-    .expect("serialize plain peer/staged");
-    assert!(plain.params.get("worktree_branch").is_none());
-}
 
 /// #2019 — `background/activity` is the HUMAN sink over events that today
 /// only wake the model. The routing key is the session that OWNS the emitter,
@@ -3173,36 +3126,6 @@ fn should_carry_a_visible_drop_marker_when_background_activity_is_capped() {
     );
 }
 
-/// `peer/closed` round-trips through the wire boundary with the originating
-/// session as the routing key and the closed peer's topic kept as an
-/// untouched payload field (the topic-stamping pass must NOT overwrite it
-/// with the originating session's own topic). Mirrors the `peer/staged` case.
-#[test]
-fn peer_closed_notification_roundtrips_and_keeps_peer_topic() {
-    let session_id = SessionKey("dev:local:tui#coding".into());
-    let event = PeerClosedEvent {
-        session_id: session_id.clone(),
-        topic: "peer-ci-fix".into(),
-        slug: "ci-fix".into(),
-        profile_id: "dev".into(),
-    };
-    let notification = UiNotification::PeerClosed(event.clone());
-
-    assert_eq!(notification.method(), methods::PEER_CLOSED);
-    assert!(UI_PROTOCOL_NOTIFICATION_METHODS.contains(&methods::PEER_CLOSED));
-    assert_eq!(notification.session_id(), &session_id);
-    // Routing topic comes from the ORIGINATING session key, not the payload.
-    assert_eq!(notification.topic(), Some("coding"));
-
-    let rpc = notification
-        .clone()
-        .into_rpc_notification()
-        .expect("serialize peer/closed");
-    assert_eq!(rpc.method, methods::PEER_CLOSED);
-    assert_eq!(rpc.params["topic"], "peer-ci-fix", "peer topic untouched");
-    let decoded = UiNotification::from_rpc_notification(rpc).expect("decode peer/closed");
-    assert_eq!(decoded, notification);
-}
 
 #[test]
 fn m15_agent_fixture_notifications_decode_to_typed_variants() {

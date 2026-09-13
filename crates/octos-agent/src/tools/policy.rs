@@ -3,7 +3,6 @@
 use metrics::counter;
 use serde::{Deserialize, Serialize};
 
-use super::robot_groups;
 
 /// Outcome of `ToolPolicy::evaluate`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,11 +77,7 @@ impl ToolPolicy {
         // Deny-wins: explicit deny entries take precedence.
         for entry in &self.deny {
             if entry_matches(entry, tool_name) {
-                let reason = if entry_is_robot_group(entry) {
-                    ROBOT_TIER_GATE_REASON
-                } else {
-                    GENERIC_DENY_REASON
-                };
+                let reason = GENERIC_DENY_REASON;
                 counter!(POLICY_DENIAL_COUNTER, "reason" => reason).increment(1);
                 return PolicyDecision::Deny { reason };
             }
@@ -99,17 +94,7 @@ impl ToolPolicy {
             }
         }
 
-        // Tool wasn't matched by any allow entry. If the allow list contains
-        // robot-tier groups AND the tool is registered in a robot tier, the
-        // gate is a robot-tier gate — that's the case robotic integrators
-        // care about observing.
-        let reason = if self.allow.iter().any(|entry| entry_is_robot_group(entry))
-            && robot_groups::tool_has_tier(tool_name)
-        {
-            ROBOT_TIER_GATE_REASON
-        } else {
-            GENERIC_DENY_REASON
-        };
+        let reason = GENERIC_DENY_REASON;
         counter!(POLICY_DENIAL_COUNTER, "reason" => reason).increment(1);
         PolicyDecision::Deny { reason }
     }
@@ -153,11 +138,6 @@ impl ToolPolicy {
 
 /// Check if a policy entry (group, wildcard, or exact name) matches a tool name.
 pub(crate) fn entry_matches(entry: &str, tool_name: &str) -> bool {
-    // Robot-tier groups resolve through the dynamic registry so integrators
-    // register tool-to-tier mappings at runtime.
-    if entry_is_robot_group(entry) {
-        return robot_groups::group_covers_tool(entry, tool_name);
-    }
     // Static named groups (group:fs, group:runtime, ...)
     if let Some(tools) = expand_group(entry) {
         return tools.contains(&tool_name);
@@ -168,10 +148,6 @@ pub(crate) fn entry_matches(entry: &str, tool_name: &str) -> bool {
     }
     // Exact match
     entry == tool_name
-}
-
-fn entry_is_robot_group(entry: &str) -> bool {
-    robot_groups::parse_group_name(entry).is_some()
 }
 
 /// Metadata about a named tool group (`group:web`, `group:runtime`, …) used

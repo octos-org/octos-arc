@@ -168,30 +168,6 @@ const BACKGROUND_RESULT_FANOUT_TIMEOUT: Duration = Duration::from_secs(5);
 /// seconds; long enough to absorb back-to-back retries on the same lane.
 const FAILOVER_PUSH_DEBOUNCE: Duration = Duration::from_secs(5);
 
-// ── Peer inbox registry (#436) ─────────────────────────────────────────────
-
-/// Inbox sender map keyed by `"{profile_id}:peer:{slug}"`, shared behind
-/// an `Arc<StdMutex<_>>` so [`peer_inbox_registry`] callers can clone the
-/// `Arc` and lock independently.
-type PeerInboxMap = Arc<StdMutex<HashMap<String, mpsc::Sender<ActorMessage>>>>;
-
-/// Global registry mapping `"{profile_id}:peer:{slug}"` → inbox sender for
-/// running peer sessions. Populated by [`ActorRegistry::dispatch`] when a
-/// peer session actor spawns; removed on session death / deletion. The
-/// [`PeerSendInputTool`] callback reads this to deliver cross-session
-/// messages without a TUI round-trip.
-static PEER_INBOX_REGISTRY: OnceLock<PeerInboxMap> = OnceLock::new();
-
-/// Get (or init) the global peer inbox registry.
-pub fn peer_inbox_registry() -> &'static PeerInboxMap {
-    PEER_INBOX_REGISTRY.get_or_init(|| Arc::new(StdMutex::new(HashMap::new())))
-}
-
-/// Build the lookup key for a peer session: `"{profile_id}:peer:{slug}"`.
-fn peer_inbox_key(profile_id: &str, slug: &str) -> String {
-    format!("{profile_id}:peer:{slug}")
-}
-
 // ────────────────────────────────────────────────────────────────────────────
 
 const DEFAULT_CONTEXT_COMPACT_RATIO_NUMERATOR: usize = 7;
@@ -2548,16 +2524,6 @@ impl ActorRegistry {
                 // profile_id which is None for the current-profile gateway.
                 tenant_id: tenant_id.map(|s| s.to_string()),
             });
-            // #436 — register peer inbox for cross-session messaging.
-            // Only peer sessions (topic `peer-<slug>`) get registered.
-            if let Some(topic) = session_key.topic() {
-                if let Some(slug) = topic.strip_prefix("peer-") {
-                    let registry = peer_inbox_registry();
-                    let key = peer_inbox_key(profile_id.unwrap_or(MAIN_PROFILE_ID), slug);
-                    registry.lock().unwrap().insert(key, tx.clone());
-                }
-            }
-
             self.actors.insert(
                 key_str.clone(),
                 ActorHandle {
@@ -2658,11 +2624,6 @@ impl ActorRegistry {
                 true
             }
         });
-        // #436 — purge closed senders from the peer inbox registry
-        peer_inbox_registry()
-            .lock()
-            .unwrap()
-            .retain(|_, tx| !tx.is_closed());
     }
 
     /// Stop and remove a session actor. Drops the sender so the actor's run
@@ -2679,32 +2640,9 @@ impl ActorRegistry {
         for key in keys_to_remove {
             if let Some(handle) = self.actors.remove(&key) {
                 debug!(session = %key, "removing session actor on delete");
-                // #436/#437 — drop the peer inbox registry's strong `Sender`
-                // clone for THIS actor's channel BEFORE dropping `handle.tx`.
-                // `dispatch` inserted a `tx.clone()` for peer sessions, so the
-                // registry itself holds a live sender: `is_closed()` can never
-                // fire while that clone is alive, which is why the trailing
-                // `retain(!is_closed)` below cannot evict the entry here. A
-                // stale entry keeps the deleted peer injectable (breaking
-                // `peer_close`) AND keeps the actor's `recv()` from ever
-                // returning `None`, leaking the actor past deletion until its
-                // idle timeout. Purge by `same_channel` so exactly this
-                // actor's entry is removed regardless of its registry key;
-                // dropping `handle.tx` next leaves no senders, so the run loop
-                // exits promptly.
-                peer_inbox_registry()
-                    .lock()
-                    .unwrap()
-                    .retain(|_, reg_tx| !reg_tx.same_channel(&handle.tx));
-                drop(handle.tx); // no senders remain → recv() returns None → run loop exits
+                drop(handle.tx); // recv() returns None → run loop exits
             }
         }
-        // Defensive sweep: evict any registry entry whose receiver has already
-        // been dropped (an actor that exited on its own before this delete).
-        peer_inbox_registry()
-            .lock()
-            .unwrap()
-            .retain(|_, tx| !tx.is_closed());
     }
 
     /// Cancel a specific session actor.

@@ -842,9 +842,6 @@ impl ProfileActorFactoryBuilder {
             }
             actor_plugin_dirs = plugin_dirs.clone();
             actor_plugin_env = plugin_env;
-            tools.register(octos_agent::ManageSkillsTool::new(
-                profile_data_dir.join("skills"),
-            ));
             tools.register(octos_agent::RecallMemoryTool::new(
                 self.memory_store.clone(),
             ));

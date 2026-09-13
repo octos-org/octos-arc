@@ -17,7 +17,7 @@
 //! filter narrows the VISIBLE registry, so tools it excludes (web/research/
 //! media/pipeline) are restored via the `coding-full` built-in, which
 //! preserves the pre-lean unfiltered surface byte-for-byte.
-//! Alternate profiles (e.g. `swarm`) declare their own allow lists and
+//! Alternate profiles declare their own allow lists and
 //! expanded agent sets.
 //!
 //! # Forward compatibility
@@ -42,8 +42,7 @@
 //!    (JSON files under `crates/octos-agent/src/assets/profiles/`).
 //!
 //! Today's built-in profiles are `coding` (the lean default), `coding-full`
-//! (the unfiltered pre-lean surface), and `swarm` (an allow-list extension
-//! that enables multi-worker swarm coordination tools).
+//! (the unfiltered pre-lean surface).
 //!
 //! # Applied vs recorded settings
 //!
@@ -59,7 +58,7 @@
 //!   not yet consult them. A future milestone wires the preferences into
 //!   the adaptive router's lane-scoring input.
 //! - `mcp_servers` — only the ids are captured. Actual server config
-//!   resolution is a follow-up milestone. `coding` and `swarm` ship with
+//!   resolution is a follow-up milestone. `coding` ship with
 //!   an empty list so no behaviour change falls out of this.
 //!
 //! The `permissions` stub also lands in a minimal form (default /
@@ -85,7 +84,6 @@ const BUILTIN_PROFILES: &[(&str, &str)] = &[
         "coding-full",
         include_str!("../assets/profiles/coding-full.json"),
     ),
-    ("swarm", include_str!("../assets/profiles/swarm.json")),
 ];
 
 /// The source a resolved profile was loaded from. Used by the CLI resolver
@@ -609,8 +607,6 @@ mod tests {
         assert_eq!(full.name, "coding-full");
         assert!(matches!(full.tools, ProfileTools::Default));
 
-        let swarm = ProfileDefinition::builtin("swarm").expect("swarm builtin");
-        assert_eq!(swarm.name, "swarm");
         // Unknown names produce `None` so the load() caller can fall
         // through to a typed error.
         assert!(ProfileDefinition::builtin("does-not-exist").is_none());
@@ -926,29 +922,6 @@ mod tests {
     }
 
     #[test]
-    fn should_load_builtin_swarm_profile_without_error() {
-        let swarm = ProfileDefinition::builtin("swarm").expect("swarm");
-        swarm.validate().expect("valid");
-        // Swarm must declare an allow list so the registry keeps its
-        // swarm-only tools reachable while normal workers stay denied.
-        match &swarm.tools {
-            ProfileTools::AllowList { tools } => {
-                assert!(tools.contains(&"send_to_agent".to_string()));
-                assert!(tools.contains(&"cancel_task".to_string()));
-                assert!(tools.contains(&"relaunch_task".to_string()));
-            }
-            other => panic!("swarm must declare an allow list, got {other:?}"),
-        }
-        // Swarm coordinators keep the pipeline engine. Pre-lean this fell
-        // out of the spawn_only carve-out (run_pipeline survived the
-        // filter without being named); now that the chat/acp bootstrap
-        // gates registration on `allows`, the swarm allow list must name
-        // it explicitly or coordinators would silently lose it.
-        assert!(swarm.tools.allows("run_pipeline"));
-        assert!(!swarm.agents.is_empty());
-    }
-
-    #[test]
     fn looks_like_path_classifies_arguments_correctly() {
         // Explicit paths start with /, ./, ~/, or ../; everything else is
         // treated as a profile name for user-dir / builtin lookup.
@@ -1039,22 +1012,6 @@ mod tests {
         assert!(
             msg.contains("typo-worker"),
             "validation error must name the missing id: {msg}"
-        );
-    }
-
-    #[test]
-    fn builtin_swarm_profile_references_only_existing_agent_definitions() {
-        // The fix-first checklist explicitly calls out the swarm profile
-        // for referencing manifests that never shipped. Verify the
-        // built-in swarm now references only ids in the AgentDefinitions
-        // registry.
-        let swarm = ProfileDefinition::builtin("swarm").expect("swarm");
-        let registry = crate::agents::AgentDefinitions::with_builtins();
-        let unknown = swarm.unknown_agent_ids(&registry);
-        assert!(
-            unknown.is_empty(),
-            "built-in swarm profile must reference only existing manifests, \
-             missing: {unknown:?}"
         );
     }
 

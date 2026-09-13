@@ -18,7 +18,6 @@ struct ProtocolSession {
     busy_watch: tokio::sync::watch::Sender<bool>,
     idle_started: AtomicBool,
     segments: std::sync::Mutex<AssistantTextProjection>,
-    peers: crate::commands::oup_peers::OupPeerHost,
 }
 
 /// Each prompt owns its cancellation flag. An interrupt RPC acknowledged
@@ -75,10 +74,6 @@ async fn open(
             busy_watch: tokio::sync::watch::channel(false).0,
             idle_started: AtomicBool::new(false),
             segments: std::sync::Mutex::new(AssistantTextProjection::default()),
-            peers: crate::commands::oup_peers::OupPeerHost::new(
-                state,
-                octos_agent::EffectivePermissions::workspace_write(),
-            ),
         }))
     })
     .await
@@ -284,7 +279,6 @@ fn replay_message(message: octos_core::ui_protocol::HydratedMessage) -> Vec<Sess
 #[async_trait::async_trait]
 impl OupFrontend for Frontend {
     async fn event(&self, event: UiNotification) -> Result<Option<UiCommand>> {
-        self.session.peers.event(&event);
         match event {
             UiNotification::EnvelopeV2(event) => self.payload(event.envelope.payload)?,
             UiNotification::ApprovalRequested(event) => {
@@ -533,7 +527,6 @@ async fn serve_with_sessions(
         .collect();
     for session in sessions {
         session.cancelled.current().store(true, Ordering::Release);
-        session.peers.close().await;
         if let Err(error) = session.oup.close().await
             && result.is_ok()
         {

@@ -1313,19 +1313,6 @@ pub mod methods {
     /// back into model context. Gated on
     /// [`super::UI_PROTOCOL_FEATURE_BACKGROUND_ACTIVITY_V1`].
     pub const BACKGROUND_ACTIVITY: &str = "background/activity";
-    /// #1801 v3 `peer/staged` — agent-initiated peer staging. The model's
-    /// `peer_handoff` tool staged a sovereign peer session server-side
-    /// (durable brief + optional fenced worktree); sessions are
-    /// client-connection-coupled, so this durable notification asks the
-    /// user's client to OPEN the staged session (topic `peer-<slug>`) in
-    /// the background. `session_id` is the ORIGINATING session; replayed on
-    /// reconnect, so clients dedup by existing session.
-    pub const PEER_STAGED: &str = "peer/staged";
-    /// `peer/closed` — the model's `peer_close` tool tore down a staged peer
-    /// session (durable brief + optional fenced worktree evicted). Mirrors
-    /// [`PEER_STAGED`]: `session_id` is the ORIGINATING session; durable so
-    /// reconnect replay redelivers it, and clients dedup by the closed peer.
-    pub const PEER_CLOSED: &str = "peer/closed";
 
     // ---- Smart-home bridge integration ----
     // Device control/state moved server-side from octos-web's client-only
@@ -1476,8 +1463,6 @@ pub const UI_PROTOCOL_NOTIFICATION_METHODS: &[&str] = &[
     methods::CONTEXT_COMPACTION_COMPLETED,
     methods::CONTEXT_COMPACTION_STARTED,
     methods::CONTEXT_NORMALIZATION_REPORTED,
-    methods::PEER_STAGED,
-    methods::PEER_CLOSED,
     methods::BACKGROUND_ACTIVITY,
 ];
 
@@ -6544,60 +6529,7 @@ pub struct SkillActionJobUpdatedEvent {
     pub job: Value,
 }
 
-/// `peer/staged` (#1801 v3) — agent-initiated peer staging. Emitted by the
-/// serve/WS turn path when the model's `peer_handoff` tool staged a peer
-/// through the host callback: the durable brief (and optional fenced
-/// worktree) already exist on disk, and the user's client is asked to open
-/// the staged session in the background. Sessions are
-/// client-connection-coupled — the MODEL stages, the CLIENT opens.
-///
-/// Durable (ledger-appended): reconnect replay redelivers the event, so a
-/// client dedups by an already-open session for `topic`. `topic` here is the
-/// staged PEER's session topic (`peer-<slug>`), a payload field — routing
-/// still keys off `session_id`, the ORIGINATING session.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PeerStagedEvent {
-    /// The ORIGINATING session (the conversation whose turn staged the peer).
-    pub session_id: SessionKey,
-    /// Topic of the staged peer session the client opens (`peer-<slug>`).
-    pub topic: String,
-    /// Directory slug reserved under the profile's `peers/` root.
-    pub slug: String,
-    /// The full task contract handed to the peer (also durable on disk at
-    /// `brief_path` — carried inline so the client can render a preview
-    /// without a filesystem read).
-    pub brief: String,
-    /// Absolute path of the durable brief (`peers/<slug>/brief.md`).
-    pub brief_path: String,
-    /// Working directory for the peer session (worktree checkout when
-    /// fenced, else the originating session's workspace root).
-    pub cwd: String,
-    /// Fence branch (`peer/<slug>`) when a worktree was created.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worktree_branch: Option<String>,
-    /// Profile the peer session runs under.
-    pub profile_id: String,
-}
 
-/// `peer/closed` — the model's `peer_close` tool tore down a staged peer
-/// session: the durable brief (and optional fenced worktree) were evicted
-/// server-side, so the user's client should close the peer pane it opened
-/// for `topic`. Mirrors [`PeerStagedEvent`]: routing keys off `session_id`
-/// (the ORIGINATING session), and `topic` (`peer-<slug>`) is the closed
-/// peer's session topic carried as a payload field.
-///
-/// Durable (ledger-appended): reconnect replay redelivers the event.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PeerClosedEvent {
-    /// The ORIGINATING session (the conversation whose turn closed the peer).
-    pub session_id: SessionKey,
-    /// Topic of the closed peer session the client tears down (`peer-<slug>`).
-    pub topic: String,
-    /// Directory slug that was reserved under the profile's `peers/` root.
-    pub slug: String,
-    /// Profile the peer session ran under.
-    pub profile_id: String,
-}
 
 /// #2019 — one background event surfaced to the HUMAN.
 ///
@@ -6749,13 +6681,6 @@ pub enum UiNotification {
     /// continuation pending), so a client can render a job indicator that stays
     /// live across the sub-agent-complete → master-re-entry gap.
     SessionOrchestration(SessionOrchestrationEvent),
-    /// #1801 v3: the model's `peer_handoff` tool staged a sovereign peer
-    /// session (durable brief + optional fenced worktree); the client opens
-    /// the staged session in the background. See [`PeerStagedEvent`].
-    PeerStaged(PeerStagedEvent),
-    /// The model's `peer_close` tool tore down a staged peer session; the
-    /// client closes the peer pane it opened. See [`PeerClosedEvent`].
-    PeerClosed(PeerClosedEvent),
     /// #2019: a background event that woke the model, surfaced to the HUMAN.
     /// See [`BackgroundActivityEvent`].
     BackgroundActivity(BackgroundActivityEvent),
@@ -6836,8 +6761,6 @@ impl UiNotification {
             Self::ContextCompactionStarted(_) => methods::CONTEXT_COMPACTION_STARTED,
             Self::ContextNormalizationReported(_) => methods::CONTEXT_NORMALIZATION_REPORTED,
             Self::SessionOrchestration(_) => methods::SESSION_ORCHESTRATION,
-            Self::PeerStaged(_) => methods::PEER_STAGED,
-            Self::PeerClosed(_) => methods::PEER_CLOSED,
             Self::BackgroundActivity(_) => methods::BACKGROUND_ACTIVITY,
             Self::Envelope(_) => methods::PROJECTION_ENVELOPE,
             Self::EnvelopeV2(_) => methods::PROJECTION_ENVELOPE,
@@ -6894,8 +6817,6 @@ impl UiNotification {
             Self::ContextCompactionStarted(event) => &event.session_id,
             Self::ContextNormalizationReported(event) => &event.session_id,
             Self::SessionOrchestration(event) => &event.session_id,
-            Self::PeerStaged(event) => &event.session_id,
-            Self::PeerClosed(event) => &event.session_id,
             Self::BackgroundActivity(event) => &event.session_id,
             Self::Envelope(event) => &event.session_id,
             Self::EnvelopeV2(event) => &event.session_id,
@@ -7065,8 +6986,6 @@ impl UiNotification {
             // (`peer-<slug>`), NOT this notification's routing topic — the
             // `stamp_topic_from_session` catch-all above leaves it alone,
             // and routing keys off `session_id` (the originating session).
-            Self::PeerStaged(params) => serde_json::to_value(params),
-            Self::PeerClosed(params) => serde_json::to_value(params),
             // #2019: routing keys off `session_id` like every other
             // session-scoped notification; the origin fields are payload.
             Self::BackgroundActivity(params) => serde_json::to_value(params),
@@ -7222,8 +7141,6 @@ impl UiNotification {
             methods::SESSION_ORCHESTRATION => {
                 Ok(Self::SessionOrchestration(decode_params(method, params)?))
             }
-            methods::PEER_STAGED => Ok(Self::PeerStaged(decode_params(method, params)?)),
-            methods::PEER_CLOSED => Ok(Self::PeerClosed(decode_params(method, params)?)),
             methods::BACKGROUND_ACTIVITY => {
                 Ok(Self::BackgroundActivity(decode_params(method, params)?))
             }

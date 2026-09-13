@@ -337,77 +337,6 @@ fn on_terminal_fires_once_for_success_and_failure_with_correct_payload() {
     );
 }
 
-/// Gap-1 unification: cascade-fail (`mark_descendants_failed`) and the
-/// orphan-sweep (`enable_persistence`) both reach the unified terminal
-/// sink — they funnel through `mark_failed`, so no extra wiring is
-/// needed, but pin it so a refactor cannot silently regress autonomous
-/// recovery for those paths.
-#[test]
-fn on_terminal_fires_for_cascade_and_orphan_sweep_failures() {
-    use std::sync::{Arc, Mutex};
-
-    // ── cascade-fail ─────────────────────────────────────────────
-    let supervisor = TaskSupervisor::new();
-    let events: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let sink = Arc::clone(&events);
-    supervisor.set_on_terminal(move |event: &TerminalEvent| {
-        if event.is_failure() {
-            sink.lock().unwrap().push(event.task.id.clone());
-        }
-    });
-
-    // A running run_pipeline parent + two pipeline node children under
-    // its tool_call_id.
-    let parent = supervisor.register("run_pipeline", "call-pipe", Some("web:s2"));
-    supervisor.mark_running(&parent);
-    let child_a = supervisor
-        .try_register_node_task("pipeline:analyze", "call-pipe", Some("web:s2"))
-        .expect("node a");
-    let child_b = supervisor
-        .try_register_node_task("pipeline:render", "call-pipe", Some("web:s2"))
-        .expect("node b");
-    supervisor.mark_running(&child_a);
-    supervisor.mark_running(&child_b);
-    let cascaded = supervisor.mark_descendants_failed("call-pipe", "parent timed out");
-    assert_eq!(cascaded, 2, "both node children must cascade-fail");
-
-    {
-        let observed = events.lock().unwrap();
-        assert!(
-            observed.contains(&child_a),
-            "cascade child A must reach terminal sink"
-        );
-        assert!(
-            observed.contains(&child_b),
-            "cascade child B must reach terminal sink"
-        );
-    }
-
-    // ── orphan-sweep ─────────────────────────────────────────────
-    let dir = tempfile::TempDir::new().unwrap();
-    let temp = dir.path().join("task_ledger.jsonl");
-    let supervisor2 = TaskSupervisor::new();
-    let events2: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let sink2 = Arc::clone(&events2);
-    supervisor2.set_on_terminal(move |event: &TerminalEvent| {
-        if event.is_failure() {
-            sink2.lock().unwrap().push(event.task.id.clone());
-        }
-    });
-    let orphan = supervisor2.register("run_pipeline", "call-orphan", Some("web:s3"));
-    supervisor2.mark_running(&orphan);
-    // enable_persistence sweeps the non-terminal in-flight task into
-    // Failed("orphaned across restart") → mark_failed → notify_terminal.
-    supervisor2
-        .enable_persistence(&temp)
-        .expect("enable_persistence");
-    // #27c — parking is peer_handoff-scoped; this fixture's tool keeps
-    // the genuine-Failed verdict, so the terminal sink still fires.
-    assert!(
-        events2.lock().unwrap().contains(&orphan),
-        "non-peer orphan failure reaches the unified terminal sink"
-    );
-}
 
 #[test]
 fn terminal_updates_refresh_summary_and_artifact_count() {
@@ -813,55 +742,6 @@ fn should_ignore_unknown_task_ids() {
     assert_eq!(supervisor.task_count(), 0);
 }
 
-#[test]
-fn should_restore_running_task_state_after_restart() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let ledger_path = dir.path().join("tasks.jsonl");
-
-    let supervisor = TaskSupervisor::new();
-    supervisor.enable_persistence(&ledger_path).unwrap();
-
-    let task_id = supervisor.register_with_lineage("search", "call-1", Some("api:session"), None);
-    supervisor.mark_running(&task_id);
-    supervisor.mark_runtime_state(
-        &task_id,
-        TaskRuntimeState::ResolvingOutputs,
-        Some("collecting evidence".to_string()),
-    );
-
-    let restored = TaskSupervisor::new();
-    restored.enable_persistence(&ledger_path).unwrap();
-
-    let tasks = restored.get_all_tasks();
-    assert_eq!(tasks.len(), 1);
-    assert_eq!(tasks[0].id, task_id);
-    // #27c — parking is peer_handoff-scoped; this fixture's tool keeps
-    // the legacy genuine-Failed verdict. Metadata (lineage, ledger path,
-    // last-known runtime_detail) is preserved for operator diagnosis.
-    assert_eq!(tasks[0].status, TaskStatus::Failed);
-    assert_eq!(tasks[0].runtime_state, TaskRuntimeState::Failed);
-    assert_eq!(
-        tasks[0].error.as_deref(),
-        Some("orphaned across restart"),
-        "orphan reaper must mark restored running tasks Parked"
-    );
-    // runtime_detail (the last live progress payload) survives the
-    // reap so operators can see where the task was when the worker died.
-    assert_eq!(
-        tasks[0].runtime_detail.as_deref(),
-        Some("collecting evidence")
-    );
-    let expected_child = format!("api:session#child-{task_id}");
-    assert_eq!(tasks[0].parent_session_key.as_deref(), Some("api:session"));
-    assert_eq!(
-        tasks[0].child_session_key.as_deref(),
-        Some(expected_child.as_str())
-    );
-    assert_eq!(
-        tasks[0].task_ledger_path.as_deref(),
-        Some(ledger_path.to_str().unwrap())
-    );
-}
 
 #[test]
 fn should_restore_completed_and_failed_truth_after_restart() {
@@ -4331,86 +4211,8 @@ async fn foreground_armed_guard_survives_sweep_before_worker_polls() {
 
 // ── issue #2035: liveness for CLIENT-DRIVEN work (peers) ──────────────
 
-/// Reproduction of #2035. A `peer_handoff` row is the shape the sweep was
-/// never designed for: it is non-terminal for the peer's whole life (it is
-/// retired on `peer_close`, not on turn terminal) and its worker is a
-/// sovereign session the CLIENT drives, so no `TaskTerminalGuard` is ever
-/// armed for it. The next turn's `enable_persistence` therefore reaps a peer
-/// that is perfectly healthy — observed live on mini5, where both peers were
-/// stamped `failed` six seconds after staging and then ran to completion.
-#[test]
-fn a_client_driven_task_with_no_lease_is_reaped_by_the_next_sweep() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let ledger_path = dir.path().join("tasks.jsonl");
 
-    let staging_turn = TaskSupervisor::new();
-    staging_turn.enable_persistence(&ledger_path).unwrap();
-    let peer = staging_turn.register("peer_handoff", "profile:peer:auditor", Some("api:master"));
 
-    // The very next turn rebuilds a fresh supervisor over the SAME ledger.
-    let next_turn = TaskSupervisor::new();
-    next_turn.enable_persistence(&ledger_path).unwrap();
-
-    assert_eq!(
-        next_turn.get_task(&peer).expect("peer row restored").error,
-        Some("orphaned across restart".to_string()),
-        "documents the #2035 defect: without a lease the peer is reaped",
-    );
-}
-
-/// The fix. A liveness lease marks the task live for as long as the CLIENT's
-/// work is in flight, so the per-turn sweep skips it — the same exemption a
-/// detached tokio worker gets from `TaskTerminalGuard`, minus the terminal
-/// side effect (a peer is retired by `peer_close`, not by a worker future).
-#[test]
-fn a_liveness_lease_keeps_a_client_driven_task_out_of_the_sweep() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let ledger_path = dir.path().join("tasks.jsonl");
-
-    let staging_turn = TaskSupervisor::new();
-    staging_turn.enable_persistence(&ledger_path).unwrap();
-    let peer = staging_turn.register("peer_handoff", "profile:peer:auditor", Some("api:master"));
-    let _lease = TaskLivenessLease::new(peer.clone());
-
-    // Several turns pass while the peer works; every one of them sweeps.
-    for _ in 0..3 {
-        let turn = TaskSupervisor::new();
-        turn.enable_persistence(&ledger_path).unwrap();
-        assert_ne!(
-            turn.get_task(&peer).expect("peer row restored").error,
-            Some("orphaned across restart".to_string()),
-            "a leased peer must survive every per-turn sweep",
-        );
-    }
-}
-
-/// The lease must not defeat the sweep's real purpose. Membership is
-/// process-global and starts empty in a new process, so a peer left behind by
-/// a genuine cross-process restart is still reaped — modelled here by dropping
-/// the lease (what process death does to the whole set) and sweeping again.
-#[test]
-fn dropping_the_liveness_lease_makes_the_task_reapable_again() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let ledger_path = dir.path().join("tasks.jsonl");
-
-    let staging_turn = TaskSupervisor::new();
-    staging_turn.enable_persistence(&ledger_path).unwrap();
-    let peer = staging_turn.register("peer_handoff", "profile:peer:auditor", Some("api:master"));
-
-    {
-        let _lease = TaskLivenessLease::new(peer.clone());
-        assert!(is_task_live(&peer), "lease marks the task live");
-    }
-    assert!(!is_task_live(&peer), "drop clears the live-set entry");
-
-    let after_restart = TaskSupervisor::new();
-    after_restart.enable_persistence(&ledger_path).unwrap();
-    assert_eq!(
-        after_restart.get_task(&peer).expect("peer row").error,
-        Some("orphaned across restart".to_string()),
-        "an unleased peer row is still a genuine orphan",
-    );
-}
 
 // ── issue #1920: heartbeat-based in-flight orphan reaper ──────────────
 
@@ -4875,228 +4677,17 @@ fn snapshot_excluding_child_supervisor_inherits_registration_observers() {
     assert!(child.get_task(&id).is_some());
 }
 
-/// #27c — the full simulated-restart orphan lifecycle: a running task's
-/// process dies; the next supervisor's boot sweep PARKS it (awaiting client
-/// re-attach) instead of failing it; the returning client revives it with
-/// `mark_running` (Parked → Running) and completes it normally. Red lines:
-/// terminal tasks are never re-parked, and Parked never fires the terminal
-/// failure callback (it is not a verdict, it is a pause).
-#[test]
-fn orphan_restart_parks_then_client_reattach_revives_full_chain() {
-    let temp = tempfile::tempdir().unwrap();
-    let ledger_path = temp.path().join("supervisor.jsonl");
-
-    // Boot 1: the "old process" registers a running task and persists it.
-    let old = TaskSupervisor::new();
-    let task_id = old.register("peer_handoff", "call-27c", Some("octos:local:tui#coding"));
-    old.mark_running(&task_id);
-    old.enable_persistence(&ledger_path).unwrap();
-
-    // Boot 2: a fresh supervisor (restart) — no live worker for the task.
-    // The sweep PARKS it, not fails it.
-    let restarted = TaskSupervisor::new();
-    restarted.enable_persistence(&ledger_path).unwrap();
-    let parked = restarted.get_task(&task_id).expect("task survived restart");
-    assert_eq!(parked.status, TaskStatus::Parked, "orphan must be Parked");
-    assert_eq!(parked.error.as_deref(), Some("orphaned across restart"));
-    assert!(
-        !parked.status.is_terminal(),
-        "Parked is re-attachable, not terminal"
-    );
-    assert!(
-        !parked.status.is_active(),
-        "Parked has no live worker in this process"
-    );
-
-    // Boot 3: the returning client re-attaches — mark_running revives the
-    // SAME task (Parked → Running) and drives it to completion.
-    restarted.mark_running(&task_id);
-    let revived = restarted.get_task(&task_id).expect("revived");
-    assert_eq!(
-        revived.status,
-        TaskStatus::Running,
-        "client re-attach revives Parked → Running"
-    );
-    restarted.mark_completed(&task_id, vec![]);
-    let done = restarted.get_task(&task_id).expect("done");
-    assert_eq!(
-        done.status,
-        TaskStatus::Completed,
-        "revived task completes normally"
-    );
-
-    // Red line 1: mark_parked on a terminal task is a no-op.
-    restarted.mark_parked(&task_id, "late park".into());
-    assert_eq!(
-        restarted.get_task(&task_id).unwrap().status,
-        TaskStatus::Completed,
-        "terminal tasks are never re-parked"
-    );
-
-    // Red line 2: a Parked task never fired the terminal-failure path —
-    // its runtime_state slot still reads the parked detail on the way
-    // through, and completion stamped completed_at only at the REAL end.
-    assert!(
-        done.completed_at.is_some(),
-        "completed_at stamps the real terminal"
-    );
-}
 
 // #21 (round-4, codex #17 B3) — the peer-task registration's FIRST durable
 // row carries the workspace stamp; a failed first write rolls the whole
 // registration back.
 
-/// Test ①: after the strict registration (and a simulated crash — a fresh
-/// supervisor over the same ledger), the restored task STILL carries the
-/// workspace scope. No second `set_workspace_root` write ever happened.
-#[test]
-fn peer_workspace_stamp_survives_restart_on_first_durable_row() {
-    let temp = tempfile::TempDir::new().unwrap();
-    let ledger = temp.path().join("tasks.jsonl");
-    let supervisor = TaskSupervisor::new();
-    supervisor.enable_persistence(&ledger).expect("persistence");
 
-    let task_id = supervisor
-        .try_register_peer_with_workspace(
-            "peer_handoff",
-            "tenant:peer:alpha",
-            Some("tenant:api:master"),
-            Some("2f686f6d652f7773"),
-        )
-        .expect("strict registration succeeds");
-    let rows: Vec<PersistedTaskRecord> = std::fs::read_to_string(&ledger)
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
-    assert_eq!(rows.len(), 1, "registration must append exactly one row");
-    assert_eq!(
-        rows[0].task.workspace_root.as_deref(),
-        Some("2f686f6d652f7773"),
-        "a crash immediately after the first append must restore the stamp"
-    );
-    assert_eq!(
-        supervisor.get_task(&task_id).and_then(|t| t.workspace_root),
-        Some("2f686f6d652f7773".to_owned()),
-        "the stamp is on the in-memory row"
-    );
-    drop(supervisor);
 
-    // "Crash" + restart: the FIRST durable row already carried the scope.
-    let restored = TaskSupervisor::new();
-    restored.enable_persistence(&ledger).expect("restore");
-    assert_eq!(
-        restored.get_task(&task_id).and_then(|t| t.workspace_root),
-        Some("2f686f6d652f7773".to_owned()),
-        "the restored row keeps the workspace scope from the FIRST write"
-    );
-}
 
-/// Test ②: a failed first durable write returns
-/// `WorkspacePersistFailed` and leaves NO task row (no half-binding).
-#[test]
-fn peer_workspace_registration_rolls_back_on_failed_first_write() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    let temp = tempfile::TempDir::new().unwrap();
-    let supervisor = TaskSupervisor::new();
-    let ledger = temp.path().join("tasks.jsonl");
-    supervisor.enable_persistence(&ledger).expect("persistence");
-    // enable_persistence with zero tasks never creates the ledger file —
-    // create it, then replace it with a directory → appends now fail.
-    std::fs::write(&ledger, "").unwrap();
-    std::fs::remove_file(&ledger).unwrap();
-    std::fs::create_dir_all(&ledger).unwrap();
-    let notifications = Arc::new(AtomicUsize::new(0));
-    let seen = notifications.clone();
-    supervisor.set_on_register(move |_| {
-        seen.fetch_add(1, Ordering::SeqCst);
-    });
-
-    let result = supervisor.try_register_peer_with_workspace(
-        "peer_handoff",
-        "tenant:peer:beta",
-        Some("tenant:api:master"),
-        Some("deadbeef"),
-    );
-    match result {
-        Err(RegisterTaskError::WorkspacePersistFailed { tool_call_id, .. }) => {
-            assert_eq!(tool_call_id, "tenant:peer:beta");
-        }
-        other => panic!("expected WorkspacePersistFailed, got {other:?}"),
-    }
-    assert_eq!(notifications.load(Ordering::SeqCst), 0);
-    assert_eq!(std::fs::read_dir(&ledger).unwrap().count(), 0);
-    let tasks: Vec<String> = supervisor
-        .tasks
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .keys()
-        .cloned()
-        .collect();
-    assert!(
-        tasks.iter().all(|id| {
-            supervisor
-                .get_task(id)
-                .is_none_or(|t| t.tool_call_id != "tenant:peer:beta")
-        }),
-        "the rolled-back registration leaves no task row; tasks: {tasks:?}"
-    );
-}
-
-#[test]
-fn peer_workspace_registration_checks_first_write_even_without_scope() {
-    let temp = tempfile::TempDir::new().unwrap();
-    let ledger = temp.path().join("tasks.jsonl");
-    let supervisor = TaskSupervisor::new();
-    supervisor.enable_persistence(&ledger).unwrap();
-    std::fs::create_dir(&ledger).unwrap();
-    assert!(matches!(
-        supervisor.try_register_peer_with_workspace("peer_handoff", "unstamped", None, None),
-        Err(RegisterTaskError::WorkspacePersistFailed { .. })
-    ));
-    assert!(supervisor.get_all_tasks().is_empty());
-}
-
-/// Test ③ (encoding side lives in octos-cli `peers` tests): two DIFFERENT
-/// scopes never alias — asserted here at the row level: distinct scopes
-/// produce distinct stamps, so the purge-side exact match cannot clear the
-/// other's items.
-#[test]
-fn distinct_workspace_scopes_stay_distinct_on_task_rows() {
-    let supervisor = TaskSupervisor::new();
-    let a = supervisor
-        .try_register_peer_with_workspace("peer_handoff", "t:peer:a", Some("t:api:m"), Some("aa"))
-        .expect("a registers");
-    let b = supervisor
-        .try_register_peer_with_workspace("peer_handoff", "t:peer:b", Some("t:api:m"), Some("bb"))
-        .expect("b registers");
-    assert_ne!(
-        supervisor.get_task(&a).and_then(|t| t.workspace_root),
-        supervisor.get_task(&b).and_then(|t| t.workspace_root),
-        "different workspace scopes stay different on the durable rows"
-    );
-}
 
 // #34: equal timestamps are possible for a registered task and its terminal
 // snapshot. Exercise durable merges with exact timestamps, without sleeps.
-fn terminal_timestamp_rows() -> (BackgroundTask, BackgroundTask) {
-    let supervisor = TaskSupervisor::new();
-    let id = supervisor
-        .try_register_peer_with_workspace(
-            "peer_handoff",
-            "timestamp-tie",
-            Some("tenant:api:timestamp"),
-            Some("/tmp/timestamp-ws"),
-        )
-        .unwrap();
-    let spawned = supervisor.get_task(&id).unwrap();
-    supervisor.mark_completed(&id, vec!["result.md".into()]);
-    let mut completed = supervisor.get_task(&id).unwrap();
-    completed.updated_at = spawned.updated_at;
-    completed.completed_at = Some(spawned.updated_at);
-    (spawned, completed)
-}
 
 fn write_terminal_timestamp_rows(path: &PathBuf, rows: &[BackgroundTask]) {
     let body = rows
@@ -5111,6 +4702,17 @@ fn write_terminal_timestamp_rows(path: &PathBuf, rows: &[BackgroundTask]) {
         .collect::<Vec<_>>()
         .join("\n");
     std::fs::write(path, format!("{body}\n")).unwrap();
+}
+
+fn terminal_timestamp_rows() -> (BackgroundTask, BackgroundTask) {
+    let supervisor = TaskSupervisor::new();
+    let id = supervisor.register("spawn", "timestamp-tie", Some("tenant:api:timestamp"));
+    let spawned = supervisor.get_task(&id).unwrap();
+    supervisor.mark_completed(&id, vec!["result.md".into()]);
+    let mut completed = supervisor.get_task(&id).unwrap();
+    completed.updated_at = spawned.updated_at;
+    completed.completed_at = Some(spawned.updated_at);
+    (spawned, completed)
 }
 
 #[test]
