@@ -119,7 +119,7 @@ def main() -> int:
     try:
         with tempfile.TemporaryDirectory(prefix="octos-b5-data-") as data_dir:
             session = OctosStdioSession(
-                "/src/target/release/octos",
+                os.environ.get("B5_OCTOS_BIN", "/src/target/release/octos"),
                 workspace,
                 env,
                 Path(data_dir),

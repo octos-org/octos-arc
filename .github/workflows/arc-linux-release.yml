@@ -78,7 +78,9 @@ jobs:
             --cap-drop=ALL \
             --pids-limit=128 \
             -v "$GITHUB_WORKSPACE":/src \
+            -v "$GITHUB_WORKSPACE/target/release/octos":/opt/octos/octos:ro \
             -w /src \
+            -e B5_OCTOS_BIN=/opt/octos/octos \
             python:3.13-slim-trixie \
             python3 /src/scripts/container-stdio-smoke.py \
             | tee b5-container-smoke.log
