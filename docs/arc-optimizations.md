@@ -1,6 +1,6 @@
 # ARC-Bench 内核优化记录
 
-当前交付分支：`wf-kernel`（第一轮运行记录保留原始 `arc-opt` 证据）。所有数字均来自本机事件流、测试输出或 GitHub Actions 产物；评测分数与单元测试结果分开记录。
+当前交付基线：`origin/main`（第一轮运行记录保留原始 `arc-opt` 证据）。所有数字均来自本机事件流、测试输出或 GitHub Actions 产物；评测分数与单元测试结果分开记录。
 
 ## 结论摘要
 
@@ -32,7 +32,7 @@
 
 改动位置：`.github/workflows/arc-linux-release.yml`。
 
-新增唯一的 ARC 专用 `workflow_dispatch` 工作流。它按输入的精确 ref 构建 `x86_64-unknown-linux-gnu` runtime 和 bundled tools，生成 `octos-bundle-x86_64-unknown-linux-gnu.tar.gz`，并在 Release 中上传 bundle SHA-256、`octos` 二进制 SHA-256、源码提交、rustc 和版本信息。工作流已在 `origin/main` 注册并成功运行 `34741413085`，创建了 [v2.0.3-rc.11-arc.2](https://github.com/octos-org/octos-arc/releases/tag/v2.0.3-rc.11-arc.2)。源码提交为 `78394e5032cfe0ed8387c0b226250c229d9fbfa8`，rustc 为 `1.98.0 (88d9e12ae 2026-08-18)`；bundle SHA-256 为 `9b2f8a34831148a4650e9f91b862fec0e0bf1f9ea3bc965573e60f23cd0d4f2d`，`octos` SHA-256 为 `bca911a3690be992da01b0d116ab21064c673d65303aa1b79bc16d22c3a00afb`。下载后使用两份发布的 checksum 文件核验均为 `OK`，并确认归档内 `octos` 是 Linux x86-64 ELF；`arc-runtime-lock.json.runtime_release` 已回填真实值。
+保留唯一的 ARC 专用 `workflow_dispatch` 工作流，不启用上游继承工作流。它按输入的精确 ref 构建 `x86_64-unknown-linux-gnu` runtime 和 bundled tools，生成 `octos-bundle-x86_64-unknown-linux-gnu.tar.gz`，并在 Release 中上传 bundle SHA-256、`octos` 二进制 SHA-256、源码提交、rustc 和版本信息。最终成功运行是 [34746031597](https://github.com/octos-org/octos-arc/actions/runs/34746031597)，创建了 [v2.0.3-rc.11-arc.10](https://github.com/octos-org/octos-arc/releases/tag/v2.0.3-rc.11-arc.10)。源码提交为 `ca337e4ff409144fa8e4469b4057371f4bca1d3f`，rustc 为 `1.98.0 (88d9e12ae 2026-08-18)`；bundle SHA-256 为 `68e10832f382a3f9b6cba3f142666b9ba3ffae30b072fa9808557cdbeda9027f`，`octos` SHA-256 为 `5e7a1b8b2cd3db40f0db290932f3b2e9909b4dd5c1adea29057873fc288b7753`。下载归档后用发布的 `bundle.sha256` 与 `octos.sha256` 均核验通过，并确认归档内 `octos` 是 Linux x86-64 ELF；`arc-runtime-lock.json.runtime_release` 已回填上述真实值。
 
 ### B2：DeepSeek 费用异常
 
@@ -50,18 +50,9 @@ serve/stdio 会话新增可选 `[gateway].token_budget`，映射到 agent 的整
 
 ### B5：容器实测
 
-本机 `docker` 命令不可用，未把容器实测写成已完成。可在 Ubuntu runner 或 ARC 容器中执行以下无特权复核：
+改动位置：`.github/workflows/arc-linux-release.yml`、`scripts/container-stdio-smoke.py`。
 
-```bash
-docker run --rm --security-opt=no-new-privileges --cap-drop=ALL \
-  -v "$PWD":/src -w /src rust:1.98.0-bookworm \
-  bash -lc 'cargo build --locked -p octos-cli --no-default-features --features api'
-docker run --rm --security-opt=no-new-privileges --cap-drop=ALL \
-  -v "$PWD":/src -w /src rust:1.98.0-bookworm \
-  bash -lc '/src/target/debug/octos --version'
-```
-
-随后向 `serve --stdio --solo` 发送一次 `shell`/`exec` 请求，记录容器标记、sandbox warning 和结构化工具结果；预期是明确降级执行，或错误中包含 `sandbox denied` 及 `--danger-full-access` 建议。
+GitHub Actions Ubuntu runner 的最终运行 `34746031597` 通过了真实容器 smoke：使用 `python:3.13-slim-trixie`、`--security-opt=no-new-privileges`、`--cap-drop=ALL` 和 `--pids-limit=128`，只挂载 `octos` 二进制而不挂载 `octos-sandbox` helper。发布的 `arc-b5-container-smoke` artifact 报告 `container_marker=true`、`helper_absent=true`、`fixture_requests=2`、`turn_ok=true`、`reply=OK`、shell marker 为 `b5-sandbox-exec`、`sandbox_log=true`；滚动日志明确记录 `no sandbox backend found`、`shell commands run WITHOUT isolation` 和 `in_container=true`。这同时验证了 `serve --stdio --solo` 在无后端容器中的自动降级路径，而不是把普通容器执行结果当作沙箱隔离。
 
 ## P0-0：stdio/solo 提示与工具面瘦身
 
@@ -77,19 +68,7 @@ docker run --rm --security-opt=no-new-privileges --cap-drop=ALL \
 
 启动时检测 `/.dockerenv` 及 docker/containerd/kubepods/podman/libpod cgroup 标记；容器中无可用隔离后端时记录明确 warning 并按容器策略降级，且不会把仅检测到的 Docker CLI 当成可用的嵌套隔离。探测函数保持纯函数便于测试。新增 dockerenv、cgroup、误判排除和 nested-Docker 降级测试；`sandbox::tests` 44/44 通过。
 
-本机未运行 Docker 容器验证：本机 Docker 不可用，因此未声称完成 Linux 容器实测。可在 Linux 主机或 ARC 容器中按以下步骤复核：
-
-```bash
-docker run --rm --security-opt=no-new-privileges --cap-drop=ALL \
-  -v "$PWD":/src -w /src rust:1.98.0-bookworm \
-  bash -lc 'cargo build --locked -p octos-cli --no-default-features --features api'
-docker run --rm --security-opt=no-new-privileges --cap-drop=ALL \
-  -v "$PWD":/src -w /src rust:1.98.0-bookworm \
-  bash -lc 'test -f /.dockerenv; cat /proc/1/cgroup; \
-    /src/target/debug/octos --version'
-```
-
-在第二个容器内再驱动一次 `serve --stdio --solo` 并执行 `shell`/`exec`，应看到容器标记和明确的降级 warning；若隔离后端仍不可用，结果必须是无沙箱执行或包含 `sandbox denied` 与 `--danger-full-access` 建议的结构化错误。
+GitHub Actions Ubuntu runner 已完成上述验证（运行 `34746031597`，对应 artifact `arc-b5-container-smoke`）：容器内 `/.dockerenv` 存在，helper 缺失，fixture 驱动的 shell 命令成功执行，且 data-dir rolling log 捕获了明确的自动降级 warning。该结果覆盖了 P0-1 要求的容器事实与降级证据；本机仍未安装 Docker，因此没有把本机 Docker 当作验证来源。
 
 ## P0-2：上下文与 Token 控制
 
@@ -146,7 +125,7 @@ cargo build --locked -p octos-cli --no-default-features --features api
 
 最终产物：`octos 2.0.3-rc.11 (a10521e4 2026-09-12)`；SHA-256 为 `4f7ec9437ec86aac0fad663fc5df94e395b537dad50138b5828732cc00e8cb09`，对应 `aarch64-apple-darwin` 和 Homebrew `rustc 1.98.0`。
 
-`runtime_release` 仍为 `null`，因为没有 GitHub Release；锁文件的 `build` 只记录真实产物元数据。
+`runtime_release` 已填入并核验 v2.0.3-rc.11-arc.10 的真实 Linux 产物；`build` 继续记录真实 macOS arm64 产物元数据。尚未创建新的 ARC 云端评测运行，因此线上 Counter 费用/分数仍应标记为“未评测”。
 
 ## 独立提交索引
 
@@ -163,4 +142,4 @@ cargo build --locked -p octos-cli --no-default-features --features api
 | P1-6 | `37d38bae` |
 | P2-7 | `dc0f6be0` |
 
-第二轮提交：B1 `e3bc8242` + `d12c15ad`；B2 `5e6ca223`；B3 `d9fba010`；B5 文档与锁文件 `a10521e4`。
+第二轮提交：B1 `e3bc8242` + `d12c15ad`；B2 `5e6ca223`；B3 `d9fba010`；B5 workflow/driver 修正经 PR #14、#15、#16、#17、#18、#21、#22、#23、#24 合入；最终 B5/Release 运行 `34746031597`，Release 提交为 `ca337e4f`。

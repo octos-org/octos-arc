@@ -51,28 +51,29 @@ does not prove the original project passed any tests.
 
 ## Release required before actual coding
 
-The repository's `arc-runtime-lock.json` intentionally still has
-`runtime_release: null`. Actual coding refuses this source-only state. A future
-release manifest must contain:
+The repository's `arc-runtime-lock.json` contains the verified Linux x86_64
+release manifest. Actual coding verifies this immutable state before execution.
+A release manifest must contain:
 
 ```json
 {
   "schema_version": 1,
   "runtime_release": {
-    "version": "<immutable downstream tag>",
+    "version": "v2.0.3-rc.11-arc.10",
     "source_commit": "<40-character build commit>",
-    "target": "<Rust target triple>",
+    "target": "x86_64-unknown-linux-gnu",
     "binary_sha256": "<64-character executable SHA-256>",
     "archive_sha256": "<64-character archive SHA-256>",
-    "url": "https://github.com/octos-org/octos-arc-runtime/releases/download/<immutable downstream tag>/<artifact>"
+    "url": "https://github.com/octos-org/octos-arc/releases/download/<immutable downstream tag>/<artifact>"
   }
 }
 ```
 
 Use a clean checkout and fresh build for release provenance. Create the final
 manifest after building; do not embed the binary's own checksum in its source.
-This crate verifies the current executable. The future download launcher must
-also verify the archive before extraction; it is not implemented here.
+This crate verifies the current executable. `arc/main.py` downloads the pinned
+archive and verifies its SHA-256 before extraction; the environment may override
+the URL only explicitly for controlled tests.
 
 Normal execution additionally needs `OPENAI_API_KEY`, explicit `--model`/`MODEL`
 and `--base-url`/`OPENAI_BASE_URL`. Optional `--temperature` records an explicit
