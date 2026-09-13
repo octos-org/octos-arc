@@ -391,3 +391,21 @@ TB ¥0.251 / 9/10. Cloud for round 26: 未评测.
 
 Cloud round 26 (C): TB 27de75de0cd0 9/10 ¥0.609 (first pass 0/6 → 13 requests; the loss was `Target crashed`);
 no ESM startup crash. Leaderboard keeps the round-24 submission (¥0.251, 9/10).
+
+## Round 27 — first-pass quality for multi-node codegen; source snapshots; locator logging
+
+Cloud TB cost is set by the first pass (4/6 → 3 requests ¥0.25; 0/6 → 13 requests ¥0.61). Local first-pass
+snapshots (new `.arc/codegen/<node>-r<n>/`, kept before every repair so cloud first-pass code is retrievable
+via the platform source API) showed three generic mistakes: an empty `div` as the strength meter (zero box →
+"not visible"), a header rendered by a fetch after load, and HTML5 `required` attributes letting the browser
+block the submit so the server's message never appears. Guidance for these lives in the multi-node slot of the
+codegen prompt only (Smoke prompts unchanged). `[acceptance]` logs now include the `Failed at:` locator line.
+
+| TB sample (local) | first pass | requests | tokens (prompt / completion / reasoning) | grade |
+|---|---|---|---|---|
+| z11 (before) | 1/6 | 3 | 18,206 / 33,223 / 22,583 | 100 |
+| z12a (visibility guidance) | 4/6 | 3 | 18,227 / 20,845 / 9,069 | 100 |
+| z12b (visibility guidance) | 6/6 | 2 | 12,702 / 15,168 / 8,185 | 100 |
+| z13 (+ no HTML5 validation) | 6/6 | 2 | 12,758 / 26,713 / 19,791 | 100 |
+
+Cloud: 未评测.
