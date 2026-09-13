@@ -11,11 +11,14 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import subprocess
 import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+sys.path.insert(0, "/src")
 
 from arc.octos_stdio import OctosStdioSession
 
