@@ -40,8 +40,6 @@ pub mod config;
 pub mod config_context;
 pub mod config_layer;
 pub mod config_watcher;
-#[cfg(feature = "api")]
-pub mod content_catalog;
 #[path = "api/context_manager.rs"]
 pub(crate) mod context_manager;
 pub(crate) mod conversation_outcome;
@@ -65,16 +63,12 @@ pub(crate) mod obs_events;
 // Peer recovery is also used by gateway actors without `api`. The remaining
 // staging and OUP transport helpers are intentionally dormant in that build.
 #[cfg_attr(not(feature = "api"), allow(dead_code))]
-pub mod persona_service;
 pub mod process_manager;
 pub mod profiles;
 mod qos_catalog;
 pub mod runtime;
 pub mod session_actor;
 pub mod skills_scope;
-pub mod soul_service;
-pub mod status_indicator;
-pub mod status_layers;
 pub mod stream_reporter;
 pub mod tools;
 #[cfg(feature = "api")]

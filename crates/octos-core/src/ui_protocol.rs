@@ -370,11 +370,6 @@ fn method_capability_gate(method: &str) -> Option<&'static str> {
         | methods::SESSION_TITLE_SET
         | methods::SESSION_DELETE
         | methods::SYSTEM_STATUS_GET
-        | methods::CONTENT_LIST
-        | methods::CONTENT_DELETE
-        | methods::CONTENT_BULK_DELETE
-        | methods::MEMORY_OVERVIEW
-        | methods::MEMORY_ENTITY
         | methods::CRON_LIST
         | methods::CRON_TOGGLE => Some(UI_PROTOCOL_FEATURE_AUXILIARY_REST_TO_WS_V1),
         methods::AGENT_LIST
@@ -1213,10 +1208,8 @@ pub mod methods {
     // ---- M12 Phase D-1 auxiliary REST → WS surface ----
     // Each method below replaces a REST endpoint listed in the ADR's
     // inventory table (docs/adr/m12-phase-d-auxiliary-rest-to-ws.md).
-    // All thirteen are capability-gated on
-    // `UI_PROTOCOL_FEATURE_AUXILIARY_REST_TO_WS_V1`
-    // (`content/delete` and `content/bulk_delete` are distinct methods
-    // sharing the `content/*` namespace).
+    // All are capability-gated on
+    // `UI_PROTOCOL_FEATURE_AUXILIARY_REST_TO_WS_V1`.
 
     /// Replaces `GET /api/sessions` — sidebar session list.
     pub const SESSION_LIST: &str = "session/list";
@@ -1241,17 +1234,6 @@ pub mod methods {
     /// Replaces `GET /api/status` — agent/server status (distinct from
     /// `/api/auth/status` which stays REST).
     pub const SYSTEM_STATUS_GET: &str = "system/status.get";
-    /// Replaces `GET /api/my/content` — content gallery listing.
-    pub const CONTENT_LIST: &str = "content/list";
-    /// Replaces `DELETE /api/my/content/{id}` — single-content deletion.
-    pub const CONTENT_DELETE: &str = "content/delete";
-    /// Replaces `POST /api/my/content/bulk-delete` — bulk-content deletion.
-    pub const CONTENT_BULK_DELETE: &str = "content/bulk_delete";
-    /// Replaces `GET /api/my/memory` — memory panel overview (long-term
-    /// memory, daily notes, entity bank summaries, staging count).
-    pub const MEMORY_OVERVIEW: &str = "memory/overview";
-    /// Replaces `GET /api/my/memory/entities/{name}` — full entity page.
-    pub const MEMORY_ENTITY: &str = "memory/entity";
     /// Replaces `GET /api/my/cron` — cron panel job listing.
     pub const CRON_LIST: &str = "cron/list";
     /// Replaces `PUT /api/my/cron/{job_id}/enabled` — cron job toggle.
@@ -1397,11 +1379,6 @@ pub const UI_PROTOCOL_COMMAND_METHODS: &[&str] = &[
     methods::SESSION_TITLE_SET,
     methods::SESSION_DELETE,
     methods::SYSTEM_STATUS_GET,
-    methods::CONTENT_LIST,
-    methods::CONTENT_DELETE,
-    methods::CONTENT_BULK_DELETE,
-    methods::MEMORY_OVERVIEW,
-    methods::MEMORY_ENTITY,
     methods::CRON_LIST,
     methods::CRON_TOGGLE,
     methods::ROUTER_SET_MODE,
@@ -1522,11 +1499,6 @@ pub const UI_PROTOCOL_FIRST_SERVER_METHODS: &[&str] = &[
     methods::SESSION_TITLE_SET,
     methods::SESSION_DELETE,
     methods::SYSTEM_STATUS_GET,
-    methods::CONTENT_LIST,
-    methods::CONTENT_DELETE,
-    methods::CONTENT_BULK_DELETE,
-    methods::MEMORY_OVERVIEW,
-    methods::MEMORY_ENTITY,
     methods::CRON_LIST,
     methods::CRON_TOGGLE,
     methods::ROUTER_SET_MODE,
@@ -3421,116 +3393,6 @@ pub struct SystemStatusGetResult {
     pub status: Value,
 }
 
-/// Params for `content/list`. `filters` is a free-form JSON object that
-/// mirrors the REST `ContentQuery` shape (category, search, from, to,
-/// sort, limit, offset, session_id) — see
-/// `crates/octos-cli/src/content_catalog.rs:96` and the dirs/session_id
-/// fields consumed by `GET /api/my/content`. Forwarded verbatim to the
-/// existing REST handler.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct ContentListParams {
-    #[serde(default)]
-    pub filters: Value,
-}
-
-/// Result for `content/list`. Mirrors the JSON body of
-/// `GET /api/my/content` (`{ entries: ContentEntry[], total: number }`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ContentListResult {
-    pub entries: Value,
-    pub total: usize,
-}
-
-/// Params for `content/delete`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContentDeleteParams {
-    pub id: String,
-}
-
-/// Result for `content/delete`. `deleted` is `true` when the row was
-/// removed, `false` when the id was not in the catalog (the REST handler
-/// returns the same boolean inside its `ActionResponse.ok`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContentDeleteResult {
-    pub deleted: bool,
-}
-
-/// Params for `content/bulk_delete`. The `ids` vector is capped at
-/// [`CONTENT_BULK_DELETE_MAX_IDS`] entries; the WS dispatcher rejects
-/// over-cap requests with `INVALID_PARAMS` before any catalog write
-/// lock is taken, so a single oversized request cannot block other
-/// catalog readers.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContentBulkDeleteParams {
-    pub ids: Vec<String>,
-}
-
-/// Server-side cap on `ContentBulkDeleteParams::ids` length. Mirrored
-/// in `crates/octos-cli/src/api/ui_protocol.rs` as the dispatcher's
-/// early-reject threshold. Chosen so a single bulk-delete cannot
-/// monopolize the catalog write-lock for more than a small bounded
-/// window even if every id is valid; the 1 MiB WS frame limit is a
-/// coarser secondary check.
-pub const CONTENT_BULK_DELETE_MAX_IDS: usize = 256;
-
-/// Result for `content/bulk_delete`. `deleted` is the number of catalog
-/// rows successfully removed — mirrors the count surfaced by the REST
-/// handler's `ActionResponse.message` ("N item(s) deleted.").
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContentBulkDeleteResult {
-    pub deleted: usize,
-}
-
-/// Params for `memory/overview`. Empty today; the struct exists so
-/// `{}` / `null` params decode uniformly (mirrors
-/// [`SystemStatusGetParams`]; the wire `params` MEMBER must still be
-/// present — the frame parser rejects requests without one).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MemoryOverviewParams {}
-
-/// Result for `memory/overview`. `overview` is the JSON body of the
-/// existing `GET /api/my/memory` handler (`MemoryOverviewResponse` —
-/// `crates/octos-cli/src/api/memory_panel.rs`), forwarded whole so the
-/// wire shape and the REST shape cannot drift apart — PLUS RPC-layer
-/// truncation metadata: the panel serves files up to 2 MiB but an RPC
-/// result must fit one ~1 MiB WS text frame, so the dispatcher caps
-/// each document field to a per-field byte budget and records the
-/// truth beside it (`long_term_truncated` + `long_term_total_bytes`,
-/// `today_truncated` + `today_total_bytes`, and per `recent[]` note
-/// `content_truncated` + `content_total_bytes`; always present on the
-/// WS wire). Capped fields are clean UTF-8 prefixes — no in-band
-/// marker is ever spliced into the markdown.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MemoryOverviewResult {
-    pub overview: Value,
-}
-
-/// Params for `memory/entity`. `name` is the entity page stem — the
-/// same value the REST route took as its `{name}` path segment and the
-/// same string `memory/overview` returns in each entity summary.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MemoryEntityParams {
-    pub name: String,
-}
-
-/// Result for `memory/entity`. Mirrors the JSON body of
-/// `GET /api/my/memory/entities/{name}` minus the redundant `ok` flag
-/// (RPC success is carried by the envelope), plus RPC-layer truncation
-/// metadata (the panel serves files up to 2 MiB; an RPC result must
-/// fit one ~1 MiB WS text frame).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MemoryEntityResult {
-    pub name: String,
-    /// Page markdown. When `content_truncated` is true this is a clean
-    /// UTF-8 PREFIX of the page capped at the RPC-layer byte budget —
-    /// no in-band marker is spliced into it.
-    pub content: String,
-    /// True when `content` was capped to fit the WS frame.
-    pub content_truncated: bool,
-    /// Raw byte length of the FULL page before any RPC-layer cap.
-    pub content_total_bytes: usize,
-}
-
 /// Params for `cron/list`. Empty today; the struct exists so `{}` /
 /// `null` params decode uniformly (mirrors [`SystemStatusGetParams`];
 /// the wire `params` MEMBER must still be present).
@@ -4228,11 +4090,6 @@ pub enum UiCommand {
     SessionTitleSet(SessionTitleSetParams),
     SessionDelete(SessionDeleteParams),
     SystemStatusGet(SystemStatusGetParams),
-    ContentList(ContentListParams),
-    ContentDelete(ContentDeleteParams),
-    ContentBulkDelete(ContentBulkDeleteParams),
-    MemoryOverview(MemoryOverviewParams),
-    MemoryEntity(MemoryEntityParams),
     CronList(CronListParams),
     CronToggle(CronToggleParams),
     // ---- Wave4-A: adaptive router controls ----
@@ -4283,11 +4140,6 @@ impl UiCommand {
             Self::SessionTitleSet(_) => methods::SESSION_TITLE_SET,
             Self::SessionDelete(_) => methods::SESSION_DELETE,
             Self::SystemStatusGet(_) => methods::SYSTEM_STATUS_GET,
-            Self::ContentList(_) => methods::CONTENT_LIST,
-            Self::ContentDelete(_) => methods::CONTENT_DELETE,
-            Self::ContentBulkDelete(_) => methods::CONTENT_BULK_DELETE,
-            Self::MemoryOverview(_) => methods::MEMORY_OVERVIEW,
-            Self::MemoryEntity(_) => methods::MEMORY_ENTITY,
             Self::CronList(_) => methods::CRON_LIST,
             Self::CronToggle(_) => methods::CRON_TOGGLE,
             Self::RouterSetMode(_) => methods::ROUTER_SET_MODE,
@@ -4339,11 +4191,6 @@ impl UiCommand {
             Self::SessionTitleSet(params) => serde_json::to_value(params),
             Self::SessionDelete(params) => serde_json::to_value(params),
             Self::SystemStatusGet(params) => serde_json::to_value(params),
-            Self::ContentList(params) => serde_json::to_value(params),
-            Self::ContentDelete(params) => serde_json::to_value(params),
-            Self::ContentBulkDelete(params) => serde_json::to_value(params),
-            Self::MemoryOverview(params) => serde_json::to_value(params),
-            Self::MemoryEntity(params) => serde_json::to_value(params),
             Self::CronList(params) => serde_json::to_value(params),
             Self::CronToggle(params) => serde_json::to_value(params),
             Self::RouterSetMode(params) => serde_json::to_value(params),
@@ -4434,15 +4281,6 @@ impl UiCommand {
             methods::SYSTEM_STATUS_GET => Ok(Self::SystemStatusGet(decode_optional_params(
                 method, params,
             )?)),
-            methods::CONTENT_LIST => Ok(Self::ContentList(decode_optional_params(method, params)?)),
-            methods::CONTENT_DELETE => Ok(Self::ContentDelete(decode_params(method, params)?)),
-            methods::CONTENT_BULK_DELETE => {
-                Ok(Self::ContentBulkDelete(decode_params(method, params)?))
-            }
-            methods::MEMORY_OVERVIEW => Ok(Self::MemoryOverview(decode_optional_params(
-                method, params,
-            )?)),
-            methods::MEMORY_ENTITY => Ok(Self::MemoryEntity(decode_params(method, params)?)),
             methods::CRON_LIST => Ok(Self::CronList(decode_optional_params(method, params)?)),
             methods::CRON_TOGGLE => Ok(Self::CronToggle(decode_params(method, params)?)),
             methods::ROUTER_SET_MODE => Ok(Self::RouterSetMode(decode_params(method, params)?)),
@@ -4948,16 +4786,6 @@ pub mod progress_kinds {
     pub const TOKEN_COST_UPDATE: &str = "token_cost_update";
     pub const TOOL_PROGRESS: &str = "tool_progress";
     pub const TOOL_COMPLETED: &str = "tool_completed";
-    /// Creative status-word rotation matching the gateway's
-    /// `StatusIndicator` (`✦ Pondering...`, `✦ Brewing...`, etc.) for
-    /// the web ThinkingIndicator surface. The server emits
-    /// `progress/updated{kind:"status_word", label:"<word>"}` every
-    /// ~8s during an in-flight agent turn; the SPA bridge
-    /// (`ui-protocol-event-router.ts`) lifts these onto a
-    /// `crew:status_word` DOM event the `ThinkingIndicator` listens
-    /// for. CJK-aware: the rotator picks Chinese words for Chinese
-    /// input, English for English.
-    pub const STATUS_WORD: &str = "status_word";
     pub const UNKNOWN: &str = "unknown";
 }
 

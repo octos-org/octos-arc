@@ -851,11 +851,6 @@ fn ui_protocol_v1_wire_contract_is_golden() {
             "session/title.set",
             "session/delete",
             "system/status.get",
-            "content/list",
-            "content/delete",
-            "content/bulk_delete",
-            "memory/overview",
-            "memory/entity",
             "cron/list",
             "cron/toggle",
             "router/set_mode",
@@ -978,11 +973,6 @@ fn ui_protocol_v1_wire_contract_is_golden() {
             "session/title.set",
             "session/delete",
             "system/status.get",
-            "content/list",
-            "content/delete",
-            "content/bulk_delete",
-            "memory/overview",
-            "memory/entity",
             "cron/list",
             "cron/toggle",
             "router/set_mode",
@@ -1070,11 +1060,6 @@ fn ui_protocol_v1_representative_wire_payloads_are_golden() {
                 "session/title.set",
                 "session/delete",
                 "system/status.get",
-                "content/list",
-                "content/delete",
-                "content/bulk_delete",
-                "memory/overview",
-                "memory/entity",
                 "cron/list",
                 "cron/toggle",
                 "router/set_mode",
@@ -4622,32 +4607,6 @@ fn aux_rest_to_ws_v1_methods_round_trip_through_rpc_envelope() {
             methods::SYSTEM_STATUS_GET,
         ),
         (
-            UiCommand::ContentList(ContentListParams {
-                filters: serde_json::json!({ "limit": 10 }),
-            }),
-            methods::CONTENT_LIST,
-        ),
-        (
-            UiCommand::ContentDelete(ContentDeleteParams { id: "c-1".into() }),
-            methods::CONTENT_DELETE,
-        ),
-        (
-            UiCommand::ContentBulkDelete(ContentBulkDeleteParams {
-                ids: vec!["c-1".into(), "c-2".into()],
-            }),
-            methods::CONTENT_BULK_DELETE,
-        ),
-        (
-            UiCommand::MemoryOverview(MemoryOverviewParams::default()),
-            methods::MEMORY_OVERVIEW,
-        ),
-        (
-            UiCommand::MemoryEntity(MemoryEntityParams {
-                name: "acme-corp".into(),
-            }),
-            methods::MEMORY_ENTITY,
-        ),
-        (
             UiCommand::CronList(CronListParams::default()),
             methods::CRON_LIST,
         ),
@@ -4661,15 +4620,12 @@ fn aux_rest_to_ws_v1_methods_round_trip_through_rpc_envelope() {
     ];
     assert_eq!(
         cases.len(),
-        17,
-        "17 UiCommand arms cover the 17 auxiliary methods \
+        12,
+        "12 UiCommand arms cover the 12 auxiliary methods \
              (`session/list`, `session/snapshot`, `session/messages_page`, \
              `session/status.get`, `session/files.list`, `session/tasks.list`, \
              `session/workspace.get`, `session/title.set`, `session/delete`, \
-             `system/status.get`, `content/list`, `content/delete`, \
-             `content/bulk_delete`, `memory/overview`, `memory/entity`, \
-             `cron/list`, `cron/toggle`) — `content/delete` and \
-             `content/bulk_delete` are distinct methods"
+             `system/status.get`, `cron/list`, `cron/toggle`)"
     );
     for (command, expected_method) in cases {
         let rpc = command
@@ -4695,15 +4651,6 @@ fn aux_rest_to_ws_v1_empty_param_methods_accept_null_params() {
         UiCommand::from_method_and_params(methods::SYSTEM_STATUS_GET, Value::Null)
             .expect("system/status.get with null params");
     assert!(matches!(system_status_null, UiCommand::SystemStatusGet(_)));
-
-    let content_list_null = UiCommand::from_method_and_params(methods::CONTENT_LIST, Value::Null)
-        .expect("content/list with null params");
-    assert!(matches!(content_list_null, UiCommand::ContentList(_)));
-
-    let memory_overview_null =
-        UiCommand::from_method_and_params(methods::MEMORY_OVERVIEW, Value::Null)
-            .expect("memory/overview with null params");
-    assert!(matches!(memory_overview_null, UiCommand::MemoryOverview(_)));
 
     let cron_list_null = UiCommand::from_method_and_params(methods::CRON_LIST, Value::Null)
         .expect("cron/list with null params");
@@ -4756,37 +4703,6 @@ fn aux_rest_to_ws_v1_result_dtos_round_trip_via_serde_json() {
     let value = serde_json::to_value(&delete).expect("serialize");
     let decoded: SessionDeleteResult = serde_json::from_value(value).expect("deserialize");
     assert_eq!(decoded, delete);
-
-    let content = ContentListResult {
-        entries: serde_json::json!([{ "id": "c-1" }]),
-        total: 1,
-    };
-    let value = serde_json::to_value(&content).expect("serialize");
-    let decoded: ContentListResult = serde_json::from_value(value).expect("deserialize");
-    assert_eq!(decoded.entries, content.entries);
-    assert_eq!(decoded.total, content.total);
-
-    let bulk = ContentBulkDeleteResult { deleted: 5 };
-    let value = serde_json::to_value(&bulk).expect("serialize");
-    let decoded: ContentBulkDeleteResult = serde_json::from_value(value).expect("deserialize");
-    assert_eq!(decoded, bulk);
-
-    let overview = MemoryOverviewResult {
-        overview: serde_json::json!({ "ok": true, "long_term": "# MEMORY" }),
-    };
-    let value = serde_json::to_value(&overview).expect("serialize");
-    let decoded: MemoryOverviewResult = serde_json::from_value(value).expect("deserialize");
-    assert_eq!(decoded.overview, overview.overview);
-
-    let entity = MemoryEntityResult {
-        name: "acme-corp".into(),
-        content: "# acme".into(),
-        content_truncated: false,
-        content_total_bytes: 6,
-    };
-    let value = serde_json::to_value(&entity).expect("serialize");
-    let decoded: MemoryEntityResult = serde_json::from_value(value).expect("deserialize");
-    assert_eq!(decoded, entity);
 
     let cron = CronListResult {
         jobs: serde_json::json!([{ "id": "job-1" }]),
@@ -4854,7 +4770,7 @@ fn launch_resolve_result_serializes_snake_case_decision() {
 
 #[test]
 fn aux_rest_to_ws_v1_methods_are_capability_gated() {
-    // The 12 new methods must gate on
+    // The auxiliary methods must gate on
     // `auxiliary.rest_to_ws.v1`. A connection that does not
     // negotiate the feature must NOT see them in the advertised
     // `supported_methods`.
@@ -4870,11 +4786,6 @@ fn aux_rest_to_ws_v1_methods_are_capability_gated() {
         methods::SESSION_TITLE_SET,
         methods::SESSION_DELETE,
         methods::SYSTEM_STATUS_GET,
-        methods::CONTENT_LIST,
-        methods::CONTENT_DELETE,
-        methods::CONTENT_BULK_DELETE,
-        methods::MEMORY_OVERVIEW,
-        methods::MEMORY_ENTITY,
         methods::CRON_LIST,
         methods::CRON_TOGGLE,
     ] {
@@ -4898,11 +4809,6 @@ fn aux_rest_to_ws_v1_methods_are_capability_gated() {
         methods::SESSION_TITLE_SET,
         methods::SESSION_DELETE,
         methods::SYSTEM_STATUS_GET,
-        methods::CONTENT_LIST,
-        methods::CONTENT_DELETE,
-        methods::CONTENT_BULK_DELETE,
-        methods::MEMORY_OVERVIEW,
-        methods::MEMORY_ENTITY,
         methods::CRON_LIST,
         methods::CRON_TOGGLE,
     ] {
@@ -5073,49 +4979,6 @@ fn aux_rest_to_ws_v1_request_dtos_match_json_goldens() {
         serde_json::json!({}),
     );
 
-    // content/list — free-form filters; default object is empty
-    assert_eq!(
-        serde_json::to_value(ContentListParams::default()).expect("serialize"),
-        serde_json::json!({ "filters": null }),
-    );
-    assert_eq!(
-        serde_json::to_value(ContentListParams {
-            filters: serde_json::json!({ "category": "image", "limit": 50 }),
-        })
-        .expect("serialize"),
-        serde_json::json!({ "filters": { "category": "image", "limit": 50 } }),
-    );
-
-    // content/delete
-    assert_eq!(
-        serde_json::to_value(ContentDeleteParams { id: "c-1".into() }).expect("serialize"),
-        serde_json::json!({ "id": "c-1" }),
-    );
-
-    // content/bulk_delete
-    assert_eq!(
-        serde_json::to_value(ContentBulkDeleteParams {
-            ids: vec!["c-1".into(), "c-2".into()],
-        })
-        .expect("serialize"),
-        serde_json::json!({ "ids": ["c-1", "c-2"] }),
-    );
-
-    // memory/overview — empty
-    assert_eq!(
-        serde_json::to_value(MemoryOverviewParams::default()).expect("serialize"),
-        serde_json::json!({}),
-    );
-
-    // memory/entity
-    assert_eq!(
-        serde_json::to_value(MemoryEntityParams {
-            name: "acme-corp".into(),
-        })
-        .expect("serialize"),
-        serde_json::json!({ "name": "acme-corp" }),
-    );
-
     // cron/list — empty
     assert_eq!(
         serde_json::to_value(CronListParams::default()).expect("serialize"),
@@ -5240,59 +5103,6 @@ fn aux_rest_to_ws_v1_result_dtos_match_json_goldens() {
         serde_json::json!({ "status": { "version": "0.1.1" } }),
     );
 
-    // content/list — `{ entries, total }`
-    assert_eq!(
-        serde_json::to_value(ContentListResult {
-            entries: serde_json::json!([{ "id": "c-1" }]),
-            total: 7,
-        })
-        .expect("serialize"),
-        serde_json::json!({
-            "entries": [{ "id": "c-1" }],
-            "total": 7,
-        }),
-    );
-
-    // content/delete — `{ deleted: bool }`
-    assert_eq!(
-        serde_json::to_value(ContentDeleteResult { deleted: true }).expect("serialize"),
-        serde_json::json!({ "deleted": true }),
-    );
-
-    // content/bulk_delete — `{ deleted: usize }`
-    assert_eq!(
-        serde_json::to_value(ContentBulkDeleteResult { deleted: 12 }).expect("serialize"),
-        serde_json::json!({ "deleted": 12 }),
-    );
-
-    // memory/overview — `{ overview: <opaque REST body> }`
-    assert_eq!(
-        serde_json::to_value(MemoryOverviewResult {
-            overview: serde_json::json!({ "ok": true, "staging_notes": 2 }),
-        })
-        .expect("serialize"),
-        serde_json::json!({ "overview": { "ok": true, "staging_notes": 2 } }),
-    );
-
-    // memory/entity — `{ name, content, content_truncated,
-    // content_total_bytes }` (truncation metadata is part of the
-    // wire contract: capped fields must be DECLARED, never silent).
-    assert_eq!(
-        serde_json::to_value(MemoryEntityResult {
-            name: "acme-corp".into(),
-            content: "# acme".into(),
-            content_truncated: false,
-            content_total_bytes: 6,
-        })
-        .expect("serialize"),
-        serde_json::json!({
-            "name": "acme-corp",
-            "content": "# acme",
-            "content_truncated": false,
-            "content_total_bytes": 6,
-        }),
-    );
-
     // cron/list — `{ jobs, count, gateway_running, truncated }`
     assert_eq!(
         serde_json::to_value(CronListResult {
@@ -5335,18 +5145,6 @@ fn rpc_error_not_found_carries_typed_resource_data() {
     assert_eq!(data.get("kind"), Some(&json!("not_found")));
     assert_eq!(data.get("resource_type"), Some(&json!("content")));
     assert_eq!(data.get("identifier"), Some(&json!("c-99")));
-}
-
-/// Codex review 2026-05-12 (MEDIUM 3): the bulk-delete cap is
-/// part of the wire contract and must not drift silently. Pin
-/// the constant value to 256 so a future bump shows up as a
-/// test diff.
-#[test]
-fn content_bulk_delete_max_ids_constant_is_pinned() {
-    assert_eq!(
-        CONTENT_BULK_DELETE_MAX_IDS, 256,
-        "wire-contract cap; bump server dispatcher AND any client adapters together",
-    );
 }
 
 // ===== UPCR-2026-014 M9-γ projection envelope golden tests =====

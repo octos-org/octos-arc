@@ -77,120 +77,6 @@ fn should_normalize_safe_tool_context_at_protocol_boundary() {
     assert_eq!(normalize_tool_context(Some(&"a".repeat(65))), None);
 }
 
-#[test]
-fn should_make_voice_admission_single_use_and_idempotent_for_same_turn() {
-    let store = VoiceAdmissionStore::default();
-    let session_id = SessionKey("profile:api:voice".to_owned());
-    let turn_id = TurnId::new();
-    let admission = store.issue(
-        "request-1".to_owned(),
-        session_id.clone(),
-        turn_id.clone(),
-        vec!["up/audio.wav".to_owned()],
-        "你好".to_owned(),
-    );
-
-    let retried_issue = store.issue(
-        "request-1".to_owned(),
-        session_id.clone(),
-        turn_id.clone(),
-        vec!["up/audio.wav".to_owned()],
-        "第二次 ASR 的漂移结果".to_owned(),
-    );
-    assert_eq!(retried_issue.admission_id, admission.admission_id);
-    assert_eq!(retried_issue.transcript, "你好");
-
-    let claimed = store
-        .claim(
-            &admission.admission_id,
-            &session_id,
-            &turn_id,
-            &["up/audio.wav".to_owned()],
-        )
-        .expect("first commit should claim the admission");
-    assert_eq!(claimed, VoiceAdmissionClaim::Start("你好".to_owned()));
-
-    store.finalize(&admission.admission_id, &turn_id);
-    let retried = store
-        .claim(
-            &admission.admission_id,
-            &session_id,
-            &turn_id,
-            &["up/audio.wav".to_owned()],
-        )
-        .expect("same-turn retry should be idempotent");
-    assert_eq!(retried, VoiceAdmissionClaim::AlreadyCommitted);
-}
-
-#[test]
-fn should_reject_voice_admission_when_scope_or_audio_changes() {
-    let store = VoiceAdmissionStore::default();
-    let session_id = SessionKey("profile:api:voice".to_owned());
-    let turn_id = TurnId::new();
-    let admission = store.issue(
-        "request-2".to_owned(),
-        session_id.clone(),
-        turn_id.clone(),
-        vec!["up/audio.wav".to_owned()],
-        "你好".to_owned(),
-    );
-
-    assert!(
-        store
-            .claim(
-                &admission.admission_id,
-                &SessionKey("other:api:voice".to_owned()),
-                &turn_id,
-                &["up/audio.wav".to_owned()],
-            )
-            .is_err()
-    );
-    assert!(
-        store
-            .claim(
-                &admission.admission_id,
-                &session_id,
-                &turn_id,
-                &["up/other.wav".to_owned()],
-            )
-            .is_err()
-    );
-}
-
-#[test]
-fn should_release_voice_admission_claim_after_start_failure() {
-    let store = VoiceAdmissionStore::default();
-    let session_id = SessionKey("profile:api:voice".to_owned());
-    let turn_id = TurnId::new();
-    let admission = store.issue(
-        "request-3".to_owned(),
-        session_id.clone(),
-        turn_id.clone(),
-        vec!["up/audio.wav".to_owned()],
-        "你好".to_owned(),
-    );
-
-    let first = store
-        .claim(
-            &admission.admission_id,
-            &session_id,
-            &turn_id,
-            &["up/audio.wav".to_owned()],
-        )
-        .expect("claim");
-    assert!(matches!(first, VoiceAdmissionClaim::Start(_)));
-    store.release(&admission.admission_id, &turn_id);
-    let retry = store
-        .claim(
-            &admission.admission_id,
-            &session_id,
-            &turn_id,
-            &["up/audio.wav".to_owned()],
-        )
-        .expect("released claim should be reusable");
-    assert!(matches!(retry, VoiceAdmissionClaim::Start(_)));
-}
-
 /// The §6 "Envelope Model" catalog in
 /// `api/OCTOS_UI_PROTOCOL_V1_SPEC_2026-04-24.md` is a hand-maintained
 /// mirror of the advertised method constants and has historically drifted
@@ -3158,11 +3044,7 @@ fn dispatch_probe_request(method: &str) -> RpcRequest<Value> {
             "session_id": session_id,
             "question": "what are you working on?",
         }),
-        methods::SESSION_LIST
-        | methods::SYSTEM_STATUS_GET
-        | methods::CONTENT_LIST
-        | methods::MEMORY_OVERVIEW
-        | methods::CRON_LIST => {
+        methods::SESSION_LIST | methods::SYSTEM_STATUS_GET | methods::CRON_LIST => {
             json!({})
         }
         methods::SESSION_SNAPSHOT
@@ -3180,9 +3062,6 @@ fn dispatch_probe_request(method: &str) -> RpcRequest<Value> {
             "session_id": session_id,
             "new_chat_id": "probe-fork-child",
         }),
-        methods::CONTENT_DELETE => json!({ "id": "content-1" }),
-        methods::CONTENT_BULK_DELETE => json!({ "ids": ["content-1"] }),
-        methods::MEMORY_ENTITY => json!({ "name": "probe-entity" }),
         methods::CRON_TOGGLE => json!({ "job_id": "probe-job", "enabled": false }),
         methods::ROUTER_SET_MODE => json!({
             "session_id": session_id,
@@ -3214,29 +3093,6 @@ fn dispatch_probe_request(method: &str) -> RpcRequest<Value> {
         APPUI_METHOD_TURN_STEER => json!({
             "session_id": session_id,
             "input": [{ "kind": "text", "text": "steer probe" }],
-        }),
-        APPUI_METHOD_VOICE_ADMIT => json!({
-            "session_id": session_id,
-            "request_id": "probe-voice-admit",
-            "turn_id": turn_id,
-            "media": [{
-                "path": "up/probe-voice.wav",
-                "mime": "audio/wav",
-                "size_bytes": 0,
-            }],
-        }),
-        APPUI_METHOD_VOICE_COMMIT_ADMISSION => json!({
-            "admission_id": "missing-probe-admission",
-            "turn": {
-                "session_id": session_id,
-                "turn_id": turn_id,
-                "input": [{ "kind": "text", "text": "voice commit probe" }],
-                "media": [{
-                    "path": "up/probe-voice.wav",
-                    "mime": "audio/wav",
-                    "size_bytes": 0,
-                }],
-            },
         }),
         other => panic!("missing AppUI dispatch probe params for {other}"),
     };
@@ -6951,78 +6807,6 @@ async fn stdio_auth_bound_methods_return_typed_auth_unavailable() {
     let headers = HeaderMap::new();
     let (ws, mut rx) = ws_connection_for_test(16);
 
-    handle_content_list(
-        &ws,
-        &state,
-        &headers,
-        None,
-        false,
-        "content-list-unauth".into(),
-        ContentListParams::default(),
-    )
-    .await;
-    let frame = recv_rpc_json(&mut rx).await;
-    assert_eq!(frame["id"], json!("content-list-unauth"));
-    assert_eq!(frame["error"]["data"]["kind"], json!("auth_unavailable"));
-
-    handle_content_delete(
-        &ws,
-        &state,
-        &headers,
-        None,
-        false,
-        "content-delete-unauth".into(),
-        ContentDeleteParams { id: "c-1".into() },
-    )
-    .await;
-    let frame = recv_rpc_json(&mut rx).await;
-    assert_eq!(frame["id"], json!("content-delete-unauth"));
-    assert_eq!(frame["error"]["data"]["kind"], json!("auth_unavailable"));
-
-    handle_content_bulk_delete(
-        &ws,
-        &state,
-        &headers,
-        None,
-        false,
-        "content-bulk-delete-unauth".into(),
-        ContentBulkDeleteParams {
-            ids: vec!["c-1".into()],
-        },
-    )
-    .await;
-    let frame = recv_rpc_json(&mut rx).await;
-    assert_eq!(frame["id"], json!("content-bulk-delete-unauth"));
-    assert_eq!(frame["error"]["data"]["kind"], json!("auth_unavailable"));
-
-    handle_memory_overview(
-        &ws,
-        &state,
-        &headers,
-        None,
-        false,
-        "memory-overview-unauth".into(),
-        MemoryOverviewParams::default(),
-    )
-    .await;
-    let frame = recv_rpc_json(&mut rx).await;
-    assert_eq!(frame["id"], json!("memory-overview-unauth"));
-    assert_eq!(frame["error"]["data"]["kind"], json!("auth_unavailable"));
-
-    handle_memory_entity(
-        &ws,
-        &state,
-        &headers,
-        None,
-        false,
-        "memory-entity-unauth".into(),
-        MemoryEntityParams { name: "e-1".into() },
-    )
-    .await;
-    let frame = recv_rpc_json(&mut rx).await;
-    assert_eq!(frame["id"], json!("memory-entity-unauth"));
-    assert_eq!(frame["error"]["data"]["kind"], json!("auth_unavailable"));
-
     handle_cron_list(
         &ws,
         &state,
@@ -7133,125 +6917,6 @@ fn panel_cron_job(id: &str, enabled: bool) -> octos_bus::CronJob {
         delete_after_run: false,
         timezone: None,
     }
-}
-
-/// The budget helper must cut on a UTF-8 char boundary (a capped
-/// multibyte document ends short of the budget rather than mid
-/// codepoint) and must no-op on absent / non-string fields.
-#[test]
-fn cap_memory_value_field_is_utf8_safe_and_typed() {
-    // 3-byte codepoints; budget of 8 lands mid-codepoint → cut at 6.
-    let mut obj = json!({ "content": "€€€" });
-    cap_memory_value_field(&mut obj, "content", 8);
-    assert_eq!(obj["content"], json!("€€"));
-    assert_eq!(obj["content_truncated"], json!(true));
-    assert_eq!(obj["content_total_bytes"], json!(9));
-
-    // Under budget: flags present, false/full.
-    let mut obj = json!({ "content": "abc" });
-    cap_memory_value_field(&mut obj, "content", 8);
-    assert_eq!(obj["content"], json!("abc"));
-    assert_eq!(obj["content_truncated"], json!(false));
-    assert_eq!(obj["content_total_bytes"], json!(3));
-
-    // Absent / non-string fields: untouched, no flags invented.
-    let mut obj = json!({ "count": 7 });
-    cap_memory_value_field(&mut obj, "content", 8);
-    assert_eq!(obj, json!({ "count": 7 }));
-    cap_memory_value_field(&mut obj, "count", 8);
-    assert_eq!(obj, json!({ "count": 7 }));
-}
-
-/// Budget arithmetic guard: budgets are ESCAPED-byte budgets (codex
-/// r2 P1 — C0 controls cost 6 wire bytes each, so raw-byte caps
-/// under-count), which makes the worst-case wire size the PLAIN sum
-/// of the budgets plus the bounded entities and envelope. That sum
-/// must clear the frame cap — otherwise the framing guard's silent
-/// preview becomes reachable again.
-#[test]
-fn memory_rpc_budgets_fit_one_ws_frame_at_escape_worst_case() {
-    // Entities bound (escaped): MAX_PANEL_ENTITIES × (100-raw-byte
-    // summary → ≤ 600 escaped + 255-raw-byte name → ≤ 1530 escaped
-    // (codex r3 P3: Unix filenames may carry non-short C0 controls,
-    // which serialize at 6 bytes per char — not just the 2-byte
-    // quote/backslash class) + ~40 bytes JSON overhead).
-    let entities_bound = 256 * (600 + 255 * 6 + 40);
-    let overview_escaped = MEMORY_RPC_LONG_TERM_BUDGET
-        + MEMORY_RPC_TODAY_BUDGET
-        + 7 * MEMORY_RPC_RECENT_NOTE_BUDGET
-        + entities_bound;
-    let envelope_overhead = 4 * 1024;
-    assert!(
-        overview_escaped + envelope_overhead < MAX_TEXT_FRAME_BYTES,
-        "overview budgets ({overview_escaped} escaped) must fit the {MAX_TEXT_FRAME_BYTES}-byte frame",
-    );
-    assert!(
-        MEMORY_RPC_ENTITY_CONTENT_BUDGET + envelope_overhead < MAX_TEXT_FRAME_BYTES,
-        "entity budget must fit the frame",
-    );
-}
-
-/// codex #1621 r2 P1 regression: C0 control bytes cost SIX wire
-/// bytes each (`\u0001`), so the cap must count escaped length —
-/// a control-heavy document must be cut to budget/6 raw bytes and
-/// the SERIALIZED field must stay within budget.
-#[test]
-fn cap_memory_value_field_counts_six_byte_control_escapes() {
-    let raw = "\u{0001}".repeat(1000); // 6000 escaped bytes
-    let mut obj = json!({ "content": raw });
-    cap_memory_value_field(&mut obj, "content", 600);
-    let served = obj["content"].as_str().unwrap();
-    assert_eq!(served.chars().count(), 100, "600 budget / 6 per control");
-    assert_eq!(obj["content_truncated"], json!(true));
-    assert_eq!(obj["content_total_bytes"], json!(1000));
-    // The PROOF: the serialized field fits the escaped budget.
-    let wire = serde_json::to_string(&obj["content"]).expect("serialize");
-    assert!(
-        wire.len() <= 600 + 2, // + surrounding quotes
-        "serialized capped field ({} bytes) must fit the escaped budget",
-        wire.len(),
-    );
-
-    // Quotes/backslashes cost 2; multibyte costs its UTF-8 length.
-    let mut obj = json!({ "content": "\"\\€x" }); // 2+2+3+1 = 8 escaped
-    cap_memory_value_field(&mut obj, "content", 7);
-    assert_eq!(obj["content"], json!("\"\\€"));
-    assert_eq!(obj["content_truncated"], json!(true));
-}
-
-/// WS-transport auth expiry: the close-code 1008 frame must precede
-/// the error envelope (codex BLOCK 2026-05-13 — the close is the
-/// load-bearing signal for the SPA `crew:auth_expired` listener and
-/// must survive writer backpressure). Representative check on
-/// `memory/overview`; all four panel wrappers share the shape.
-#[tokio::test]
-async fn memory_overview_ws_auth_expiry_closes_1008_before_error() {
-    let state = Arc::new(AppState::empty_for_tests());
-    let headers = HeaderMap::new();
-    let (ws, mut rx) = ws_connection_for_test(16);
-
-    handle_memory_overview(
-        &ws,
-        &state,
-        &headers,
-        None,
-        true,
-        "mem-overview-expired".into(),
-        MemoryOverviewParams::default(),
-    )
-    .await;
-
-    let first = rx.recv().await.expect("close frame");
-    match first {
-        axum::extract::ws::Message::Close(Some(frame)) => {
-            assert_eq!(frame.code, 1008);
-            assert_eq!(frame.reason.as_str(), "auth_expired");
-        }
-        other => panic!("expected close frame with 1008, got {other:?}"),
-    }
-    let second = recv_rpc_json(&mut rx).await;
-    assert_eq!(second["id"], json!("mem-overview-expired"));
-    assert_eq!(second["error"]["data"]["kind"], json!("auth_unavailable"));
 }
 
 #[cfg(unix)]
@@ -9959,7 +9624,6 @@ fn shell_approval_event_is_typed_only_after_negotiation() {
             spawn_complete: false,
             file_attached: false,
             voice_audio: false,
-            voice_asr_admission_v1: false,
             plan_todos: false,
             background_activity: false,
             projection_envelope: false,
@@ -10031,7 +9695,6 @@ fn risk_default_is_unspecified_when_manifest_silent() {
             spawn_complete: false,
             file_attached: false,
             voice_audio: false,
-            voice_asr_admission_v1: false,
             plan_todos: false,
             background_activity: false,
             projection_envelope: false,
@@ -10148,7 +9811,6 @@ fn plugin_high_risk_approval_emits_risk_field_on_wire() {
             spawn_complete: false,
             file_attached: false,
             voice_audio: false,
-            voice_asr_admission_v1: false,
             plan_todos: false,
             background_activity: false,
             projection_envelope: false,
@@ -10220,7 +9882,6 @@ fn plugin_critical_risk_approval_emits_risk_critical() {
             spawn_complete: false,
             file_attached: false,
             voice_audio: false,
-            voice_asr_admission_v1: false,
             plan_todos: false,
             background_activity: false,
             projection_envelope: false,
@@ -10285,7 +9946,6 @@ fn shell_approval_still_emits_risk_field() {
             spawn_complete: false,
             file_attached: false,
             voice_audio: false,
-            voice_asr_admission_v1: false,
             plan_todos: false,
             background_activity: false,
             projection_envelope: false,
@@ -10393,7 +10053,6 @@ fn approval_cwd_is_sanitized_against_path_spoof() {
             spawn_complete: false,
             file_attached: false,
             voice_audio: false,
-            voice_asr_admission_v1: false,
             plan_todos: false,
             background_activity: false,
             projection_envelope: false,
@@ -14017,7 +13676,6 @@ async fn session_open_includes_pane_snapshot_after_negotiation() {
             spawn_complete: false,
             file_attached: false,
             voice_audio: false,
-            voice_asr_admission_v1: false,
             plan_todos: false,
             background_activity: false,
             projection_envelope: false,
@@ -14562,9 +14220,6 @@ fn aux_rest_to_ws_v1_negotiated_capabilities_include_only_when_requested() {
         octos_core::ui_protocol::methods::SESSION_TITLE_SET,
         octos_core::ui_protocol::methods::SESSION_DELETE,
         octos_core::ui_protocol::methods::SYSTEM_STATUS_GET,
-        octos_core::ui_protocol::methods::CONTENT_LIST,
-        octos_core::ui_protocol::methods::CONTENT_DELETE,
-        octos_core::ui_protocol::methods::CONTENT_BULK_DELETE,
     ] {
         assert!(
             capabilities.supports_method(method),
@@ -14591,9 +14246,6 @@ fn aux_rest_to_ws_v1_negotiated_capabilities_omit_when_not_requested() {
         octos_core::ui_protocol::methods::SESSION_SNAPSHOT,
         octos_core::ui_protocol::methods::SESSION_MESSAGES_PAGE,
         octos_core::ui_protocol::methods::SYSTEM_STATUS_GET,
-        octos_core::ui_protocol::methods::CONTENT_LIST,
-        octos_core::ui_protocol::methods::CONTENT_DELETE,
-        octos_core::ui_protocol::methods::CONTENT_BULK_DELETE,
     ] {
         assert!(
             !capabilities.supports_method(method),
@@ -15285,7 +14937,6 @@ fn aux_rest_to_ws_v1_route_rpc_rejects_methods_when_feature_not_negotiated() {
         octos_core::ui_protocol::methods::SESSION_SNAPSHOT,
         octos_core::ui_protocol::methods::SESSION_DELETE,
         octos_core::ui_protocol::methods::SYSTEM_STATUS_GET,
-        octos_core::ui_protocol::methods::CONTENT_LIST,
     ] {
         let request = RpcRequest::<Value>::new("req-1", method, Value::Null);
         let result = route_rpc_command(request, features);
@@ -15359,9 +15010,6 @@ fn aux_rest_to_ws_v1_route_rpc_rejects_methods_with_no_feature_header_at_all() {
         octos_core::ui_protocol::methods::SESSION_TITLE_SET,
         octos_core::ui_protocol::methods::SESSION_DELETE,
         octos_core::ui_protocol::methods::SYSTEM_STATUS_GET,
-        octos_core::ui_protocol::methods::CONTENT_LIST,
-        octos_core::ui_protocol::methods::CONTENT_DELETE,
-        octos_core::ui_protocol::methods::CONTENT_BULK_DELETE,
     ] {
         let request = RpcRequest::<Value>::new("req-no-header", method, Value::Null);
         let result = route_rpc_command(request, features);
@@ -16038,16 +15686,15 @@ async fn rest_status_to_rpc_error_404_session_context_echoes_session_id() {
 }
 
 /// Codex review 2026-05-12 (MEDIUM 1, companion): a REST 404 from
-/// a non-session resource (content row, profile row) maps to the
-/// new `RESOURCE_NOT_FOUND` slot with `resource_type` +
+/// a non-session resource (a cron job row, a profile row) maps to
+/// the `RESOURCE_NOT_FOUND` slot with `resource_type` +
 /// `identifier` echoed in `data`. Before this fix every 404 hit
-/// `UNKNOWN_SESSION` regardless of resource kind, which forced
-/// content/profile misses through a session-shaped error.
+/// `UNKNOWN_SESSION` regardless of resource kind.
 #[tokio::test]
 async fn rest_status_to_rpc_error_404_resource_context_uses_not_found_slot() {
-    let context = RestResourceContext::resource("content", "c-42");
+    let context = RestResourceContext::resource("cron", "job-42");
     let err = rest_status_to_rpc_error(
-        octos_core::ui_protocol::methods::CONTENT_DELETE,
+        octos_core::ui_protocol::methods::CRON_TOGGLE,
         axum::http::StatusCode::NOT_FOUND,
         None,
         &context,
@@ -16061,9 +15708,12 @@ async fn rest_status_to_rpc_error_404_resource_context_uses_not_found_slot() {
     assert_eq!(data.get("kind").and_then(Value::as_str), Some("not_found"));
     assert_eq!(
         data.get("resource_type").and_then(Value::as_str),
-        Some("content"),
+        Some("cron"),
     );
-    assert_eq!(data.get("identifier").and_then(Value::as_str), Some("c-42"),);
+    assert_eq!(
+        data.get("identifier").and_then(Value::as_str),
+        Some("job-42"),
+    );
     assert_eq!(data.get("rest_status").and_then(Value::as_u64), Some(404));
 }
 
@@ -16087,20 +15737,6 @@ async fn rest_status_to_rpc_error_503_maps_to_runtime_not_ready() {
     );
     let data = err.data.as_ref().expect("typed error data");
     assert_eq!(data.get("rest_status").and_then(Value::as_u64), Some(503));
-}
-
-/// Codex review 2026-05-12 (MEDIUM 3): `content/bulk_delete` must
-/// reject requests carrying more than
-/// `CONTENT_BULK_DELETE_MAX_IDS` ids early, before the catalog
-/// write-lock is taken. The dispatcher uses the constant from
-/// `octos-core` so the cap is shared with the params DTO docs.
-#[test]
-fn content_bulk_delete_max_ids_constant_is_mirrored_from_core() {
-    assert_eq!(
-        octos_core::ui_protocol::CONTENT_BULK_DELETE_MAX_IDS,
-        256,
-        "bulk-delete cap is documented at 256 in the ADR; bump both sides if changed",
-    );
 }
 
 // M11-E: `session_filesystem_profile_for_workspace` was deleted
@@ -17253,100 +16889,6 @@ async fn interrupt_called_twice_returns_same_response() {
     )
     .await;
     assert!(matches!(second, InterruptOutcome::AlreadyInterrupting));
-    handle.abort();
-}
-
-#[tokio::test]
-async fn voice_supersede_waits_for_captured_turn_to_finish_interrupting() {
-    let session_id = SessionKey("local:voice-supersede".into());
-    let turn_id = TurnId::new();
-    let active_turns: SharedActiveTurns = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-    let handle = tokio::spawn(async { std::future::pending::<()>().await });
-    let entry = test_active_turn(turn_id.clone(), handle.abort_handle());
-    let turn_state = entry.state.clone();
-    active_turns.lock().await.insert(session_id.clone(), entry);
-
-    let waiter = tokio::spawn({
-        let active_turns = active_turns.clone();
-        let session_id = session_id.clone();
-        let turn_id = turn_id.clone();
-        async move { await_superseded_turn(&active_turns, &session_id, &turn_id).await }
-    });
-
-    tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            if matches!(*turn_state.lock().await, TurnState::Interrupting { .. }) {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("voice supersede captures the active turn");
-    let transition = transition_to_terminal(&turn_state, TerminalReason::Completed)
-        .await
-        .expect("voice supersede captured the active turn");
-    assert_eq!(transition.reason, TerminalReason::Interrupted);
-    transition
-        .ack
-        .expect("captured supersede has an acknowledgement")
-        .send(())
-        .expect("supersede waiter receives acknowledgement");
-
-    waiter
-        .await
-        .expect("waiter task")
-        .expect("supersede succeeds");
-    handle.abort();
-}
-
-#[tokio::test]
-async fn voice_supersede_already_interrupting_polls_until_terminal() {
-    let session_id = SessionKey("local:voice-supersede-retry".into());
-    let turn_id = TurnId::new();
-    let active_turns: SharedActiveTurns = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-    let handle = tokio::spawn(async { std::future::pending::<()>().await });
-    let entry = test_active_turn(turn_id.clone(), handle.abort_handle());
-    let turn_state = entry.state.clone();
-    active_turns.lock().await.insert(session_id.clone(), entry);
-
-    let first = decide_interrupt(
-        &active_turns,
-        &TurnInterruptParams {
-            session_id: session_id.clone(),
-            turn_id: turn_id.clone(),
-        },
-    )
-    .await;
-    let InterruptOutcome::Captured { ack_rx } = first else {
-        panic!("first interrupt must capture the turn");
-    };
-
-    let waiter = tokio::spawn({
-        let active_turns = active_turns.clone();
-        let session_id = session_id.clone();
-        let turn_id = turn_id.clone();
-        async move { await_superseded_turn(&active_turns, &session_id, &turn_id).await }
-    });
-    tokio::task::yield_now().await;
-    assert!(!waiter.is_finished());
-
-    let transition = transition_to_terminal(&turn_state, TerminalReason::Completed)
-        .await
-        .expect("original interrupt completes");
-    transition
-        .ack
-        .expect("original interrupt owns acknowledgement")
-        .send(())
-        .expect("original waiter still alive");
-    ack_rx
-        .await
-        .expect("original interrupt observes acknowledgement");
-
-    waiter
-        .await
-        .expect("retry waiter task")
-        .expect("retry sees terminal turn");
     handle.abort();
 }
 

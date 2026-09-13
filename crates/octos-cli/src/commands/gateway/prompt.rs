@@ -4,8 +4,6 @@ use std::path::Path;
 
 use octos_agent::SkillsLoader;
 
-use crate::persona_service::PersonaService;
-
 /// Build the system prompt with bootstrap files, memory context, and skills.
 ///
 /// `max_inject_tokens` caps the injected memory block (long-term memory +
@@ -43,7 +41,9 @@ impl GatewayPromptParts {
 
 pub async fn build_system_prompt(
     base: Option<&str>,
-    data_dir: &Path,
+    // Retained for signature stability with the persona/soul injection the
+    // slimming removed; the base prompt no longer reads the data dir.
+    _data_dir: &Path,
     project_dir: &Path,
     skills_loader: &SkillsLoader,
     tool_config: &octos_agent::ToolConfigStore,
@@ -70,23 +70,11 @@ pub async fn build_system_prompt(
         );
     }
 
-    // Inject dynamically generated persona (from persona.md) if available
-    if let Some(persona) = PersonaService::read_persona(data_dir) {
-        prompt.push_str("\n\n## Communication Style\n\n");
-        prompt.push_str(&persona);
-    }
-
     // Append bootstrap files (AGENTS.md, SOUL.md, USER.md, etc.)
     let bootstrap = super::super::load_bootstrap_files(project_dir);
     if !bootstrap.is_empty() {
         prompt.push_str("\n\n");
         prompt.push_str(&bootstrap);
-    }
-
-    // Per-user soul override (takes precedence over shared SOUL.md)
-    if let Some(user_soul) = crate::soul_service::read_soul(data_dir) {
-        prompt.push_str("\n\n## Soul\n\n");
-        prompt.push_str(&user_soul);
     }
 
     // ---- memory slot ----------------------------------------------------

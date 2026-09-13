@@ -11,7 +11,6 @@ pub(crate) mod coding_tool_contract;
 mod cron_panel;
 mod events;
 mod handlers;
-mod memory_panel;
 pub mod metrics;
 pub mod profile_scope;
 pub mod provider_diagnostics;
@@ -78,14 +77,12 @@ pub use router::AuthIdentity as TestAuthIdentity;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use crate::content_catalog::ContentCatalogManager;
 use crate::process_manager::ProcessManager;
 use crate::profiles::ProfileStore;
 use crate::runtime::{ProfileRuntime, SessionRuntimeCache};
-use crate::user_store::UserStore;
 
 /// Serializes skill filesystem mutation and runtime publication per profile.
 ///
@@ -301,8 +298,6 @@ pub struct AppState {
     /// the dashboard; the store remains for `profile/local/create`).
     pub user_store: Option<Arc<crate::user_store::UserStore>>,
     pub allow_admin_shell: bool,
-    /// Content catalog manager for per-profile file indexing.
-    pub content_catalog_mgr: Option<Arc<ContentCatalogManager>>,
     /// Optional path to the JSONL harness-event sink. When `Some`,
     /// typed harness events (e.g. `SwarmReviewDecision`) are appended
     /// to the file in addition to being broadcast live to harness
@@ -401,7 +396,6 @@ impl AppState {
             process_manager: None,
             user_store: None,
             allow_admin_shell: false,
-            content_catalog_mgr: None,
             harness_event_sink_path: None,
             credential_pool: None,
             content_classifier: None,

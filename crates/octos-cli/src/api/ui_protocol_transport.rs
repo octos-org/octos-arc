@@ -28,27 +28,26 @@ use octos_core::ui_protocol::{
     AgentOutputDeltaEvent, AgentUpdatedEvent, ApprovalAutoResolvedEvent, ApprovalCancelledEvent,
     ApprovalCommandDetails, ApprovalDecidedEvent, ApprovalDecision, ApprovalId,
     ApprovalRenderHints, ApprovalRequestedEvent, ApprovalTypedDetails, AttachmentOwnerV2,
-    ContentBulkDeleteParams, ContentDeleteParams, ContentListParams,
     ContextCompactionCompletedEvent, ContextCompactionStartedEvent,
     ContextNormalizationReportedEvent, CronListParams, CronToggleParams, EnvelopeTokenUsage,
     EnvelopeV2, EnvelopeV2Notification, FileRef, HydratedMessage, HydratedTurn, InputItem,
-    MemoryEntityParams, MemoryOverviewParams, MessageDeltaEvent, MessageMeta, OutputCursor,
-    Payload, PayloadV2, ReplayLossyEvent, RpcError, RpcErrorResponse, RpcRequest, RpcResponse,
-    SESSION_HYDRATE_INCLUDE_MAX, SESSION_MESSAGES_PAGE_DEFAULT_LIMIT,
-    SESSION_MESSAGES_PAGE_MAX_LIMIT, SESSION_MESSAGES_PAGE_MAX_OFFSET, SESSION_TITLE_SET_MAX_CHARS,
-    SessionBtwParams, SessionDeleteParams, SessionFilesListParams, SessionHydrateParams,
-    SessionHydrateResult, SessionListParams, SessionMessagesPageParams, SessionOpenParams,
-    SessionOpenResult, SessionOpened, SessionOrchestrationEvent, SessionRollbackParams,
-    SessionRollbackResult, SessionSnapshotParams, SessionStatusGetParams, SessionTasksListParams,
-    SessionTitleSetParams, SessionWorkspaceGetParams, SkillActionJobUpdatedEvent,
-    SystemStatusGetParams, TaskArtifactListParams, TaskArtifactListResult, TaskArtifactReadParams,
-    TaskArtifactReadResult, TaskArtifactRecord, TaskCancelParams, TaskCancelResult, TaskListEntry,
-    TaskListParams, TaskListResult, TaskOutputDeltaEvent, TaskRestartFromNodeParams,
-    TaskRestartFromNodeResult, TaskRuntimeState as UiTaskRuntimeState, TaskUpdatedEvent,
-    ThreadGraphEntry, ThreadGraphGetParams, ThreadGraphGetResult, ToolCompletedEvent,
-    ToolProgressEvent, ToolStartedEvent, TurnCompletedEvent, TurnErrorEvent,
-    TurnErrorPartialResult, TurnId, TurnInterruptParams, TurnInterruptResult, TurnLifecycleState,
-    TurnSessionResult, TurnStartParams, TurnStateGetParams, TurnStateGetResult, TurnTerminalError,
+    MessageDeltaEvent, MessageMeta, OutputCursor, Payload, PayloadV2, ReplayLossyEvent, RpcError,
+    RpcErrorResponse, RpcRequest, RpcResponse, SESSION_HYDRATE_INCLUDE_MAX,
+    SESSION_MESSAGES_PAGE_DEFAULT_LIMIT, SESSION_MESSAGES_PAGE_MAX_LIMIT,
+    SESSION_MESSAGES_PAGE_MAX_OFFSET, SESSION_TITLE_SET_MAX_CHARS, SessionBtwParams,
+    SessionDeleteParams, SessionFilesListParams, SessionHydrateParams, SessionHydrateResult,
+    SessionListParams, SessionMessagesPageParams, SessionOpenParams, SessionOpenResult,
+    SessionOpened, SessionOrchestrationEvent, SessionRollbackParams, SessionRollbackResult,
+    SessionSnapshotParams, SessionStatusGetParams, SessionTasksListParams, SessionTitleSetParams,
+    SessionWorkspaceGetParams, SkillActionJobUpdatedEvent, SystemStatusGetParams,
+    TaskArtifactListParams, TaskArtifactReadParams, TaskArtifactReadResult, TaskArtifactRecord,
+    TaskCancelParams, TaskCancelResult, TaskListEntry, TaskListParams, TaskListResult,
+    TaskOutputDeltaEvent, TaskRestartFromNodeParams, TaskRestartFromNodeResult,
+    TaskRuntimeState as UiTaskRuntimeState, TaskUpdatedEvent, ThreadGraphEntry,
+    ThreadGraphGetParams, ThreadGraphGetResult, ToolCompletedEvent, ToolProgressEvent,
+    ToolStartedEvent, TurnCompletedEvent, TurnErrorEvent, TurnErrorPartialResult, TurnId,
+    TurnInterruptParams, TurnInterruptResult, TurnLifecycleState, TurnSessionResult,
+    TurnStartParams, TurnStateGetParams, TurnStateGetResult, TurnTerminalError,
     TurnTerminalOutcome, UI_PROTOCOL_FEATURE_APPROVAL_TYPED_V1,
     UI_PROTOCOL_FEATURE_AUXILIARY_REST_TO_WS_V1, UI_PROTOCOL_FEATURE_BACKGROUND_ACTIVITY_V1,
     UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1, UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1,
@@ -72,8 +71,7 @@ use octos_core::ui_protocol::{
     hydrate_sections, progress_kinds, thread_status,
 };
 use octos_core::{
-    AgentId, InboundMessage, MAIN_PROFILE_ID, Message, MessageOrigin, MessageRole, SessionKey,
-    TaskId,
+    AgentId, InboundMessage, MAIN_PROFILE_ID, Message, MessageRole, SessionKey, TaskId,
 };
 use octos_llm::pricing::model_pricing;
 use serde::{Deserialize, Serialize};
@@ -111,9 +109,6 @@ use crate::contracts::approvals::PendingApprovalStore;
 use crate::contracts::diff::PendingDiffPreviewStore;
 use crate::contracts::questions::PendingQuestionStore;
 use crate::contracts::scope::ScopePolicy;
-use crate::contracts::voice_admission::VoiceAdmissionClaim;
-#[cfg(test)]
-use crate::contracts::voice_admission::VoiceAdmissionStore;
 use crate::contracts::{UiProtocolContractStores, contract_stores};
 // Phase 3 (goal-in-chat): the peer staging / addressing / parked-prompt layer
 // moved VERBATIM to the non-`api` `crate::peers` so `octos chat --peers` can
@@ -129,7 +124,6 @@ use crate::context_manager::{
 use crate::usage_ledger::{
     PersistentUsageLedger, USAGE_LEDGER_FILE, UsageCostSource, UsageEvent, UsageTotals,
 };
-use crate::user_store::UserRole;
 
 const MAX_DIFF_PREVIEW_BYTES: usize = 256 * 1024;
 const PROGRESS_CHANNEL_CAPACITY: usize = 1024;
@@ -196,9 +190,6 @@ const APPUI_METHOD_SESSION_COMPACT: &str = "session/compact";
 /// Set the per-session compaction mode (LLM vs heuristic) from the `/context`
 /// menu; overrides the `--llm-compaction` default for auto + manual compaction.
 const APPUI_METHOD_SESSION_COMPACT_MODE_SET: &str = "session/compact/mode/set";
-const APPUI_METHOD_VOICE_ADMIT: &str = "voice/admit";
-const APPUI_METHOD_VOICE_COMMIT_ADMISSION: &str = "voice/commit_admission";
-const APPUI_FEATURE_VOICE_ASR_ADMISSION_V1: &str = "voice.asr_admission.v1";
 const APPUI_METHOD_AUTH_STATUS: &str = "auth/status";
 const APPUI_METHOD_AUTH_SEND_CODE: &str = "auth/send_code";
 const APPUI_METHOD_AUTH_VERIFY: &str = "auth/verify";
@@ -356,17 +347,10 @@ const APPUI_EXTRA_METHODS: &[&str] = &[
     octos_core::ui_protocol::methods::SESSION_BTW,
     APPUI_METHOD_SESSION_COMPACT,
     APPUI_METHOD_SESSION_COMPACT_MODE_SET,
-    APPUI_METHOD_VOICE_ADMIT,
-    APPUI_METHOD_VOICE_COMMIT_ADMISSION,
 ];
 const APPUI_STDIO_AUTH_BOUND_UNAVAILABLE_METHODS: &[&str] = &[
     APPUI_METHOD_AUTH_ME,
     APPUI_METHOD_AUTH_LOGOUT,
-    octos_core::ui_protocol::methods::CONTENT_LIST,
-    octos_core::ui_protocol::methods::CONTENT_DELETE,
-    octos_core::ui_protocol::methods::CONTENT_BULK_DELETE,
-    octos_core::ui_protocol::methods::MEMORY_OVERVIEW,
-    octos_core::ui_protocol::methods::MEMORY_ENTITY,
     octos_core::ui_protocol::methods::CRON_LIST,
     octos_core::ui_protocol::methods::CRON_TOGGLE,
     octos_core::ui_protocol::methods::SMART_HOME_STATUS_GET,
@@ -1360,9 +1344,6 @@ struct ConnectionUiFeatures {
     /// progressive MSE playback; otherwise it falls back to whole-file
     /// `file/attached` audio.
     voice_audio: bool,
-    /// Two-phase ASR admission. Strictly opt-in so older clients keep using
-    /// the legacy `turn/start` voice path unchanged.
-    voice_asr_admission_v1: bool,
     /// `plan.todos.v1` negotiated. When set, the server streams the
     /// `update_plan` tool's checklist as `plan/updated` notifications and
     /// replays the latest snapshot on `session/open`. Otherwise the plan rides
@@ -1477,11 +1458,6 @@ impl ConnectionUiFeatures {
             spawn_complete: has_ui_feature(headers, query, UI_PROTOCOL_FEATURE_SPAWN_COMPLETE_V1),
             file_attached: has_ui_feature(headers, query, UI_PROTOCOL_FEATURE_FILE_ATTACHED_V1),
             voice_audio: has_ui_feature(headers, query, UI_PROTOCOL_FEATURE_VOICE_AUDIO_V1),
-            voice_asr_admission_v1: has_ui_feature(
-                headers,
-                query,
-                APPUI_FEATURE_VOICE_ASR_ADMISSION_V1,
-            ),
             plan_todos: has_ui_feature(headers, query, UI_PROTOCOL_FEATURE_PLAN_TODOS_V1),
             background_activity: has_ui_feature(
                 headers,
@@ -1570,7 +1546,6 @@ impl ConnectionUiFeatures {
             spawn_complete: true,
             file_attached: true,
             voice_audio: true,
-            voice_asr_admission_v1: true,
             plan_todos: true,
             background_activity: true,
             // Do NOT auto-enable `projection.envelope.v1` for stdio
@@ -1634,7 +1609,6 @@ impl ConnectionUiFeatures {
             spawn_complete: has(UI_PROTOCOL_FEATURE_SPAWN_COMPLETE_V1),
             file_attached: has(UI_PROTOCOL_FEATURE_FILE_ATTACHED_V1),
             voice_audio: has(UI_PROTOCOL_FEATURE_VOICE_AUDIO_V1),
-            voice_asr_admission_v1: has(APPUI_FEATURE_VOICE_ASR_ADMISSION_V1),
             plan_todos: has(UI_PROTOCOL_FEATURE_PLAN_TODOS_V1),
             background_activity: has(UI_PROTOCOL_FEATURE_BACKGROUND_ACTIVITY_V1),
             projection_envelope: has(UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V1),
@@ -1710,9 +1684,6 @@ impl ConnectionUiFeatures {
         }
         if self.voice_audio {
             requested.push(UI_PROTOCOL_FEATURE_VOICE_AUDIO_V1);
-        }
-        if self.voice_asr_admission_v1 {
-            requested.push(APPUI_FEATURE_VOICE_ASR_ADMISSION_V1);
         }
         if self.plan_todos {
             requested.push(UI_PROTOCOL_FEATURE_PLAN_TODOS_V1);
@@ -1858,12 +1829,6 @@ impl ConnectionUiFeatures {
             &mut capabilities.supported_features,
             APPUI_FEATURE_PERMISSION_PROFILE_V1,
         );
-        if self.voice_asr_admission_v1 {
-            push_capability_feature(
-                &mut capabilities.supported_features,
-                APPUI_FEATURE_VOICE_ASR_ADMISSION_V1,
-            );
-        }
         push_capability_feature(
             &mut capabilities.supported_features,
             APPUI_FEATURE_RUNTIME_POLICY_STAMP_V1,
@@ -4110,8 +4075,7 @@ fn replace_voice_user_message_content(messages: &mut [Message], transcript: Opti
 }
 
 /// The legacy `turn/start` path only has nothing to process when silent audio
-/// is the request's sole input. The two-phase voice admission path rejects
-/// no-speech before a turn reaches this function.
+/// is the request's sole input.
 fn should_short_circuit_no_speech(
     had_audio_media: bool,
     had_non_audio_media: bool,
@@ -4611,108 +4575,11 @@ impl Drop for AbortOnDrop {
     }
 }
 
-/// Interval between successive status-word rotations on the in-flight
-/// thinking bubble. Mirrors the gateway `StatusIndicator::run_status_loop`
-/// (`tick % 8 == 0`) so the cadence feels identical across surfaces.
-const STATUS_WORD_INTERVAL: std::time::Duration = std::time::Duration::from_secs(8);
-
 /// #2066 round 4 (codex fix 2) — cadence of the AppUI goal-turn in-flight
 /// heartbeat, mirroring the session actor's `IN_FLIGHT_HEARTBEAT_INTERVAL`
 /// (#2003): well under the 30-minute staleness horizon, coarse enough to be
 /// free.
 const APPUI_IN_FLIGHT_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// CJK code-point check shared with `status_indicator::has_cjk` — kept
-/// inline here to avoid pulling the channel-aware status_indicator
-/// module into the WS turn path.
-fn prompt_has_cjk(prompt: &str) -> bool {
-    prompt.chars().any(|c| {
-        matches!(
-            c,
-            '\u{4E00}'..='\u{9FFF}'
-            | '\u{3400}'..='\u{4DBF}'
-            | '\u{F900}'..='\u{FAFF}'
-        )
-    })
-}
-
-/// Spawn a per-turn tokio task that rotates a creative status word
-/// every [`STATUS_WORD_INTERVAL`] through the progress channel for the
-/// SPA `ThinkingIndicator`. Mirrors the gateway StatusIndicator
-/// (`✦ Pondering...`, `✦ 正在炼丹...`) but for the WS surface — the
-/// frame goes through the existing `progress_tx` pipeline which the
-/// mapper at `ui_protocol_progress::map_status_word` lifts onto
-/// `progress/updated{kind:"status_word"}`.
-///
-/// The task exits when EITHER the cancel flag flips (the per-turn
-/// handler signals it via [`StatusWordRotatorGuard`] on its way out)
-/// OR the progress channel's receiver drops (function scope unwinds
-/// and the consumer is gone). Backpressure failures (`try_send` ==
-/// `Full`) just skip that rotation — a missed word is harmless.
-fn spawn_status_word_rotator(
-    progress_tx: tokio::sync::mpsc::Sender<String>,
-    prompt: &str,
-    cancel: Arc<std::sync::atomic::AtomicBool>,
-) {
-    use crate::persona_service::{DEFAULT_STATUS_WORDS, DEFAULT_STATUS_WORDS_ZH};
-
-    let is_cjk = prompt_has_cjk(prompt);
-    let pool: Vec<&'static str> = if is_cjk {
-        DEFAULT_STATUS_WORDS_ZH.to_vec()
-    } else {
-        DEFAULT_STATUS_WORDS.to_vec()
-    };
-    if pool.is_empty() {
-        return;
-    }
-
-    // Slow per-turn offset so back-to-back turns don't always start on
-    // the same word. Using `SystemTime` here is fine — the offset has
-    // no correctness role, only aesthetic spread.
-    let start_idx = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as usize)
-        .unwrap_or(0)
-        % pool.len();
-
-    tokio::spawn(async move {
-        let mut idx = start_idx;
-        loop {
-            tokio::time::sleep(STATUS_WORD_INTERVAL).await;
-            if cancel.load(std::sync::atomic::Ordering::Acquire) || progress_tx.is_closed() {
-                return;
-            }
-            let word = pool[idx % pool.len()];
-            idx = idx.wrapping_add(1);
-            let payload = serde_json::json!({
-                "type": "status_word",
-                "label": word,
-            });
-            let Ok(json) = serde_json::to_string(&payload) else {
-                continue;
-            };
-            // Backpressure failure → drop this rotation. The next
-            // tick will pick a fresh word. The SPA caches the last
-            // rendered word so a missed frame just delays the next
-            // visible swap by 8s.
-            let _ = progress_tx.try_send(json);
-        }
-    });
-}
-
-/// RAII guard that flips the rotator's cancellation flag on drop so
-/// the spawned task exits cleanly when `run_standalone_turn` returns
-/// (including on early-return / panic / interrupt paths).
-struct StatusWordRotatorGuard {
-    cancel: Arc<std::sync::atomic::AtomicBool>,
-}
-
-impl Drop for StatusWordRotatorGuard {
-    fn drop(&mut self) {
-        self.cancel
-            .store(true, std::sync::atomic::Ordering::Release);
-    }
-}
 
 struct BoundedChannelReporter {
     tx: tokio::sync::mpsc::Sender<String>,
@@ -6290,66 +6157,6 @@ async fn ui_protocol_connection(
             UiCommand::SystemStatusGet(params) => {
                 handle_system_status_get(&ws, &state, id, params).await;
             }
-            UiCommand::ContentList(params) => {
-                handle_content_list(
-                    &ws,
-                    &state,
-                    &connection_headers,
-                    connection_identity.as_ref(),
-                    true,
-                    id,
-                    params,
-                )
-                .await;
-            }
-            UiCommand::ContentDelete(params) => {
-                handle_content_delete(
-                    &ws,
-                    &state,
-                    &connection_headers,
-                    connection_identity.as_ref(),
-                    true,
-                    id,
-                    params,
-                )
-                .await;
-            }
-            UiCommand::ContentBulkDelete(params) => {
-                handle_content_bulk_delete(
-                    &ws,
-                    &state,
-                    &connection_headers,
-                    connection_identity.as_ref(),
-                    true,
-                    id,
-                    params,
-                )
-                .await;
-            }
-            UiCommand::MemoryOverview(params) => {
-                handle_memory_overview(
-                    &ws,
-                    &state,
-                    &connection_headers,
-                    connection_identity.as_ref(),
-                    true,
-                    id,
-                    params,
-                )
-                .await;
-            }
-            UiCommand::MemoryEntity(params) => {
-                handle_memory_entity(
-                    &ws,
-                    &state,
-                    &connection_headers,
-                    connection_identity.as_ref(),
-                    true,
-                    id,
-                    params,
-                )
-                .await;
-            }
             UiCommand::CronList(params) => {
                 handle_cron_list(
                     &ws,
@@ -7005,50 +6812,6 @@ where
                 UiCommand::SystemStatusGet(params) => {
                     handle_system_status_get(&ws, &state, id, params).await;
                 }
-                UiCommand::ContentList(params) => {
-                    handle_content_list(&ws, &state, &connection_headers, None, false, id, params)
-                        .await;
-                }
-                UiCommand::ContentDelete(params) => {
-                    handle_content_delete(
-                        &ws,
-                        &state,
-                        &connection_headers,
-                        None,
-                        false,
-                        id,
-                        params,
-                    )
-                    .await;
-                }
-                UiCommand::ContentBulkDelete(params) => {
-                    handle_content_bulk_delete(
-                        &ws,
-                        &state,
-                        &connection_headers,
-                        None,
-                        false,
-                        id,
-                        params,
-                    )
-                    .await;
-                }
-                UiCommand::MemoryOverview(params) => {
-                    handle_memory_overview(
-                        &ws,
-                        &state,
-                        &connection_headers,
-                        None,
-                        false,
-                        id,
-                        params,
-                    )
-                    .await;
-                }
-                UiCommand::MemoryEntity(params) => {
-                    handle_memory_entity(&ws, &state, &connection_headers, None, false, id, params)
-                        .await;
-                }
                 UiCommand::CronList(params) => {
                     handle_cron_list(&ws, &state, &connection_headers, None, false, id, params)
                         .await;
@@ -7457,29 +7220,6 @@ struct RawProfileParams {
     profile_id: Option<String>,
     #[serde(default)]
     session_id: Option<SessionKey>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RawVoiceAdmitParams {
-    session_id: SessionKey,
-    request_id: String,
-    turn_id: TurnId,
-    media: Vec<FileRef>,
-    #[serde(default)]
-    topic: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RawVoiceCommitAdmissionParams {
-    admission_id: String,
-    #[serde(default)]
-    supersedes_turn_id: Option<TurnId>,
-    turn: TurnStartParams,
-}
-
-#[derive(Debug, Clone)]
-struct PreAdmittedVoice {
-    transcript: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -13104,12 +12844,6 @@ async fn handle_raw_appui_rpc(
         APPUI_METHOD_AUTH_ME if features.stdio_transport => {
             Err(auth_unavailable_error(APPUI_METHOD_AUTH_ME))
         }
-        octos_core::ui_protocol::methods::CONTENT_LIST if features.stdio_transport => Err(
-            auth_unavailable_error(octos_core::ui_protocol::methods::CONTENT_LIST),
-        ),
-        octos_core::ui_protocol::methods::CONTENT_DELETE if features.stdio_transport => Err(
-            auth_unavailable_error(octos_core::ui_protocol::methods::CONTENT_DELETE),
-        ),
         APPUI_METHOD_AUTH_ME => Ok(json!({
             "email": "unknown account",
             "profile_id": connection_profile_id.unwrap_or(MAIN_PROFILE_ID)
@@ -13356,11 +13090,6 @@ fn route_rpc_command(
         | octos_core::ui_protocol::methods::SESSION_TITLE_SET
         | octos_core::ui_protocol::methods::SESSION_DELETE
         | octos_core::ui_protocol::methods::SYSTEM_STATUS_GET
-        | octos_core::ui_protocol::methods::CONTENT_LIST
-        | octos_core::ui_protocol::methods::CONTENT_DELETE
-        | octos_core::ui_protocol::methods::CONTENT_BULK_DELETE
-        | octos_core::ui_protocol::methods::MEMORY_OVERVIEW
-        | octos_core::ui_protocol::methods::MEMORY_ENTITY
         | octos_core::ui_protocol::methods::CRON_LIST
         | octos_core::ui_protocol::methods::CRON_TOGGLE => Some(features.auxiliary_rest_to_ws_v1),
         // UPCR-2026-023: `user_question/respond` is strict opt-in. A client
@@ -13452,21 +13181,10 @@ fn raw_method_is_dispatched(method: &str, stdio_transport: bool) -> bool {
             | APPUI_METHOD_ONBOARDING_WORKSPACE_PROBE
             | APPUI_METHOD_SESSION_COMPACT
             | APPUI_METHOD_SESSION_COMPACT_MODE_SET
-            | APPUI_METHOD_VOICE_ADMIT
-            | APPUI_METHOD_VOICE_COMMIT_ADMISSION
     ) {
         return true;
     }
-    // Content methods are dispatched by the raw handler ONLY on the stdio
-    // transport (where they return an auth-unavailable error); on every other
-    // transport they fall through to the typed surface. A session-ingress
-    // socket is never stdio, so these never reach the ingress deny gate.
-    stdio_transport
-        && matches!(
-            method,
-            octos_core::ui_protocol::methods::CONTENT_LIST
-                | octos_core::ui_protocol::methods::CONTENT_DELETE
-        )
+    false
 }
 
 /// Whether a session-ingress credential can actually CALL `method`. This is the
@@ -13489,11 +13207,6 @@ fn session_ingress_callable_method(method: &str) -> bool {
         APPUI_METHOD_PROFILE_LOCAL_CREATE
             | octos_core::ui_protocol::methods::SESSION_LIST
             | octos_core::ui_protocol::methods::SYSTEM_STATUS_GET
-            | octos_core::ui_protocol::methods::CONTENT_LIST
-            | octos_core::ui_protocol::methods::CONTENT_DELETE
-            | octos_core::ui_protocol::methods::CONTENT_BULK_DELETE
-            | octos_core::ui_protocol::methods::MEMORY_OVERVIEW
-            | octos_core::ui_protocol::methods::MEMORY_ENTITY
             | octos_core::ui_protocol::methods::CRON_LIST
             | octos_core::ui_protocol::methods::CRON_TOGGLE
             | octos_core::ui_protocol::methods::SESSION_FORK
@@ -13523,11 +13236,6 @@ fn validate_session_ingress_command_scope(
         | UiCommand::LaunchResolve(_)
         | UiCommand::SessionList(_)
         | UiCommand::SystemStatusGet(_)
-        | UiCommand::ContentList(_)
-        | UiCommand::ContentDelete(_)
-        | UiCommand::ContentBulkDelete(_)
-        | UiCommand::MemoryOverview(_)
-        | UiCommand::MemoryEntity(_)
         | UiCommand::CronList(_)
         | UiCommand::CronToggle(_)
         | UiCommand::SessionFork(_)
@@ -16485,61 +16193,8 @@ async fn handle_turn_start(
         id,
         params,
         json!({ "accepted": true }),
-        None,
     )
     .await;
-}
-
-async fn await_superseded_turn(
-    active_turns: &SharedActiveTurns,
-    session_id: &SessionKey,
-    turn_id: &TurnId,
-) -> Result<(), RpcError> {
-    let params = TurnInterruptParams {
-        session_id: session_id.clone(),
-        turn_id: turn_id.clone(),
-    };
-    match decide_interrupt(active_turns, &params).await {
-        InterruptOutcome::Unknown | InterruptOutcome::AlreadyTerminal(_) => Ok(()),
-        InterruptOutcome::Mismatch => Err(RpcError::invalid_request(
-            "the superseded turn is not the active turn for this session",
-        )),
-        InterruptOutcome::Captured { ack_rx } => {
-            match tokio::time::timeout(INTERRUPT_ACK_TIMEOUT, ack_rx).await {
-                Ok(Ok(())) => Ok(()),
-                _ => Err(RpcError::internal_error(
-                    "timed out while interrupting the superseded voice turn",
-                )),
-            }
-        }
-        InterruptOutcome::AlreadyInterrupting => {
-            let wait = async {
-                loop {
-                    let terminal = {
-                        let active = active_turns.lock().await;
-                        let Some(active) = active.get(session_id) else {
-                            return;
-                        };
-                        if active.turn_id != *turn_id {
-                            return;
-                        }
-                        matches!(*active.state.lock().await, TurnState::Terminal(_))
-                    };
-                    if terminal {
-                        return;
-                    }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            };
-            tokio::time::timeout(INTERRUPT_ACK_TIMEOUT, wait)
-                .await
-                .map_err(|_| {
-                    RpcError::internal_error(
-                        "timed out while waiting for the superseded voice turn",
-                    )
-                })
-        }
-    }
 }
 
 /// `handle_turn_start` body with a caller-chosen accept payload.
@@ -16565,7 +16220,6 @@ async fn handle_turn_start_with_accept(
     id: String,
     mut params: TurnStartParams,
     accept_result: Value,
-    pre_admitted_voice: Option<PreAdmittedVoice>,
 ) -> bool {
     // UPCR-2026-015 (M9-β-1): if the client carried a `topic` field
     // alongside the session_id, fold it into the resolved SessionKey
@@ -16716,7 +16370,6 @@ async fn handle_turn_start_with_accept(
                 features,
                 params,
                 prompt,
-                pre_admitted_voice,
                 resolved_profile_id,
                 turn_state_for_task,
                 interrupt_rx,
@@ -20813,446 +20466,6 @@ async fn handle_system_status_get(
     }
 }
 
-async fn handle_content_list(
-    ws: &WsConnection,
-    state: &Arc<AppState>,
-    headers: &HeaderMap,
-    identity: Option<&AuthIdentity>,
-    close_on_auth_unavailable: bool,
-    id: String,
-    params: ContentListParams,
-) {
-    let method = octos_core::ui_protocol::methods::CONTENT_LIST;
-    let Some(identity) = identity.cloned() else {
-        // Web PR #114 contract: SPA bridge listens for close-code 1008 to
-        // trigger `crew:auth_expired` (clears token, routes to /login). The
-        // RPC envelope alone leaves a stale-token client retrying forever.
-        // Codex BLOCK (2026-05-13): close must precede the error envelope so
-        // it survives backpressure when only one writer slot is free.
-        if close_on_auth_unavailable {
-            let _ = close_ws_with_code(ws, 1008, "auth_expired");
-        }
-        let _ = send_rpc_error(ws, Some(id), auth_unavailable_error(method));
-        return;
-    };
-    // `ContentQuery` deserializes from the same JSON the REST query
-    // string built. Forwarding the `filters` object lets clients opt
-    // in to category / search / pagination without us redefining the
-    // struct here. Null / empty filters fall back to the REST default
-    // (`Default::default()`) so `content/list` with `{}` params works
-    // identically to `GET /api/my/content` with no query string.
-    let filters = if params.filters.is_null() {
-        Value::Object(serde_json::Map::new())
-    } else {
-        params.filters
-    };
-    let query: crate::content_catalog::ContentQuery = match serde_json::from_value(filters) {
-        Ok(q) => q,
-        Err(err) => {
-            let _ = send_rpc_error(
-                ws,
-                Some(id),
-                RpcError::invalid_params(format!("{method}: invalid filters: {err}")),
-            );
-            return;
-        }
-    };
-    let result = super::profile_scope::my_content(
-        State(state.clone()),
-        headers.clone(),
-        Extension(identity),
-        axum::extract::Query(query),
-    )
-    .await;
-    match result {
-        Ok(axum::Json(value)) => match serde_json::to_value(&value) {
-            Ok(json_value) => {
-                let entries = json_value
-                    .get("entries")
-                    .cloned()
-                    .unwrap_or_else(|| json!([]));
-                let total = json_value.get("total").and_then(Value::as_u64).unwrap_or(0) as usize;
-                send_aux_rpc_result(
-                    ws,
-                    id,
-                    method,
-                    json!({
-                        "entries": entries,
-                        "total": total,
-                    }),
-                );
-            }
-            Err(error) => {
-                let _ = send_rpc_error(
-                    ws,
-                    Some(id),
-                    RpcError::internal_error(format!(
-                        "{method}: serialize content list failed: {error}"
-                    )),
-                );
-            }
-        },
-        Err((status, message)) => {
-            // `content/list` is a collection endpoint — no
-            // addressable id. Use the generic resource context so a
-            // (rare) 404 surfaces as `RESOURCE_NOT_FOUND` rather than
-            // `UNKNOWN_SESSION`.
-            let context = RestResourceContext::resource("content", "");
-            let _ = send_rpc_error(
-                ws,
-                Some(id),
-                rest_status_to_rpc_error(method, status, Some(message), &context),
-            );
-        }
-    }
-}
-
-async fn handle_content_delete(
-    ws: &WsConnection,
-    state: &Arc<AppState>,
-    headers: &HeaderMap,
-    identity: Option<&AuthIdentity>,
-    close_on_auth_unavailable: bool,
-    id: String,
-    params: ContentDeleteParams,
-) {
-    let method = octos_core::ui_protocol::methods::CONTENT_DELETE;
-    let Some(identity) = identity.cloned() else {
-        // Web PR #114 contract: see `close_ws_with_code` doc-comment. Codex
-        // BLOCK (2026-05-13): close before error so it survives writer
-        // backpressure when the channel has just one free slot.
-        if close_on_auth_unavailable {
-            let _ = close_ws_with_code(ws, 1008, "auth_expired");
-        }
-        let _ = send_rpc_error(ws, Some(id), auth_unavailable_error(method));
-        return;
-    };
-    let content_id = params.id.clone();
-    let result = super::profile_scope::delete_my_content(
-        State(state.clone()),
-        headers.clone(),
-        Extension(identity),
-        axum_path(params.id),
-    )
-    .await;
-    match result {
-        Ok(axum::Json(action)) => {
-            send_aux_rpc_result(
-                ws,
-                id,
-                method,
-                json!({
-                    "deleted": action.ok,
-                }),
-            );
-        }
-        Err((status, message)) => {
-            // Content row miss → `RESOURCE_NOT_FOUND` with the content
-            // id echoed in `data.identifier`. Previously this funnelled
-            // through `UNKNOWN_SESSION` and stuffed the method name in
-            // the `session_id` slot (codex review 2026-05-12).
-            let context = RestResourceContext::resource("content", content_id);
-            let _ = send_rpc_error(
-                ws,
-                Some(id),
-                rest_status_to_rpc_error(method, status, Some(message), &context),
-            );
-        }
-    }
-}
-
-async fn handle_content_bulk_delete(
-    ws: &WsConnection,
-    state: &Arc<AppState>,
-    headers: &HeaderMap,
-    identity: Option<&AuthIdentity>,
-    close_on_auth_unavailable: bool,
-    id: String,
-    params: ContentBulkDeleteParams,
-) {
-    let method = octos_core::ui_protocol::methods::CONTENT_BULK_DELETE;
-    let Some(identity) = identity.cloned() else {
-        // Web PR #114 contract: see `close_ws_with_code` doc-comment. Codex
-        // BLOCK (2026-05-13): close before error so it survives writer
-        // backpressure when the channel has just one free slot.
-        if close_on_auth_unavailable {
-            let _ = close_ws_with_code(ws, 1008, "auth_expired");
-        }
-        let _ = send_rpc_error(ws, Some(id), auth_unavailable_error(method));
-        return;
-    };
-    // Codex review 2026-05-12: reject over-cap bulk-delete requests
-    // before they reach the catalog write-lock. The 1 MiB frame limit
-    // is a coarser secondary check; this per-method cap keeps a
-    // single oversized request from monopolizing the catalog for
-    // even a small bounded window. Mirrored in
-    // `octos-core::ui_protocol::CONTENT_BULK_DELETE_MAX_IDS`.
-    if params.ids.len() > octos_core::ui_protocol::CONTENT_BULK_DELETE_MAX_IDS {
-        let _ = send_rpc_error(
-            ws,
-            Some(id),
-            RpcError::invalid_params(format!(
-                "{method}: ids count {} exceeds maximum of {}",
-                params.ids.len(),
-                octos_core::ui_protocol::CONTENT_BULK_DELETE_MAX_IDS,
-            ))
-            .with_data(json!({
-                "max_ids": octos_core::ui_protocol::CONTENT_BULK_DELETE_MAX_IDS,
-                "requested_ids": params.ids.len(),
-            })),
-        );
-        return;
-    }
-    let result = super::profile_scope::bulk_delete_my_content(
-        State(state.clone()),
-        headers.clone(),
-        Extension(identity),
-        axum::Json(super::profile_scope::BulkDeleteRequest { ids: params.ids }),
-    )
-    .await;
-    match result {
-        Ok(axum::Json(action)) => {
-            // The REST handler stuffs the count into the user-facing
-            // message ("N item(s) deleted."). Parse it back out so the
-            // WS shape can return a typed integer per the ADR.
-            let deleted = action
-                .message
-                .as_deref()
-                .and_then(|msg| msg.split_whitespace().next())
-                .and_then(|first| first.parse::<usize>().ok())
-                .unwrap_or(0);
-            send_aux_rpc_result(ws, id, method, json!({ "deleted": deleted }));
-        }
-        Err((status, message)) => {
-            // Bulk-delete is a collection operation; no single id is
-            // the locus. Surface 404 (which the REST handler should
-            // never return for this method) through the generic
-            // resource context.
-            let context = RestResourceContext::resource("content", "");
-            let _ = send_rpc_error(
-                ws,
-                Some(id),
-                rest_status_to_rpc_error(method, status, Some(message), &context),
-            );
-        }
-    }
-}
-
-/// Per-field JSON-ESCAPED byte budgets for the memory RPC results
-/// (codex #1621 r1 P1, tightened r2 P1). The REST panel intentionally
-/// serves files up to `memory_panel::MAX_PANEL_FILE_BYTES` (2 MiB), but
-/// an RPC result must fit ONE ~1 MiB WS text frame
-/// (`MAX_TEXT_FRAME_BYTES`) — without a handler-level bound the
-/// outbound framing guard (`preview_oversized_frame`) would splice a
-/// head+tail preview into the largest string while the envelope still
-/// reports success: silent corruption for a document viewer.
-///
-/// Budgets are measured in ESCAPED bytes (r2 P1: a flat raw-byte cap
-/// under-counts — `serde_json` emits SIX bytes (`\u0001`) for a C0
-/// control byte, so a control-heavy file capped by raw length would
-/// still serialize past the frame and re-reach the silent preview).
-/// `cap_index_by_escaped_len` walks the field with serde_json's actual
-/// escaping table, so plain markdown keeps ~the full budget while
-/// pathological content is cut exactly where its wire cost hits it.
-/// Worst-case wire size is therefore the PLAIN SUM of the budgets:
-///   96 (long_term) + 48 (today) + 7×24 (recent) + ~543 (entities —
-///   bounded upstream at ≤ MAX_PANEL_ENTITIES=256 rows: summaries
-///   ≤ 100 raw bytes (`octos_memory::extract_abstract`) → ≤ 600
-///   escaped, names ≤ 255 raw → ≤ 1530 escaped (Unix filenames may
-///   carry C0 controls at 6 wire bytes each), + per-row JSON
-///   overhead) ≈ 855 KiB, under the frame cap with ~169 KiB margin.
-/// Truncation is EXPLICIT: `<field>_truncated` + `<field>_total_bytes`
-/// ride beside every capped field; the content itself is a clean UTF-8
-/// prefix with NO in-band marker.
-const MEMORY_RPC_LONG_TERM_BUDGET: usize = 96 * 1024;
-const MEMORY_RPC_TODAY_BUDGET: usize = 48 * 1024;
-const MEMORY_RPC_RECENT_NOTE_BUDGET: usize = 24 * 1024;
-/// `memory/entity` is a single-document result — it gets the largest
-/// budget that still clears the frame cap.
-const MEMORY_RPC_ENTITY_CONTENT_BUDGET: usize = 384 * 1024;
-
-/// Wire cost of one char in a JSON string per `serde_json`'s escaper:
-/// `"` / `\` and the short control escapes (`\b \f \n \r \t`)
-/// emit 2 bytes; every other C0 control emits 6 (`\u00XX`); everything
-/// else passes through at its UTF-8 length.
-fn json_escaped_len(c: char) -> usize {
-    match c {
-        '"' | '\\' | '\x08' | '\x0c' | '\n' | '\r' | '\t' => 2,
-        c if (c as u32) < 0x20 => 6,
-        c => c.len_utf8(),
-    }
-}
-
-/// Largest raw prefix of `s` whose JSON-ESCAPED length fits
-/// `escaped_budget`. Always a char boundary (walks `char_indices`).
-fn cap_index_by_escaped_len(s: &str, escaped_budget: usize) -> usize {
-    let mut used = 0usize;
-    for (i, c) in s.char_indices() {
-        let cost = json_escaped_len(c);
-        if used + cost > escaped_budget {
-            return i;
-        }
-        used += cost;
-    }
-    s.len()
-}
-
-/// Cap the string at `obj[field]` to `budget` ESCAPED bytes (UTF-8
-/// boundary, clean prefix — no in-band marker) and record the truth
-/// beside it as `<field>_truncated` + `<field>_total_bytes` (always
-/// written, false/full-length when the field fit).
-fn cap_memory_value_field(obj: &mut Value, field: &str, budget: usize) {
-    let Some(Value::String(s)) = obj.get_mut(field) else {
-        return;
-    };
-    let total = s.len();
-    let cut = cap_index_by_escaped_len(s, budget);
-    let truncated = cut < s.len();
-    if truncated {
-        s.truncate(cut);
-    }
-    if let Some(map) = obj.as_object_mut() {
-        map.insert(format!("{field}_truncated"), json!(truncated));
-        map.insert(format!("{field}_total_bytes"), json!(total));
-    }
-}
-
-/// Apply the per-field budgets to a serialized `MemoryOverviewResponse`.
-fn apply_memory_overview_budgets(overview: &mut Value) {
-    cap_memory_value_field(overview, "long_term", MEMORY_RPC_LONG_TERM_BUDGET);
-    cap_memory_value_field(overview, "today", MEMORY_RPC_TODAY_BUDGET);
-    if let Some(recent) = overview.get_mut("recent").and_then(Value::as_array_mut) {
-        for note in recent {
-            cap_memory_value_field(note, "content", MEMORY_RPC_RECENT_NOTE_BUDGET);
-        }
-    }
-}
-
-async fn handle_memory_overview(
-    ws: &WsConnection,
-    state: &Arc<AppState>,
-    headers: &HeaderMap,
-    identity: Option<&AuthIdentity>,
-    close_on_auth_unavailable: bool,
-    id: String,
-    _params: MemoryOverviewParams,
-) {
-    let method = octos_core::ui_protocol::methods::MEMORY_OVERVIEW;
-    let Some(identity) = identity.cloned() else {
-        // Web PR #114 contract: see `close_ws_with_code` doc-comment. Codex
-        // BLOCK (2026-05-13): close before error so it survives writer
-        // backpressure when the channel has just one free slot.
-        if close_on_auth_unavailable {
-            let _ = close_ws_with_code(ws, 1008, "auth_expired");
-        }
-        let _ = send_rpc_error(ws, Some(id), auth_unavailable_error(method));
-        return;
-    };
-    let result =
-        super::memory_panel::my_memory(State(state.clone()), headers.clone(), Extension(identity))
-            .await;
-    match result {
-        Ok(axum::Json(overview)) => match serde_json::to_value(&overview) {
-            // The REST body is forwarded whole under `overview` (the
-            // `system/status.get` wrap pattern) so the WS shape cannot
-            // drift from `MemoryOverviewResponse` field by field — then
-            // capped per document field so the result fits one WS frame
-            // with EXPLICIT flags instead of the framing guard's silent
-            // head+tail preview (codex #1621 r1 P1).
-            Ok(mut value) => {
-                apply_memory_overview_budgets(&mut value);
-                send_aux_rpc_result(ws, id, method, json!({ "overview": value }))
-            }
-            Err(error) => {
-                let _ = send_rpc_error(
-                    ws,
-                    Some(id),
-                    RpcError::internal_error(format!(
-                        "{method}: serialize memory overview failed: {error}"
-                    )),
-                );
-            }
-        },
-        Err(status) => {
-            // Collection-style endpoint — no addressable id. The REST
-            // handler returns bare `StatusCode`s (no body), so there is
-            // no detail string to forward.
-            let context = RestResourceContext::resource("memory", "");
-            let _ = send_rpc_error(
-                ws,
-                Some(id),
-                rest_status_to_rpc_error(method, status, None, &context),
-            );
-        }
-    }
-}
-
-async fn handle_memory_entity(
-    ws: &WsConnection,
-    state: &Arc<AppState>,
-    headers: &HeaderMap,
-    identity: Option<&AuthIdentity>,
-    close_on_auth_unavailable: bool,
-    id: String,
-    params: MemoryEntityParams,
-) {
-    let method = octos_core::ui_protocol::methods::MEMORY_ENTITY;
-    let Some(identity) = identity.cloned() else {
-        // Web PR #114 contract: see `close_ws_with_code` doc-comment. Codex
-        // BLOCK (2026-05-13): close before error so it survives writer
-        // backpressure when the channel has just one free slot.
-        if close_on_auth_unavailable {
-            let _ = close_ws_with_code(ws, 1008, "auth_expired");
-        }
-        let _ = send_rpc_error(ws, Some(id), auth_unavailable_error(method));
-        return;
-    };
-    let entity_name = params.name.clone();
-    let result = super::memory_panel::my_memory_entity(
-        State(state.clone()),
-        headers.clone(),
-        Extension(identity),
-        axum_path(params.name),
-    )
-    .await;
-    match result {
-        Ok(axum::Json(entity)) => {
-            // `ok` is dropped — RPC success is carried by the envelope.
-            // Content is capped with an EXPLICIT flag so an over-frame
-            // page degrades to a declared prefix, never the framing
-            // guard's silent in-band preview (codex #1621 r1 P1).
-            let mut content = entity.content;
-            let content_total_bytes = content.len();
-            let cut = cap_index_by_escaped_len(&content, MEMORY_RPC_ENTITY_CONTENT_BUDGET);
-            let content_truncated = cut < content.len();
-            if content_truncated {
-                content.truncate(cut);
-            }
-            send_aux_rpc_result(
-                ws,
-                id,
-                method,
-                json!({
-                    "name": entity.name,
-                    "content": content,
-                    "content_truncated": content_truncated,
-                    "content_total_bytes": content_total_bytes,
-                }),
-            );
-        }
-        Err(status) => {
-            // Entity page miss → `RESOURCE_NOT_FOUND` with the page name
-            // echoed in `data.identifier` (the REST 404 carries no body).
-            let context = RestResourceContext::resource("memory_entity", entity_name);
-            let _ = send_rpc_error(
-                ws,
-                Some(id),
-                rest_status_to_rpc_error(method, status, None, &context),
-            );
-        }
-    }
-}
-
 async fn handle_cron_list(
     ws: &WsConnection,
     state: &Arc<AppState>,
@@ -23283,10 +22496,6 @@ async fn run_standalone_turn(
     // Voice (语音轮): made `mut` so the serve/WS turn/start path can merge
     // transcribed audio media into the prompt text before the agent runs.
     mut prompt: String,
-    // Present only after `voice/admit` returned Speech and the matching,
-    // scoped single-use admission was consumed by `voice/commit_admission`.
-    // This prevents the committed turn from running ASR twice.
-    pre_admitted_voice: Option<PreAdmittedVoice>,
     routed_profile_id: Option<String>,
     turn_state: Arc<TokioMutex<TurnState>>,
     mut interrupt_rx: mpsc::Receiver<()>,
@@ -24499,20 +23708,6 @@ async fn run_standalone_turn(
             turn_id.clone(),
         ),
     );
-    // Rotator: emits `progress/updated{kind:"status_word"}` every 8s
-    // for the SPA ThinkingIndicator to swap a creative word in the
-    // in-flight bubble. The drop guard ensures the spawned task
-    // exits when this function unwinds (success, error, or interrupt).
-    let status_word_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    spawn_status_word_rotator(
-        progress_tx.clone(),
-        &prompt,
-        Arc::clone(&status_word_cancel),
-    );
-    let _status_word_guard = StatusWordRotatorGuard {
-        cancel: Arc::clone(&status_word_cancel),
-    };
-
     let progress_tx_for_result = progress_tx.clone();
     // C1 fix: the supervisor `on_change` callback is now wired earlier
     // (before `enable_persistence`, inside the background-result block) so
@@ -25863,8 +25058,8 @@ async fn run_standalone_turn(
         // right here. The old shape (`continue`, then a post-select check)
         // re-entered the select with the interrupt arm disabled and waited
         // for the NEXT progress event — a silent long tool (`bash sleep …`)
-        // held the terminal back until the ~8 s status_word heartbeat and the
-        // client's 5 s turn/interrupt ack timed out.
+        // held the terminal back indefinitely and the client's 5 s
+        // turn/interrupt ack timed out.
         let event = match crate::turn_loop::next_turn_loop_step(
             &mut interrupt_rx,
             &mut progress_rx,

@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex as StdMutex, OnceLock, Weak};
+use std::sync::{Mutex as StdMutex, Weak};
 use std::time::{Duration, Instant};
 
 use metrics::counter;
@@ -60,7 +60,6 @@ use crate::conversation_outcome::{
     ConversationOutcome, display_incomplete, mark_incomplete, mark_incomplete_usage,
 };
 use crate::cron_tool::CronTool;
-use crate::status_layers::{StatusComposer, UserStatusConfig};
 
 /// #2131: adapts the per-session `ContextManager` to the `RecallTool`'s
 /// ledger read-back trait, so an evicted tool output can be re-materialized by
@@ -86,7 +85,6 @@ pub struct DispatchParams<'a> {
     pub session_key: SessionKey,
     pub reply_channel: &'a str,
     pub reply_chat_id: &'a str,
-    pub status_indicator: Option<Arc<StatusComposer>>,
     pub profile_id: Option<&'a str>,
     /// Owning tenant for upload isolation (#1377 P1.2). Decoupled from
     /// `profile_id` (routing): on a profiled gateway this falls back to the
@@ -103,7 +101,6 @@ struct SpawnParams<'a> {
     channel: &'a str,
     chat_id: &'a str,
     semaphore: Arc<Semaphore>,
-    status_indicator: Option<Arc<StatusComposer>>,
     system_prompt_override: Option<String>,
     sender_user_id: Option<String>,
     /// Resolved DISPATCH profile = the authoritative owning tenant for this
@@ -2332,7 +2329,6 @@ impl ActorRegistry {
             session_key,
             reply_channel,
             reply_chat_id,
-            status_indicator,
             profile_id,
             tenant_id,
             system_prompt_override,
@@ -2355,7 +2351,6 @@ impl ActorRegistry {
                 channel: reply_channel,
                 chat_id: reply_chat_id,
                 semaphore: self.semaphore.clone(),
-                status_indicator: status_indicator.clone(),
                 system_prompt_override: system_prompt_override.clone(),
                 sender_user_id: sender_user_id.clone(),
                 // #1377 P1.2: the ISOLATION tenant (falls back to the gateway
@@ -2425,7 +2420,6 @@ impl ActorRegistry {
                     channel: reply_channel,
                     chat_id: reply_chat_id,
                     semaphore: self.semaphore.clone(),
-                    status_indicator,
                     system_prompt_override: prompt_override.clone(),
                     sender_user_id: uid_override.clone(),
                     // #1377 P1.2: isolation tenant (gateway-profile fallback).
@@ -2800,7 +2794,6 @@ impl ActorFactory {
             channel,
             chat_id,
             semaphore,
-            status_indicator,
             system_prompt_override,
             sender_user_id,
             tenant_id,
@@ -3374,15 +3367,6 @@ impl ActorFactory {
                 (parts.pre_memory, parts.post_memory)
             }
         };
-        // Per-chat soul override (set via /soul in this chat) — appended to
-        // the pre-memory half so it lands in the base prompt's soul slot,
-        // after any profile-wide soul and before the memory segment.
-        if let Some(user_soul) =
-            crate::soul_service::read_soul_for_session(&self.data_dir, &session_key)
-        {
-            system_prompt.push_str("\n\n## Soul\n\n");
-            system_prompt.push_str(&user_soul);
-        }
         // RFC-0 (#1289): tool deferral + the `activate_tools` meta-tool were
         // removed, so there is no deferred-tools teaching block to append.
         let _ = &mut system_prompt;
@@ -3545,9 +3529,6 @@ impl ActorFactory {
         let session_usage = octos_agent::SharedSessionUsage::default();
         let agent = agent.with_session_usage_base(session_usage.clone());
 
-        // Load per-user status configuration
-        let user_status_config = UserStatusConfig::load(&self.data_dir, session_key.base_key());
-
         let actor = SessionActor {
             session_key: session_key.clone(),
             channel: channel.to_string(),
@@ -3559,9 +3540,8 @@ impl ActorFactory {
             hook_context: session_hook_context,
             session_handle,
             out_tx: proxy_tx, // actor sends through proxy, not directly
-            status_indicator,
             sender_user_id: sender_user_id.clone(),
-            user_status_config,
+            show_thinking: false,
             data_dir: self.data_dir.clone(),
             usage_ledger: self.usage_ledger.clone(),
             session_usage,
@@ -3971,10 +3951,9 @@ struct SessionActor {
 
     out_tx: mpsc::Sender<OutboundMessage>,
 
-    status_indicator: Option<Arc<StatusComposer>>,
     sender_user_id: Option<String>,
-    /// Per-user status configuration (greeting, visibility toggles, custom layers).
-    user_status_config: UserStatusConfig,
+    /// Whether reasoning content is prepended to replies (`/thinking on`).
+    show_thinking: bool,
     /// Data directory for persisting user configs.
     data_dir: std::path::PathBuf,
     /// Durable per-profile usage ledger. `None` only in tests or if startup
@@ -5064,10 +5043,6 @@ impl SessionActor {
                 self.handle_queue_command(&parts[1..]).await;
                 true
             }
-            "/status" => {
-                self.handle_status_command(&parts[1..]).await;
-                true
-            }
             "/reset" => {
                 self.handle_reset_command().await;
                 true
@@ -5085,8 +5060,7 @@ impl SessionActor {
                      /sessions — list all sessions\n\
                      /back — return to default session\n\
                      /delete — delete current session\n\
-                     /soul [text] — view or set persona\n\
-                     /status — show agent status\n\
+                     /thinking on|off — show/hide reasoning content\n\
                      /adaptive — view adaptive routing\n\
                      /router — inspect/switch adaptive router (status, set, metrics)\n\
                      /queue — view or change queue mode\n\
@@ -5315,203 +5289,6 @@ impl SessionActor {
             .await;
     }
 
-    /// `/status` — view or configure per-user status layers.
-    ///
-    /// Usage:
-    ///   /status                        — show current config
-    ///   /status greeting <text>        — set greeting template
-    ///   /status provider on|off        — toggle provider layer
-    ///   /status metrics on|off         — toggle metrics layer
-    ///   /status words <w1,w2,...>       — set custom status words
-    ///   /status add <id> <priority> <text> — add custom layer
-    ///   /status remove <id>            — remove custom layer
-    ///   /status reset                  — reset to defaults
-    async fn handle_status_command(&mut self, args: &[&str]) {
-        use crate::status_layers::{CustomLayerDef, LayerPolicy};
-
-        if args.is_empty() {
-            let cfg = &self.user_status_config;
-            let mut lines = vec![
-                "**Status Config**".to_string(),
-                format!(
-                    "Greeting: {}",
-                    cfg.greeting_template.as_deref().unwrap_or("(none)")
-                ),
-                format!("Provider visible: {}", cfg.provider_visible),
-                format!("Metrics visible: {}", cfg.metrics_visible),
-                format!("Greeting duration: {}s", cfg.greeting_duration_secs),
-            ];
-            if let Some(ref words) = cfg.status_words {
-                lines.push(format!("Words: {}", words.join(", ")));
-            }
-            if let Some(ref locale) = cfg.locale {
-                lines.push(format!("Locale: {locale}"));
-            }
-            for custom in &cfg.custom_layers {
-                lines.push(format!(
-                    "Custom layer `{}` (p={}): {}",
-                    custom.id, custom.priority, custom.content
-                ));
-            }
-            self.send_reply(&lines.join("\n")).await;
-            return;
-        }
-
-        match args[0] {
-            "greeting" => {
-                if args.len() < 2 {
-                    self.send_reply("Usage: /status greeting <text>  (or /status greeting off)")
-                        .await;
-                    return;
-                }
-                let text = args[1..].join(" ");
-                if text == "off" || text == "none" {
-                    self.user_status_config.greeting_template = None;
-                    self.send_reply("Greeting disabled.").await;
-                } else {
-                    self.user_status_config.greeting_template = Some(text.clone());
-                    self.send_reply(&format!("Greeting set: {text}")).await;
-                }
-            }
-            "provider" => {
-                let on = match args.get(1).copied() {
-                    Some("on" | "true" | "1") => true,
-                    Some("off" | "false" | "0") => false,
-                    _ => {
-                        self.send_reply("Usage: /status provider on|off").await;
-                        return;
-                    }
-                };
-                self.user_status_config.provider_visible = on;
-                self.send_reply(&format!(
-                    "Provider layer: {}",
-                    if on { "visible" } else { "hidden" }
-                ))
-                .await;
-            }
-            "metrics" => {
-                let on = match args.get(1).copied() {
-                    Some("on" | "true" | "1") => true,
-                    Some("off" | "false" | "0") => false,
-                    _ => {
-                        self.send_reply("Usage: /status metrics on|off").await;
-                        return;
-                    }
-                };
-                self.user_status_config.metrics_visible = on;
-                self.send_reply(&format!(
-                    "Metrics layer: {}",
-                    if on { "visible" } else { "hidden" }
-                ))
-                .await;
-            }
-            "words" => {
-                if args.len() < 2 {
-                    self.send_reply("Usage: /status words word1,word2,...")
-                        .await;
-                    return;
-                }
-                let words: Vec<String> = args[1..]
-                    .join(" ")
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                if words.is_empty() {
-                    self.user_status_config.status_words = None;
-                    self.send_reply("Status words reset to default.").await;
-                } else {
-                    let preview = words.join(", ");
-                    self.user_status_config.status_words = Some(words);
-                    self.send_reply(&format!("Status words: {preview}")).await;
-                }
-            }
-            "add" => {
-                // /status add <id> <priority> <text>
-                if args.len() < 4 {
-                    self.send_reply("Usage: /status add <id> <priority> <text>")
-                        .await;
-                    return;
-                }
-                let id = args[1].to_string();
-                let priority: u8 = match args[2].parse() {
-                    Ok(p) => p,
-                    Err(_) => {
-                        self.send_reply("Priority must be a number 0-255.").await;
-                        return;
-                    }
-                };
-                let content = args[3..].join(" ");
-                // Remove existing layer with same ID
-                self.user_status_config.custom_layers.retain(|l| l.id != id);
-                self.user_status_config.custom_layers.push(CustomLayerDef {
-                    id: id.clone(),
-                    priority,
-                    policy: LayerPolicy::Fixed,
-                    content: content.clone(),
-                });
-                self.send_reply(&format!("Added layer `{id}` (p={priority}): {content}"))
-                    .await;
-            }
-            "remove" => {
-                if args.len() < 2 {
-                    self.send_reply("Usage: /status remove <id>").await;
-                    return;
-                }
-                let id = args[1];
-                let before = self.user_status_config.custom_layers.len();
-                self.user_status_config.custom_layers.retain(|l| l.id != id);
-                if self.user_status_config.custom_layers.len() < before {
-                    self.send_reply(&format!("Removed layer `{id}`.")).await;
-                } else {
-                    self.send_reply(&format!("No custom layer `{id}` found."))
-                        .await;
-                }
-            }
-            "duration" => {
-                if let Some(secs) = args.get(1).and_then(|s| s.parse::<u64>().ok()) {
-                    self.user_status_config.greeting_duration_secs = secs;
-                    self.send_reply(&format!("Greeting duration: {secs}s"))
-                        .await;
-                } else {
-                    self.send_reply("Usage: /status duration <seconds>").await;
-                    return;
-                }
-            }
-            "locale" => {
-                if let Some(loc) = args.get(1) {
-                    if *loc == "auto" || *loc == "off" {
-                        self.user_status_config.locale = None;
-                        self.send_reply("Locale: auto-detect").await;
-                    } else {
-                        self.user_status_config.locale = Some(loc.to_string());
-                        self.send_reply(&format!("Locale: {loc}")).await;
-                    }
-                } else {
-                    self.send_reply("Usage: /status locale <en|zh|auto>").await;
-                    return;
-                }
-            }
-            "reset" => {
-                self.user_status_config = UserStatusConfig::default();
-                self.send_reply("Status config reset to defaults.").await;
-            }
-            other => {
-                self.send_reply(&format!(
-                    "Unknown status subcommand: {other}\n\
-                    Usage: /status [greeting|provider|metrics|words|add|remove|duration|locale|reset]"
-                )).await;
-                return;
-            }
-        }
-
-        // Persist changes
-        let base_key = self.session_key.base_key();
-        if let Err(e) = self.user_status_config.save(&self.data_dir, base_key) {
-            warn!(error = %e, "failed to save user status config");
-        }
-    }
-
     /// `/reset` — reset session state for test isolation.
     ///
     /// Resets queue mode to default (collect) and clears conversation
@@ -5542,21 +5319,17 @@ impl SessionActor {
     async fn handle_thinking_command(&mut self, args: &[&str]) {
         match args.first().copied() {
             Some("on" | "true" | "1") => {
-                self.user_status_config.show_thinking = true;
+                self.show_thinking = true;
                 self.send_reply("💭 Thinking display: **on** — reasoning content will be shown.")
                     .await;
             }
             Some("off" | "false" | "0") => {
-                self.user_status_config.show_thinking = false;
+                self.show_thinking = false;
                 self.send_reply("💭 Thinking display: **off** — reasoning content will be hidden.")
                     .await;
             }
             None => {
-                let state = if self.user_status_config.show_thinking {
-                    "on"
-                } else {
-                    "off"
-                };
+                let state = if self.show_thinking { "on" } else { "off" };
                 self.send_reply(&format!(
                     "💭 Thinking display: **{state}**\n\nUsage: `/thinking on` or `/thinking off`"
                 ))
@@ -5565,10 +5338,6 @@ impl SessionActor {
             _ => {
                 self.send_reply("Usage: `/thinking on|off`").await;
             }
-        }
-        let base_key = self.session_key.base_key();
-        if let Err(e) = self.user_status_config.save(&self.data_dir, base_key) {
-            warn!(error = %e, "failed to save user status config");
         }
     }
 
@@ -6255,49 +6024,7 @@ impl SessionActor {
         // Token tracker for status indicator
         let token_tracker = Arc::new(TokenTracker::new());
 
-        // Matrix app-reply hook: tools tagged "app_reply" produce GPU cards
-        // that replace the agent's text reply on capable clients. When any
-        // such tool is registered AND we're on matrix, suppress the persistent
-        // status message and final streamed text after an app-reply succeeds.
-        let app_reply_tools: Arc<HashSet<String>> = Arc::new(
-            self.agent
-                .tool_registry()
-                .names_with_tag("app_reply")
-                .into_iter()
-                .collect(),
-        );
-        let channel_is_matrix = self
-            .status_indicator
-            .as_ref()
-            .map(|si| si.channel().name() == "matrix")
-            .unwrap_or(false);
-        let persist_visible_status = !channel_is_matrix || app_reply_tools.is_empty();
-
-        // Start status indicator
-        let status_handle = self.status_indicator.as_ref().map(|si| {
-            let voice_transcript = inbound
-                .metadata
-                .get("voice_transcript")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            // PR F (M8.10) — codex review P1 #1: bind the originating
-            // turn's `client_message_id` to the status composer so its
-            // `edit_message_bound` calls and initial `send_with_id`
-            // metadata route to THIS turn's bubble, even when sticky
-            // has rotated under rapid-fire concurrent writes.
-            si.start_with_thread(
-                self.chat_id.clone(),
-                status_prompt,
-                Arc::clone(&token_tracker),
-                voice_transcript,
-                &self.user_status_config,
-                self.sender_user_id.clone(),
-                client_message_id.clone(),
-                persist_visible_status,
-            )
-        });
-
-        // Set up progressive streaming reporter.
+        // Set up streaming reporter.
         //
         // M8.10 PR #2: bind the user message's `client_message_id` to the
         // reporter so every emitted SSE payload (token, tool_start, ...)
@@ -6321,51 +6048,11 @@ impl SessionActor {
             })));
         }
 
-        // Drop the original stream_tx — the reporter and callback each hold their
-        // own clones.  If we keep this alive, the stream forwarder will never see
-        // channel-closed and the await at the end of this function deadlocks.
+        // Drop the original stream_tx — the reporter and callback each hold
+        // their own clones. The stream receiver is dropped with them: with the
+        // status-indicator surface gone there is no channel to stream-edit.
         drop(stream_tx);
-
-        // Set provider layer on the status composer
-        if let Some(ref handle) = status_handle {
-            handle.set_provider(self.agent.provider_name(), self.agent.model_id());
-        }
-
-        // Spawn stream forwarder task (only for channels that support editing)
-        let stream_forwarder = if let Some(ref si) = self.status_indicator {
-            let channel = Arc::clone(si.channel());
-            if channel.supports_edit() {
-                let cancel_status = status_handle.as_ref().map(|h| Arc::clone(&h.cancelled));
-                let status_msg_id = status_handle.as_ref().map(|h| Arc::clone(&h.status_msg_id));
-                let op_updater = status_handle.as_ref().map(|h| h.operation_updater());
-                Some(tokio::spawn(crate::stream_reporter::run_stream_forwarder(
-                    stream_rx,
-                    channel,
-                    self.chat_id.clone(),
-                    cancel_status,
-                    status_msg_id,
-                    Arc::clone(&self.active_sessions),
-                    self.session_key.clone(),
-                    self.sender_user_id.clone(),
-                    op_updater,
-                    // #649 follow-up (rapid-fire): forward THIS turn's
-                    // cmid so the forwarder stamps every `send_with_id` /
-                    // `edit_message` outbound with it. Concurrent overflow
-                    // turns each get their OWN forwarder + their OWN
-                    // cmid — under rapid-fire 5 turns that prevents the
-                    // shared sticky map from collapsing them onto one
-                    // bubble.
-                    client_message_id.clone(),
-                    Arc::clone(&app_reply_tools),
-                )))
-            } else {
-                drop(stream_rx);
-                None
-            }
-        } else {
-            drop(stream_rx);
-            None
-        };
+        drop(stream_rx);
 
         // ── Spawn agent call as a separate task (Arc<Agent>, no &mut self) ──
 
@@ -6461,9 +6148,6 @@ impl SessionActor {
                             self.agent.set_reporter(Arc::new(octos_agent::SilentReporter));
                             if let Some(ref router) = self.adaptive_router {
                                 router.set_status_callback(None);
-                            }
-                            if let Some(handle) = status_handle {
-                                handle.stop().await;
                             }
                             return;
                         }
@@ -6573,9 +6257,6 @@ impl SessionActor {
                             if let Some(ref router) = self.adaptive_router {
                                 router.set_status_callback(None);
                             }
-                            if let Some(handle) = status_handle {
-                                handle.stop().await;
-                            }
                             return;
                         }
                     }
@@ -6668,26 +6349,6 @@ impl SessionActor {
         // Clear adaptive router status callback (stream_tx is being dropped)
         if let Some(ref router) = self.adaptive_router {
             router.set_status_callback(None);
-        }
-
-        // Wait for stream forwarder — but NOT for API channel.
-        // For API channel, the forwarder blocks on rx.recv() which requires
-        // _completion to close the SSE sender. Since _completion is sent after
-        // this function's match block, awaiting the forwarder here would deadlock.
-        let stream_result = if self.channel == "api" {
-            // Drop the forwarder handle — it will finish on its own when _completion
-            // arrives and closes the SSE sender.
-            drop(stream_forwarder);
-            None
-        } else if let Some(handle) = stream_forwarder {
-            (handle.await).ok()
-        } else {
-            None
-        };
-
-        // Stop status indicator
-        if let Some(handle) = status_handle {
-            handle.stop().await;
         }
 
         // Handle agent result — save messages (skipping user msg, already saved)
@@ -7020,7 +6681,7 @@ impl SessionActor {
                     };
 
                     // Prepend thinking content when show_thinking is enabled
-                    let display_content = if self.user_status_config.show_thinking {
+                    let display_content = if self.show_thinking {
                         let prefix =
                             format_thinking_prefix(conv_response.reasoning_content.as_deref());
                         format!("{prefix}{display_content}")
@@ -7064,40 +6725,7 @@ impl SessionActor {
                         display_content
                     };
 
-                    // Skip streaming edit when session is inactive — let the
-                    // reply go through proxy → pending buffer for later flush.
-                    let session_active = self.is_active().await;
-                    // Review finding #6: when an app-card tool already delivered
-                    // the reply (suppression fired in the stream forwarder),
-                    // treat the turn as already replied so we neither finish a
-                    // streamed bubble nor send conv_response.content separately.
-                    let app_reply_suppressed = !incomplete
-                        && stream_result
-                            .as_ref()
-                            .is_some_and(|sr| sr.suppressed_by_app_reply);
-                    let streamed = if app_reply_suppressed {
-                        true
-                    } else if session_active {
-                        if let Some(ref sr) = stream_result {
-                            if let Some(ref mid) = sr.message_id {
-                                if let Some(ref si) = self.status_indicator {
-                                    let _ = si
-                                        .channel()
-                                        .finish_stream(&self.chat_id, mid, &display_content)
-                                        .await;
-                                }
-                                true
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    };
-
-                    if !streamed {
+                    {
                         // M8.10 PR #2: tag the assistant reply with the
                         // turn's thread_id so the API channel can stamp
                         // it onto the SSE `replace` event it emits.
@@ -7254,16 +6882,14 @@ impl SessionActor {
         let content = msg.content.clone();
         let overflow_reply_to = msg.message_id.clone();
         let session_timeout = self.session_timeout;
-        let status_indicator = self.status_indicator.clone();
         let sender_user_id = self.sender_user_id.clone();
-        let user_status_config = self.user_status_config.clone();
+        let show_thinking = self.show_thinking;
         let pre_primary_history_vec = pre_primary_history.to_vec();
         let pre_primary_assistant_count = pre_primary_history_vec
             .iter()
             .filter(|m| matches!(m.role, MessageRole::Assistant))
             .count();
         let max_history = self.max_history.load(Ordering::Acquire);
-        let active_sessions = self.active_sessions.clone();
         let overflow_cancelled = Arc::clone(&self.overflow_cancelled);
         let user_workspace = self.user_workspace.clone();
         let data_dir = self.data_dir.clone();
@@ -7423,39 +7049,6 @@ impl SessionActor {
             };
             let tracker = Arc::new(TokenTracker::new());
 
-            // Matrix app-reply hook (see process_inbound for rationale).
-            let app_reply_tools: Arc<HashSet<String>> = Arc::new(
-                agent
-                    .tool_registry()
-                    .names_with_tag("app_reply")
-                    .into_iter()
-                    .collect(),
-            );
-            let channel_is_matrix = status_indicator
-                .as_ref()
-                .map(|si| si.channel().name() == "matrix")
-                .unwrap_or(false);
-            let persist_visible_status = !channel_is_matrix || app_reply_tools.is_empty();
-
-            // ── Per-overflow status indicator (own "✦ Thinking..." message) ──
-            //
-            // PR F (M8.10): bind the overflow turn's cmid to the status
-            // composer so its wire events route to the OVERFLOW
-            // bubble, not whatever sticky/primary turn the chat is
-            // currently on.
-            let status_handle = status_indicator.as_ref().map(|si| {
-                si.start_with_thread(
-                    chat_id.clone(),
-                    &content,
-                    Arc::clone(&tracker),
-                    None,
-                    &user_status_config,
-                    sender_user_id.clone(),
-                    overflow_client_message_id.clone(),
-                    persist_visible_status,
-                )
-            });
-
             // ── Per-overflow stream reporter (own chat bubble) ──────────────
             //
             // M8.10 PR #2: tag every SSE payload emitted by this reporter
@@ -7469,35 +7062,9 @@ impl SessionActor {
                     .with_thread_id(overflow_client_message_id.clone()),
             );
 
-            // Spawn stream forwarder — edits its OWN message, not the primary's
-            let stream_forwarder = if let Some(ref si) = status_indicator {
-                let fwd_channel = Arc::clone(si.channel());
-                let cancel_status = status_handle.as_ref().map(|h| Arc::clone(&h.cancelled));
-                let status_msg_id = status_handle.as_ref().map(|h| Arc::clone(&h.status_msg_id));
-                let op_updater = status_handle.as_ref().map(|h| h.operation_updater());
-                Some(tokio::spawn(crate::stream_reporter::run_stream_forwarder(
-                    stream_rx,
-                    fwd_channel,
-                    chat_id.clone(),
-                    cancel_status,
-                    status_msg_id,
-                    active_sessions.clone(),
-                    session_key.clone(),
-                    sender_user_id.clone(),
-                    op_updater,
-                    // #649 follow-up (rapid-fire): each overflow turn
-                    // captures its OWN cmid up front so its stream
-                    // forwarder stamps every outbound with it. Without
-                    // this, 5 concurrent rapid-fire overflow forwarders
-                    // fight over the shared sticky map and collapse onto
-                    // the bubble of whichever turn arrived last.
-                    overflow_client_message_id.clone(),
-                    Arc::clone(&app_reply_tools),
-                )))
-            } else {
-                drop(stream_rx);
-                None
-            };
+            // No status-indicator surface — drop the stream receiver so
+            // reporter events are discarded instead of pooled.
+            drop(stream_rx);
 
             // ── Run agent with task-local reporter override ─────────────────
             //
@@ -7529,18 +7096,6 @@ impl SessionActor {
                 .as_ref()
                 .is_ok_and(ConversationOutcome::is_incomplete);
             drop(overflow_reporter);
-
-            // Wait for stream forwarder to finish flushing
-            let stream_result = if let Some(handle) = stream_forwarder {
-                handle.await.ok()
-            } else {
-                None
-            };
-
-            // Stop status indicator (deletes the "✦ Thinking..." message)
-            if let Some(handle) = status_handle {
-                handle.stop().await;
-            }
 
             // Codex #1632 r2 P2: account BEFORE any response-suppression
             // exit (slash-command cancellation, pending-approval refusal)
@@ -7764,68 +7319,18 @@ impl SessionActor {
 
                     let reply = display_incomplete(strip_think_tags(&final_content), incomplete);
                     // Prepend thinking content when show_thinking is enabled
-                    let reply = if user_status_config.show_thinking {
+                    let reply = if show_thinking {
                         let prefix =
                             format_thinking_prefix(conv_response.reasoning_content.as_deref());
                         format!("{prefix}{reply}")
                     } else {
                         reply
                     };
-                    // Check session activity — if inactive, skip streaming edit
-                    // so the reply goes through proxy → pending buffer.
-                    let session_active = {
-                        let my_topic = session_key.topic().unwrap_or("");
-                        let base_key = session_key.base_key();
-                        let active_topic = active_sessions
-                            .read()
-                            .await
-                            .get_active_topic(base_key)
-                            .to_string();
-                        my_topic == active_topic
-                    };
-                    let already_streamed = session_active
-                        && stream_result
-                            .as_ref()
-                            .is_some_and(|sr| sr.message_id.is_some());
-                    // Update the existing overflow bubble, never send the
-                    // partial body again as a second non-API message. API
-                    // watchers still get the one committed session_result
-                    // below, even if the primary already closed its stream.
-                    if incomplete && already_streamed {
-                        if let (Some(si), Some(mid)) = (
-                            status_indicator.as_ref(),
-                            stream_result.as_ref().and_then(|sr| sr.message_id.as_ref()),
-                        ) {
-                            let _ = si.channel().finish_stream(&chat_id, mid, &reply).await;
-                        }
-                    }
-                    // Review finding #6: an app-card tool already delivered the
-                    // reply — don't also emit conv_response.content as a text
-                    // bubble on this overflow turn.
-                    let app_reply_suppressed = !incomplete
-                        && stream_result
-                            .as_ref()
-                            .is_some_and(|sr| sr.suppressed_by_app_reply);
-
-                    // FA-12 defect C: `already_streamed` is an unreliable
-                    // "content already delivered" signal for ApiChannel —
-                    // its `send_with_id` always returns `Some("sse-{chat_id}")`
-                    // so the first stream_forwarder flush marks the overflow
-                    // as "streamed", even if subsequent chunks silently no-op
-                    // because `pending[chat_id]` was removed by the primary
-                    // turn's `_completion`. Decouple the durable metadata
-                    // emission from the user-facing content rendering: when
-                    // we have a committed seq, always emit `_session_result`
-                    // metadata so `ApiChannel::send` routes via
-                    // `broadcast_session_event` → watchers (the durable
-                    // fanout that survives primary-turn completion). When
-                    // the channel already rendered the content inline, emit
-                    // with empty body so non-API channels don't produce a
-                    // duplicate bubble and the web side doesn't double-render.
-                    let have_durable_metadata = committed_seq.is_some();
-                    let should_emit = !reply.trim().is_empty()
-                        && !app_reply_suppressed
-                        && (have_durable_metadata || !already_streamed);
+                    // Emit whenever there is reply text. With a committed seq the
+                    // `_session_result` metadata below routes the durable fanout
+                    // through ApiChannel watchers; without one the text bubble
+                    // itself is the delivery.
+                    let should_emit = !reply.trim().is_empty();
 
                     if should_emit {
                         let mut metadata = serde_json::Map::new();
@@ -7856,11 +7361,7 @@ impl SessionActor {
                                 mark_incomplete_usage(result, &conv_response.token_usage);
                             }
                         }
-                        let outbound_content = if already_streamed {
-                            String::new()
-                        } else {
-                            reply
-                        };
+                        let outbound_content = reply;
                         // M8.10 PR #2: tag the overflow assistant reply
                         // with the overflow user's cmid so any wire events
                         // ApiChannel emits (replace, file, …) carry the
@@ -8007,46 +7508,7 @@ impl SessionActor {
         // Token tracker for status indicator
         let token_tracker = Arc::new(TokenTracker::new());
 
-        // Matrix app-reply hook (see process_inbound_speculative for rationale).
-        let app_reply_tools: Arc<HashSet<String>> = Arc::new(
-            self.agent
-                .tool_registry()
-                .names_with_tag("app_reply")
-                .into_iter()
-                .collect(),
-        );
-        let channel_is_matrix = self
-            .status_indicator
-            .as_ref()
-            .map(|si| si.channel().name() == "matrix")
-            .unwrap_or(false);
-        let persist_visible_status = !channel_is_matrix || app_reply_tools.is_empty();
-
-        // Start status indicator
-        //
-        // PR F (M8.10) — codex review P1 #1: bind the inbound's cmid
-        // to the status composer so its wire events route to the
-        // correct turn under rapid-fire concurrent writes.
-        let status_handle = self.status_indicator.as_ref().map(|si| {
-            let voice_transcript = inbound
-                .metadata
-                .get("voice_transcript")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-
-            si.start_with_thread(
-                self.chat_id.clone(),
-                status_prompt,
-                Arc::clone(&token_tracker),
-                voice_transcript,
-                &self.user_status_config,
-                self.sender_user_id.clone(),
-                client_message_id.clone(),
-                persist_visible_status,
-            )
-        });
-
-        // Set up progressive streaming reporter if we have a channel.
+        // Set up streaming reporter.
         //
         // M8.10 follow-up (#636): bind the inbound's `client_message_id`
         // to the reporter (matching the speculative-overflow path at
@@ -8072,48 +7534,10 @@ impl SessionActor {
         }
 
         // Drop the original stream_tx — clones live in reporter + callback.
-        // Without this, the stream forwarder await deadlocks.
+        // The stream receiver is dropped with them: with the status-indicator
+        // surface gone there is no channel to stream-edit.
         drop(stream_tx);
-
-        // Set provider layer on the status composer
-        if let Some(ref handle) = status_handle {
-            handle.set_provider(self.agent.provider_name(), self.agent.model_id());
-        }
-
-        // Spawn stream forwarder task — edits a channel message as text arrives.
-        // Only for channels that support message editing/streaming (Discord,
-        // Telegram, Feishu, WeCom bot). Channels without edit support (Slack,
-        // etc.) skip streaming to avoid sending duplicate messages.
-        let stream_forwarder = if let Some(ref si) = self.status_indicator {
-            let channel = Arc::clone(si.channel());
-            if channel.supports_edit() {
-                let cancel_status = status_handle.as_ref().map(|h| Arc::clone(&h.cancelled));
-                let status_msg_id = status_handle.as_ref().map(|h| Arc::clone(&h.status_msg_id));
-                let op_updater = status_handle.as_ref().map(|h| h.operation_updater());
-                Some(tokio::spawn(crate::stream_reporter::run_stream_forwarder(
-                    stream_rx,
-                    channel,
-                    self.chat_id.clone(),
-                    cancel_status,
-                    status_msg_id,
-                    Arc::clone(&self.active_sessions),
-                    self.session_key.clone(),
-                    self.sender_user_id.clone(),
-                    op_updater,
-                    // #649 follow-up (rapid-fire): forward this turn's
-                    // cmid so streaming chunks stamp it on the wire.
-                    client_message_id.clone(),
-                    Arc::clone(&app_reply_tools),
-                )))
-            } else {
-                drop(stream_rx);
-                None
-            }
-        } else {
-            // No channel available — drop the receiver so events are discarded
-            drop(stream_rx);
-            None
-        };
+        drop(stream_rx);
 
         // Process through agent (potentially long LLM call).
         //
@@ -8237,18 +7661,6 @@ impl SessionActor {
         // Clear adaptive router status callback
         if let Some(ref router) = self.adaptive_router {
             router.set_status_callback(None);
-        }
-
-        // Wait for stream forwarder to complete and get its result
-        let stream_result = if let Some(handle) = stream_forwarder {
-            (handle.await).ok()
-        } else {
-            None
-        };
-
-        // Stop status indicator (if stream forwarder didn't already cancel it)
-        if let Some(handle) = status_handle {
-            handle.stop().await;
         }
 
         // Capture annotation data before match moves result
@@ -8513,7 +7925,7 @@ impl SessionActor {
                     };
 
                     // Prepend thinking content when show_thinking is enabled
-                    let display_content = if self.user_status_config.show_thinking {
+                    let display_content = if self.show_thinking {
                         let prefix =
                             format_thinking_prefix(conv_response.reasoning_content.as_deref());
                         format!("{prefix}{display_content}")
@@ -8535,31 +7947,7 @@ impl SessionActor {
                         display_content
                     };
 
-                    // If stream forwarder already sent a message AND this session
-                    // is active, do a final edit. When inactive, skip the edit so
-                    // the reply goes through the proxy → pending buffer path.
-                    let session_active = self.is_active().await;
-                    let streamed = if session_active {
-                        if let Some(ref sr) = stream_result {
-                            if let Some(ref mid) = sr.message_id {
-                                if let Some(ref si) = self.status_indicator {
-                                    let _ = si
-                                        .channel()
-                                        .finish_stream(&self.chat_id, mid, &display_content)
-                                        .await;
-                                }
-                                true
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    };
-
-                    if !streamed {
+                    {
                         // M8.10 PR #2: tag the assistant reply with the
                         // turn's thread_id so the API channel can stamp
                         // it onto the SSE `replace` event it emits.

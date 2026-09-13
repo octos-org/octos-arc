@@ -783,9 +783,6 @@ impl ServeCommand {
             default_network_denied: default_network_denied_flag,
             llm_compaction: self.llm_compaction,
             allow_admin_shell: config.allow_admin_shell,
-            content_catalog_mgr: Some(Arc::new(
-                crate::content_catalog::ContentCatalogManager::new(profile_store.clone()),
-            )),
             // Harness JSONL event sink — wired from the
             // `OCTOS_HARNESS_EVENT_SINK` env var when the caller wants
             // review decisions and swarm dispatch events persisted (see

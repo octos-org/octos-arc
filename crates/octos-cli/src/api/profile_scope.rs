@@ -3,16 +3,11 @@
 //! machinery was removed with the multi-tenant dashboard; authorization is
 //! local-trust (all local callers are admin-equivalent).
 
-use axum::Extension;
-use axum::Json;
-use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::AppState;
-use super::handlers::response_path_for_profile_file;
 use super::router::AuthIdentity;
 
 pub const ADMIN_PROFILE_ID: &str = "admin";
@@ -197,19 +192,6 @@ pub(crate) fn is_authorized_for_profile(
     }
 }
 
-/// Resolve the full profile for "my" endpoints.
-fn resolve_my_profile(
-    identity: &AuthIdentity,
-    ps: &crate::profiles::ProfileStore,
-    state: &AppState,
-    headers: &HeaderMap,
-) -> Result<crate::profiles::UserProfile, StatusCode> {
-    let id = resolve_my_profile_id(identity, ps, state, headers)?;
-    ps.get(&id)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)
-}
-
 /// Ensure an admin profile exists in the store, creating one if needed.
 fn ensure_admin_profile(ps: &crate::profiles::ProfileStore) -> Result<(), StatusCode> {
     if let Ok(Some(_)) = ps.get(ADMIN_PROFILE_ID) {
@@ -272,176 +254,6 @@ pub(crate) fn resolve_my_profile_id(
         }
         AuthIdentity::User { id, .. } => Ok(id.clone()),
     }
-}
-
-// Helper for `ui_protocol_transport::handle_content_list` (M12 Phase D-5).
-// The REST route `GET /api/my/content` was retired in this milestone; the
-// function survives as a private helper that the WS dispatcher calls
-// directly to back the `content/list` RPC method. Downgraded to
-// `pub(super)` so the public API surface no longer exposes a fn whose
-// route was removed.
-/// Helper backing the WS `content/list` RPC method (formerly `GET /api/my/content`).
-pub(super) async fn my_content(
-    State(state): State<Arc<AppState>>,
-    headers: axum::http::HeaderMap,
-    axum::Extension(identity): axum::Extension<AuthIdentity>,
-    axum::extract::Query(query): axum::extract::Query<crate::content_catalog::ContentQuery>,
-) -> Result<Json<crate::content_catalog::ContentQueryResult>, (StatusCode, String)> {
-    let ps = state
-        .profile_store
-        .as_ref()
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "not configured".into()))?;
-    let mgr = state.content_catalog_mgr.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "content catalog not configured".into(),
-    ))?;
-    // Use X-Profile-Id header (from Caddy proxy) if available, otherwise resolve from identity.
-    //
-    // Codex P1 fix (PR #958 review): authorize the X-Profile-Id branch the
-    // same way the host-scoped path does. Without `is_authorized_for_profile`
-    // a bearer-authenticated user could pass any tenant id and read its
-    // catalog, since the bearer auth completes before the middleware's
-    // loopback-only X-Profile-Id check runs. The new check matches the
-    // semantics enforced by `resolve_my_profile_id`'s host-scoped branch:
-    // admin can target any tenant, users can target their own profile or
-    // sub-accounts they own. Cross-tenant access returns 403.
-    let profile = if let Some(pid) = headers.get("x-profile-id").and_then(|v| v.to_str().ok()) {
-        if !is_authorized_for_profile(&state, &identity, pid) {
-            tracing::warn!(
-                identity = ?identity,
-                requested_profile = %pid,
-                "GET /api/my/content X-Profile-Id denied — identity not authorized for the profile"
-            );
-            return Err((StatusCode::FORBIDDEN, "forbidden".into()));
-        }
-        ps.get(pid)
-            .map_err(|_| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "profile store error".into(),
-                )
-            })?
-            .ok_or((StatusCode::NOT_FOUND, format!("profile '{pid}' not found")))?
-    } else {
-        resolve_my_profile(&identity, ps, &state, &headers)
-            .map_err(|s| (s, "profile not found".into()))?
-    };
-    let data_dir = ps.resolve_data_dir(&profile);
-
-    let catalog = mgr
-        .get_catalog_with_scan(&profile.id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let cat = catalog.read().await;
-    let result = cat.query(&query);
-    let entries = result
-        .entries
-        .into_iter()
-        .filter_map(|mut entry| {
-            let handle =
-                response_path_for_profile_file(&data_dir, std::path::Path::new(&entry.path))?;
-            entry.path = handle;
-            entry.thumbnail_path = entry
-                .thumbnail_path
-                .as_ref()
-                .map(|_| "available".to_string());
-            Some(entry)
-        })
-        .collect();
-    Ok(Json(crate::content_catalog::ContentQueryResult {
-        entries,
-        total: result.total,
-    }))
-}
-
-// Helper for `ui_protocol_transport::handle_content_delete` (M12 Phase D-5).
-// The REST route `DELETE /api/my/content/{id}` was retired in this
-// milestone; the function survives as a private helper backing the
-// `content/delete` WS RPC method.
-/// Helper backing the WS `content/delete` RPC method (formerly `DELETE /api/my/content/{id}`).
-pub(super) async fn delete_my_content(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    axum::Extension(identity): axum::Extension<AuthIdentity>,
-    Path(id): Path<String>,
-) -> Result<Json<ActionResponse>, (StatusCode, String)> {
-    let ps = state
-        .profile_store
-        .as_ref()
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "not configured".into()))?;
-    let mgr = state.content_catalog_mgr.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "content catalog not configured".into(),
-    ))?;
-    let profile = resolve_my_profile(&identity, ps, &state, &headers)
-        .map_err(|s| (s, "profile not found".into()))?;
-
-    let catalog = mgr
-        .get_catalog(&profile.id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let mut cat = catalog.write().await;
-    let deleted = cat
-        .delete(&id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    Ok(Json(ActionResponse {
-        ok: deleted,
-        message: if deleted {
-            Some("Content deleted.".into())
-        } else {
-            Some("Content not found.".into())
-        },
-    }))
-}
-
-// Helper for `ui_protocol_transport::handle_content_bulk_delete` (M12 Phase D-5).
-// The REST route `POST /api/my/content/bulk-delete` was retired in this
-// milestone; the function survives as a private helper backing the
-// `content/bulk_delete` WS RPC method.
-/// Helper backing the WS `content/bulk_delete` RPC method (formerly `POST /api/my/content/bulk-delete`).
-pub(super) async fn bulk_delete_my_content(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    axum::Extension(identity): axum::Extension<AuthIdentity>,
-    Json(req): Json<BulkDeleteRequest>,
-) -> Result<Json<ActionResponse>, (StatusCode, String)> {
-    let ps = state
-        .profile_store
-        .as_ref()
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "not configured".into()))?;
-    let mgr = state.content_catalog_mgr.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "content catalog not configured".into(),
-    ))?;
-    let profile = resolve_my_profile(&identity, ps, &state, &headers)
-        .map_err(|s| (s, "profile not found".into()))?;
-
-    let catalog = mgr
-        .get_catalog(&profile.id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let mut cat = catalog.write().await;
-    let deleted = cat
-        .bulk_delete(&req.ids)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    Ok(Json(ActionResponse {
-        ok: true,
-        message: Some(format!("{deleted} item(s) deleted.")),
-    }))
-}
-
-#[derive(Deserialize)]
-pub(super) struct BulkDeleteRequest {
-    pub ids: Vec<String>,
-}
-
-#[derive(Serialize)]
-pub struct ActionResponse {
-    pub ok: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
 }
 
 /// Truncate a string to `max_len` chars (used by panel surfaces).
