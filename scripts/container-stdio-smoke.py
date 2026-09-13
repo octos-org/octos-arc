@@ -167,9 +167,6 @@ def main() -> int:
         "stderr_tail": stderr,
         "event_methods": [method for method, _ in events],
     }
-    Path("/src/b5-container-smoke.log").write_text(
-        json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
     print(json.dumps(report, ensure_ascii=False, indent=2))
     if not container_marker:
         raise SystemExit("B5 failed: /.dockerenv was not present")

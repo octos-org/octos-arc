@@ -80,7 +80,8 @@ jobs:
             -v "$GITHUB_WORKSPACE":/src \
             -w /src \
             python:3.13-slim-trixie \
-            python3 /src/scripts/container-stdio-smoke.py
+            python3 /src/scripts/container-stdio-smoke.py \
+            | tee b5-container-smoke.log
 
       - name: Upload B5 container evidence
         if: always()
