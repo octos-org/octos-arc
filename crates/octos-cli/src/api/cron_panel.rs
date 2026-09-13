@@ -92,17 +92,6 @@ fn cron_path_for(data_dir: &Path) -> PathBuf {
     data_dir.join("cron.json")
 }
 
-/// Whether the profile's gateway CHILD PROCESS is currently running.
-/// That process's `CronService` owns `cron.json` from another address
-/// space we cannot coordinate with — the toggle refuses while it runs.
-/// `None` process manager (solo serve, tests) means no child exists.
-async fn gateway_running(state: &AppState, profile_id: &str) -> bool {
-    match state.process_manager.as_ref() {
-        Some(pm) => pm.status(profile_id).await.running,
-        None => false,
-    }
-}
-
 /// The serve-process-local `CronService` for this profile, if one is
 /// live (enabled top-level profile with an LLM gets one on its
 /// `ProfileRuntime`). Mutations MUST route through it when present —
@@ -142,7 +131,9 @@ pub async fn my_cron(
         .ok_or(StatusCode::NOT_FOUND)?;
     let cron_path = cron_path_for(&ps.resolve_data_dir(&profile));
 
-    let running = gateway_running(&state, &profile_id).await;
+    // No gateway children exist anymore (the process supervisor was
+    // removed with the fleet surface) — `gateway_running` is always false.
+    let running = false;
     // The FILE is the freshest honest view: every owner persists
     // synchronously after each mutation, while the parent service's
     // memory can predate a gateway child's whole lifetime.
@@ -318,9 +309,6 @@ pub async fn set_my_cron_enabled(
     // A spawned child owns cron.json from another process; we can
     // neither call into it nor safely edit under it — refuse and let
     // the SPA route the user through the stop/start controls.
-    if gateway_running(&state, &profile_id).await {
-        return Err(err(StatusCode::CONFLICT, "gateway_running"));
-    }
     let outcome = if let Some(svc) = live_cron_service(&state, &profile_id) {
         toggle_via_service(&svc, &job_id, body.enabled)
     } else {

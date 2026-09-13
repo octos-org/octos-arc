@@ -163,11 +163,11 @@ mod serve_broken_pipe {
     ///
     /// REAL broken-pipe shutdown: serve's stdout is a pipe whose read end we
     /// hold; after the startup banner and SIGINT we CLOSE the read end, so
-    /// every subsequent shutdown println ("Shutting down server...", "Stopping
-    /// gateways...") writes into EPIPE. The console helper must swallow it,
-    /// `stop_all` must still run (proof: the tracing rolling log under
-    /// data_dir/logs contains "stopping all gateway child processes"), and
-    /// the process must exit 0 — not SIGABRT/SIGPIPE.
+    /// the shutdown println ("Shutting down server...") writes into EPIPE.
+    /// The console helper must swallow it and the process must exit 0 —
+    /// not SIGABRT/SIGPIPE. (The old "stopping gateways" tracing marker is
+    /// gone with the gateway-process supervisor; graceful shutdown itself
+    /// is the cleanup this test observes via a clean exit 0.)
     #[test]
     fn serve_shutdown_broken_pipe_cleanup_marker_observed() {
         let _guard = serial_guard();
@@ -232,23 +232,6 @@ mod serve_broken_pipe {
 
         let status = child.wait().expect("failed to wait for serve");
         let stderr_log = std::fs::read_to_string(&err_path).unwrap_or_default();
-        // Cleanup evidence must come from a NON-stdout sink: serve's rolling
-        // tracing log under data_dir/logs (created by init_tracing).
-        // #37 — POLL the log instead of a single immediate read: on a slow
-        // CI runner the tracing writer's flush trails process exit (local
-        // 11s vs CI 431s for the same tip), so the one-shot read raced the
-        // marker and failed. Poll up to 60s in 200ms steps (300 attempts);
-        // fall through to the original assert with the final content.
-        let log_dir = data_dir.join("logs");
-        let marker_deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-        let mut tracing_log = read_dir_logs_concat(&log_dir);
-        while !(tracing_log.contains("stopping all gateway child processes")
-            || tracing_log.contains("gateways stopped"))
-            && std::time::Instant::now() < marker_deadline
-        {
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            tracing_log = read_dir_logs_concat(&log_dir);
-        }
         let orphaned = unsafe { libc::kill(pid, 0) } == 0;
         let _ = std::fs::remove_dir_all(&data_dir);
 
@@ -266,17 +249,13 @@ mod serve_broken_pipe {
             Some(0),
             "serve must exit 0 under broken-pipe shutdown; code={code:?} signal={termsig:?} stderr:\n{stderr_log}"
         );
-        assert!(
-            tracing_log.contains("stopping all gateway child processes")
-                || tracing_log.contains("gateways stopped"),
-            "cleanup marker missing from tracing log (data_dir/logs), log:\n{tracing_log}\nstderr:\n{stderr_log}"
-        );
     }
 
     /// Test 3: serve_shutdown_order_preserved
     ///
-    /// Order: "Shutting down server..." (axum graceful) must appear BEFORE
-    /// "Stopping gateways..." (stop_all) in the shutdown output.
+    /// SIGINT produces a GRACEFUL shutdown: the "Shutting down server..."
+    /// console marker is written and the process exits 0 (the trailing
+    /// "Stopping gateways..." marker is gone with the gateway supervisor).
     #[test]
     fn serve_shutdown_order_preserved() {
         let _guard = serial_guard();
@@ -322,17 +301,13 @@ mod serve_broken_pipe {
             code, 0,
             "serve should exit 0, stdout:\n{stdout_log}\nstderr:\n{stderr_log}"
         );
-        // ORDER assertion: graceful marker BEFORE stop_all marker.
-        let shutdown_pos = stdout_log.find("Shutting down server...");
-        let stop_pos = stdout_log.find("Stopping gateways...");
         assert!(
-            shutdown_pos.is_some(),
+            stdout_log.contains("Shutting down server..."),
             "graceful marker missing:\n{stdout_log}"
         );
-        assert!(stop_pos.is_some(), "stop_all marker missing:\n{stdout_log}");
         assert!(
-            shutdown_pos.unwrap() < stop_pos.unwrap(),
-            "shutdown order violated: 'Shutting down' must precede 'Stopping gateways':\n{stdout_log}"
+            !stdout_log.contains("Stopping gateways..."),
+            "gateway stop marker must be gone with the supervisor:\n{stdout_log}"
         );
     }
 
@@ -412,19 +387,6 @@ mod serve_broken_pipe {
                 return seen.contains(needle);
             }
         }
-    }
-
-    /// Concatenate every *.log file under a directory (tracing rolling sink).
-    fn read_dir_logs_concat(dir: &std::path::Path) -> String {
-        std::fs::read_dir(dir)
-            .map(|entries| {
-                entries
-                    .filter_map(|e| e.ok())
-                    .filter_map(|e| std::fs::read_to_string(e.path()).ok())
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            })
-            .unwrap_or_default()
     }
 
     /// Wait until a file contains the given substring.

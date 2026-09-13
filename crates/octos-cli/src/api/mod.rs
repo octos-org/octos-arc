@@ -13,7 +13,6 @@ mod events;
 mod handlers;
 pub mod metrics;
 pub mod profile_scope;
-pub mod provider_diagnostics;
 mod router;
 pub(crate) mod session_ingress;
 pub(crate) mod skill_action_jobs;
@@ -35,9 +34,7 @@ mod ui_protocol_reasoning_effort;
 pub(crate) use crate::contracts::sanitize as ui_protocol_sanitize;
 pub(crate) use crate::contracts::scope as ui_protocol_scope;
 mod ui_protocol_task_output;
-pub mod usage;
 pub mod voice_text;
-pub mod webhook_proxy;
 pub mod ws_slash;
 
 pub use metrics::init_metrics;
@@ -80,7 +77,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use crate::process_manager::ProcessManager;
 use crate::profiles::ProfileStore;
 use crate::runtime::{ProfileRuntime, SessionRuntimeCache};
 
@@ -181,9 +177,6 @@ pub struct AppState {
 
     /// Prometheus metrics handle.
     pub metrics_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
-
-    /// Process manager for gateway lifecycle.
-    pub process_manager: Option<Arc<ProcessManager>>,
 
     /// Per-profile guard for AppUI skill install/remove plus runtime reload.
     pub profile_skill_mutation_locks: Arc<ProfileSkillMutationLocks>,
@@ -393,7 +386,6 @@ impl AppState {
             default_network_denied: false,
             llm_compaction: false,
             host_memory: None,
-            process_manager: None,
             user_store: None,
             allow_admin_shell: false,
             harness_event_sink_path: None,

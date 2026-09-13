@@ -13,103 +13,6 @@ use super::Executable;
 use crate::api::{AppState, build_router, init_metrics, resolve_appui_allowed_origins};
 use crate::config::Config;
 
-// #1857 PR 5a — fleet worker pool defaults (serve boot). Conservative single-
-// host values; not yet operator-configurable (5a is the dispatch backbone, not
-// the tuning surface).
-/// Max fleet attempts running across ALL fleets at once.
-const FLEET_POOL_GLOBAL_CONCURRENCY: usize = 4;
-/// Max fleet attempts running per single fleet at once.
-const FLEET_POOL_PER_FLEET_CONCURRENCY: usize = 2;
-/// Hard wall-clock ceiling for one attempt's agent run.
-const FLEET_POOL_ATTEMPT_DEADLINE_SECS: u64 = 600;
-/// Lease TTL stamped at launch. Chosen > the attempt deadline so boot
-/// reconciliation reclaims only genuinely-abandoned (crashed-owner) leases, not
-/// a healthy in-flight attempt.
-const FLEET_POOL_LEASE_TTL_MS: u64 = 900_000;
-/// Tokens reserved on the fleet budget at launch (soft admission). #1857 PR 5a
-/// fix (MEDIUM): reduced from 50k — that is a whole small goal's budget, so a
-/// modestly-budgeted goal would have EVERY task rejected. This is a per-attempt
-
-/// #1857 PR 5a fix (HIGH 1) — a fleet worker's shell reach is bounded ONLY by
-/// the sandbox (the closed worker tool set is a denylist, not a boundary). Fail
-/// closed: the pool must be installed ONLY when the configured sandbox
-/// constructs a REAL isolating backend — never [`NoSandbox`], which a disabled
-/// sandbox (or `Auto` finding no backend on this host) yields and which would
-/// give the worker unbounded network/host reach. Returns whether `sandbox_cfg`
-/// yields real isolation.
-///
-/// [`NoSandbox`]: octos_agent::sandbox::NoSandbox
-fn fleet_sandbox_is_isolating(sandbox_cfg: &octos_agent::sandbox::SandboxConfig) -> bool {
-    let sandbox = octos_agent::sandbox::create_sandbox(sandbox_cfg);
-    // A refusing resolution (explicit mode unhonorable on this host, or
-    // sandbox.fail_closed with no backend) is fail-closed but useless to a
-    // pool: every worker command would refuse. Treat it like a missing
-    // backend — the pool is not installed — matching the pre-refusal
-    // behaviour where these configs resolved to `NoSandbox` and were caught
-    // by `is_noop()`.
-    !sandbox.is_noop() && sandbox.refusal().is_none()
-}
-
-/// Whether the resolved sandbox backend can grant a `FsGrant::Host` worker FULL
-/// daemon-user FS write together with the reads git needs — the third gate
-/// condition for the fleet WORKTREE flow (§5). Computed at serve boot (mirrors
-/// [`fleet_sandbox_is_isolating`]) from the base sandbox's
-/// `supports_repo_git_write()`: `true` for bwrap and unrestricted-read macOS,
-/// `false` for docker, restricted-read macOS, Landlock, AppContainer, and no
-/// sandbox. When `false`, the pool falls back to a scratch workspace for every
-/// task (a worktree worker whose `git commit` can't reach `<repo>/.git` would
-/// lose its deliverable when the checkout is removed). Threaded into
-/// `PoolConfig.repo_git_write_supported`.
-fn fleet_sandbox_supports_repo_git_write(
-    sandbox_cfg: &octos_agent::sandbox::SandboxConfig,
-) -> bool {
-    octos_agent::sandbox::create_sandbox(sandbox_cfg).supports_repo_git_write()
-}
-
-fn smtp_email_is_usable(email: &crate::profiles::EmailSettings) -> bool {
-    if !email.provider.eq_ignore_ascii_case("smtp") {
-        return false;
-    }
-
-    let host = email
-        .smtp_host
-        .as_deref()
-        .map(str::trim)
-        .unwrap_or_default();
-    let username = email.username.as_deref().map(str::trim).unwrap_or_default();
-    let from_address = email
-        .from_address
-        .as_deref()
-        .map(str::trim)
-        .unwrap_or_default();
-    !host.is_empty() && !username.is_empty() && !from_address.is_empty()
-}
-
-fn resolve_profile_email_secret(
-    email: &crate::profiles::EmailSettings,
-    env_vars: &std::collections::HashMap<String, String>,
-) -> Option<String> {
-    if let Some(password) = email.password.as_ref().filter(|value| !value.is_empty()) {
-        return Some(password.clone());
-    }
-
-    let password_env = email
-        .password_env
-        .as_ref()
-        .filter(|value| !value.is_empty())?;
-    let value = env_vars.get(password_env)?;
-    if value == crate::auth::keychain::KEYCHAIN_MARKER {
-        crate::auth::keychain::get_secret(password_env)
-            .ok()
-            .flatten()
-            .filter(|secret| !secret.is_empty())
-    } else if value.is_empty() {
-        None
-    } else {
-        Some(value.clone())
-    }
-}
-
 /// Start the REST API server.
 ///
 /// `Serialize`/`Deserialize` back the layered startup config: the resolved
@@ -612,31 +515,6 @@ impl ServeCommand {
         let (http_listener, effective_serve_port) =
             bind_http_listener(self.stdio, &self.host, self.port).await?;
 
-        let bridge_js_path = data_dir.join("whatsapp-bridge").join("bridge.js");
-        let process_manager = Arc::new(
-            crate::process_manager::ProcessManager::new(profile_store.clone())
-                .with_bridge_js(bridge_js_path)
-                .with_serve_config(effective_serve_port, auth_token.clone())
-                // Section B (codex review round-5 P1.2): every spawned
-                // gateway inherits the host's strict-signing policy via
-                // an env var. `Config::from_file` OR-merges it onto the
-                // gateway's effective `plugins.require_signed`.
-                .with_host_plugins_require_signed(config.plugins.require_signed)
-                .with_host_max_inject_tokens(
-                    config.memory.as_ref().and_then(|m| m.max_inject_tokens),
-                )
-                .with_host_memory_refresh_enabled(crate::config::MemoryConfig::refresh_enabled(
-                    config.memory.as_ref(),
-                ))
-                .with_host_asr_language(
-                    config
-                        .voice
-                        .as_ref()
-                        .and_then(|voice| voice.asr_language.clone()),
-                ),
-        );
-        process_manager.set_self_ref();
-
         // Initialize user store and auth manager for multi-user support
         let user_store = Arc::new(
             crate::user_store::UserStore::open(&data_dir).wrap_err("failed to open user store")?,
@@ -744,7 +622,6 @@ impl ServeCommand {
             auth_token,
             metrics_handle,
             profile_store: Some(profile_store.clone()),
-            process_manager: Some(process_manager.clone()),
             user_store: Some(user_store),
             http_client: reqwest::Client::new(),
             // If a config file was loaded, admin edits target that exact file.
@@ -846,165 +723,7 @@ impl ServeCommand {
 
         if self.stdio {
             crate::api::ui_protocol_transport::stdio_connection(state).await?;
-            tracing::info!("stopping all gateway child processes");
-            let _ = process_manager.stop_all().await;
             return Ok(());
-        }
-
-        // Auto-start enabled profiles
-        let profiles = profile_store.list().unwrap_or_default();
-        let enabled_count = profiles.iter().filter(|p| p.enabled).count();
-        tracing::info!(
-            total = profiles.len(),
-            enabled = enabled_count,
-            "loaded profiles"
-        );
-        if enabled_count > 0 {
-            for p in &profiles {
-                if p.enabled {
-                    if !p.config.has_llm_selection() {
-                        tracing::warn!(
-                            profile = %p.id,
-                            "skipping auto-start: no LLM provider configured"
-                        );
-                        continue;
-                    }
-                    tracing::info!(profile = %p.id, "auto-starting gateway");
-                    if let Err(e) = process_manager.start(p).await {
-                        tracing::warn!(profile = %p.id, error = %e, "failed to auto-start gateway");
-                    }
-                }
-            }
-        }
-
-        // Profile file watcher: auto-restart gateways when profile JSON changes.
-        {
-            let ps = profile_store.clone();
-            let pm = process_manager.clone();
-            tokio::spawn(async move {
-                use crate::profiles::{ProfileChange, UserProfile, diff_profiles};
-                use sha2::{Digest, Sha256};
-                use std::collections::HashMap;
-
-                // Snapshot of known profile states: (hash, profile)
-                let mut known: HashMap<String, ([u8; 32], UserProfile)> = HashMap::new();
-                // Seed with current profiles
-                if let Ok(list) = ps.list() {
-                    for p in list {
-                        if let Ok(bytes) = std::fs::read(ps.profile_path(&p.id)) {
-                            let hash: [u8; 32] = Sha256::digest(&bytes).into();
-                            known.insert(p.id.clone(), (hash, p));
-                        }
-                    }
-                }
-
-                // NOTE(#149): The 5-second poll interval is hardcoded. This could be made
-                // configurable (e.g. via a CLI flag or config field) for deployments that
-                // need faster detection or want to reduce filesystem polling overhead.
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
-                loop {
-                    interval.tick().await;
-                    let current = match ps.list() {
-                        Ok(list) => list,
-                        Err(_) => continue,
-                    };
-                    for profile in &current {
-                        let bytes = match std::fs::read(ps.profile_path(&profile.id)) {
-                            Ok(b) => b,
-                            Err(_) => continue,
-                        };
-                        let hash: [u8; 32] = Sha256::digest(&bytes).into();
-
-                        if let Some((old_hash, old_profile)) = known.get(&profile.id) {
-                            if hash == *old_hash {
-                                continue; // no change
-                            }
-                            let status = pm.status(&profile.id).await;
-
-                            // Handle enable/disable transitions
-                            if !old_profile.enabled && profile.enabled && !status.running {
-                                // disabled → enabled: start gateway
-                                tracing::info!(
-                                    profile = %profile.id,
-                                    "profile enabled, starting gateway"
-                                );
-                                if let Err(e) = pm.start(profile).await {
-                                    tracing::warn!(
-                                        profile = %profile.id,
-                                        error = %e,
-                                        "failed to start gateway after enable"
-                                    );
-                                }
-                            } else if old_profile.enabled && !profile.enabled && status.running {
-                                // enabled → disabled: stop gateway
-                                tracing::info!(
-                                    profile = %profile.id,
-                                    "profile disabled, stopping gateway"
-                                );
-                                if let Err(e) = pm.stop(&profile.id).await {
-                                    tracing::warn!(
-                                        profile = %profile.id,
-                                        error = %e,
-                                        "failed to stop gateway after disable"
-                                    );
-                                }
-                            } else if status.running {
-                                // Config changed while running — check if restart needed
-                                match diff_profiles(old_profile, profile) {
-                                    ProfileChange::RestartRequired(fields) => {
-                                        tracing::info!(
-                                            profile = %profile.id,
-                                            fields = ?fields,
-                                            "profile changed (restart-required fields), restarting gateway"
-                                        );
-                                        if let Err(e) = pm.restart(profile).await {
-                                            tracing::warn!(
-                                                profile = %profile.id,
-                                                error = %e,
-                                                "failed to restart gateway after profile change"
-                                            );
-                                        }
-                                    }
-                                    ProfileChange::HotReloadable => {
-                                        tracing::debug!(
-                                            profile = %profile.id,
-                                            "profile changed (hot-reloadable only), gateway watcher will handle"
-                                        );
-                                    }
-                                    ProfileChange::Unchanged => {}
-                                }
-                            } else if profile.enabled && !status.running {
-                                // Profile changed & enabled but not running — start it
-                                tracing::info!(
-                                    profile = %profile.id,
-                                    "profile changed and enabled but not running, starting gateway"
-                                );
-                                if let Err(e) = pm.start(profile).await {
-                                    tracing::warn!(
-                                        profile = %profile.id,
-                                        error = %e,
-                                        "failed to start gateway"
-                                    );
-                                }
-                            }
-                        } else if profile.enabled {
-                            // New profile detected — auto-start its gateway
-                            tracing::info!(
-                                profile = %profile.id,
-                                "new profile detected, starting gateway"
-                            );
-                            if let Err(e) = pm.start(profile).await {
-                                tracing::warn!(
-                                    profile = %profile.id,
-                                    error = %e,
-                                    "failed to auto-start gateway for new profile"
-                                );
-                            }
-                        }
-                        known.insert(profile.id.clone(), (hash, profile.clone()));
-                    }
-                }
-            });
         }
 
         // (#1973 fix E — the global master-continuation drain used to be
@@ -1020,27 +739,11 @@ impl ServeCommand {
 
         tracing::info!(address = %addr, "octos API server starting");
         tracing::info!(app = %format!("http://{}/app/", addr), "web app available");
-        tracing::info!(dashboard = %format!("http://{}/admin/", addr), "admin dashboard available");
-        if enabled_count > 0 {
-            tracing::info!(count = enabled_count, "gateway profiles auto-started");
-        }
-
         use super::serve_console;
         let _ = serve_console::print_stdout(&format!("{}", "octos API server".cyan().bold()));
         let _ = serve_console::print_stdout(&format!("{}: http://{}", "Listening".green(), addr));
         let _ = serve_console::print_stdout(&format!("{}: http://{}/app/", "App".green(), addr));
-        let _ = serve_console::print_stdout(&format!(
-            "{}: http://{}/admin/",
-            "Admin dashboard".green(),
-            addr
-        ));
-        if enabled_count > 0 {
-            let _ = serve_console::print_stdout(&format!(
-                "{}: {} profiles auto-started",
-                "Gateways".green(),
-                enabled_count
-            ));
-        }
+        let _ = serve_console::print_stdout("");
         let _ = serve_console::print_stdout("");
 
         axum::serve(
@@ -1053,15 +756,6 @@ impl ServeCommand {
             let _ = serve_console::print_stdout(&format!("{}", "Shutting down server...".yellow()));
         })
         .await?;
-
-        // Stop all gateway child processes before exiting
-        tracing::info!("stopping all gateway child processes");
-        let _ = serve_console::print_stdout(&format!("{}", "Stopping gateways...".yellow()));
-        let stopped = process_manager.stop_all().await;
-        if stopped > 0 {
-            tracing::info!(count = stopped, "gateways stopped");
-            let _ = serve_console::print_stdout(&format!("  stopped {} gateway(s)", stopped));
-        }
 
         // Force exit — background tokio tasks (profile watcher, auth cleanup,
         // admin bot) have no shutdown signal and would hang indefinitely.
@@ -1113,61 +807,6 @@ mod tests {
         assert!(origins.contains(&format!("http://127.0.0.1:{effective_port}")));
         assert!(origins.contains(&format!("http://localhost:{effective_port}")));
         assert!(origins.contains(&format!("http://[::1]:{effective_port}")));
-    }
-
-    /// #1857 PR 5a fix (HIGH 1) — the fleet worker pool installs ONLY behind a
-    /// REAL isolating sandbox. A disabled sandbox (or an explicit `None` mode)
-    /// yields `NoSandbox`, which the fail-closed predicate must reject so a fleet
-    /// worker never runs unsandboxed with network reach. (The real-backend side
-    /// is host-dependent — `Auto` may resolve to `NoSandbox` on a CI host with no
-    /// bwrap/docker — so only the fail-closed direction is asserted here.)
-    #[test]
-    fn fleet_pool_requires_a_real_isolating_sandbox() {
-        use octos_agent::sandbox::{SandboxConfig, SandboxMode};
-        let disabled = SandboxConfig {
-            enabled: false,
-            ..Default::default()
-        };
-        assert!(
-            !fleet_sandbox_is_isolating(&disabled),
-            "a disabled sandbox must NOT be treated as isolating",
-        );
-        let none_mode = SandboxConfig {
-            enabled: true,
-            mode: SandboxMode::None,
-            ..Default::default()
-        };
-        assert!(
-            !fleet_sandbox_is_isolating(&none_mode),
-            "SandboxMode::None must NOT be treated as isolating",
-        );
-    }
-
-    /// Fail-closed twin: a config whose resolution REFUSES (an explicit mode
-    /// unhonorable on this host) is fail-closed but useless to a pool — every
-    /// worker command would refuse — so the boot gate must not install the
-    /// pool behind it, matching the old behaviour where the same configs
-    /// degraded to `NoSandbox` and were caught by `is_noop()`. The refusing
-    /// resolution reports `is_noop() == false`, so without the dedicated
-    /// `refusal()` check this would regress to installing a dead pool.
-    #[test]
-    fn fleet_pool_rejects_a_refusing_sandbox_resolution() {
-        use octos_agent::sandbox::{SandboxConfig, SandboxMode};
-        // Unhonorable on every host this test runs on: landlock requires
-        // Linux (and, on Linux, the octos-sandbox helper, absent in unit-test
-        // runners); appcontainer requires Windows.
-        let unhonorable = SandboxConfig {
-            mode: if cfg!(windows) {
-                SandboxMode::Landlock
-            } else {
-                SandboxMode::AppContainer
-            },
-            ..Default::default()
-        };
-        assert!(
-            !fleet_sandbox_is_isolating(&unhonorable),
-            "a refusing sandbox resolution must NOT install the fleet pool",
-        );
     }
 
     /// Two `octos serve` against one data dir can't coexist (redb is
@@ -1228,39 +867,6 @@ mod tests {
         drop(relaunch);
         let _next = acquire_serve_data_dir_lock(dir.path())
             .expect("the new guard still releases its own lock on drop");
-    }
-
-    fn dashboard_smtp_test_env_lock() -> &'static std::sync::Mutex<()> {
-        use std::sync::{Mutex, OnceLock};
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
-
-    struct EnvVarGuard {
-        key: &'static str,
-        previous: Option<String>,
-    }
-
-    impl EnvVarGuard {
-        #[allow(unsafe_code)]
-        fn remove(key: &'static str) -> Self {
-            let previous = std::env::var(key).ok();
-            // SAFETY: dashboard SMTP env tests hold `dashboard_smtp_test_env_lock`,
-            // serializing mutation of process-wide environment variables.
-            unsafe { std::env::remove_var(key) };
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for EnvVarGuard {
-        #[allow(unsafe_code)]
-        fn drop(&mut self) {
-            // SAFETY: callers keep the env lock for the full guard lifetime.
-            match self.previous.as_ref() {
-                Some(value) => unsafe { std::env::set_var(self.key, value) },
-                None => unsafe { std::env::remove_var(self.key) },
-            }
-        }
     }
 
     #[test]

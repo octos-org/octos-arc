@@ -14,10 +14,8 @@ use url::Url;
 use super::AppState;
 use super::handlers;
 use super::metrics;
-use super::provider_diagnostics;
 use super::session_ingress;
 use super::ui_protocol_transport;
-use super::usage;
 
 /// Authentication identity extracted by the auth middleware.
 #[derive(Clone, Debug)]
@@ -215,9 +213,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     // both WebSocket gates. CORS intentionally does not call
     // `allow_credentials`: bearer/work-secret auth is an independent layer
     // and must not become ambient browser authority.
-    let allowed_origins: Arc<Vec<String>> = Arc::new(browser_origin_allowlist(
-        &state.appui_allowed_origins,
-    ));
+    let allowed_origins: Arc<Vec<String>> =
+        Arc::new(browser_origin_allowlist(&state.appui_allowed_origins));
     let cors = {
         let allowed = allowed_origins.clone();
         CorsLayer::new()
@@ -295,40 +292,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(handlers::restart_task_from_node),
         );
 
-    // User self-service endpoints (user or admin auth)
-    // User self-service endpoints. The multi-tenant user-account surface
-    // was removed with the dashboard; the surviving `my` routes are the
-    // provider/search diagnostics (shared with the retired admin plane)
-    // and the usage ledger reads.
-    let my_api = Router::new()
-        .route(
-            "/api/my/test-provider",
-            post(provider_diagnostics::test_provider),
-        )
-        .route(
-            "/api/my/provider-models",
-            post(provider_diagnostics::provider_models),
-        )
-        .route(
-            "/api/my/test-search",
-            post(provider_diagnostics::test_search),
-        )
-        .route(
-            "/api/my/model-limits",
-            get(provider_diagnostics::model_limits),
-        )
-        .route("/api/my/usage", get(usage::my_usage))
-        .route(
-            "/api/my/usage/sessions/{session_id}",
-            get(usage::my_session_usage),
-        );
+    // Admin API routes (admin auth only, 1MB body limit)
 
     // Admin API routes (admin auth only, 1MB body limit)
 
     // Auth middleware was removed with the multi-tenant dashboard: all
     // HTTP callers are local-trust. stdio (the ARC path) never enters the
     // router at all.
-    let protected = my_api.merge(chat_api);
+    let protected = chat_api;
 
     // Metrics route — protected when auth is configured, public otherwise
     let metrics_route = Router::new().route("/metrics", get(metrics::metrics_handler));

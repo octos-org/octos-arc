@@ -1,7 +1,7 @@
 //! API request handlers.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::collections::HashSet;
+use std::sync::Arc;
 
 use axum::Extension;
 use axum::Json;
@@ -20,7 +20,7 @@ use octos_core::{MAIN_PROFILE_ID, SessionKey};
 use serde::{Deserialize, Serialize};
 
 use super::AppState;
-use super::profile_scope::{ADMIN_PROFILE_ID, is_authorized_for_profile};
+use super::profile_scope::ADMIN_PROFILE_ID;
 use super::router::AuthIdentity;
 
 /// Legacy `POST /api/chat` retired.
@@ -34,17 +34,6 @@ use super::router::AuthIdentity;
 ///   `scripts/validate-m4-1a-live.sh`) migrated to the WS path.
 ///
 /// The sole chat transport is now `/api/ui-protocol/ws`.
-
-#[derive(Serialize)]
-pub(crate) struct ContentFileEntry {
-    filename: String,
-    path: String,
-    size: u64,
-    modified: String,
-    category: String,
-    /// Parent directory name for grouping in the UI.
-    group: String,
-}
 
 pub(crate) fn response_path_for_profile_file(
     base_dir: &std::path::Path,
@@ -320,60 +309,6 @@ pub(crate) fn authorized_routed_profile_id_from_headers(
     Ok(Some(profile_id))
 }
 
-/// Resolve API port for a specific profile, or fall back to first available.
-/// Profile is identified by X-Profile-Id header (set by Caddy from subdomain).
-async fn resolve_api_port(state: &AppState, headers: &HeaderMap) -> Option<(String, u16)> {
-    let pm = state.process_manager.as_ref()?;
-
-    if let Some(profile_id) = routed_profile_id_from_headers(state, headers) {
-        if let Some(port) = pm.api_port(&profile_id).await {
-            return Some((profile_id, port));
-        }
-        tracing::warn!(profile = profile_id, "no API port for requested profile");
-    }
-
-    // Fall back to first available
-    pm.first_api_port().await
-}
-
-/// #995 follow-up — authorization-aware wrapper around
-/// [`resolve_api_port`]. Returns `Err(403)` when the header-resolved
-/// profile is not one the authenticated identity is authorized for.
-///
-/// The header authorization check runs FIRST — even if no
-/// `process_manager` is wired (standalone mode) the call site still
-/// needs to authorize a cross-tenant `X-Profile-Id`, because the
-/// authorization gate is the only thing keeping a forged header from
-/// reaching the standalone path's storage helpers downstream.
-///
-/// Falls back to the gateway's first available port when no header
-/// resolved to a profile, matching the legacy `resolve_api_port`
-/// contract — that fallback never touches a tenant-scoped route, so
-/// there is no header to authorize.
-#[allow(clippy::result_large_err)]
-async fn resolve_api_port_authorized(
-    state: &AppState,
-    headers: &HeaderMap,
-    identity: Option<&AuthIdentity>,
-) -> Result<Option<(String, u16)>, Response> {
-    let authorized_profile_id =
-        authorized_routed_profile_id_from_headers(state, headers, identity)?;
-
-    let pm = match state.process_manager.as_ref() {
-        Some(pm) => pm,
-        None => return Ok(None),
-    };
-
-    if let Some(profile_id) = authorized_profile_id {
-        if let Some(port) = pm.api_port(&profile_id).await {
-            return Ok(Some((profile_id, port)));
-        }
-        tracing::warn!(profile = profile_id, "no API port for requested profile");
-    }
-
-    Ok(pm.first_api_port().await)
-}
-
 /// #995 follow-up round 3 — authorization-aware profile resolver for
 /// the API channel. Returns `Err(403)` when the header resolves to a
 /// profile the identity is not authorized for; falls back to
@@ -532,12 +467,6 @@ fn standalone_api_session_key_candidates_with_topic(
     Ok(candidates)
 }
 
-pub(crate) fn encode_api_session_path_id(id: &str) -> String {
-    octos_bus::session::encode_path_component(id)
-}
-
-/// Result entry shape for the WS `session/list` RPC method (formerly the
-/// body of `GET /api/sessions`, retired in M12 Phase D-5).
 #[derive(Serialize, Deserialize)]
 pub struct SessionInfo {
     pub id: String,
@@ -747,43 +676,6 @@ pub async fn list_sessions(
         );
     }
 
-    // Also fetch from gateway if available.
-    // #995 follow-up — routed_profile_id used to walk the per-profile
-    // gateway is authorized above; the `resolve_api_port_authorized`
-    // call re-checks header authorization belt-and-suspenders.
-    let api_port = if let Some(profile_id) = connection_scoped_profile_id {
-        // The frozen connection scope is authoritative on localhost. Never
-        // fall back to the first running gateway, which may belong to a
-        // different profile.
-        match state.process_manager.as_ref() {
-            Some(pm) => pm
-                .api_port(profile_id)
-                .await
-                .map(|port| (profile_id.to_string(), port)),
-            None => None,
-        }
-    } else {
-        match resolve_api_port_authorized(&state, &headers, identity_ref).await {
-            Ok(port) => port,
-            Err(response) => return response,
-        }
-    };
-    if let Some((_profile_id, port)) = api_port {
-        let proxy_resp = super::webhook_proxy::api_get_proxy(&state, port, "/sessions").await;
-        if proxy_resp.status().is_success() {
-            if let Ok(body) = axum::body::to_bytes(proxy_resp.into_body(), 10 * 1024 * 1024).await {
-                if let Ok(gateway_sessions) = serde_json::from_slice::<Vec<SessionInfo>>(&body) {
-                    // Merge, dedup by id (per-profile / standalone wins).
-                    let existing: std::collections::HashSet<String> =
-                        all.iter().map(|s| s.id.clone()).collect();
-                    all.extend(gateway_sessions.into_iter().filter(|s| {
-                        !existing.contains(&s.id) && !is_internal_api_session_id(&s.id)
-                    }));
-                }
-            }
-        }
-    }
-
     if all.is_empty() && state.sessions.is_none() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -861,7 +753,11 @@ pub struct PaginationParams {
 
 #[derive(Deserialize)]
 pub struct TopicQueryParams {
+    /// Read only by the retired gateway-proxy branches; WS callers still
+    /// construct the struct, so the field survives until that surface is
+    /// simplified (batch B).
     #[serde(default)]
+    #[allow(dead_code)]
     pub topic: Option<String>,
 }
 
@@ -872,39 +768,6 @@ pub struct TopicQueryParams {
 
 fn default_page_limit() -> usize {
     100
-}
-
-fn append_topic_query(path: &mut String, topic: Option<&str>) {
-    if let Some(topic) = topic.filter(|value| !value.is_empty()) {
-        path.push_str(if path.contains('?') {
-            "&topic="
-        } else {
-            "?topic="
-        });
-        path.push_str(&octos_bus::session::encode_path_component(topic));
-    }
-}
-
-fn session_messages_proxy_path(
-    id: &str,
-    limit: usize,
-    offset: usize,
-    source: Option<&str>,
-    since_seq: Option<usize>,
-    topic: Option<&str>,
-) -> String {
-    let encoded_id = encode_api_session_path_id(id);
-    let mut path = format!("/sessions/{encoded_id}/messages?limit={limit}&offset={offset}");
-    if let Some(source) = source {
-        path.push_str("&source=");
-        path.push_str(source);
-    }
-    if let Some(since_seq) = since_seq {
-        path.push_str("&since_seq=");
-        path.push_str(&since_seq.to_string());
-    }
-    append_topic_query(&mut path, topic);
-    path
 }
 
 pub async fn session_messages(
@@ -1053,29 +916,6 @@ pub async fn session_messages(
         }
     } // !use_full
 
-    // Proxy to gateway.
-    // #995 follow-up — authorize routed profile against identity
-    // before walking the gateway.
-    let api_port = match resolve_api_port_authorized(&state, &headers, identity_ref).await {
-        Ok(port) => port,
-        Err(response) => return response,
-    };
-    if let Some((_profile_id, port)) = api_port {
-        let path = session_messages_proxy_path(
-            &id,
-            limit,
-            offset,
-            if use_full {
-                Some("full")
-            } else {
-                params.source.as_deref()
-            },
-            params.since_seq,
-            params.topic.as_deref(),
-        );
-        return super::webhook_proxy::api_get_proxy(&state, port, &path).await;
-    }
-
     (StatusCode::SERVICE_UNAVAILABLE, "Sessions not available").into_response()
 }
 
@@ -1103,28 +943,12 @@ pub struct MessageInfo {
 // `session/status.get` RPC method.
 /// Backing impl for the WS `session/status.get` RPC method.
 pub async fn session_status(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    identity: Option<Extension<AuthIdentity>>,
-    axum::extract::Path(id): axum::extract::Path<String>,
-    axum::extract::Query(params): axum::extract::Query<TopicQueryParams>,
+    State(_state): State<Arc<AppState>>,
+    _headers: HeaderMap,
+    _identity: Option<Extension<AuthIdentity>>,
+    axum::extract::Path(_id): axum::extract::Path<String>,
+    axum::extract::Query(_params): axum::extract::Query<TopicQueryParams>,
 ) -> Response {
-    let identity_ref = identity.as_ref().map(|ext| &ext.0);
-    // Proxy to gateway (session actors live there).
-    // #995 follow-up — authorize routed profile against identity
-    // before walking the gateway. Pre-fix the gateway routing read the
-    // raw header.
-    let api_port = match resolve_api_port_authorized(&state, &headers, identity_ref).await {
-        Ok(port) => port,
-        Err(response) => return response,
-    };
-    if let Some((_profile_id, port)) = api_port {
-        let encoded_id = encode_api_session_path_id(&id);
-        let mut path = format!("/sessions/{encoded_id}/status");
-        append_topic_query(&mut path, params.topic.as_deref());
-        return super::webhook_proxy::api_get_proxy(&state, port, &path).await;
-    }
-
     // Standalone mode — no active task tracking
     Json(serde_json::json!({
         "active": false,
@@ -1138,26 +962,12 @@ pub async fn session_status(
 // `session/tasks.list` RPC method.
 /// Backing impl for the WS `session/tasks.list` RPC method.
 pub async fn session_tasks(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    identity: Option<Extension<AuthIdentity>>,
-    axum::extract::Path(id): axum::extract::Path<String>,
-    axum::extract::Query(params): axum::extract::Query<TopicQueryParams>,
+    State(_state): State<Arc<AppState>>,
+    _headers: HeaderMap,
+    _identity: Option<Extension<AuthIdentity>>,
+    axum::extract::Path(_id): axum::extract::Path<String>,
+    axum::extract::Query(_params): axum::extract::Query<TopicQueryParams>,
 ) -> Response {
-    let identity_ref = identity.as_ref().map(|ext| &ext.0);
-    // Proxy to gateway (task supervisor lives there).
-    // #995 follow-up — authorize routed profile against identity.
-    let api_port = match resolve_api_port_authorized(&state, &headers, identity_ref).await {
-        Ok(port) => port,
-        Err(response) => return response,
-    };
-    if let Some((_profile_id, port)) = api_port {
-        let encoded_id = encode_api_session_path_id(&id);
-        let mut path = format!("/sessions/{encoded_id}/tasks");
-        append_topic_query(&mut path, params.topic.as_deref());
-        return super::webhook_proxy::api_get_proxy(&state, port, &path).await;
-    }
-
     // Standalone mode — no background tasks
     Json(serde_json::json!([])).into_response()
 }
@@ -1176,30 +986,10 @@ pub async fn session_tasks(
 ///   `task_query_store` wired (standalone mode).
 pub async fn cancel_task(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    identity: Option<Extension<AuthIdentity>>,
+    _headers: HeaderMap,
+    _identity: Option<Extension<AuthIdentity>>,
     axum::extract::Path(task_id): axum::extract::Path<String>,
 ) -> Response {
-    let identity_ref = identity.as_ref().map(|ext| &ext.0);
-    // Gateway-mode: forward to the gateway process that owns the
-    // supervisor. #995 follow-up — authorize routed profile against
-    // identity before forwarding (a forged header could otherwise
-    // cancel a victim's task on a TRUSTED hop).
-    let api_port = match resolve_api_port_authorized(&state, &headers, identity_ref).await {
-        Ok(port) => port,
-        Err(response) => return response,
-    };
-    if let Some((_profile_id, port)) = api_port {
-        let path = format!("/tasks/{}/cancel", encode_api_session_path_id(&task_id));
-        return super::webhook_proxy::api_post_proxy_json(
-            &state,
-            port,
-            &path,
-            serde_json::json!({}),
-        )
-        .await;
-    }
-
     let Some(store) = state.task_query_store.as_ref() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1259,32 +1049,12 @@ pub struct RestartFromNodeRequest {
 /// - `503 Service Unavailable` when no supervisor is wired.
 pub async fn restart_task_from_node(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    identity: Option<Extension<AuthIdentity>>,
+    _headers: HeaderMap,
+    _identity: Option<Extension<AuthIdentity>>,
     axum::extract::Path(task_id): axum::extract::Path<String>,
     body: Option<Json<RestartFromNodeRequest>>,
 ) -> Response {
     let body = body.map(|Json(b)| b).unwrap_or_default();
-    let identity_ref = identity.as_ref().map(|ext| &ext.0);
-
-    // #995 follow-up — authorize routed profile against identity. A
-    // forged header could otherwise relaunch a victim's task on a
-    // TRUSTED hop.
-    let api_port = match resolve_api_port_authorized(&state, &headers, identity_ref).await {
-        Ok(port) => port,
-        Err(response) => return response,
-    };
-    if let Some((_profile_id, port)) = api_port {
-        let path = format!(
-            "/tasks/{}/restart-from-node",
-            encode_api_session_path_id(&task_id)
-        );
-        let proxied_body = serde_json::json!({
-            "node_id": body.node_id,
-        });
-        return super::webhook_proxy::api_post_proxy_json(&state, port, &path, proxied_body).await;
-    }
-
     let Some(store) = state.task_query_store.as_ref() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1605,23 +1375,6 @@ pub async fn update_session_title(
         }
     }
 
-    // Proxy to gateway too, since the session may live in the per-profile
-    // SessionManager rather than the serve-process store.
-    // #995 follow-up — same `resolve_api_port_authorized` gate.
-    let api_port = match resolve_api_port_authorized(&state, &headers, identity_ref).await {
-        Ok(port) => port,
-        Err(response) => return response,
-    };
-    if let Some((_profile_id, port)) = api_port {
-        let path = format!("/sessions/{}/title", encode_api_session_path_id(&id));
-        let body_json = serde_json::json!({ "title": title }).to_string();
-        let _ = super::webhook_proxy::api_patch_proxy(&state, port, &path, body_json).await;
-        // Treat gateway proxy success as also updating; we don't strictly
-        // need to inspect the response since the gateway is authoritative
-        // when serve has no in-memory copy.
-        updated = true;
-    }
-
     if updated {
         StatusCode::NO_CONTENT.into_response()
     } else {
@@ -1707,18 +1460,6 @@ pub async fn delete_session(
                 "failed to clear per-session reasoning_effort sidecar on delete"
             );
         }
-    }
-
-    // Also proxy delete to gateway — sessions may live in the gateway's
-    // SessionManager (per-profile data dir), not just the serve process's store.
-    // #995 follow-up — same `resolve_api_port_authorized` gate.
-    let api_port = match resolve_api_port_authorized(&state, &headers, identity_ref).await {
-        Ok(port) => port,
-        Err(response) => return response,
-    };
-    if let Some((_profile_id, port)) = api_port {
-        let path = format!("/sessions/{}", encode_api_session_path_id(&id));
-        let _ = super::webhook_proxy::api_delete_proxy(&state, port, &path).await;
     }
 
     StatusCode::NO_CONTENT.into_response()
@@ -2248,39 +1989,31 @@ async fn resolve_profile_data_dir(
     headers: &HeaderMap,
     identity: Option<&AuthIdentity>,
 ) -> Result<std::path::PathBuf, Response> {
-    if let Some((_profile_id, _port)) = resolve_api_port(state, headers).await {
-        if let Some(ref ps) = state.profile_store {
-            let header_profile_id = routed_profile_id_from_headers(state, headers);
-            let identity_profile_id = match identity {
-                Some(AuthIdentity::User { id, .. }) => Some(id.as_str()),
-                Some(AuthIdentity::Admin) => Some(ADMIN_PROFILE_ID),
-                None => None,
-            };
-
-            let pid = decide_resolved_profile_id(
-                state,
-                identity,
-                header_profile_id.as_deref(),
-                identity_profile_id,
-            )?;
-            match ps.get(&pid) {
-                Ok(Some(profile)) => return Ok(ps.resolve_data_dir(&profile)),
-                Ok(None) => {
-                    return Err((StatusCode::NOT_FOUND, "profile not found").into_response());
-                }
-                Err(error) => {
-                    return Err((
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("profile lookup failed: {error}"),
-                    )
-                        .into_response());
-                }
-            }
-        }
+    let Some(ref ps) = state.profile_store else {
         return Err((StatusCode::SERVICE_UNAVAILABLE, "no profile store").into_response());
-    }
+    };
+    let header_profile_id = routed_profile_id_from_headers(state, headers);
+    let identity_profile_id = match identity {
+        Some(AuthIdentity::User { id, .. }) => Some(id.as_str()),
+        Some(AuthIdentity::Admin) => Some(ADMIN_PROFILE_ID),
+        None => None,
+    };
 
-    Err((StatusCode::SERVICE_UNAVAILABLE, "no gateway").into_response())
+    let pid = decide_resolved_profile_id(
+        state,
+        identity,
+        header_profile_id.as_deref(),
+        identity_profile_id,
+    )?;
+    match ps.get(&pid) {
+        Ok(Some(profile)) => Ok(ps.resolve_data_dir(&profile)),
+        Ok(None) => Err((StatusCode::NOT_FOUND, "profile not found").into_response()),
+        Err(error) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("profile lookup failed: {error}"),
+        )
+            .into_response()),
+    }
 }
 
 // The `Err` variant is a fully-built axum `Response` (large by design);
@@ -2312,44 +2045,6 @@ fn resolve_profile_data_dir_by_id(
     }
 }
 
-fn sanitize_upload_filename(filename: &str) -> String {
-    filename
-        .replace(['/', '\\', '\0'], "_")
-        .chars()
-        .take(200)
-        .collect::<String>()
-}
-
-fn dedupe_destination(dest_dir: &std::path::Path, filename: &str) -> std::path::PathBuf {
-    let candidate = dest_dir.join(filename);
-    if !candidate.exists() {
-        return candidate;
-    }
-
-    let stem = std::path::Path::new(filename)
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .filter(|value| !value.is_empty())
-        .unwrap_or("file");
-    let extension = std::path::Path::new(filename)
-        .extension()
-        .and_then(|value| value.to_str())
-        .filter(|value| !value.is_empty());
-
-    for index in 2..10_000 {
-        let deduped = match extension {
-            Some(extension) => format!("{stem}-{index}.{extension}"),
-            None => format!("{stem}-{index}"),
-        };
-        let deduped_path = dest_dir.join(&deduped);
-        if !deduped_path.exists() {
-            return deduped_path;
-        }
-    }
-
-    candidate
-}
-
 fn modified_rfc3339(meta: &std::fs::Metadata) -> String {
     meta.modified()
         .ok()
@@ -2360,236 +2055,6 @@ fn modified_rfc3339(meta: &std::fs::Metadata) -> String {
                 .unwrap_or_default()
         })
         .unwrap_or_default()
-}
-
-fn newest_tree_mtime(
-    root: &std::path::Path,
-    skip_dir_names: &[&str],
-) -> Option<std::time::SystemTime> {
-    fn walk(
-        dir: &std::path::Path,
-        skip_dir_names: &[&str],
-        latest: &mut Option<std::time::SystemTime>,
-    ) {
-        let entries = match std::fs::read_dir(dir) {
-            Ok(entries) => entries,
-            Err(_) => return,
-        };
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let file_name = entry.file_name();
-            let file_name = file_name.to_string_lossy();
-            if path.is_dir() {
-                if skip_dir_names.iter().any(|skip| *skip == file_name) {
-                    continue;
-                }
-                walk(&path, skip_dir_names, latest);
-                continue;
-            }
-            if let Ok(meta) = entry.metadata() {
-                if let Ok(modified) = meta.modified() {
-                    if latest.map(|current| modified > current).unwrap_or(true) {
-                        *latest = Some(modified);
-                    }
-                }
-            }
-        }
-    }
-
-    if root.is_file() {
-        return root.metadata().ok()?.modified().ok();
-    }
-
-    let mut latest = None;
-    walk(root, skip_dir_names, &mut latest);
-    latest
-}
-
-fn run_build_command(command: &mut std::process::Command, label: &str) -> Result<(), String> {
-    let output = command
-        .output()
-        .map_err(|e| format!("{label} failed to start: {e}"))?;
-
-    if output.status.success() {
-        return Ok(());
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let detail = format!("{stdout}\n{stderr}").trim().to_string();
-    if detail.is_empty() {
-        Err(format!("{label} failed with status {}", output.status))
-    } else {
-        Err(format!("{label} failed:\n{detail}"))
-    }
-}
-
-fn safe_preview_join(root: &std::path::Path, request_path: &str) -> Option<std::path::PathBuf> {
-    let mut joined = root.to_path_buf();
-    for segment in request_path.split('/') {
-        if segment.is_empty() {
-            continue;
-        }
-        if segment == "." || segment == ".." || segment.contains('\\') {
-            return None;
-        }
-        joined.push(segment);
-    }
-    Some(joined)
-}
-
-fn resolve_preview_asset_path(
-    output_dir: &std::path::Path,
-    request_path: &str,
-) -> Option<std::path::PathBuf> {
-    fn resolve_direct(
-        output_dir: &std::path::Path,
-        request_path: &str,
-    ) -> Option<std::path::PathBuf> {
-        let candidate = safe_preview_join(output_dir, request_path)?;
-        if request_path.is_empty() {
-            Some(output_dir.join("index.html"))
-        } else if candidate.is_dir() {
-            Some(candidate.join("index.html"))
-        } else if candidate.exists() {
-            Some(candidate)
-        } else {
-            let nested_index = candidate.join("index.html");
-            if nested_index.exists() {
-                Some(nested_index)
-            } else if !request_path.contains('.') {
-                let html = candidate.with_extension("html");
-                if html.exists() { Some(html) } else { None }
-            } else {
-                None
-            }
-        }
-    }
-
-    let request_path = request_path.trim_start_matches('/');
-    let resolved = resolve_direct(output_dir, request_path).or_else(|| {
-        if request_path.contains('.') {
-            return None;
-        }
-
-        let segments: Vec<&str> = request_path
-            .split('/')
-            .filter(|segment| !segment.is_empty())
-            .collect();
-        if segments.len() < 2 {
-            return None;
-        }
-
-        // Legacy generated sites sometimes emit page-relative links such as
-        // "./capabilities/" from "/concepts/". When that happens, the
-        // browser requests "concepts/capabilities/". Fall back to the
-        // rightmost route segment at the preview root if it exists there.
-        for start in 1..segments.len() {
-            let fallback_path = segments[start..].join("/");
-            if let Some(path) = resolve_direct(output_dir, &fallback_path) {
-                return Some(path);
-            }
-        }
-
-        None
-    })?;
-
-    let canonical_root = std::fs::canonicalize(output_dir).ok()?;
-    let canonical_resolved = std::fs::canonicalize(resolved).ok()?;
-    if !canonical_resolved.starts_with(&canonical_root) {
-        return None;
-    }
-
-    Some(canonical_resolved)
-}
-
-/// Identity-first profile-data-dir resolver for `/api/site-preview/*`.
-///
-/// Codex flagged the legacy [`resolve_profile_data_dir`] path as
-/// unsafe for routes that lack an authoritative `profile_id` URL
-/// segment: it falls back to `X-Profile-Id` and treats the header as
-/// trusted, so an authed tenant A spoofing `X-Profile-Id: tenant-b`
-/// reads tenant B's preview. This helper deliberately ignores the
-/// header for profile routing and instead:
-///
-/// 1. Requires an `AuthIdentity` (the route is wrapped in
-///    `user_auth_middleware`, so reaching here with `None` is a
-///    routing bug — fail closed with 401).
-/// 2. If the request's host resolves to a tenant profile via the
-///    subdomain (e.g. `tenant-a.api.ominix.io`), honor it only when
-///    [`is_authorized_for_profile`] passes for the authenticated
-///    identity — otherwise 403 (mirrors `/api/my/*` host-scoping).
-/// 3. Otherwise, use the identity's own profile id: regular users
-///    map to their own user id, admin token maps to the admin
-///    profile.
-/// 4. Resolve the data dir from the now-authoritative profile id.
-#[allow(clippy::result_large_err)] // matches sibling `resolve_profile_data_dir_by_id`
-fn resolve_site_preview_data_dir(
-    state: &AppState,
-    headers: &HeaderMap,
-    identity: Option<&Extension<AuthIdentity>>,
-) -> Result<std::path::PathBuf, Response> {
-    let Some(Extension(identity)) = identity else {
-        tracing::warn!(
-            "site-preview route reached without AuthIdentity — routing bug? failing closed"
-        );
-        return Err(StatusCode::UNAUTHORIZED.into_response());
-    };
-
-    // Host-routed profile takes precedence (e.g. tenant subdomain),
-    // but ONLY when the authenticated identity is allowed to see
-    // that profile. Otherwise 403 — never silently fall through to
-    // another profile.
-    if let Some(host) = request_host(headers) {
-        if !is_local_request_host(&host) {
-            if let Some(candidate) = host.split('.').next() {
-                if let Some(host_profile_id) = resolve_profile_id_candidate(state, candidate) {
-                    if !is_authorized_for_profile(state, identity, &host_profile_id) {
-                        tracing::warn!(
-                            identity = ?identity,
-                            host_profile_id = %host_profile_id,
-                            "site-preview host-scope denied — identity not authorized for the tenant subdomain"
-                        );
-                        return Err(StatusCode::FORBIDDEN.into_response());
-                    }
-                    return resolve_profile_data_dir_by_id(state, &host_profile_id);
-                }
-            }
-        }
-    }
-
-    // No host-routed profile: derive purely from the authenticated
-    // identity. Crucially we do NOT read `X-Profile-Id` for profile
-    // routing — that's the codex-flagged side door.
-    let identity_profile_id = match identity {
-        AuthIdentity::Admin => ADMIN_PROFILE_ID,
-        AuthIdentity::User { id, .. } => id.as_str(),
-    };
-
-    // Defence in depth: if the caller DID send `X-Profile-Id`, treat
-    // any value that doesn't match the authenticated identity's
-    // profile (and that the identity isn't otherwise authorized for)
-    // as an explicit cross-tenant spoofing attempt → 403. This makes
-    // the rejection signal unambiguous in logs and tests, mirroring
-    // the response shape `/api/preview/{profile_id}/*` returns when
-    // identity does not own the route's profile_id segment.
-    if let Some(header_value) = headers.get("x-profile-id").and_then(|v| v.to_str().ok()) {
-        let trimmed = header_value.trim();
-        if !trimmed.is_empty()
-            && let Some(spoofed) = resolve_profile_id_candidate(state, trimmed)
-            && !is_authorized_for_profile(state, identity, &spoofed)
-        {
-            tracing::warn!(
-                identity = ?identity,
-                spoofed_profile_id = %spoofed,
-                "site-preview denied — X-Profile-Id requests a profile the identity is not authorized for (codex follow-up to PR #1001 / issue #994)"
-            );
-            return Err(StatusCode::FORBIDDEN.into_response());
-        }
-    }
-
-    resolve_profile_data_dir_by_id(state, identity_profile_id)
 }
 
 /// GET /api/files/list?dirs=research,slides,skill-output&session_id=... — list files in profile content directories.
@@ -3002,60 +2467,7 @@ pub async fn health() -> Json<serde_json::Value> {
 //  outstanding grant.
 //
 //  See `crates/octos-cli/src/api/preview_tokens.rs` for full design
-//  rationale on the token-cache module itself.
-// ───────────────────────────────────────────────────────────────────────────
-
-/// Body for `POST /api/my/preview/sign`.
-#[derive(Deserialize)]
-pub struct SignPreviewRequest {
-    pub profile_id: String,
-    pub session_id: String,
-    pub site_slug: String,
-}
-
-/// Build the HTTP 429 response for a preview-token rate-limit refusal.
-///
-/// #1009 follow-up: every preview-token 429 must include a
-/// `Retry-After: 60` header so SPAs and clients have a uniform backoff
-/// hint regardless of which cap (per-bearer / per-identity / global)
-/// tripped. 60 s is chosen to match the SPA's existing re-sign cadence
-/// (TTL - 60 s) — a polite client should naturally re-issue near the
-/// same boundary, and an aggressive client gets a hard backoff hint.
-///
-/// We hand-build the response (rather than the
-/// `(StatusCode, &'static str).into_response()` shortcut used
-/// elsewhere) so we can attach the header before returning.
-fn preview_rate_limit_response(body: &'static str) -> Response {
-    let mut resp = (StatusCode::TOO_MANY_REQUESTS, body).into_response();
-    resp.headers_mut().insert(
-        axum::http::header::RETRY_AFTER,
-        axum::http::HeaderValue::from_static("60"),
-    );
-    resp
-}
-
-/// Extract a bearer token from the request headers OR the URL query
-/// string. Mirrors `crate::api::router::extract_token` but takes a
-/// `&HeaderMap` so the sign_preview handler can call it from a typed
-/// extractor signature without re-receiving the raw axum Request.
-///
-/// NOTE: The query-string branch is omitted here because `/api/my/preview/sign`
-/// is POST-only and clients should send the bearer via the
-/// `Authorization` header — query-string fallback is a holdover for
-/// EventSource and `<img src=...>` which neither apply to the sign
-/// surface. If a future client needs it we'll revisit; keeping the
-/// surface narrow at sign time reduces the bearer's exposure in access
-/// logs.
-fn extract_bearer_from_request(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
-#[cfg(test)]
+//  rationale on the token-cache module itself.#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -3758,19 +3170,6 @@ mod tests {
     }
 
     #[test]
-    fn encode_api_session_path_id_escapes_reserved_characters() {
-        assert_eq!(
-            encode_api_session_path_id("web-123#slides topic"),
-            "web-123%23slides%20topic"
-        );
-    }
-
-    #[test]
-    fn session_messages_proxy_path_encodes_session_id() {
-        let path = session_messages_proxy_path("web-123#slides", 25, 0, None, None, None);
-        assert!(path.starts_with("/sessions/web-123%23slides/messages?"));
-    }
-
     #[test]
     fn response_path_for_profile_file_hides_absolute_paths() {
         let base = tempfile::tempdir().unwrap();
@@ -3864,28 +3263,6 @@ mod tests {
             "the owning tenant must be able to download its upload"
         );
         let _ = std::fs::remove_file(&f);
-    }
-
-    #[test]
-    fn resolve_preview_asset_path_falls_back_to_root_route_for_legacy_relative_links() {
-        let base = std::env::temp_dir().join(format!(
-            "octos-preview-fallback-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(base.join("capabilities")).unwrap();
-        std::fs::write(base.join("capabilities").join("index.html"), "ok").unwrap();
-
-        let resolved = resolve_preview_asset_path(&base, "concepts/capabilities/").unwrap();
-
-        assert_eq!(
-            resolved,
-            std::fs::canonicalize(base.join("capabilities").join("index.html")).unwrap()
-        );
-
-        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
@@ -4648,43 +4025,6 @@ mod tests {
     }
 
     #[test]
-    fn session_messages_proxy_path_includes_topic_and_since_seq() {
-        let path = session_messages_proxy_path(
-            "slides-123",
-            100,
-            5,
-            Some("full"),
-            Some(8),
-            Some("slides untitled-deck"),
-        );
-
-        assert_eq!(
-            path,
-            "/sessions/slides-123/messages?limit=100&offset=5&source=full&since_seq=8&topic=slides%20untitled-deck"
-        );
-    }
-
-    #[test]
-    fn append_topic_query_uses_question_mark_for_clean_path() {
-        let mut path = "/sessions/slides-123/tasks".to_string();
-        append_topic_query(&mut path, Some("slides untitled-deck"));
-        assert_eq!(
-            path,
-            "/sessions/slides-123/tasks?topic=slides%20untitled-deck"
-        );
-    }
-
-    #[test]
-    fn append_topic_query_uses_ampersand_when_query_exists() {
-        let mut path = "/sessions/slides-123/messages?limit=100".to_string();
-        append_topic_query(&mut path, Some("slides untitled-deck"));
-        assert_eq!(
-            path,
-            "/sessions/slides-123/messages?limit=100&topic=slides%20untitled-deck"
-        );
-    }
-
-    #[test]
     fn default_page_limit_is_100() {
         assert_eq!(default_page_limit(), 100);
     }
@@ -4700,6 +4040,7 @@ mod tests {
 
     /// Build a `task_query_store` carrying a single live supervisor with a
     /// running task pre-registered. Returns (store, supervisor, task_id).
+    #[cfg(test)]
     fn build_task_store_with_running_task(
         session_key: &str,
         tool_name: &str,
@@ -4917,9 +4258,7 @@ mod tests {
     // middleware ran) it must name a profile the identity is authorized
     // for — otherwise we return `403`, never silently override.
 
-    use crate::api::profile_scope::ADMIN_PROFILE_ID;
     use crate::profiles::{ProfileStore, UserProfile};
-    use crate::user_store::UserRole;
 
     fn make_profile(id: &str, parent_id: Option<&str>) -> UserProfile {
         UserProfile {

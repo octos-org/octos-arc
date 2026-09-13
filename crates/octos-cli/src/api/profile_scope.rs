@@ -5,7 +5,6 @@
 
 use axum::http::{HeaderMap, StatusCode};
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use super::AppState;
 use super::router::AuthIdentity;
