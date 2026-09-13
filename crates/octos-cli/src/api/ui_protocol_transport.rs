@@ -33,7 +33,7 @@ use octos_core::ui_protocol::{
     ContextNormalizationReportedEvent, CronListParams, CronToggleParams, EnvelopeTokenUsage,
     EnvelopeV2, EnvelopeV2Notification, FileRef, HydratedMessage, HydratedTurn, InputItem,
     MemoryEntityParams, MemoryOverviewParams, MessageDeltaEvent, MessageMeta, OutputCursor,
-    Payload, PayloadV2, PeerClosedEvent, PeerStagedEvent, ReplayLossyEvent, RpcError,
+    Payload, PayloadV2, ReplayLossyEvent, RpcError,
     RpcErrorResponse, RpcRequest, RpcResponse, SESSION_HYDRATE_INCLUDE_MAX,
     SESSION_MESSAGES_PAGE_DEFAULT_LIMIT, SESSION_MESSAGES_PAGE_MAX_LIMIT,
     SESSION_MESSAGES_PAGE_MAX_OFFSET, SESSION_TITLE_SET_MAX_CHARS, SessionBtwParams,
@@ -108,7 +108,6 @@ use super::ui_protocol_task_output;
 use super::ws_slash;
 // Phase 3 (goal-in-chat): the contract stores now live outside the `api` gate
 // so `octos chat --peers` shares the identical process-global registry.
-use crate::peers::*;
 use crate::contracts::approvals::PendingApprovalStore;
 use crate::contracts::diff::PendingDiffPreviewStore;
 use crate::contracts::questions::PendingQuestionStore;
@@ -1024,22 +1023,6 @@ struct StoredSessionPermissionProfile {
 }
 
 
-/// Captured before the task is spawned, so an abort before its first poll also
-/// releases the dispatch reservation. The strong state reference pins the
-/// generation address until this guard drops; a stale guard cannot close a
-/// replacement even when its client-supplied session and turn IDs are reused.
-struct BuildCacheTurnReservation(BuildCacheTurnOwner, Arc<TokioMutex<TurnState>>);
-impl Drop for BuildCacheTurnReservation {
-    fn drop(&mut self) {
-        release_peer_build_cache_slot(
-            None,
-            &self.0.session,
-            &self.0.turn,
-            &self.1,
-            crate::build_cache::pool::SlotOutcome::Cancelled,
-        );
-    }
-}
 
 
 #[derive(Default)]
@@ -4903,13 +4886,6 @@ struct UiProtocolApprovalRequester {
     /// `state.sessions.lock().data_dir()` on the auto-resolved decision
     /// path (and any future direct-decision paths).
     state: Arc<AppState>,
-    /// #1842(b) — `peers/` under the RESOLVED runtime profile this turn was
-    /// admitted under (`session_runtime.profile.data_dir`). The closed-peer park
-    /// gate keys off THIS, never off a profile parsed from `session_id` (a raw
-    /// client session key carries no profile — exactly how a reverted attempt
-    /// stayed bypassable) and never off a `state.profiles` re-lookup (a dynamic
-    /// profile runtime is not in that map). See [`PeerParkGate`].
-    peers_root: PathBuf,
     session_id: SessionKey,
     turn_id: TurnId,
     features: ConnectionUiFeatures,
@@ -7412,10 +7388,6 @@ async fn abort_live_forwarders(forwarders: &SharedLiveForwarders, ledger: &UiPro
     }
     for session_id in drained_sessions {
         ledger.prune_subscriber_if_idle(&session_id);
-        // #436 P1 #5 — a closing peer session must stop being an injection
-        // target so `peer_send_input` fails cleanly (or re-homes on reopen)
-        // rather than queuing into a dead session; also frees a registry slot.
-        evict_peer_wire_session(&session_id);
     }
 }
 
@@ -11239,8 +11211,6 @@ async fn raw_skill_action_invoke(
             ledger: Arc::clone(ledger),
             contracts: ui_context.contracts,
             state: Arc::clone(state),
-            // #1842(b) — the peers root of the RESOLVED runtime profile.
-            peers_root: session_runtime.profile.data_dir.join("peers"),
             session_id: params.session_id.clone(),
             turn_id: TurnId::new(),
             features: ui_context.features,
@@ -15043,10 +15013,7 @@ async fn open_session_result(
                 // this session's turns later append) under the per-cwd
                 // storage identity. No-op when the store wasn't relocated.
                 register_session_ledger_scope(state, ledger, &runtime);
-                open_context_provider = Some(
-                    peer_lane_provider_for(&params.session_id, &runtime)
-                        .unwrap_or_else(|| runtime.profile.llm.clone()),
-                );
+                open_context_provider = Some(runtime.profile.llm.clone());
                 effective_workspace_root = Some(runtime.workspace_root.clone());
                 effective_runtime_hint = effective_workspace_hint
                     .as_ref()
@@ -15111,11 +15078,6 @@ async fn open_session_result(
             effective_runtime_hint,
         );
     }
-    // #436 — record a `peer-<slug>` session's wire key so `peer_send_input`
-    // (wired on the master's turn, which cannot know the peer's client-chosen
-    // wire id) can resolve the slug to the continuation-queue key it enqueues
-    // an injected turn under. No-op for non-peer / unprofiled sessions.
-    register_peer_wire_session(state, &params.session_id);
     // Open-time context snapshot — deliberately BEFORE the replay head is
     // taken: when the open-time threshold pass compacts an oversized rebuilt
     // ledger, its started/completed lifecycle events are appended to the
@@ -15726,29 +15688,6 @@ fn directory_is_writable(path: &Path) -> bool {
     }
 }
 
-/// #1057: report `workspace_policy.toml` presence + parse status. We do not
-/// load the policy into the runtime here — that responsibility lives with
-/// `SessionRuntime::bootstrap`. The probe only answers "would a future
-/// session/open against this directory hit a policy parse failure?".
-fn reserve_peer_build_cache_turn(
-    state: &AppState,
-    session_id: &SessionKey,
-    turn_id: &TurnId,
-    turn_state: &Arc<TokioMutex<TurnState>>,
-    routed_profile: Option<&str>,
-) -> Result<BuildCacheTurnReservation, RpcError> {
-    let owner = build_cache_turn_owner(session_id, turn_id, turn_state);
-    if let Some(slug) = session_id
-        .topic()
-        .and_then(|topic| topic.strip_prefix("peer-"))
-        && let Some(runtime) =
-            resolve_session_profile_runtime(state, session_id.profile_id().or(routed_profile))
-    {
-        let key = build_cache_slot_registry_key(&runtime.data_dir.join("peers"), slug);
-        build_cache_slot_registry().reserve_staged(&key, &owner)?;
-    }
-    Ok(BuildCacheTurnReservation(owner, turn_state.clone()))
-}
 
 
 
@@ -15763,6 +15702,10 @@ fn session_permission_profiles() -> Arc<SessionPermissionProfileStore> {
 
 
 
+/// #1057: report `workspace_policy.toml` presence + parse status. We do not
+/// load the policy into the runtime here — that responsibility lives with
+/// `SessionRuntime::bootstrap`. The probe only answers "would a future
+/// session/open against this directory hit a policy parse failure?".
 fn workspace_policy_probe(root: Option<&Path>) -> Value {
     let Some(root) = root else {
         return json!({
@@ -15816,42 +15759,7 @@ fn workspace_profile_scope(profile_id: Option<&str>, session_id: &SessionKey) ->
         .to_owned()
 }
 
-fn build_cache_turn_owner(
-    session: &SessionKey,
-    turn: &TurnId,
-    state: &TokioMutex<TurnState>,
-) -> BuildCacheTurnOwner {
-    BuildCacheTurnOwner {
-        session: session.clone(),
-        turn: turn.clone(),
-        generation: std::ptr::from_ref(state) as usize,
-    }
-}
 
-fn release_peer_build_cache_slot(
-    peers_root: Option<&std::path::Path>,
-    session_id: &SessionKey,
-    turn_id: &TurnId,
-    turn_state: &TokioMutex<TurnState>,
-    outcome: crate::build_cache::pool::SlotOutcome,
-) {
-    let Some(slug) = session_id
-        .topic()
-        .and_then(|topic| topic.strip_prefix("peer-"))
-    else {
-        return;
-    };
-    let owner = build_cache_turn_owner(session_id, turn_id, turn_state);
-    if let Some(root) = peers_root {
-        build_cache_slot_registry().release_owned(
-            &build_cache_slot_registry_key(root, slug),
-            &owner,
-            outcome,
-        );
-    } else {
-        build_cache_slot_registry().release_for_slug(slug, &owner, outcome);
-    }
-}
 
 
 /// Resolve the `ProfileRuntime` for the routed session, mirroring
@@ -16806,21 +16714,7 @@ async fn handle_turn_start_with_accept(
         .map(ToOwned::to_owned)
         .or_else(|| resolved_profile_id.clone())
         .unwrap_or_else(|| MAIN_PROFILE_ID.to_owned());
-    let cache_reservation = match reserve_peer_build_cache_turn(
-        state,
-        &session_id,
-        &turn_id,
-        &turn_state,
-        resolved_profile_id.as_deref(),
-    ) {
-        Ok(reservation) => reservation,
-        Err(error) => {
-            let _ = send_rpc_error(ws, Some(id), error);
-            return false;
-        }
-    };
     let handle = tokio::spawn(async move {
-        let _cache_reservation = cache_reservation;
         if start_rx.await.is_err() {
             return;
         }
@@ -16838,7 +16732,6 @@ async fn handle_turn_start_with_accept(
                 turn_state_for_task,
                 interrupt_rx,
                 steer_buffer_for_turn,
-                false,
                 None,
                 // #1133 — regular `turn/start` path is user-initiated;
                 // it never runs as a goal continuation, so no goal
@@ -16846,11 +16739,6 @@ async fn handle_turn_start_with_accept(
                 // runner sets this to `Some(...)` for `GoalContinue`.
                 None,
                 // #1650 — interactive goal binding removed with the autonomy engine.
-                None,
-                // #436 — regular user turns already persist their prompt
-                // (they are not internal continuations); no override needed.
-                false,
-                // #436 P1 #2 — regular turns don't gate completion on dispatch.
                 None,
                 // OLP-CTRL 回合 4 — an interactive turn is never a steer
                 // continuation turn; it must not consume reviewer-notes.
@@ -16955,67 +16843,9 @@ enum TurnSteerDecision {
     NoActiveTurn,
 }
 
-/// #436 P1 #2 — decide whether THIS connection's per-connection continuation
-/// drain may run a due target. A peer session's turn streams live deltas
-/// EPHEMERALLY to the running connection's socket, so a non-owning same-profile
-/// connection (e.g. the master) draining a peer continuation would render the
-/// peer's turn on the WRONG client. Restrict a peer target to the connection
-/// that has the peer session open; a peer whose client is elsewhere or
-/// disconnected is left for its OWN connection or the connection-independent
-/// global drain (detached socket → delivered via the peer's durable session
-/// forwarder). Non-peer targets (goal/loop/child) are unchanged — any
-/// same-profile connection may drain them, as before.
-fn peer_target_deliverable_on_connection(
-    wire_key: &SessionKey,
-    open_sessions: &std::collections::HashSet<SessionKey>,
-) -> bool {
-    let is_peer = wire_key
-        .topic()
-        .is_some_and(|topic| topic.starts_with("peer-"));
-    !is_peer || open_sessions.contains(wire_key)
-}
 
-/// #436 P1 #3 — a peer continuation is only run by the connection-independent
-/// global drain when its target session is the slug's CURRENT registered wire.
-/// A closed peer (evicted from the registry) or an obsolete wire (superseded by
-/// a reopen the global drain raced) is skipped, so the injection is never run
-/// under a dead/obsolete session — it is re-homed and delivered when the peer
-/// reopens. Non-peer targets always pass.
-fn peer_target_is_current_wire(wire_key: &SessionKey) -> bool {
-    let Some((profile_id, slug)) = peer_slug_and_profile(wire_key) else {
-        return true;
-    };
-    peer_wire_registry()
-        .resolve(&peer_wire_key(profile_id, slug))
-        .as_ref()
-        == Some(wire_key)
-}
 
-/// #436 — a peer retired via `peer_close` must never be dispatched, even for an
-/// injection queued just before the close and re-homed onto the reopened wire:
-/// `peer_target_is_current_wire` sees only the registry (a reopened peer IS
-/// current), not the durable `closed` marker. This checks the marker so a
-/// closed peer's continuation is RETIRED by the drain gates (FIX 5 — popped +
-/// tombstoned, never reinserted), so it cannot strand. Non-peer (goal/loop)
-/// targets and unresolvable profiles are never "closed".
-fn peer_target_is_closed(state: &Arc<AppState>, wire_key: &SessionKey) -> bool {
-    let Some((profile_id, slug)) = peer_slug_and_profile(wire_key) else {
-        return false;
-    };
-    state
-        .profiles
-        .get(profile_id)
-        .is_some_and(|runtime| peer_is_closed(&runtime.data_dir.join("peers"), slug))
-}
 
-/// #436 P1 #2 — decide whether a drained continuation may be marked completed.
-/// A `peer_send_input` injection that did NOT dispatch the agent (its turn
-/// aborted before processing — e.g. a failed `TurnStarted` delivery) must stay
-/// durable for retry/replay, so it is NOT completed. Every other continuation
-/// (and a peer injection that DID dispatch) completes normally.
-fn continuation_may_complete(is_peer_injection: bool, agent_dispatched: bool) -> bool {
-    !is_peer_injection || agent_dispatched
-}
 
 /// Snapshot of sessions that currently have an in-flight (non-terminal) turn in
 /// the process-global active-turns registry. One lock acquisition; used to feed
@@ -23484,7 +23314,6 @@ async fn run_standalone_turn(
     // prompt row gets) the moment it is folded into the conversation.
     // `None` for non-steerable turns.
     steer_buffer: Option<octos_agent::SharedSteerBuffer>,
-    internal_master_continuation: bool,
     // #1128 codex P1 re-review #2 — when this turn is draining a
     // self-paced or maintenance LoopFire continuation, pass the loop
     // id here so `run_standalone_turn` can re-schedule it from the
@@ -23511,19 +23340,6 @@ async fn run_standalone_turn(
     // `None` for master continuations (`goal_context` carries their
     // accounting instead).
     interactive_goal_binding: Option<(String, String)>,
-    // #436 — when a master continuation's prompt IS a user turn that must land
-    // in the transcript + durable history (a `peer_send_input` injection),
-    // persist the internal user message instead of skipping it. `false` for
-    // system-internal continuations (goal/loop/child/recovery), whose
-    // `[system-internal]` prompt is intentionally not shown as a user row.
-    persist_continuation_prompt_as_user: bool,
-    // #436 P1 #2 — set to `true` right before the agent is dispatched, so the
-    // caller can tell whether the turn ACTUALLY processed the prompt. A turn
-    // that aborts before dispatch (e.g. a failed `TurnStarted` delivery) leaves
-    // it `false`, and the continuation runner then keeps a peer_send_input
-    // injection durable for retry/replay instead of marking it completed.
-    // `None` for the regular `turn/start` path, which doesn't need the signal.
-    turn_dispatched: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     // OLP-CTRL 回合 4 (消费权归一): `true` ONLY when this turn drains a
     // STEER continuation — the sole turn allowed to read-and-clear the
     // reviewer-notes sidecar and emit the steer_consumed receipt. Every
@@ -23626,7 +23442,6 @@ async fn run_standalone_turn(
             Some(("runtime_unavailable", error.as_str())),
             None,
             steer_buffer.as_ref(),
-            None,
             // Outer-loop #4 (§4.2): peer sessions release their held slot at the interrupted terminal; None = no peer context on this path.
         )
         .await;
@@ -23658,7 +23473,6 @@ async fn run_standalone_turn(
                 Some(("permission_denied", message.as_str())),
                 None,
                 steer_buffer.as_ref(),
-                None,
                 // Outer-loop #4 (§4.2): peer sessions release their held slot at the interrupted terminal; None = no peer context on this path.
             )
             .await;
@@ -23689,7 +23503,6 @@ async fn run_standalone_turn(
                 Some(("runtime_unavailable", &error.to_string())),
                 None,
                 steer_buffer.as_ref(),
-                None,
                 // Outer-loop #4 (§4.2): peer sessions release their held slot at the interrupted terminal; None = no peer context on this path.
             )
             .await;
@@ -23697,13 +23510,6 @@ async fn run_standalone_turn(
             return;
         }
     };
-    // Outer-loop #4 (§4.2): this turn's peers root — `Some` ONLY when this
-    // session is a peer (topic `peer-<slug>`) running under the profile's
-    // data dir. The interrupted-terminal release below keys the slot registry
-    // by exactly this root + slug; `None` keeps every master turn off the
-    // registry entirely.
-    let peers_root: Option<std::path::PathBuf> =
-        peer_slug_and_profile(&session_id).map(|_| session_runtime.profile.data_dir.join("peers"));
     // Per-project ledger isolation (#1666): every event this turn appends
     // must land under the session's per-cwd storage identity. `session/open`
     // registered it already for the normal flow; re-registering here is an
@@ -23779,7 +23585,6 @@ async fn run_standalone_turn(
     // `Arc<ToolRegistry>` so per-turn mutation does not race with the
     // cached SessionRuntime.
     let sessions = session_runtime.sessions.clone();
-    let gathered_peer_results = GatheredPeerResults::default();
     // #1128 codex P1 re-review #2 — pre-turn assistant-message count
     // snapshot off the SessionRuntime's session manager (the source
     // of truth for persisted turns). Used at end-of-turn to find the
@@ -23902,13 +23707,7 @@ async fn run_standalone_turn(
     }
 
     let workspace_root: Option<PathBuf> = Some(session_runtime.workspace_root.clone());
-    // #peer-model — a peer session whose staging recorded a valid model LANE
-    // (`peers/<slug>/model`) runs its turns on that `sub_provider` instead of
-    // the profile's primary; every other session (and any missing/unmatched/
-    // unbuildable lane) falls back to the profile's primary provider.
-    let llm_provider: Arc<dyn octos_llm::LlmProvider> =
-        peer_lane_provider_for(&session_id, &session_runtime)
-            .unwrap_or_else(|| session_runtime.profile.llm.clone());
+    let llm_provider: Arc<dyn octos_llm::LlmProvider> = session_runtime.profile.llm.clone();
     let memory_store: Arc<octos_memory::EpisodeStore> = session_runtime.profile.memory.clone();
     let mut agent_config = session_runtime.agent.agent_config();
     // A human-driven turn does not become unattended merely because it
@@ -23916,11 +23715,7 @@ async fn run_standalone_turn(
     // this policy; explicit profile caps still win for either intent.
     agent_config.max_iterations = crate::runtime::turn_policy::max_iterations(
         session_runtime.profile.max_iterations,
-        if internal_master_continuation {
-            crate::runtime::turn_policy::TurnIntent::Autonomous
-        } else {
-            crate::runtime::turn_policy::TurnIntent::Interactive
-        },
+        crate::runtime::turn_policy::TurnIntent::Interactive,
     );
     // Per-session reasoning/thinking effort (TUI `/thinking`), persisted
     // server-side so it survives a full serve/TUI restart (in `--stdio` mode a
@@ -23946,7 +23741,7 @@ async fn run_standalone_turn(
             // A user turn is authoritative: when it omits the effort the user
             // chose "default", so clear the stored override. Server-initiated
             // continuations keep falling back to the stored value.
-            !internal_master_continuation,
+            true,
         )
         .await;
     if let Some(level) = resolved_effort {
@@ -24028,14 +23823,6 @@ async fn run_standalone_turn(
         workspace_root: Some(session_runtime.workspace_root.clone()),
     };
     if let Some(reply) = ws_slash::try_dispatch_slash_command(&prompt, &slash_ctx).await {
-        // #436 P1 #3 — a `/`-prefixed injected message is CONSUMED here (the
-        // command runs + is persisted) and returns before the agent-dispatch
-        // flag point below. Mark it dispatched so the continuation runner
-        // COMPLETES it rather than keeping it durable — otherwise a slash-shaped
-        // peer_send_input injection would be re-delivered after a restart.
-        if let Some(flag) = turn_dispatched.as_ref() {
-            flag.store(true, std::sync::atomic::Ordering::Release);
-        }
         let user_turn_id = turn_id.0.to_string();
         let user_message = pre_stamp_turn_thread_id(Message::user(prompt.clone()), &user_turn_id);
         let assistant_message = pre_stamp_turn_thread_id(Message::assistant(reply), &user_turn_id);
@@ -24059,8 +23846,6 @@ async fn run_standalone_turn(
             // reply is canned and no token meter ran.
             None,
             steer_buffer.as_ref(),
-            peers_root.as_deref(),
-            // Outer-loop #4 (§4.2): peer sessions release their held slot at the interrupted terminal; None = no peer context on this path.
         )
         .await;
         contracts.scopes.evict_turn(&session_id, &turn_id);
@@ -24833,15 +24618,6 @@ async fn run_standalone_turn(
     stable_system_prompt.push_str(OUP_GOAL_LIFECYCLE_INSTRUCTION);
 
     let mut tail_context_events = Vec::new();
-    if let Some(note) =
-        peer_results_ready_note(&session_runtime.profile.data_dir.join("peers"), &session_id)
-    {
-        tail_context_events.push((
-            ContextEventKind::PeerResultsReady,
-            "peer-results-ready",
-            note,
-        ));
-    }
     // Empty memory is not a context event. In particular, a fresh stdio/solo
     // session must not pay for a synthetic `memory-snapshot` line on every
     // turn; the named memory segment already carries the stable policy when
@@ -24915,91 +24691,13 @@ async fn run_standalone_turn(
     // the gateway actor path carried it fine.
     .with_parent_session_key(session_id.to_string())
     .with_reporter(reporter);
-    // Peer-agent-based goal: when THIS turn runs as a peer session (topic
-    // `peer-<slug>`) AND the staged peer dir carries a `goal` file (written
-    // by `stage_peer` from the master's `peer_handoff` request), rehydrate
-    // the (goal_id, task_id) pair into the agent. This is what makes the
-    // peer's `goal_*` tool calls resolve to the goal the master handed off
-    // under — without it the tools fall back to the peer's own (non-goal)
-    // session and read an empty state. A missing/malformed file is silently
-    // treated as goal-less (the peer still runs, just without goal context).
-    let mut request_agent = request_agent;
-    if let Some(profile) = session_runtime.agent.profile() {
-        request_agent = request_agent
+    let mut request_agent = if let Some(profile) = session_runtime.agent.profile() {
+        request_agent
             .with_profile(profile)
-            .with_agent_definitions(session_runtime.agent.agent_definitions());
-    }
-    if let Some((_profile_id, slug)) = peer_slug_and_profile(&session_id) {
-        let peers_root = session_runtime.profile.data_dir.join("peers");
-        if let Some(peer_dir) = staged_peer_dir(&peers_root, slug) {
-            if let Some(body) =
-                peer_io::read_peer_file(&peer_dir, "goal", peer_io::PEER_FILE_READ_CAP_SMALL)
-            {
-                let mut lines = body.lines();
-                let goal_id = lines.next().map(str::trim).filter(|s| !s.is_empty());
-                let task_id = lines.next().map(str::trim).filter(|s| !s.is_empty());
-                if let Some(goal_id) = goal_id {
-                    request_agent = request_agent.with_goal_id(goal_id.to_owned());
-                    if let Some(task_id) = task_id {
-                        request_agent = request_agent.with_task_id(task_id.to_owned());
-                    }
-                }
-            }
-            // Peer-agent-based goal: capture the originator session ONCE at
-            // boot and inject into the Agent. This is the (codex v9 High #2)
-            // fix: previously `goal_get` re-read the originator file on
-            // every call, which is a mutable, symlink-vulnerable read that
-            // could rebind a known goal_id to a different session mid-turn.
-            // Capturing it here pins the value for the whole turn.
-            if let Some(originator) =
-                peer_io::read_peer_file(&peer_dir, "originator", peer_io::PEER_FILE_READ_CAP_SMALL)
-                    .map(|s| s.trim().to_owned())
-                    .filter(|s| !s.is_empty())
-            {
-                request_agent = request_agent.with_originator_session(originator);
-            }
-
-            // Outer-loop #4 (docs/build-cache-pool.md §4.1/§7.4): acquire
-            // (or ADOPT) this turn's build-cache slot. Slot lifecycle is ONE
-            // TURN: boot acquires, the turn terminal releases.
-            //
-            // The registry keeps the original lock and usage tracker during
-            // adoption. An Active claim owned by another session/turn is
-            // rejected before eligibility cleanup or any new allocation.
-            let held_slot = match build_cache_peer::slot_for_owned_turn(
-                &peers_root,
-                &session_runtime.workspace_root,
-                slug,
-                &build_cache_turn_owner(&session_id, &turn_id, &turn_state),
-            ) {
-                Ok(slot) => slot,
-                Err(error) => {
-                    // Eligible peers must not escape the bounded pool by
-                    // falling back to a private, unbounded target directory.
-                    try_emit_terminal(
-                        &turn_state,
-                        TerminalReason::Errored,
-                        &ws,
-                        &ledger,
-                        &session_id,
-                        &turn_id,
-                        Some(("build_cache_unavailable", &error.message)),
-                        None,
-                        steer_buffer.as_ref(),
-                        Some(&peers_root),
-                    )
-                    .await;
-                    contracts.scopes.evict_turn(&session_id, &turn_id);
-                    return;
-                }
-            };
-            if let Some(slot) = held_slot {
-                request_agent = request_agent
-                    .with_build_cache_slot(slot.path)
-                    .with_build_cache_usage(slot.usage);
-            }
-        }
-    }
+            .with_agent_definitions(session_runtime.agent.agent_definitions())
+    } else {
+        request_agent
+    };
     // In-loop compaction delivery (UPCR-2026-026 follow-up): mirror the
     // pre-turn lifecycle delivery — durable direct send for clients that
     // negotiated `context.lifecycle.v1`, ledger-only otherwise — so the
@@ -25137,9 +24835,6 @@ async fn run_standalone_turn(
             ledger: ledger.clone(),
             contracts: contracts.clone(),
             state: state.clone(),
-            // #1842(b) — `peers/` of the profile this turn was ADMITTED under,
-            // the exact root peer_close/stage_peer use for this profile.
-            peers_root: session_runtime.profile.data_dir.join("peers"),
             session_id: session_id.clone(),
             turn_id: turn_id.clone(),
             features,
@@ -25345,11 +25040,6 @@ async fn run_standalone_turn(
     // since FA-11.
     let auto_escalation_router = session_runtime.profile.adaptive_router.clone();
     let auto_escalation_session_id = session_id.0.clone();
-    // #436 — a `peer_send_input` continuation carries a real user turn: keep
-    // its prompt (persist it as a `UserMessage`) so it reaches the peer's
-    // transcript + durable history via the canonical `MessageCommitObserver`.
-    let skip_internal_user_persist =
-        internal_master_continuation && !persist_continuation_prompt_as_user;
     // #1128 codex P1 re-review #2 — clone the session manager Arc
     // before the agent_task spawn moves the original. We need the
     // clone alive in this outer scope for the post-turn self-paced
@@ -25381,38 +25071,6 @@ async fn run_standalone_turn(
     // client returns home after the farewell audio. `false` for text turns or
     // replies without the marker.
     let (exit_directive_tx, exit_directive_rx) = tokio::sync::oneshot::channel::<bool>();
-    // #436 P1 #2 — we are past every pre-dispatch early-return (failed
-    // `TurnStarted`, runtime-unavailable, etc.); the agent is about to process
-    // the prompt. Record that so the continuation runner knows the injection
-    // was actually consumed and may be marked completed.
-    let peer_lifetime_turn = match begin_peer_lifetime_turn(
-        &session_runtime.profile.data_dir.join("peers"),
-        &session_id,
-        &turn_id.0.to_string(),
-    ) {
-        Ok(token) => token,
-        Err(error) => {
-            let message = format!("cannot persist peer turn lifetime: {error}");
-            try_emit_terminal(
-                &turn_state,
-                TerminalReason::Errored,
-                &ws,
-                &ledger,
-                &session_id,
-                &turn_id,
-                Some(("peer_lifetime_unavailable", &message)),
-                None,
-                steer_buffer.as_ref(),
-                Some(&session_runtime.profile.data_dir.join("peers")),
-            )
-            .await;
-            contracts.scopes.evict_turn(&session_id, &turn_id);
-            return;
-        }
-    };
-    if let Some(flag) = turn_dispatched.as_ref() {
-        flag.store(true, std::sync::atomic::Ordering::Release);
-    }
     // #1969 — shared token tracker: `token_tracker_task` is moved into the
     // spawned agent task below; the original `token_tracker` stays in THIS scope
     // so the drain loop can read an interrupted turn's partial spend after the
@@ -25669,7 +25327,6 @@ async fn run_standalone_turn(
                     // post-turn reschedule would otherwise win and
                     // drop the preamble's hint).
                     let mut last_persisted_preamble_assistant: Option<String> = None;
-                    let mut skipped_internal_user = false;
                     // NEW-16 defense-in-depth: per-turn message-index
                     // cursor. The main fix is the append-only
                     // `turn_output_log` upstream — but if some edge
@@ -25696,13 +25353,6 @@ async fn run_standalone_turn(
                         cursors.get(&cursor_key).map(|e| e.next_index).unwrap_or(0)
                     };
                     for (message_index, message) in response.messages.iter().cloned().enumerate() {
-                        if skip_internal_user_persist
-                            && !skipped_internal_user
-                            && message.role == MessageRole::User
-                        {
-                            skipped_internal_user = true;
-                            continue;
-                        }
                         // NEW-16 defense-in-depth: skip indexes already
                         // persisted for this `(session, turn)` pair.
                         // `cursor_already_advanced` reflects the
@@ -25900,9 +25550,8 @@ async fn run_standalone_turn(
                         } else {
                             // The `final_assistant` row is the synthesised
                             // carrier of `response.content`. By
-                            // construction this is an Assistant row (so
-                            // the skip_internal_user_persist branch does
-                            // not apply) and its content equals
+                            // construction this is an Assistant row, and
+                            // its content equals
                             // `response.content` (so it is the
                             // final-assistant carrier).
                             //
@@ -26392,29 +26041,6 @@ async fn run_standalone_turn(
                     token_usage: None,
                     partial_result: None,
                 };
-                // #1801 v2: a peer session's terminal leaves its result on
-                // the blackboard (result.md beside the brief). #1965 — the
-                // turn's accumulated spend (folded from this `done` event
-                // just above) rides along so a goal-bound peer charges the
-                // master goal's budget.
-                write_peer_result_if_peer_session(
-                    &state,
-                    &session_id,
-                    TurnTerminalOutcome::Completed,
-                    event.get("content").and_then(Value::as_str).unwrap_or(""),
-                    final_tokens_consumed,
-                    peer_lifetime_turn.as_ref(),
-                );
-                // Peer-fleet auto-synthesis: a peer COMPLETING may be the last
-                // of its master's fleet — evaluate the fleet and, when every
-                // owned peer is done and the master is idle, fire ONE autonomous
-                // synthesis turn on the master (no user prompt). No-op for
-                // non-peer sessions and incomplete fleets. Only the Completed
-                // arm triggers the evaluation; an errored/interrupted peer's
-                // result still counts toward readiness (it does not block) but
-                // does not itself kick off a synthesis.
-                // #2003 — also evaluate on the MASTER-idle edge. No-ops for a peer
-                // session (handled just above) and for a session with no fleet.
                 // FIX-04: flush any accumulated drops before the lifecycle
                 // terminal so the client knows the cursor is incomplete.
                 flush_replay_lossy(&ws, &ledger, &session_id, &progress_dropped);
@@ -26433,19 +26059,8 @@ async fn run_standalone_turn(
                     None,
                     Some(details),
                     steer_buffer.as_ref(),
-                    peers_root.as_deref(),
-                    // Outer-loop #4 (§4.2): peer sessions release their held slot at the interrupted terminal; None = no peer context on this path.
                 )
                 .await;
-                if let Err(error) = commit_gathered_peer_results(
-                    &session_runtime.profile.data_dir.join("peers"),
-                    &session_id,
-                    &gathered_peer_results,
-                    &*turn_state.lock().await,
-                    &event,
-                ) {
-                    tracing::warn!(?error, "failed to commit peer consumption receipts");
-                }
                 drop(admission);
                 break;
             }
@@ -26504,25 +26119,6 @@ async fn run_standalone_turn(
                 } else {
                     TurnTerminalOutcome::Errored
                 };
-                // #1965/#1969 — `final_tokens_consumed` now carries the errored
-                // turn's real accumulated spend (folded from this event's token
-                // fields just above), so a goal-bound peer that rate-limited
-                // mid-run charges the master goal instead of 0.
-                write_peer_result_if_peer_session(
-                    &state,
-                    &session_id,
-                    turn_outcome,
-                    &wire_msg,
-                    final_tokens_consumed,
-                    peer_lifetime_turn.as_ref(),
-                );
-                // codex #2 — an ERRORED/interrupted/rate-limited peer still
-                // wrote a result.md; evaluate the fleet here too so a fleet
-                // whose LAST peer errors still triggers synthesis (the error
-                // body is part of what the master consolidates). Same fleet
-                // gate as the completed arm; no-op for non-peer sessions.
-                // #2003 — also evaluate on the MASTER-idle edge. No-ops for a peer
-                // session (handled just above) and for a session with no fleet.
                 flush_replay_lossy(&ws, &ledger, &session_id, &progress_dropped);
                 try_emit_terminal(
                     &turn_state,
@@ -26544,8 +26140,6 @@ async fn run_standalone_turn(
                         ..Default::default()
                     }),
                     steer_buffer.as_ref(),
-                    peers_root.as_deref(),
-                    // Outer-loop #4 (§4.2): peer sessions release their held slot at the interrupted terminal; None = no peer context on this path.
                 )
                 .await;
                 break;
@@ -26709,11 +26303,6 @@ async fn run_standalone_turn(
     }
 
     if interrupt_observed {
-        if let Some(token) = peer_lifetime_turn.as_ref()
-            && let Err(error) = finish_peer_lifetime_turn(token, "", false, false)
-        {
-            warn!(%error, "failed to record interrupted peer lifetime");
-        }
         // Stop the agent so any in-flight LLM/tool await unblocks promptly.
         agent_task.abort();
         // Esc/`/stop`/`turn/interrupt` did not used to break a still-running
@@ -26826,8 +26415,6 @@ async fn run_standalone_turn(
             )),
             None,
             steer_buffer.as_ref(),
-            peers_root.as_deref(),
-            // Outer-loop #4 (§4.2): peer sessions release their held slot at the interrupted terminal; None = no peer context on this path.
         )
         .await;
         // codex #2 residual — a client-interrupted peer takes THIS branch, not
@@ -27279,11 +26866,6 @@ async fn try_emit_terminal(
     // flips to Terminal and BEFORE the terminal frame below — see
     // `settle_leftover_steers`.
     steer_buffer: Option<&octos_agent::SharedSteerBuffer>,
-    // Outer-loop #4 (§4.2): the peers root for a PEER session's build-cache
-    // slot release at an error or interrupted terminal. `None` on paths that
-    // cannot be a peer turn (M9 fixtures, review scatter-join, slash
-    // dispatch) — those sessions hold no slot, so the release no-ops.
-    peers_root: Option<&std::path::Path>,
 ) {
     // Single terminal gate: state → Terminal, then the steer settlement
     // (`turn/steer_dropped`), then — below — the terminal frame.
@@ -27350,15 +26932,6 @@ async fn try_emit_terminal(
             );
         }
         TerminalReason::Errored => {
-            // A pre-dispatch failure (for example peer lifetime persistence)
-            // skips the result writer, so release here as an idempotent net.
-            release_peer_build_cache_slot(
-                peers_root,
-                session_id,
-                turn_id,
-                turn_state,
-                crate::build_cache::pool::SlotOutcome::Failed,
-            );
             let (code, message) = error_payload.unwrap_or(("runtime_error", "turn failed"));
             // #48b — OLP observability: when the terminal error CARRIES the
             // malformed-exhausted marker as a PREFIX, emit ONLY the
@@ -27400,20 +26973,6 @@ async fn try_emit_terminal(
         TerminalReason::Interrupted => {
             let (code, message) = error_payload.unwrap_or(("interrupted", "turn interrupted"));
             let _ = send_turn_error(ws, ledger, session_id, turn_id, code, message);
-            // Outer-loop #4 (§4.2): an INTERRUPTED turn never reaches
-            // `write_peer_result_if_peer_session` (it aborts the agent task
-            // before the done/error event), so the peer's held slot must be
-            // released HERE or one client interrupt leaks it until serve
-            // restart — with peer_slots=2, two interrupts pool-exhaust the
-            // fleet. Idempotent: a turn that already released at its terminal
-            // finds no registry entry.
-            release_peer_build_cache_slot(
-                peers_root,
-                session_id,
-                turn_id,
-                turn_state,
-                crate::build_cache::pool::SlotOutcome::Cancelled,
-            );
         }
     }
 
@@ -28399,13 +27958,6 @@ async fn abort_connection_turns(
                 active.abort.abort();
             }
         }
-        release_peer_build_cache_slot(
-            None,
-            &session_id,
-            &turn_id,
-            &registered.state,
-            crate::build_cache::pool::SlotOutcome::Cancelled,
-        );
         // #920.1: append a durable terminal event so reconnect-replay
         // sees this turn end. Without this the in-flight turn vanishes
         // from the live registry but no `turn/error` lands, so clients
@@ -29765,13 +29317,6 @@ async fn transition_to_terminal_settling_steers(
     turn_id: &TurnId,
 ) -> Option<TerminalTransition> {
     let transition = transition_to_terminal(turn_state, expected_reason).await?;
-    // Every terminal path, including shortcuts and boot failures, returns its claim.
-    let outcome = match transition.reason {
-        TerminalReason::Completed => crate::build_cache::pool::SlotOutcome::Completed,
-        TerminalReason::Errored => crate::build_cache::pool::SlotOutcome::Failed,
-        TerminalReason::Interrupted => crate::build_cache::pool::SlotOutcome::Cancelled,
-    };
-    release_peer_build_cache_slot(None, session_id, turn_id, turn_state, outcome);
     if let Some(buffer) = steer_buffer {
         settle_leftover_steers(
             buffer,
@@ -30619,6 +30164,10 @@ fn ledger_event_cursor(event: &UiProtocolLedgerEvent) -> Option<UiCursor> {
             // the events it summarises, not its own — surfacing it here
             // would re-loop the replay flag onto itself.
             | UiNotification::ReplayLossy(_)
+            // Peer staging/closing carry no cursor (files are the durable
+            // record); kept exhaustive while the variants exist.
+            | UiNotification::PeerStaged(_)
+            | UiNotification::PeerClosed(_)
             | UiNotification::FileAttached(_)
             // Streamed reply-audio chunks are ephemeral; their ordering lives
             // in the segment_id/seq, not a durable ledger cursor.
@@ -30654,13 +30203,6 @@ fn ledger_event_cursor(event: &UiProtocolLedgerEvent) -> Option<UiCursor> {
             // Whole-job orchestration status is a stateless lifecycle push
             // (no durable cursor of its own).
             | UiNotification::SessionOrchestration(_)
-            // #1801 v3: peer staging carries filesystem facts (brief path /
-            // cwd / branch), not a replay cursor; the durable ledger cursor
-            // on the surrounding LedgeredUiProtocolEvent is authoritative.
-            | UiNotification::PeerStaged(_)
-            // peer/closed likewise carries only teardown facts (slug / topic),
-            // not a replay cursor — same authoritative-ledger-cursor rule.
-            | UiNotification::PeerClosed(_)
             // #2019: the human sink carries an origin + text + timestamp, not
             // a replay cursor; the surrounding ledger event's cursor is what
             // a reconnecting client resumes from.
