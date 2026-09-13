@@ -118,6 +118,7 @@ def main() -> int:
     events: list[tuple[str, dict]] = []
     session: OctosStdioSession | None = None
     stderr = ""
+    runtime_log = ""
     text = ""
     ok = False
     try:
@@ -152,6 +153,13 @@ def main() -> int:
                 timeout=120.0,
             )
             stderr = session.stderr_tail(200)
+            log_lines: list[str] = []
+            for log_path in sorted(Path(data_dir).rglob("*.log")):
+                try:
+                    log_lines.append(log_path.read_text(encoding="utf-8", errors="replace"))
+                except OSError:
+                    continue
+            runtime_log = "\n".join(log_lines)
     finally:
         if session is not None:
             session.close()
@@ -162,7 +170,8 @@ def main() -> int:
     container_marker = Path("/.dockerenv").is_file()
     octos_bin = Path(os.environ.get("B5_OCTOS_BIN", "/src/target/release/octos"))
     helper_absent = not octos_bin.with_name("octos-sandbox").exists()
-    sandbox_log = any("sandbox" in line.lower() for line in stderr.splitlines())
+    diagnostic_log = "\n".join((stderr, runtime_log))
+    sandbox_log = any("sandbox" in line.lower() for line in diagnostic_log.splitlines())
     report = {
         "container_marker": container_marker,
         "helper_absent": helper_absent,
@@ -172,6 +181,7 @@ def main() -> int:
         "marker": marker_value,
         "sandbox_log": sandbox_log,
         "stderr_tail": stderr,
+        "runtime_log_tail": "\n".join(runtime_log.splitlines()[-80:]),
         "event_methods": [method for method, _ in events],
     }
     print(json.dumps(report, ensure_ascii=False, indent=2))
