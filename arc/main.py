@@ -310,7 +310,9 @@ def unchanged_node_ids(nodes: list[dict], previous: dict[str, dict]) -> set[str]
 
 CODEGEN_MANIFESTS = {
     "frontend/package.json": {"name": "f", "private": True, "scripts": {"build": "node -e \"const f=require('fs');f.mkdirSync('dist',{recursive:true});for(const n of f.readdirSync('src'))f.copyFileSync('src/'+n,'dist/'+n)\""}},
-    "backend/package.json": {"name": "b", "private": True, "scripts": {"start": "node server.js"}},
+    # "type": "commonjs" pins the loader: Node 20.19 module detection treated a server.js mixing
+    # import and require as ESM (cloud 3e425ce2ebf6: "require is not defined in ES module scope").
+    "backend/package.json": {"name": "b", "private": True, "type": "commonjs", "scripts": {"start": "node server.js"}},
 }
 
 
@@ -755,7 +757,7 @@ Requirement {node_id}: {description}
 
 Acceptance test (ground truth):
 {spec}
-Files: frontend/src/index.html (+ one html per further route); backend/server.js = Node http server on process.env.PORT||{port} serving ../frontend/dist files (index.html for /, <name>.html for /<name>) plus any API routes the requirement needs (in-memory state), 404 for anything else, wrapped in try/catch and process.on('uncaughtException').{ports} Both package.json files already exist (build copies src/* to dist; start runs server.js): do not output them.
+Files: frontend/src/index.html (+ one html per further route); backend/server.js = CommonJS (require) Node http server on process.env.PORT||{port} serving ../frontend/dist files (index.html for /, <name>.html for /<name>) plus any API routes the requirement needs (in-memory state), 404 for anything else, wrapped in try/catch and process.on('uncaughtException').{ports} Both package.json files already exist (build copies src/* to dist; start runs server.js): do not output them.
 Rules: texts, button names, labels and test ids exactly as in the test; the initial state is literally in the HTML; state lives in the page script unless the requirement says it is persisted; no external resources, no CSS, no comments, no notes; Playwright strict mode: every locator in the test must match exactly one element on the served page (no duplicate links, labels, texts or ids; each label's for= resolves to its own control). {size_rule}
 """
 

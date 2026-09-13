@@ -154,7 +154,9 @@ class CodegenManifestTests(unittest.TestCase):
         self.assertEqual(m.write_codegen_manifests(root), [])
         fe = json.loads((root / "frontend/package.json").read_text())
         self.assertIn("mkdirSync('dist',{recursive:true})", fe["scripts"]["build"])
-        self.assertEqual(json.loads((root / "backend/package.json").read_text())["scripts"]["start"], "node server.js")
+        be = json.loads((root / "backend/package.json").read_text())
+        self.assertEqual(be["scripts"]["start"], "node server.js")
+        self.assertEqual(be["type"], "commonjs")
 
 
 class ExtraPortsBoundTests(unittest.TestCase):
