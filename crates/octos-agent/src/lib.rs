@@ -203,11 +203,10 @@ pub use task_supervisor::{
     TerminalOutcome, parse_alternatives, task_is_live,
 };
 pub use tools::{
-    AskUserQuestionTool, BackgroundResultKind, BackgroundResultPayload, BrowserTool,
+    AskUserQuestionTool, BackgroundResultKind, BackgroundResultPayload,
     CheckBackgroundTasksTool, CheckWorkspaceContractTool, ConcurrencyClass, ConfigureToolTool,
     DEFAULT_DISPATCH_TIMEOUT_SECS, DEFAULT_HTTP_CONNECT_TIMEOUT_SECS,
-    DEFAULT_HTTP_READ_TIMEOUT_SECS, DELEGATED_DENY_GROUP, DELEGATION_METRIC, DeepSearchTool,
-    DelegateTool, DelegationEvent, DelegationOutcome, DepthBudget, DiffEditTool,
+    DEFAULT_HTTP_READ_TIMEOUT_SECS, DELEGATED_DENY_GROUP, DELEGATION_METRIC, DelegateTool, DelegationEvent, DelegationOutcome, DepthBudget, DiffEditTool,
     DispatchContextContract, DispatchOutcome, DispatchRequest, DispatchResponse, EditFileTool,
     GlobTool, GrepTool, HttpMcpAgent, ListDirTool, MAX_DEPTH, MakeTypeEntry, ManageSkillsTool,
     McpAgentBackend, McpAgentBackendConfig, MemoryNoteTool, MessageTool,
@@ -217,10 +216,11 @@ pub use tools::{
     PeerRespondRequest, PeerRespondTool, PeerSendInputCallback, PeerSendInputRequest,
     PeerSendInputTool, PolicyDecision, ReadFileTool, ReadTaskOutputTool, RecallMemoryTool,
     RecordMemoryUseTool, RobotToolRegistry, SaveMemoryTool, SendAppCardTool, SendFileTool,
-    SharedBackend, ShellTool, SpawnTool, StdioMcpAgent, SynthesizeResearchTool, Tool,
+    SharedBackend, ShellTool, SpawnTool, StdioMcpAgent, Tool,
+    UserQuestionRequester, WriteFileTool,
     ToolApprovalDecision, ToolApprovalRequest, ToolApprovalRequester, ToolConfigStore, ToolPolicy,
     ToolRegistry, ToolResult, TurnAttachmentContext, UserQuestionOutcome, UserQuestionRequest,
-    UserQuestionRequester, WebFetchTool, WebSearchTool, WriteFileTool,
+
     admin::{AdminApiContext, register_admin_api_tools},
     build_backend_from_config, build_delegated_child_policy, build_dispatch_event_payload,
     dispatch_with_metrics, install_robot_registry, keep_tool_in_slides_session,
@@ -460,28 +460,6 @@ mod tests {
             .unwrap();
         assert!(!result.success);
         assert!(result.output.contains("Path outside"));
-    }
-
-    #[tokio::test]
-    async fn test_web_fetch_rejects_localhost() {
-        let tool = WebFetchTool::new();
-        let result = tool
-            .execute(&serde_json::json!({"url": "http://localhost:8080/admin"}))
-            .await
-            .unwrap();
-        assert!(!result.success);
-        assert!(result.output.contains("private"));
-    }
-
-    #[tokio::test]
-    async fn test_web_fetch_rejects_private_ip() {
-        let tool = WebFetchTool::new();
-        let result = tool
-            .execute(&serde_json::json!({"url": "http://169.254.169.254/latest/meta-data"}))
-            .await
-            .unwrap();
-        assert!(!result.success);
-        assert!(result.output.contains("private"));
     }
 
     #[tokio::test]

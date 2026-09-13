@@ -15,12 +15,12 @@ use crate::task_supervisor::TaskSupervisor;
 use super::CodeStructureTool;
 use super::policy::{self, ToolPolicy};
 use super::{
-    ApplyPatchTool, AskUserQuestionTool, BrowserTool, CheckWorkspaceContractTool, CloseAgentTool,
+    ApplyPatchTool, AskUserQuestionTool, CheckWorkspaceContractTool, CloseAgentTool,
     ConfigureToolTool, DiffEditTool, EditFileTool, ExecCommandTool, GlobTool, GrepTool,
     ImageGenerationTool, ListDirTool, ReadFileTool, RequestUserInputTool, ResumeAgentTool,
     SendInputTool, ShellTool, SpawnAgentTool, Tool, ToolCatalogEntry, ToolConfigStore, ToolResult,
-    ToolSearchTool, ToolSuggestTool, UpdatePlanTool, ViewImageTool, WaitAgentTool, WebFetchTool,
-    WebSearchTool, WorkspaceDiffTool, WorkspaceLogTool, WorkspaceShowTool, WriteFileTool,
+    ToolSearchTool, ToolSuggestTool, UpdatePlanTool, ViewImageTool, WaitAgentTool,
+    WorkspaceDiffTool, WorkspaceLogTool, WorkspaceShowTool, WriteFileTool,
     WriteStdinTool,
 };
 use crate::sandbox::{NoSandbox, Sandbox};
@@ -1331,9 +1331,6 @@ impl ToolRegistry {
         registry.register(GrepTool::new(cwd));
         registry
             .register(ListDirTool::new(cwd).with_filesystem_scope(permissions.filesystem_scope));
-        registry.register(WebSearchTool::new());
-        registry.register(WebFetchTool::new());
-        registry.register(BrowserTool::new());
         registry.register(CheckWorkspaceContractTool::new(cwd));
         registry.register(WorkspaceLogTool::new(cwd));
         registry.register(WorkspaceShowTool::new(cwd));
@@ -1643,15 +1640,6 @@ impl ToolRegistry {
     /// Tools already registered by `with_builtins_and_sandbox()` are replaced
     /// with config-aware instances. Also registers the `configure_tool` tool.
     pub fn inject_tool_config(&mut self, config: Arc<ToolConfigStore>) {
-        if self.tools.contains_key("web_search") {
-            self.register(WebSearchTool::new().with_config(config.clone()));
-        }
-        if self.tools.contains_key("web_fetch") {
-            self.register(WebFetchTool::new().with_config(config.clone()));
-        }
-        if self.tools.contains_key("browser") {
-            self.register(BrowserTool::new().with_config(config.clone()));
-        }
         self.register(ConfigureToolTool::new(config));
     }
 }

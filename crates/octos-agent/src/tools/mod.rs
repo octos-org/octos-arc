@@ -827,13 +827,11 @@ pub mod args;
 pub mod apply_patch;
 pub mod ask_user_question;
 pub mod coding_tools;
-pub mod deep_search;
 pub mod delegate;
 pub mod diff_edit;
 pub mod edit_file;
 pub mod glob_tool;
 pub mod grep_tool;
-pub mod http;
 pub mod list_dir;
 pub mod manage_skills;
 pub mod mcp_agent;
@@ -851,7 +849,6 @@ pub mod recall;
 pub mod recall_memory;
 pub mod record_memory_use;
 pub(crate) mod replacer;
-pub mod research_utils;
 pub mod save_memory;
 pub mod send_app_card;
 pub mod send_file;
@@ -859,14 +856,10 @@ pub mod shell;
 #[allow(dead_code)]
 pub(crate) mod site_crawl;
 pub mod spawn;
-pub mod synthesize_research;
-pub mod web_fetch;
-pub mod web_search;
 pub mod write_file;
 pub mod write_grant;
 
 pub mod admin;
-pub mod browser;
 pub mod check;
 pub mod check_background_tasks;
 pub mod check_workspace_contract;
@@ -887,7 +880,6 @@ pub use coding_tools::{
     RequestUserInputTool, ResumeAgentTool, SendInputTool, SpawnAgentTool, ToolCatalogEntry,
     ToolSearchTool, ToolSuggestTool, UpdatePlanTool, ViewImageTool, WaitAgentTool, WriteStdinTool,
 };
-pub use deep_search::DeepSearchTool;
 pub use delegate::{
     DELEGATED_DENY_GROUP, DELEGATION_METRIC, DelegateTool, DelegationEvent, DelegationOutcome,
     DepthBudget, MAX_DEPTH, build_delegated_child_policy,
@@ -896,7 +888,6 @@ pub use diff_edit::DiffEditTool;
 pub use edit_file::EditFileTool;
 pub use glob_tool::GlobTool;
 pub use grep_tool::GrepTool;
-pub use http::HttpTool;
 pub use list_dir::ListDirTool;
 pub use manage_skills::ManageSkillsTool;
 pub use mcp_agent::{
@@ -928,15 +919,11 @@ pub use send_app_card::SendAppCardTool;
 pub use send_file::SendFileTool;
 pub use shell::ShellTool;
 pub use spawn::{BackgroundResultKind, BackgroundResultPayload, SpawnTool};
-pub use synthesize_research::SynthesizeResearchTool;
-pub use web_fetch::WebFetchTool;
-pub use web_search::WebSearchTool;
 pub use write_file::WriteFileTool;
 pub use write_grant::{
     DENIED_MARKER, WriteGrantViolation, WriteGrantViolationSink, WritePathGrant,
 };
 
-pub use browser::BrowserTool;
 pub use check::CheckTool;
 pub use check_background_tasks::CheckBackgroundTasksTool;
 pub use check_workspace_contract::CheckWorkspaceContractTool;
