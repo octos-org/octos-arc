@@ -11,7 +11,7 @@ use octos_bus::SessionManager;
 
 use super::Executable;
 use crate::api::{
-    AppState, EventBroadcaster, build_router, init_metrics, resolve_appui_allowed_origins,
+    AppState, build_router, init_metrics, resolve_appui_allowed_origins,
 };
 use crate::config::Config;
 
@@ -418,7 +418,6 @@ impl ServeCommand {
             }
         };
 
-        let broadcaster = Arc::new(EventBroadcaster::new(256));
 
         // M11-F: per-profile LLM, credentials, tool registry, plugins,
         // MCP, and memory are built once per profile below via
@@ -755,7 +754,6 @@ impl ServeCommand {
             session_cache,
             profile_skill_mutation_locks: Arc::new(crate::api::ProfileSkillMutationLocks::new()),
             sessions,
-            broadcaster,
             started_at: chrono::Utc::now(),
             auth_token,
             metrics_handle,

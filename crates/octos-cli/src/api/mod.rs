@@ -41,7 +41,6 @@ pub mod voice_text;
 pub mod webhook_proxy;
 pub mod ws_slash;
 
-pub use events::EventBroadcaster;
 pub use metrics::init_metrics;
 pub(crate) use router::resolve_appui_allowed_origins;
 pub use router::{DEFAULT_BASE_DOMAIN, build_router, cors_allowlist_for_base_domain};
@@ -189,10 +188,6 @@ pub struct AppState {
     /// hashed admin-token file is created via dashboard rotation).
     pub auth_token: Option<String>,
 
-    /// Process-wide event broadcaster for harness/admin + swarm SSE
-    /// surfaces. Chat traffic uses `/api/ui-protocol/ws` exclusively as
-    /// of M9-α-5/α-6.
-    pub broadcaster: Arc<EventBroadcaster>,
 
     /// Prometheus metrics handle.
     pub metrics_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
@@ -390,7 +385,6 @@ impl AppState {
             )),
             profile_skill_mutation_locks: Arc::new(ProfileSkillMutationLocks::new()),
             sessions: None,
-            broadcaster: Arc::new(EventBroadcaster::new(16)),
             started_at: chrono::Utc::now(),
             auth_token: None,
             metrics_handle: None,

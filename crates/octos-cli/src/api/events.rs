@@ -17,48 +17,11 @@
 //! talks to `/api/ui-protocol/ws` exclusively.
 
 use octos_agent::{ProgressEvent, ProgressReporter};
-use tokio::sync::broadcast;
 
 /// Producer iteration identity, opaque to clients. It does not depend on how
 /// many progress events were delivered or retained by the ledger.
 pub(super) fn assistant_segment_id_for_iteration(thread_id: &str, iteration: u32) -> String {
     format!("{thread_id}:assistant:iteration:{iteration}")
-}
-
-/// Process-wide broadcaster of progress events, used by the harness +
-/// swarm event surfaces. Publishes pre-serialized JSON frames so
-/// downstream subscribers (admin dashboard, M7.8 live gate) can forward
-/// them verbatim.
-pub struct EventBroadcaster {
-    tx: broadcast::Sender<String>,
-}
-
-impl EventBroadcaster {
-    pub fn new(capacity: usize) -> Self {
-        let (tx, _) = broadcast::channel(capacity);
-        Self { tx }
-    }
-
-    /// Subscribe to the event stream.
-    pub fn subscribe(&self) -> broadcast::Receiver<String> {
-        self.tx.subscribe()
-    }
-}
-
-impl ProgressReporter for EventBroadcaster {
-    fn report(&self, event: ProgressEvent) {
-        // Broadcaster is process-wide and not turn-scoped, so it cannot
-        // resolve a thread_id without further plumbing. Per-request
-        // consumers (e.g. the UI Protocol v1 `BoundedChannelReporter`)
-        // tag every payload with their turn-bound thread_id; broadcaster
-        // subscribers are debug-only and tolerate the absence.
-        let json = match serde_json::to_string(&event_to_json(&event, None)) {
-            Ok(j) => j,
-            Err(_) => return,
-        };
-        // Ignore send errors (no subscribers)
-        let _ = self.tx.send(json);
-    }
 }
 
 /// Serialize a [`ProgressEvent`] to a JSON wire payload. When `thread_id`
@@ -717,15 +680,4 @@ mod tests {
         assert_eq!(retry["iteration"], 5);
     }
 
-    #[test]
-    fn broadcaster_subscribe_receives_events() {
-        let broadcaster = EventBroadcaster::new(16);
-        let mut rx = broadcaster.subscribe();
-
-        broadcaster.report(ProgressEvent::Thinking { iteration: 1 });
-
-        let msg = rx.try_recv().unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&msg).unwrap();
-        assert_eq!(parsed["type"], "thinking");
-    }
 }
