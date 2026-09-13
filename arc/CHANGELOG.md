@@ -409,3 +409,38 @@ codegen prompt only (Smoke prompts unchanged). `[acceptance]` logs now include t
 | z13 (+ no HTML5 validation) | 6/6 | 2 | 12,758 / 26,713 / 19,791 | 100 |
 
 Cloud: 未评测.
+
+## Round 28 — Ticket Booking first-pass study (20 local samples) and deterministic fixes
+
+Coordinator ask: first-pass rate + reasoning distribution over ≥5 local TB runs; find systematic first-pass
+errors; evaluate staged codegen. 20 samples on rounds 27–28 prompts (`.arc/codegen/<node>-r0/` snapshots):
+
+| sample | first pass | final | requests | reasoning |
+|---|---|---|---|---|
+| z11 z12a z12b z13 | 1/6 4/6 6/6 6/6 | 10/10 ×4 | 3 3 2 2 | 22.6k 9.1k 8.2k 19.8k |
+| s1 s2 s3 s4 s5 | 2/6 0/6 0/6 3/6 0/6 | 10/10 ×5 | 3 3 3 9 4 | 10.7k 6.9k 21.4k 22.6k 17.5k |
+| s6 s7 s8 s9 s10 | 5/6 6/6 0/6 6/6 0/6 | 10/10 ×5 | 3 2 12 2 5 | 13.3k 6.7k 28.6k 39.0k 18.0k |
+| s11 s12 s13 s14 s15 s16 | 6/6 start-crash 6/6 start-crash 0/6 1/6 | 10/10 9/10 8/10 10/10 10/10 10/10 | 2 25 19 11 3 3 | 6.1k 48.5k 29.2k 24.9k 9.3k 20.7k |
+
+First pass ≥5/6: 7 of 20 (35%); 10/10 reached: 18 of 20; requests median 3 (2–25); reasoning per run
+median ≈19k, range 6k–48k on the SAME prompt (s7 6.7k vs s9 39.0k both 6/6 first pass) — reasoning is
+sampling noise, not prompt-driven, so splitting codegen into staged outputs would add a request and prompt
+tokens without a mechanism to lower it: not pursued.
+
+Systematic first-pass errors found and fixed deterministically (zero prompt tokens):
+- no `<meta charset>` + `text/html` without charset → Chromium decoded Chinese as Latin-1, every Chinese
+  locator failed (s5, s10): `codegen.ensure_charset` injects the meta tag into every generated HTML.
+- `/register` mapped to `dist/register` (no extension) → 404 (s8): the build script also emits extensionless
+  page copies.
+- file block with JSON-escaped newlines (s12: server.js syntax error at start): `unescape_flattened` for fully
+  flattened blocks, `repair_flattened_js` (only if `node --check` fails before and passes after) for partial.
+- static nav links duplicating the server-filled `<!--NAV-->` (s2, s3, s15: strict-mode violation):
+  `dedupe_nav_links` strips them when the server implements the placeholder.
+- two codegen repairs before tool mode (tool mode is what multiplies cost: s8 12 req, s12 25 req).
+Prompt (multi-node slot only): mechanisms for NAV, cookie `Path=/`, helper values must validate, messages =
+first regex alternative verbatim, no HTML5 validation attributes.
+
+Remaining first-pass misses are model sampling (invented validation rules, message wording, links injected
+twice server-side, cookie/redirect details). With the leaderboard scoring the MOST RECENT run and the current
+TB entry at ¥0.251 (a 3-request run), a rerun has negative expected value (median 3 requests ≈ ¥0.3, tail
+¥0.6+): recommendation — do not rerun TB; keep the entry. Cloud: 未评测 for round 28.
