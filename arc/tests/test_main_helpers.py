@@ -154,6 +154,16 @@ class CodegenManifestTests(unittest.TestCase):
         self.assertEqual(m.write_codegen_manifests(root), [])
         fe = json.loads((root / "frontend/package.json").read_text())
         self.assertIn("mkdirSync('dist',{recursive:true})", fe["scripts"]["build"])
+        # the build script must run and emit both register.html and extensionless register
+        import shutil, subprocess
+        node = shutil.which("node") or "/opt/homebrew/opt/node@24/bin/node"
+        (root / "frontend/src").mkdir(parents=True)
+        (root / "frontend/src/index.html").write_text("i"); (root / "frontend/src/register.html").write_text("r")
+        cmd = fe["scripts"]["build"][len("node -e "):].strip('"').replace('\\"', '"')
+        subprocess.run([node, "-e", cmd], cwd=root / "frontend", check=True)
+        self.assertEqual((root / "frontend/dist/register").read_text(), "r")
+        self.assertTrue((root / "frontend/dist/register.html").is_file())
+        self.assertFalse((root / "frontend/dist/index").exists())
         be = json.loads((root / "backend/package.json").read_text())
         self.assertEqual(be["scripts"]["start"], "node server.js")
         self.assertEqual(be["type"], "commonjs")

@@ -309,7 +309,9 @@ def unchanged_node_ids(nodes: list[dict], previous: dict[str, dict]) -> set[str]
 
 
 CODEGEN_MANIFESTS = {
-    "frontend/package.json": {"name": "f", "private": True, "scripts": {"build": "node -e \"const f=require('fs');f.mkdirSync('dist',{recursive:true});for(const n of f.readdirSync('src'))f.copyFileSync('src/'+n,'dist/'+n)\""}},
+    # Pages are copied twice: `register.html` and extensionless `register`, so a naive static
+    # server that maps /register -> dist/register still finds the page (local s5/s8 first pass: 404 -> 0/6).
+    "frontend/package.json": {"name": "f", "private": True, "scripts": {"build": "node -e \"const f=require('fs');f.mkdirSync('dist',{recursive:true});for(const n of f.readdirSync('src')){f.copyFileSync('src/'+n,'dist/'+n);if(n.endsWith('.html')&&n!=='index.html')f.copyFileSync('src/'+n,'dist/'+n.slice(0,-5))}\""}},
     # "type": "commonjs" pins the loader: Node 20.19 module detection treated a server.js mixing
     # import and require as ESM (cloud 3e425ce2ebf6: "require is not defined in ES module scope").
     "backend/package.json": {"name": "b", "private": True, "type": "commonjs", "scripts": {"start": "node server.js"}},
