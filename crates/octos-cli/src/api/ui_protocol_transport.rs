@@ -23629,47 +23629,6 @@ async fn run_standalone_turn(
     tool_registry.set_session_key(session_id.to_string());
     // RFC-0 (#1289): the `activate_tools` meta-tool was removed — no per-turn
     // re-registration/rewiring needed.
-    // RFC-1 fixup (codex P2): apply the SAME freshness pattern to the
-    // `mofa_make` / `mofa_describe_content_type` dispatcher pair.
-    // `snapshot_excluding` clones `Arc<dyn Tool>` instances, so the
-    // dispatcher in the per-turn registry is the SAME object as the
-    // SessionRuntime's cached dispatcher. Calling
-    // `wire_mofa_make_registry_back_ref` further down (via
-    // `Agent::new_shared`'s central wire, see Fix #1) would mutate
-    // that shared dispatcher's `Mutex<Weak<ToolRegistry>>` to point
-    // at THIS turn's registry — and overlapping turns/background
-    // `mofa_make` runs on the cached session registry would then
-    // resolve through the WRONG registry (or, once the per-turn
-    // registry drops, an empty Weak → DISPATCHER_ERROR).
-    //
-    // Mint fresh `MofaMakeTool` + `MofaDescribeContentTypeTool`
-    // instances seeded from the existing dispatcher's catalog so the
-    // per-turn registry has its own dispatcher object whose Weak is
-    // safe to rewire. The SessionRuntime's cached dispatcher keeps
-    // its original Weak (set at SessionRuntime bootstrap), so other
-    // turns are unaffected.
-    if let Some(existing) = tool_registry.get("mofa_make").cloned() {
-        if let Some(dispatcher) = existing
-            .as_any()
-            .downcast_ref::<octos_agent::MofaMakeTool>()
-        {
-            let entries = dispatcher.entries();
-            let fresh_dispatcher = octos_agent::MofaMakeTool::new();
-            for entry in &entries {
-                fresh_dispatcher.register_or_replace(entry.clone());
-            }
-            tool_registry.register(fresh_dispatcher);
-
-            if tool_registry.get("mofa_describe_content_type").is_some() {
-                let fresh_describe = octos_agent::MofaDescribeContentTypeTool::new();
-                for entry in &entries {
-                    fresh_describe.register_or_replace(entry.clone());
-                }
-                tool_registry.register(fresh_describe);
-            }
-        }
-    }
-
     // Slides session structural guardrail — PR #1265 follow-up.
     //
     let workspace_root: Option<PathBuf> = Some(session_runtime.workspace_root.clone());
@@ -24791,8 +24750,6 @@ async fn run_standalone_turn(
     // `specs()` but `activate_tools` is unable to reach the registry
     // (its internal `Weak<ToolRegistry>` is empty). Gateway does the
     // equivalent at `session_actor.rs:2500`.
-    // RFC-1: wire mofa_make.
-    request_agent.wire_mofa_make_dispatcher();
 
     let agent_session_id = session_id.clone();
     let approval_requester: Arc<dyn octos_agent::ToolApprovalRequester> =

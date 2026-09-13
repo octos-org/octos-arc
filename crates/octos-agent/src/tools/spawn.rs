@@ -3906,13 +3906,6 @@ impl Tool for SpawnTool {
             // In subagent context, spawn_only tools should be regular tools —
             // the subagent IS the background, so no need to auto-background again.
             tools.clear_spawn_only();
-            // RFC-1 fixup (codex P1): also clear internal-hidden markers.
-            // In a subagent registry, the mofa_make dispatcher's targets
-            // (mofa_slides, mofa_cards, …) should be directly callable —
-            // the subagent's whole purpose may be to drive that target
-            // tool; routing through a dispatcher adds latency without
-            // value once we are already in a spawned context.
-            tools.clear_internal_hidden();
             // Preflight against the EFFECTIVE (post-deny) allow-list: a tool
             // the manifest forbids must not gate the spawn on availability,
             // since the policy below denies it regardless (codex P2).
@@ -4511,11 +4504,6 @@ impl Tool for SpawnTool {
                 // In subagent context, spawn_only tools should be regular tools —
                 // the subagent IS the background, so no need to auto-background again.
                 tools.clear_spawn_only();
-                // RFC-1 fixup (codex P1): mirror the sync spawn path — clear
-                // internal-hidden markers so subagent registries can call
-                // dispatcher targets directly without going through
-                // `mofa_make`.
-                tools.clear_internal_hidden();
                 // Preflight against the EFFECTIVE (post-deny) allow-list —
                 // mirror the sync path so a manifest-forbidden tool that is
                 // absent from this registry does not fail the spawn (codex P2).

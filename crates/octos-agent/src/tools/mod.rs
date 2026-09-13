@@ -803,7 +803,7 @@ pub use registry::ToolRegistry;
 
 // Tool policy
 pub mod policy;
-pub use policy::{PolicyDecision, ToolPolicy, keep_tool_in_slides_session};
+pub use policy::{PolicyDecision, ToolPolicy};
 
 // Shared dispatch-policy gate (#714 / #713) re-exported from the
 // crate root so [`SpawnTool::with_dispatch_policy`] callers can pull
@@ -851,7 +851,6 @@ pub mod write_grant;
 pub mod check;
 pub mod check_background_tasks;
 pub mod check_workspace_contract;
-pub mod mofa_make;
 pub mod tool_config;
 pub mod workspace_history;
 
@@ -904,9 +903,6 @@ pub use write_grant::{
 pub use check::CheckTool;
 pub use check_background_tasks::CheckBackgroundTasksTool;
 pub use check_workspace_contract::CheckWorkspaceContractTool;
-pub use mofa_make::{
-    MakeTypeEntry, MofaDescribeContentTypeTool, MofaMakeTool, make_dispatcher_with_entries,
-};
 pub use tool_config::{ConfigureToolTool, ToolConfigStore};
 pub use workspace_history::{WorkspaceDiffTool, WorkspaceLogTool, WorkspaceShowTool};
 

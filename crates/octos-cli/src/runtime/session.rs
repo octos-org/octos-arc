@@ -672,11 +672,6 @@ impl SessionRuntime {
             profile_id: Some(profile.profile_id.clone()),
         });
 
-        // RFC-1 (issue #1290): same pattern for the `mofa_make`
-        // dispatcher. The loader registered it but its `Weak<ToolRegistry>`
-        // back-reference needs the Arc-wrapped registry; we plant it here.
-        agent.wire_mofa_make_dispatcher();
-
         let agent = Arc::new(agent);
 
         // Step 6: open the SessionManager at the resolved sessions root.

@@ -220,27 +220,6 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
         description: "LLM-facing tool configuration",
         tools: &["configure_tool"],
     },
-    ToolGroupInfo {
-        name: "group:media",
-        description: "Media generation: comics, slides, infographics, cards, and text-to-speech",
-        tools: &[
-            // RFC-1 fixup (codex round 3 P2): include the dispatcher
-            // pair so profile/policy allow-lists that grant only
-            // `group:media` still have a LLM-visible entry-point. Pre-
-            // fixup, an `allow: [group:media]` policy would retain
-            // only the (now internal-hidden) concrete targets and
-            // drop `mofa_make` / `mofa_describe_content_type`,
-            // leaving the LLM with no callable generation tool.
-            "mofa_make",
-            "mofa_describe_content_type",
-            "mofa_comic",
-            "mofa_slides",
-            "mofa_infographic",
-            "mofa_cards",
-            "fm_tts",
-            "fm_voice_list",
-        ],
-    },
     // M6.7 — the canonical deny list applied to every DelegateTool child.
     // It bounds re-delegation, spawning, user messaging, and memory writes.
     // Policy evaluation is deny-wins, so adding `group:delegated` to a
@@ -304,34 +283,6 @@ pub fn tool_group_info(name: &str) -> Option<&'static ToolGroupInfo> {
 /// Expand a group name to its tool names. Returns None if not a group.
 fn expand_group(name: &str) -> Option<&'static [&'static str]> {
     tool_group_info(name).map(|g| g.tools)
-}
-
-/// Predicate that hides every `mofa_*` skill except `mofa_slides` for a
-/// slides session. Designed to be passed to [`crate::ToolRegistry::retain`]
-/// in `session_actor.rs` after `tools.activate("group:media")` so that:
-///
-/// 1. The slides system prompt's "ALWAYS use mofa_slides" rule is enforced
-///    structurally — weaker LLMs (kimi-k2.6 fallback on mini1's dspfac
-///    profile, 2026-05-24) cannot misroute the slides workflow to
-///    `mofa_site` / `mofa_youtube` even when the prompt rule is buried
-///    mid-text.
-/// 2. Non-mofa skills (fm_tts, plugin tools that don't share the prefix)
-///    pass through untouched.
-/// 3. `mofa_slides` itself is preserved.
-///
-/// Returns `true` if the tool should be kept, `false` if it should be
-/// evicted from the registry.
-pub fn keep_tool_in_slides_session(tool_name: &str) -> bool {
-    // RFC-1 fixup (codex P1 round 2): retain the dispatcher pair too.
-    // After the RFC-1 switch from `defer` → `mark_internal_hidden`,
-    // `mofa_slides` is registered but invisible to `specs()` — the
-    // LLM only sees `mofa_make` + `mofa_describe_content_type`. If
-    // `retain` evicts those (they share the `mofa_` prefix), slides
-    // sessions end up with NO visible slides-generation tool.
-    matches!(
-        tool_name,
-        "mofa_slides" | "mofa_make" | "mofa_describe_content_type"
-    ) || !tool_name.starts_with("mofa_")
 }
 
 #[cfg(test)]
@@ -581,125 +532,6 @@ mod tests {
             assert!(
                 !policy.is_allowed(entry_point),
                 "{entry_point} must be denied when group:delegated is in the deny list"
-            );
-        }
-    }
-
-    #[test]
-    fn should_keep_mofa_slides_in_slides_session() {
-        // The canonical slides skill must survive the per-session filter
-        // — that's the one tool the system prompt instructs the LLM to
-        // call. Evicting it would break the slides workflow entirely.
-        assert!(keep_tool_in_slides_session("mofa_slides"));
-    }
-
-    /// RFC-1 fixup (codex round 2 P1): when the make_type-based
-    /// `mofa-slides` skill is installed, `mofa_slides` is hidden via
-    /// `mark_internal_hidden` and the LLM only sees `mofa_make` +
-    /// `mofa_describe_content_type`. The slides-session retain MUST
-    /// preserve those two so the LLM still has a slides-generation
-    /// entry-point. Pre-fixup, retain evicted both (they share the
-    /// `mofa_` prefix) and slides sessions ended up with no visible
-    /// slides tool whatsoever.
-    #[test]
-    fn should_keep_mofa_make_dispatcher_pair_in_slides_session() {
-        assert!(
-            keep_tool_in_slides_session("mofa_make"),
-            "mofa_make dispatcher MUST survive slides-session retain — \
-             it is the only LLM-facing entry-point after RFC-1 hides \
-             the individual mofa_slides target tool"
-        );
-        assert!(
-            keep_tool_in_slides_session("mofa_describe_content_type"),
-            "mofa_describe_content_type must survive slides-session \
-             retain so the LLM can fetch the slides args schema"
-        );
-    }
-
-    /// RFC-1 fixup (codex round 3 P2): the `group:media` definition
-    /// must include the `mofa_make` dispatcher pair so any policy that
-    /// allow-lists `group:media` retains an LLM-callable generation
-    /// entry-point. Pre-fixup the group held only the concrete
-    /// targets (`mofa_slides`, `mofa_cards`, ...), so a profile with
-    /// `allow: [group:media]` would keep only internal-hidden tools
-    /// and drop the dispatcher, leaving no callable surface.
-    #[test]
-    fn group_media_includes_mofa_make_dispatcher_pair() {
-        let info = tool_group_info("group:media").expect("group:media defined");
-        assert!(
-            info.tools.contains(&"mofa_make"),
-            "group:media must include mofa_make so allow-list policies \
-             retain the dispatcher; got {:?}",
-            info.tools
-        );
-        assert!(
-            info.tools.contains(&"mofa_describe_content_type"),
-            "group:media must include mofa_describe_content_type so \
-             allow-list policies retain the catalog query tool"
-        );
-        // And a policy that allows only group:media must accept these
-        // names — guards against future regression that removes the
-        // dispatcher from the group while keeping the targets.
-        let policy = ToolPolicy {
-            allow: vec!["group:media".into()],
-            ..Default::default()
-        };
-        assert!(policy.is_allowed("mofa_make"));
-        assert!(policy.is_allowed("mofa_describe_content_type"));
-    }
-
-    #[test]
-    fn should_drop_sibling_mofa_skills_in_slides_session() {
-        // The bug originally reported (kimi-k2.6 fallback on mini1
-        // dspfac, 2026-05-24): the LLM saw `mofa_site` /
-        // `mofa_youtube` next to `mofa_slides` and misrouted to them
-        // with empty `audio_path` / `content_dir`. The filter must
-        // hide every non-slides mofa_ skill so the LLM literally
-        // cannot call them in a slides session.
-        for unwanted in [
-            "mofa_site",
-            "mofa_youtube",
-            "mofa_publish",
-            "mofa_research",
-            "mofa_pdf",
-            "mofa_xlsx",
-            "mofa_cli",
-            "mofa_fm",
-            "mofa_frame",
-            "mofa_podcast",
-            "mofa_infographic",
-            "mofa_cards",
-            "mofa_comic",
-        ] {
-            assert!(
-                !keep_tool_in_slides_session(unwanted),
-                "{unwanted} should be hidden in a slides session"
-            );
-        }
-    }
-
-    #[test]
-    fn should_preserve_non_mofa_tools_in_slides_session() {
-        // Slides sessions still need general tools: research,
-        // file ops, shell (gated by the prompt to git + PNG-cache
-        // delete), task-status checks, the auto-delivery surface.
-        // The filter only targets the `mofa_*` skill prefix.
-        for kept in [
-            "read_file",
-            "write_file",
-            "glob",
-            "shell",
-            "send_file",
-            "check_background_tasks",
-            "check_workspace_contract",
-            "web_search",
-            "web_fetch",
-            "fm_tts",
-            "fm_voice_list",
-        ] {
-            assert!(
-                keep_tool_in_slides_session(kept),
-                "{kept} must remain available in a slides session"
             );
         }
     }

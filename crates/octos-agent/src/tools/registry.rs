@@ -193,16 +193,6 @@ pub struct ToolRegistry {
     /// wins when present. `spawn_only` tools never reach this path (they are
     /// backgrounded earlier in the execution loop).
     tool_timeout_secs: u64,
-    /// RFC-1 fixup (codex P1): tool names that are registered for
-    /// **internal** dispatch only — callable through `get()` /
-    /// `get_tool()` so internal forwarders (e.g. the `mofa_make`
-    /// dispatcher routing to its target) can reach them, but excluded
-    /// from `specs()` so the LLM never sees them in its tool list.
-    ///
-    /// This is the right semantic for `mofa_make`'s hidden targets
-    /// (`mofa_slides`, `mofa_cards`, ...): the dispatcher is the ONLY
-    /// supported LLM entry-point.
-    internal_hidden: HashSet<String>,
     /// #1607: the session sandbox handed to the shell/exec/bash tools at
     /// construction. Stored (not just handed off and dropped) so the
     /// Agent-internal project-root validator path
@@ -251,7 +241,6 @@ impl ToolRegistry {
             session_key: None,
             output_dir_hint: None,
             tool_timeout_secs: DEFAULT_REGISTRY_TOOL_TIMEOUT_SECS,
-            internal_hidden: HashSet::new(),
             // #1607: default to a no-op sandbox. Constructors that receive a
             // real sandbox (`with_builtins_and_permissions`,
             // `rebind_cwd_with_permissions`) overwrite this below.
@@ -300,47 +289,6 @@ impl ToolRegistry {
         if let Some(msg) = message {
             self.spawn_only_messages.insert(name.to_string(), msg);
         }
-    }
-
-    /// RFC-1 fixup (codex P1): mark a tool as **internal hidden**.
-    ///
-    /// Internal hidden tools are still callable through `get()` /
-    /// `get_tool()` (so internal forwarders like the `mofa_make`
-    /// dispatcher can reach them), but they are removed from `specs()`
-    /// AND from `activate_tools`'s enumerated description AND cannot
-    /// be re-promoted via `activate(name)`.
-    ///
-    /// Use this for dispatcher target tools (mofa_slides, mofa_cards,
-    /// etc.) that should ONLY be reachable through their dispatcher
-    /// (`mofa_make`) — never directly callable by the LLM.
-    ///
-    /// Unlike `defer`, this is a one-way operation from the LLM's
-    /// point of view: there is no "un-hide" path through any
-    /// LLM-callable tool. (Internal callers can clear the marker
-    /// programmatically via [`Self::clear_internal_hidden`] if a
-    /// future code path needs to surface the tool — e.g. spawn child
-    /// registries that clear spawn_only also clear this set.)
-    pub fn mark_internal_hidden(&mut self, name: &str) {
-        if self.tools.contains_key(name) {
-            self.internal_hidden.insert(name.to_string());
-        }
-        self.invalidate_cache();
-    }
-
-    /// Whether the given tool is currently internal-hidden (RFC-1).
-    pub fn is_internal_hidden(&self, name: &str) -> bool {
-        self.internal_hidden.contains(name)
-    }
-
-    /// Clear all internal-hidden markers. Used by spawn child registries
-    /// where the same tools should be directly callable (the subagent
-    /// IS the background context — no dispatcher indirection needed).
-    pub fn clear_internal_hidden(&mut self) {
-        if self.internal_hidden.is_empty() {
-            return;
-        }
-        self.internal_hidden.clear();
-        self.invalidate_cache();
     }
 
     /// Check if a tool is marked spawn_only.
@@ -651,12 +599,6 @@ impl ToolRegistry {
     /// the LLM can actually call `read_task_output` before it advertises
     /// the new `task_handle` envelope.
     pub fn is_tool_visible(&self, name: &str) -> bool {
-        // RFC-1 fixup (codex P1): internal-hidden tools are invisible to
-        // the LLM. They are callable only via internal forwarders (e.g.
-        // `mofa_make`), never through the LLM's tool list.
-        if self.internal_hidden.contains(name) {
-            return false;
-        }
         self.is_tool_visible_post_activation(name)
     }
 
@@ -666,9 +608,6 @@ impl ToolRegistry {
         let Some(tool) = self.tools.get(name) else {
             return false;
         };
-        if self.internal_hidden.contains(name) {
-            return false;
-        }
         if let Some(ref policy) = self.provider_policy {
             if !provider_policy_allows_equivalent_with_tags(policy, name, tool.tags()) {
                 return false;
@@ -703,17 +642,12 @@ impl ToolRegistry {
         }
 
         // RFC-0 (#1289): every enabled tool is emitted every turn. The only
-        // exclusions remaining are internal-hidden tools (mofa_make
-        // dispatcher targets), provider-policy denials, and context-filter
-        // misses. There is no longer any recency-based (LRU) deferral nor an
-        // `activate_tools` meta-tool description to inject.
+        // exclusions remaining are provider-policy denials and
+        // context-filter misses. There is no recency-based (LRU) deferral
+        // nor an `activate_tools` meta-tool description to inject.
         let mut specs: Vec<ToolSpec> = self
             .tools
             .values()
-            // RFC-1 fixup (codex P1): exclude internal-hidden tools from
-            // the LLM-visible spec set. They remain callable via `get()`
-            // for internal forwarders (e.g. `mofa_make`).
-            .filter(|t| !self.internal_hidden.contains(t.name()))
             .filter(|t| {
                 self.provider_policy.as_ref().is_none_or(|p| {
                     provider_policy_allows_equivalent_with_tags(p, t.name(), t.tags())
@@ -775,8 +709,7 @@ impl ToolRegistry {
     /// Retain only tools whose names satisfy the predicate.
     ///
     /// Also prunes parallel side state (`spawn_only`,
-    /// `spawn_only_messages`, `internal_hidden`) for any names that were
-    /// dropped. Without this, a stale `spawn_only` marker fools the agent's
+    /// `spawn_only_messages`) for any names that were dropped. Without this, a stale `spawn_only` marker fools the agent's
     /// spawn_only intercept in `execution.rs` into treating an evicted tool
     /// as background-eligible. The intercept falls through to
     /// `bg_tools.execute_with_context` which fails async because the tool
@@ -800,67 +733,6 @@ impl ToolRegistry {
         self.spawn_only.retain(|name| self.tools.contains_key(name));
         self.spawn_only_messages
             .retain(|name, _| self.tools.contains_key(name));
-        // RFC-1 fixup: prune stale internal-hidden markers symmetrically.
-        self.internal_hidden
-            .retain(|name| self.tools.contains_key(name));
-        // RFC-1 fixup (codex round 4 P2 + round 5 P1/P2): prune
-        // dispatcher catalogs when their forwarding targets are
-        // evicted. The slides-session
-        // `retain(keep_tool_in_slides_session)` removes `mofa_cards`,
-        // `mofa_comic`, etc. from `tools`, but the `MofaMakeTool`
-        // dispatcher's catalog (built at load time) still advertises
-        // those `content_type` enum values to the LLM. Without this
-        // prune the LLM can call `mofa_make({content_type: "cards"})`
-        // and observe a `[DISPATCHER_ERROR]` because the target was
-        // evicted — weakening the slides-only guardrail.
-        //
-        // Round 5 P1: this registry may have been built via
-        // `snapshot_excluding` / `rebind_cwd`, which clones the
-        // dispatcher tool as a SHARED `Arc<dyn Tool>` with the
-        // base/profile registry. Calling `replace_entries` on a shared
-        // dispatcher would poison the base's catalog — every subsequent
-        // session cloned from the same base would also observe the
-        // pruned catalog. Round 5 P2: an earlier attempt gated on
-        // `Arc::strong_count > 2`, but the threshold is racy under
-        // concurrent retains across sibling snapshots (the count can
-        // dip back to 2 between snapshot ops, causing the in-place
-        // branch to fire on a still-shared Arc). Always mint a FRESH
-        // dispatcher seeded with surviving entries and register it
-        // locally — the allocation cost is paid once per retain pass
-        // and the shared-Arc hazard is unconditionally eliminated. The
-        // `Weak<ToolRegistry>` back-ref on the fresh dispatcher is
-        // intentionally left unwired here —
-        // `Agent::new::refresh_mofa_make_dispatcher_in_place` /
-        // `wire_mofa_make_registry_back_ref` rewires it before the
-        // agent loop executes, matching the freshen path used by
-        // pipeline / per-turn snapshots.
-        if let Some(arc) = self.tools.get("mofa_make").cloned() {
-            if let Some(dispatcher) = arc.as_any().downcast_ref::<super::MofaMakeTool>() {
-                let surviving: Vec<super::MakeTypeEntry> = dispatcher
-                    .entries()
-                    .into_iter()
-                    .filter(|entry| self.tools.contains_key(&entry.target_tool))
-                    .collect();
-                let fresh = super::MofaMakeTool::new();
-                for entry in &surviving {
-                    fresh.register_or_replace(entry.clone());
-                }
-                self.register(fresh);
-                if let Some(describe_arc) = self.tools.get("mofa_describe_content_type").cloned() {
-                    if describe_arc
-                        .as_any()
-                        .downcast_ref::<super::MofaDescribeContentTypeTool>()
-                        .is_some()
-                    {
-                        let fresh_describe = super::MofaDescribeContentTypeTool::new();
-                        for entry in &surviving {
-                            fresh_describe.register_or_replace(entry.clone());
-                        }
-                        self.register(fresh_describe);
-                    }
-                }
-            }
-        }
         self.invalidate_cache();
     }
 
@@ -1040,11 +912,6 @@ impl ToolRegistry {
             session_key: None,
             output_dir_hint: self.output_dir_hint.clone(),
             tool_timeout_secs: self.tool_timeout_secs,
-            // RFC-1 fixup (codex P1): propagate internal-hidden markers
-            // onto per-turn snapshots so the per-turn registry observes
-            // the same invariants as the parent (mofa_make targets stay
-            // hidden from `specs()`).
-            internal_hidden: self.internal_hidden.clone(),
             // #1607: carry the parent's sandbox onto the snapshot so a
             // snapshot-derived registry (used by `rebind_cwd_with_permissions`)
             // keeps a real sandbox by default. `rebind_cwd_with_permissions`
@@ -1374,10 +1241,6 @@ impl ToolRegistry {
     pub fn catalog_snapshot(&self) -> Vec<ToolCatalogEntry> {
         self.tools
             .values()
-            // RFC-1 fixup (codex P1): exclude internal-hidden tools from
-            // tool_search / tool_suggest discovery too — the LLM cannot
-            // call them directly, advertising them would be misleading.
-            .filter(|tool| !self.internal_hidden.contains(tool.name()))
             .filter(|tool| {
                 self.provider_policy.as_ref().is_none_or(|policy| {
                     provider_policy_allows_equivalent_with_tags(policy, tool.name(), tool.tags())
@@ -2804,555 +2667,7 @@ mod profile_filter_tests {
         );
     }
 
-    #[test]
-    fn should_retain_only_mofa_slides_when_slides_session_filter_runs() {
-        // Pins the wiring in session_actor.rs::spawn slides branch:
-        // `tools.retain(octos_agent::keep_tool_in_slides_session)` must
-        // evict every fake mofa skill except `mofa_slides`, and must NOT
-        // evict the unrelated tools (read_file, shell, etc.).
-        //
-        // Without this guardrail the kimi-k2.6 fallback on mini1 dspfac
-        // misrouted "Make a 3-slide intro deck" → mofa_site (2026-05-24
-        // soak). The structural filter makes that misroute literally
-        // impossible regardless of LLM judgement.
-        use super::policy::keep_tool_in_slides_session;
-        use async_trait::async_trait;
-        use eyre::Result;
-        use serde_json::Value;
-
-        struct FakeMofa(&'static str);
-        #[async_trait]
-        impl Tool for FakeMofa {
-            fn name(&self) -> &str {
-                self.0
-            }
-            fn description(&self) -> &str {
-                "fake mofa skill (test fixture)"
-            }
-            fn input_schema(&self) -> Value {
-                serde_json::json!({"type": "object"})
-            }
-            async fn execute(&self, _: &Value) -> Result<ToolResult> {
-                Ok(ToolResult::default())
-            }
-        }
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut reg = ToolRegistry::with_builtins(dir.path());
-        // Simulate the fleet skill surface: every dspfac-installed mofa
-        // skill is registered as a plugin tool. (Real plugins go via
-        // PluginLoader; here we use a stub for an isolated unit test.)
-        for name in [
-            "mofa_slides",
-            "mofa_site",
-            "mofa_youtube",
-            "mofa_publish",
-            "mofa_research",
-            "mofa_pdf",
-            "mofa_xlsx",
-            "mofa_cli",
-            "mofa_fm",
-            "mofa_frame",
-            "mofa_podcast",
-            "mofa_infographic",
-            "mofa_cards",
-            "mofa_comic",
-        ] {
-            reg.register(FakeMofa(name));
-        }
-
-        reg.retain(keep_tool_in_slides_session);
-
-        let names = builtin_names(&reg);
-        assert!(
-            names.contains(&"mofa_slides".to_string()),
-            "mofa_slides MUST survive the slides-session filter",
-        );
-        for unwanted in [
-            "mofa_site",
-            "mofa_youtube",
-            "mofa_publish",
-            "mofa_research",
-            "mofa_pdf",
-            "mofa_xlsx",
-            "mofa_cli",
-            "mofa_fm",
-            "mofa_frame",
-            "mofa_podcast",
-            "mofa_infographic",
-            "mofa_cards",
-            "mofa_comic",
-        ] {
-            assert!(
-                !names.contains(&unwanted.to_string()),
-                "{unwanted} MUST be evicted from a slides session",
-            );
-        }
-        // Built-in non-mofa tools must remain — these are the tools the
-        // slides system prompt's "TOOL DISCIPLINE" block depends on.
-        for kept in ["read_file", "write_file", "glob", "shell"] {
-            assert!(
-                names.contains(&kept.to_string()),
-                "{kept} must NOT be evicted by the slides filter",
-            );
-        }
-    }
-
     /// RFC-1 (issue #1290): a make_type dispatcher target marked
-    /// `mark_internal_hidden` is excluded from the LLM-visible `specs()`
-    /// set but remains callable via `get()` (so the dispatcher can forward
-    /// to it). Non-hidden siblings stay visible.
-    #[test]
-    fn internal_hidden_excluded_from_specs_but_callable_via_get() {
-        use async_trait::async_trait;
-        use eyre::Result;
-        use serde_json::Value;
-
-        struct FakeTool(&'static str);
-        #[async_trait]
-        impl Tool for FakeTool {
-            fn name(&self) -> &str {
-                self.0
-            }
-            fn description(&self) -> &str {
-                "fake (test fixture)"
-            }
-            fn input_schema(&self) -> Value {
-                serde_json::json!({"type": "object"})
-            }
-            async fn execute(&self, _: &Value) -> Result<ToolResult> {
-                Ok(ToolResult::default())
-            }
-        }
-
-        let mut reg = ToolRegistry::new();
-        for name in ["mofa_slides", "mofa_cards"] {
-            reg.register(FakeTool(name));
-        }
-        // `mofa_slides` is the dispatcher's target — hide it from the LLM.
-        reg.mark_internal_hidden("mofa_slides");
-
-        let visible: Vec<String> = reg.specs().into_iter().map(|s| s.name).collect();
-        assert!(
-            !visible.contains(&"mofa_slides".to_string()),
-            "internal-hidden mofa_slides must NOT appear in specs; got {visible:?}"
-        );
-        assert!(
-            visible.contains(&"mofa_cards".to_string()),
-            "non-hidden mofa_cards must remain visible in specs; got {visible:?}"
-        );
-        // Still reachable via get() for internal dispatcher forwarding.
-        assert!(
-            reg.get("mofa_slides").is_some(),
-            "internal-hidden tool must remain callable via get()"
-        );
-        assert!(reg.is_internal_hidden("mofa_slides"));
-    }
-
-    /// RFC-1 fixup (codex round 4 P2): when `retain` evicts dispatcher
-    /// target tools (e.g. `mofa_cards`, `mofa_comic` during the
-    /// slides-session retain pass), the surviving `MofaMakeTool`
-    /// dispatcher's catalog must be pruned in lockstep. Otherwise the
-    /// dispatcher's `content_type` enum continues to advertise the
-    /// evicted content types and the LLM can call them, only to
-    /// observe `[DISPATCHER_ERROR]` because the target is gone.
-    #[test]
-    fn retain_prunes_mofa_make_catalog_to_surviving_targets() {
-        use super::policy::keep_tool_in_slides_session;
-        use crate::tools::{MakeTypeEntry, MofaDescribeContentTypeTool, MofaMakeTool};
-        use async_trait::async_trait;
-        use eyre::Result;
-        use serde_json::Value;
-
-        struct FakeTool(&'static str);
-        #[async_trait]
-        impl Tool for FakeTool {
-            fn name(&self) -> &str {
-                self.0
-            }
-            fn description(&self) -> &str {
-                "fake"
-            }
-            fn input_schema(&self) -> Value {
-                serde_json::json!({"type": "object"})
-            }
-            async fn execute(&self, _: &Value) -> Result<ToolResult> {
-                Ok(ToolResult::default())
-            }
-        }
-
-        let mut reg = ToolRegistry::new();
-        // Register target tools for three content_types so the
-        // dispatcher catalog has entries to prune.
-        reg.register(FakeTool("mofa_slides"));
-        reg.register(FakeTool("mofa_cards"));
-        reg.register(FakeTool("mofa_comic"));
-
-        // Construct a dispatcher pair seeded with all three entries
-        // (mirrors what the loader does after discovering three
-        // `make_type` plugins).
-        let dispatcher = MofaMakeTool::new();
-        let describe = MofaDescribeContentTypeTool::new();
-        for entry in [
-            MakeTypeEntry::new("slides", "mofa-slides", "mofa_slides", "PPTX decks"),
-            MakeTypeEntry::new("cards", "mofa-cards", "mofa_cards", "Greeting cards"),
-            MakeTypeEntry::new("comic", "mofa-comic", "mofa_comic", "Comic strips"),
-        ] {
-            dispatcher.register_or_replace(entry.clone());
-            describe.register_or_replace(entry);
-        }
-        reg.register(dispatcher);
-        reg.register(describe);
-        // Hide each target (the loader does this in
-        // `mark_internal_hidden` after dispatcher registration).
-        for target in ["mofa_slides", "mofa_cards", "mofa_comic"] {
-            reg.mark_internal_hidden(target);
-        }
-
-        // Sanity: the catalog has 3 entries before retain.
-        let pre = reg
-            .get("mofa_make")
-            .and_then(|arc| arc.as_any().downcast_ref::<MofaMakeTool>())
-            .unwrap()
-            .entries();
-        assert_eq!(pre.len(), 3, "catalog must have 3 entries before retain");
-
-        // Apply the slides-session retain. This evicts `mofa_cards`
-        // and `mofa_comic` but keeps `mofa_slides` + the dispatcher
-        // pair.
-        reg.retain(keep_tool_in_slides_session);
-
-        // Post-condition: the dispatcher's catalog has been pruned to
-        // only the surviving content_type (slides). The LLM's
-        // mofa_make enum will no longer offer `cards` or `comic`.
-        let post = reg
-            .get("mofa_make")
-            .and_then(|arc| arc.as_any().downcast_ref::<MofaMakeTool>())
-            .expect("mofa_make survived retain")
-            .entries();
-        assert_eq!(
-            post.len(),
-            1,
-            "catalog must be pruned to surviving targets; got {post:?}"
-        );
-        assert_eq!(post[0].content_type, "slides");
-
-        // The describe tool's catalog is pruned symmetrically so the
-        // LLM cannot fetch a schema for an evicted content_type.
-        let describe_post = reg
-            .get("mofa_describe_content_type")
-            .and_then(|arc| arc.as_any().downcast_ref::<MofaDescribeContentTypeTool>())
-            .expect("describe tool survived retain")
-            .entries();
-        assert_eq!(describe_post.len(), 1);
-        assert_eq!(describe_post[0].content_type, "slides");
-    }
-
-    /// RFC-1 fixup (codex round 5 P1): when a registry is built via
-    /// `snapshot_excluding` (or `rebind_cwd`, which calls that
-    /// internally), the per-session registry shares the SAME
-    /// `Arc<MofaMakeTool>` instance with the base/profile registry it
-    /// was cloned from. A subsequent `retain` on the per-session
-    /// registry must NOT poison the base/profile registry's
-    /// dispatcher catalog via interior-mutable `replace_entries` on
-    /// the shared `Arc<MofaMakeTool>`. Otherwise the next non-slides
-    /// session cloned from the SAME base also sees the pruned
-    /// catalog (e.g. only `slides`), and `mofa_make` silently loses
-    /// `cards`, `comic`, `site`, etc. until restart.
-    #[test]
-    fn retain_does_not_corrupt_base_registry_dispatcher_catalog() {
-        use super::policy::keep_tool_in_slides_session;
-        use crate::tools::{MakeTypeEntry, MofaDescribeContentTypeTool, MofaMakeTool};
-        use async_trait::async_trait;
-        use eyre::Result;
-        use serde_json::Value;
-
-        struct FakeTool(&'static str);
-        #[async_trait]
-        impl Tool for FakeTool {
-            fn name(&self) -> &str {
-                self.0
-            }
-            fn description(&self) -> &str {
-                "fake"
-            }
-            fn input_schema(&self) -> Value {
-                serde_json::json!({"type": "object"})
-            }
-            async fn execute(&self, _: &Value) -> Result<ToolResult> {
-                Ok(ToolResult::default())
-            }
-        }
-
-        // Build the base registry mirroring what the gateway / profile
-        // assembles before per-session snapshots are made.
-        let mut base = ToolRegistry::new();
-        for target in ["mofa_slides", "mofa_cards", "mofa_comic", "mofa_site"] {
-            base.register(FakeTool(target));
-        }
-        let dispatcher = MofaMakeTool::new();
-        let describe = MofaDescribeContentTypeTool::new();
-        for entry in [
-            MakeTypeEntry::new("slides", "mofa-slides", "mofa_slides", "PPTX decks"),
-            MakeTypeEntry::new("cards", "mofa-cards", "mofa_cards", "Cards"),
-            MakeTypeEntry::new("comic", "mofa-comic", "mofa_comic", "Comic strips"),
-            MakeTypeEntry::new("site", "mofa-site", "mofa_site", "Static sites"),
-        ] {
-            dispatcher.register_or_replace(entry.clone());
-            describe.register_or_replace(entry);
-        }
-        base.register(dispatcher);
-        base.register(describe);
-        for target in ["mofa_slides", "mofa_cards", "mofa_comic", "mofa_site"] {
-            base.mark_internal_hidden(target);
-        }
-
-        // Snapshot from the base — this is what a per-session registry
-        // looks like before any retain pass. The cloned `Arc<dyn Tool>`
-        // for `mofa_make` is SHARED with the base.
-        let mut slides_session = base.snapshot_excluding(&[]);
-
-        // Pre-condition: both base and snapshot have all 4 entries.
-        let base_pre = base
-            .get("mofa_make")
-            .and_then(|arc| arc.as_any().downcast_ref::<MofaMakeTool>())
-            .unwrap()
-            .entries();
-        assert_eq!(
-            base_pre.len(),
-            4,
-            "sanity: base has 4 entries before retain"
-        );
-
-        // Slides-session retain: keeps only mofa_slides plus the
-        // dispatcher pair; evicts mofa_cards/mofa_comic/mofa_site.
-        slides_session.retain(keep_tool_in_slides_session);
-
-        // The slides session's dispatcher must observe only `slides`.
-        let session_post = slides_session
-            .get("mofa_make")
-            .and_then(|arc| arc.as_any().downcast_ref::<MofaMakeTool>())
-            .expect("slides session retained mofa_make")
-            .entries();
-        assert_eq!(
-            session_post.len(),
-            1,
-            "slides session catalog must be pruned; got {session_post:?}"
-        );
-        assert_eq!(session_post[0].content_type, "slides");
-
-        // CRITICAL: the base registry's dispatcher catalog must be
-        // unchanged. If the retain mutated the SHARED Arc, the base
-        // would silently lose the other content types.
-        let base_post = base
-            .get("mofa_make")
-            .and_then(|arc| arc.as_any().downcast_ref::<MofaMakeTool>())
-            .expect("base still has mofa_make")
-            .entries();
-        assert_eq!(
-            base_post.len(),
-            4,
-            "base registry's dispatcher catalog MUST NOT be poisoned by \
-             a slides-session retain; got {:?}",
-            base_post
-                .iter()
-                .map(|e| &e.content_type)
-                .collect::<Vec<_>>()
-        );
-        let base_types: std::collections::HashSet<&str> =
-            base_post.iter().map(|e| e.content_type.as_str()).collect();
-        for required in ["slides", "cards", "comic", "site"] {
-            assert!(
-                base_types.contains(required),
-                "base catalog lost {required:?} after slides session retain; got {base_types:?}"
-            );
-        }
-
-        // Mirror the assertion for the describe tool.
-        let base_describe_post = base
-            .get("mofa_describe_content_type")
-            .and_then(|arc| arc.as_any().downcast_ref::<MofaDescribeContentTypeTool>())
-            .expect("base still has describe tool")
-            .entries();
-        assert_eq!(
-            base_describe_post.len(),
-            4,
-            "base describe catalog must also survive intact",
-        );
-    }
-
-    /// RFC-1 fixup (codex round 5 P1): build a base; spawn a slides
-    /// session via `snapshot_excluding`; THEN spawn a second
-    /// (non-slides) session from the same base. The second session's
-    /// dispatcher must observe all original content types — the slides
-    /// session's retain must not leak into other sessions cloned from
-    /// the same base.
-    #[test]
-    fn slides_session_retain_leaves_other_sessions_unaffected() {
-        use super::policy::keep_tool_in_slides_session;
-        use crate::tools::{MakeTypeEntry, MofaMakeTool};
-        use async_trait::async_trait;
-        use eyre::Result;
-        use serde_json::Value;
-
-        struct FakeTool(&'static str);
-        #[async_trait]
-        impl Tool for FakeTool {
-            fn name(&self) -> &str {
-                self.0
-            }
-            fn description(&self) -> &str {
-                "fake"
-            }
-            fn input_schema(&self) -> Value {
-                serde_json::json!({"type": "object"})
-            }
-            async fn execute(&self, _: &Value) -> Result<ToolResult> {
-                Ok(ToolResult::default())
-            }
-        }
-
-        let mut base = ToolRegistry::new();
-        for target in ["mofa_slides", "mofa_cards", "mofa_comic"] {
-            base.register(FakeTool(target));
-        }
-        let dispatcher = MofaMakeTool::new();
-        for entry in [
-            MakeTypeEntry::new("slides", "mofa-slides", "mofa_slides", "PPTX decks"),
-            MakeTypeEntry::new("cards", "mofa-cards", "mofa_cards", "Cards"),
-            MakeTypeEntry::new("comic", "mofa-comic", "mofa_comic", "Comic strips"),
-        ] {
-            dispatcher.register_or_replace(entry);
-        }
-        base.register(dispatcher);
-
-        // Session A: slides session → retain.
-        let mut session_a = base.snapshot_excluding(&[]);
-        session_a.retain(keep_tool_in_slides_session);
-        let a_entries = session_a
-            .get("mofa_make")
-            .and_then(|arc| arc.as_any().downcast_ref::<MofaMakeTool>())
-            .unwrap()
-            .entries();
-        assert_eq!(a_entries.len(), 1, "session A pruned to slides only");
-
-        // Session B: a fresh snapshot from the SAME base — must see
-        // ALL original content types. If session A's retain corrupted
-        // the shared dispatcher Arc, session B would also see only
-        // slides → permanent regression until process restart.
-        let session_b = base.snapshot_excluding(&[]);
-        let b_entries = session_b
-            .get("mofa_make")
-            .and_then(|arc| arc.as_any().downcast_ref::<MofaMakeTool>())
-            .expect("session B has mofa_make")
-            .entries();
-        assert_eq!(
-            b_entries.len(),
-            3,
-            "session B must see the full catalog; got {:?}",
-            b_entries
-                .iter()
-                .map(|e| &e.content_type)
-                .collect::<Vec<_>>()
-        );
-        let b_types: std::collections::HashSet<&str> =
-            b_entries.iter().map(|e| e.content_type.as_str()).collect();
-        for required in ["slides", "cards", "comic"] {
-            assert!(
-                b_types.contains(required),
-                "session B lost {required:?}; got {b_types:?}"
-            );
-        }
-    }
-
-    /// RFC-1 fixup (codex round 5 P1): two slides sessions retain
-    /// concurrently from the same base. Each session's local
-    /// dispatcher must be pruned to `slides`-only, but the base must
-    /// remain fully intact. Exercises the shared-Arc hazard under
-    /// concurrent mutation rather than sequential.
-    #[test]
-    fn concurrent_retains_on_shared_base_dont_race() {
-        use super::policy::keep_tool_in_slides_session;
-        use crate::tools::{MakeTypeEntry, MofaMakeTool};
-        use async_trait::async_trait;
-        use eyre::Result;
-        use serde_json::Value;
-
-        struct FakeTool(&'static str);
-        #[async_trait]
-        impl Tool for FakeTool {
-            fn name(&self) -> &str {
-                self.0
-            }
-            fn description(&self) -> &str {
-                "fake"
-            }
-            fn input_schema(&self) -> Value {
-                serde_json::json!({"type": "object"})
-            }
-            async fn execute(&self, _: &Value) -> Result<ToolResult> {
-                Ok(ToolResult::default())
-            }
-        }
-
-        let mut base = ToolRegistry::new();
-        for target in ["mofa_slides", "mofa_cards", "mofa_comic", "mofa_site"] {
-            base.register(FakeTool(target));
-        }
-        let dispatcher = MofaMakeTool::new();
-        for entry in [
-            MakeTypeEntry::new("slides", "mofa-slides", "mofa_slides", "PPTX decks"),
-            MakeTypeEntry::new("cards", "mofa-cards", "mofa_cards", "Cards"),
-            MakeTypeEntry::new("comic", "mofa-comic", "mofa_comic", "Comic strips"),
-            MakeTypeEntry::new("site", "mofa-site", "mofa_site", "Static sites"),
-        ] {
-            dispatcher.register_or_replace(entry);
-        }
-        base.register(dispatcher);
-
-        // Spawn two slides session snapshots and run their retain
-        // passes on separate threads to expose any race on the shared
-        // dispatcher Arc.
-        let mut handles = Vec::new();
-        for _ in 0..2 {
-            let mut session = base.snapshot_excluding(&[]);
-            handles.push(std::thread::spawn(move || {
-                session.retain(keep_tool_in_slides_session);
-                session
-                    .get("mofa_make")
-                    .and_then(|arc| arc.as_any().downcast_ref::<MofaMakeTool>())
-                    .unwrap()
-                    .entries()
-                    .into_iter()
-                    .map(|e| e.content_type)
-                    .collect::<Vec<_>>()
-            }));
-        }
-        for h in handles {
-            let session_entries = h.join().expect("retain thread panicked");
-            assert_eq!(
-                session_entries,
-                vec!["slides".to_string()],
-                "every session must end with only slides; got {session_entries:?}"
-            );
-        }
-
-        // Base registry must still hold every original content type.
-        let base_entries = base
-            .get("mofa_make")
-            .and_then(|arc| arc.as_any().downcast_ref::<MofaMakeTool>())
-            .unwrap()
-            .entries();
-        assert_eq!(
-            base_entries.len(),
-            4,
-            "base catalog must be untouched by concurrent session retains; got {:?}",
-            base_entries
-                .iter()
-                .map(|e| &e.content_type)
-                .collect::<Vec<_>>()
-        );
-    }
 
     /// Profile narrowing must NOT tear down an MCP transport (#1886).
     ///

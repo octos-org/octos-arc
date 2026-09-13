@@ -39,14 +39,6 @@ pub struct SkillExtras {
     pub spawn_only_tools: Vec<String>,
     /// Custom messages per spawn_only tool.
     pub spawn_only_messages: std::collections::HashMap<String, String>,
-    /// RFC-1 (issue #1290): dispatcher entries collected from manifests
-    /// that declare `make_type`. Each entry carries the content_type
-    /// label, the target tool name to dispatch to, and the
-    /// human-readable description. The loader feeds this list into the
-    /// `mofa_make` registration site so the LLM-visible enum is built
-    /// from the actually-discovered skills (per-profile shadowing
-    /// preserved).
-    pub make_type_entries: Vec<crate::tools::MakeTypeEntry>,
 }
 
 /// Resolve manifest extras against the skill directory.
@@ -378,9 +370,6 @@ mod tests {
             name: "test".into(),
             id: None,
             version: "1.0".into(),
-            make_type: None,
-            content_type_description: None,
-            make_target_tool: None,
             tools: vec![],
             actions: vec![],
             sha256: None,
@@ -414,9 +403,6 @@ mod tests {
             name: "test".into(),
             id: None,
             version: "1.0".into(),
-            make_type: None,
-            content_type_description: None,
-            make_target_tool: None,
             tools: vec![],
             actions: vec![],
             sha256: None,
@@ -460,9 +446,6 @@ mod tests {
             name: name.into(),
             id: None,
             version: "1.0.0".into(),
-            make_type: None,
-            content_type_description: None,
-            make_target_tool: None,
             tools: tools
                 .into_iter()
                 .map(|t| PluginToolDef {

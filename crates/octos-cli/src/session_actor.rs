@@ -3701,10 +3701,6 @@ impl ActorFactory {
             );
         }
 
-        // RFC-1 (issue #1290): wire the mofa_make dispatcher's
-        // back-reference now that tools are in Arc.
-        agent.wire_mofa_make_dispatcher();
-
         // Session-cumulative usage base: the agent READS it when emitting
         // `cost_update` progress (base + live turn); this actor seeds it
         // from the usage ledger at run() start and folds every completed
