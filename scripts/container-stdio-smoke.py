@@ -135,6 +135,13 @@ def main() -> int:
                     "fixture-only",
                 ],
             )
+            session.bootstrap_profile(
+                provider="openai",
+                model="fixture",
+                base_url=f"http://127.0.0.1:{server.server_port}/v1",
+                api_key_env="B5_FAKE_API_KEY",
+                timeout=180.0,
+            )
             session.open(timeout=120.0)
             ok, text = session.run_turn(
                 "Run the shell command requested by the fixture and then reply OK.",
