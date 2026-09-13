@@ -33790,76 +33790,6 @@ fn skill_action_methods_require_their_feature_when_client_negotiates() {
 }
 
 #[test]
-fn voice_admission_methods_require_explicit_feature_negotiation() {
-    let legacy = ConnectionUiFeatures::default();
-    for method in [
-        APPUI_METHOD_VOICE_ADMIT,
-        APPUI_METHOD_VOICE_COMMIT_ADMISSION,
-    ] {
-        assert_eq!(
-            voice_admission_method_available(method, legacy),
-            Some(false)
-        );
-    }
-
-    let negotiated = ConnectionUiFeatures::from_requested_feature_tokens(
-        [APPUI_FEATURE_VOICE_ASR_ADMISSION_V1],
-        false,
-    );
-    for method in [
-        APPUI_METHOD_VOICE_ADMIT,
-        APPUI_METHOD_VOICE_COMMIT_ADMISSION,
-    ] {
-        assert_eq!(
-            voice_admission_method_available(method, negotiated),
-            Some(true)
-        );
-    }
-
-    let capabilities = negotiated.advertised_capabilities(&AppState::empty_for_tests());
-    assert!(capabilities.supports_feature(APPUI_FEATURE_VOICE_ASR_ADMISSION_V1));
-    assert!(
-        capabilities
-            .supported_methods
-            .iter()
-            .any(|method| method == APPUI_METHOD_VOICE_ADMIT)
-    );
-}
-
-#[test]
-fn background_skill_actions_require_the_job_capability() {
-    let sync: octos_agent::plugins::SkillActionDef = serde_json::from_value(json!({
-        "id": "document.open",
-        "label": "Open",
-        "binding": {"type": "tool", "tool": "source_import"}
-    }))
-    .unwrap();
-    let background: octos_agent::plugins::SkillActionDef = serde_json::from_value(json!({
-        "id": "source.import",
-        "label": "Import",
-        "execution": "background",
-        "binding": {"type": "tool", "tool": "source_import"}
-    }))
-    .unwrap();
-    let actions_only = ConnectionUiFeatures::from_requested_feature_tokens(
-        [APPUI_FEATURE_SKILL_ACTIONS_V1],
-        false,
-    );
-
-    assert!(skill_action_execution_available(&sync, actions_only));
-    assert!(!skill_action_execution_available(&background, actions_only));
-
-    let full = ConnectionUiFeatures::from_requested_feature_tokens(
-        [
-            APPUI_FEATURE_SKILL_ACTIONS_V1,
-            APPUI_FEATURE_SKILL_ACTION_JOBS_V1,
-        ],
-        false,
-    );
-    assert!(skill_action_execution_available(&background, full));
-}
-
-#[test]
 fn skill_action_job_updates_require_negotiated_job_feature() {
     let event = UiProtocolLedgerEvent::Notification(UiNotification::SkillActionJobUpdated(
         SkillActionJobUpdatedEvent {
@@ -36239,7 +36169,7 @@ fn should_preserve_producer_identity_on_filtered_voice_delta_and_held_back_tail(
     let ledger = UiProtocolLedger::new(32);
     let session = SessionKey("local:voice-segment-identity".into());
     let turn = TurnId::new();
-    let mut filter = crate::api::voice_turn::VisibleDeltaFilter::new();
+    let mut filter = crate::api::voice_text::VisibleDeltaFilter::new();
     let visible = filter.push("Spoken answer [[VI");
     let tail = filter.finish();
     for text in [visible, tail] {
@@ -36820,3 +36750,38 @@ fn standalone_turn_reapplies_hook_context() {
         "hook context must be re-applied alongside the hook executor wiring"
     );
 }
+
+#[test]
+fn background_skill_actions_require_the_job_capability() {
+    let sync: octos_agent::plugins::SkillActionDef = serde_json::from_value(json!({
+        "id": "document.open",
+        "label": "Open",
+        "binding": {"type": "tool", "tool": "source_import"}
+    }))
+    .unwrap();
+    let background: octos_agent::plugins::SkillActionDef = serde_json::from_value(json!({
+        "id": "source.import",
+        "label": "Import",
+        "execution": "background",
+        "binding": {"type": "tool", "tool": "source_import"}
+    }))
+    .unwrap();
+    let actions_only = ConnectionUiFeatures::from_requested_feature_tokens(
+        [APPUI_FEATURE_SKILL_ACTIONS_V1],
+        false,
+    );
+
+    assert!(skill_action_execution_available(&sync, actions_only));
+    assert!(!skill_action_execution_available(&background, actions_only));
+
+    let full = ConnectionUiFeatures::from_requested_feature_tokens(
+        [
+            APPUI_FEATURE_SKILL_ACTIONS_V1,
+            APPUI_FEATURE_SKILL_ACTION_JOBS_V1,
+        ],
+        false,
+    );
+    assert!(skill_action_execution_available(&background, full));
+}
+
+

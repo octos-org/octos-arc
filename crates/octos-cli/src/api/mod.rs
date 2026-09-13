@@ -13,7 +13,6 @@ mod events;
 mod handlers;
 mod memory_panel;
 pub mod metrics;
-pub(crate) mod ominix_runtime;
 pub mod profile_scope;
 pub mod provider_diagnostics;
 mod router;
@@ -38,9 +37,7 @@ pub(crate) use crate::contracts::sanitize as ui_protocol_sanitize;
 pub(crate) use crate::contracts::scope as ui_protocol_scope;
 mod ui_protocol_task_output;
 pub mod usage;
-pub(crate) mod voice_turn;
-pub mod voices;
-pub(crate) mod volcano_ws;
+pub mod voice_text;
 pub mod webhook_proxy;
 pub mod ws_slash;
 

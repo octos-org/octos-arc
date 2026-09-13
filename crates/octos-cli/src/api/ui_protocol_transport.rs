@@ -105,7 +105,6 @@ use super::ui_protocol_progress::{
 use super::ui_protocol_sanitize::sanitize_display_path;
 use super::ui_protocol_scope::{ApprovalScopeKind, match_key_for};
 use super::ui_protocol_task_output;
-use super::voice_turn::VoiceAsrStatus;
 use super::ws_slash;
 // Phase 3 (goal-in-chat): the contract stores now live outside the `api` gate
 // so `octos chat --peers` shares the identical process-global registry.
@@ -1939,9 +1938,6 @@ impl ConnectionUiFeatures {
             {
                 continue;
             }
-            if voice_admission_method_available(method, self) == Some(false) {
-                continue;
-            }
             if !capabilities
                 .supported_methods
                 .iter()
@@ -2172,15 +2168,6 @@ fn skill_action_method_available(method: &str, features: ConnectionUiFeatures) -
         }
         APPUI_METHOD_SKILL_ACTION_JOB_LIST | APPUI_METHOD_SKILL_ACTION_JOB_READ => {
             Some(features.skill_action_jobs_available())
-        }
-        _ => None,
-    }
-}
-
-fn voice_admission_method_available(method: &str, features: ConnectionUiFeatures) -> Option<bool> {
-    match method {
-        APPUI_METHOD_VOICE_ADMIT | APPUI_METHOD_VOICE_COMMIT_ADMISSION => {
-            Some(features.voice_asr_admission_v1)
         }
         _ => None,
     }
@@ -15171,36 +15158,9 @@ async fn handle_raw_appui_rpc(
         );
         return true;
     }
-    if voice_admission_method_available(request.method.as_str(), features) == Some(false) {
-        let _ = send_rpc_error(
-            ws,
-            Some(id),
-            RpcError::method_not_supported(request.method.as_str()),
-        );
-        return true;
-    }
 
-    if request.method == APPUI_METHOD_VOICE_ADMIT {
-        handle_voice_admit(ws, state, contracts, connection_profile_id, id, request).await;
-        return true;
-    }
 
-    if request.method == APPUI_METHOD_VOICE_COMMIT_ADMISSION {
-        handle_voice_commit_admission(
-            ws,
-            state,
-            ledger,
-            contracts,
-            active_turns,
-            connection_turns,
-            connection_profile_id,
-            features,
-            id,
-            request,
-        )
-        .await;
-        return true;
-    }
+
 
     let result = match request.method.as_str() {
         APPUI_METHOD_CONFIG_CAPABILITIES_LIST => {
@@ -18785,172 +18745,6 @@ async fn handle_turn_start(
     .await;
 }
 
-fn voice_media_paths(media: &[FileRef]) -> Vec<String> {
-    media
-        .iter()
-        .filter(|file| file.mime.starts_with("audio/") || octos_bus::media::is_audio(&file.path))
-        .map(|file| file.path.clone())
-        .collect()
-}
-
-fn voice_session_with_topic(session_id: &SessionKey, topic: Option<&str>) -> SessionKey {
-    string_session_with_optional_topic(&session_id.0, topic)
-}
-
-async fn resolve_voice_admission_runtime(
-    state: &Arc<AppState>,
-    session_id: &SessionKey,
-    connection_profile_id: Option<&str>,
-) -> Result<Arc<crate::runtime::SessionRuntime>, RpcError> {
-    let active_profile_id = session_id.profile_id().or(connection_profile_id);
-    if let Some(profile_id) = active_profile_id {
-        ensure_known_profile(state, profile_id)?;
-    }
-    let profile_runtime = ensure_session_profile_runtime(state, active_profile_id)
-        .await?
-        .ok_or_else(|| {
-            runtime_unavailable_error(profile_runtime_unavailable_message(
-                state,
-                active_profile_id.unwrap_or("<unset>"),
-            ))
-        })?;
-    let workspace_profile_id = workspace_profile_scope(active_profile_id, session_id);
-    let hint = session_workspaces().runtime_hint(&workspace_profile_id, session_id);
-    let permissions_epoch = state.session_cache.session_generation(session_id);
-    let permissions = effective_permissions_for_session(state, session_id)?;
-    state
-        .session_cache
-        .get_or_init_with_permissions(
-            &profile_runtime,
-            session_id.clone(),
-            hint,
-            permissions,
-            permissions_epoch,
-        )
-        .await
-        .map_err(|error| runtime_unavailable_error(error.to_string()))
-}
-
-async fn handle_voice_admit(
-    ws: &WsConnection,
-    state: &Arc<AppState>,
-    contracts: &Arc<UiProtocolContractStores>,
-    connection_profile_id: Option<&str>,
-    id: String,
-    request: &RpcRequest<Value>,
-) {
-    let params: RawVoiceAdmitParams = match parse_raw_params(request) {
-        Ok(params) => params,
-        Err(error) => {
-            let _ = send_rpc_error(ws, Some(id), error);
-            return;
-        }
-    };
-    if params.request_id.trim().is_empty() {
-        let _ = send_rpc_error(
-            ws,
-            Some(id),
-            RpcError::invalid_params("voice/admit requires a non-empty request_id"),
-        );
-        return;
-    }
-    let session_id = voice_session_with_topic(&params.session_id, params.topic.as_deref());
-    if let Err(error) = validate_session_scope(&session_id, None, connection_profile_id) {
-        send_scope_error(ws, id, error);
-        return;
-    }
-    let audio_paths = voice_media_paths(&params.media);
-    if audio_paths.is_empty() {
-        let _ = send_rpc_error(
-            ws,
-            Some(id),
-            RpcError::invalid_params("voice/admit requires at least one audio file"),
-        );
-        return;
-    }
-    let session_runtime =
-        match resolve_voice_admission_runtime(state, &session_id, connection_profile_id).await {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                let _ = send_rpc_error(ws, Some(id), error);
-                return;
-            }
-        };
-    let materialized = octos_bus::file_handle::materialize_turn_uploads(
-        &session_runtime.workspace_root,
-        Some(session_runtime.profile.profile_id.as_str()),
-        &audio_paths,
-    );
-    let asr_media = materialized
-        .iter()
-        .map(|path| {
-            let path = Path::new(path);
-            if path.is_absolute() {
-                path.to_string_lossy().into_owned()
-            } else {
-                session_runtime
-                    .workspace_root
-                    .join(path)
-                    .to_string_lossy()
-                    .into_owned()
-            }
-        })
-        .collect::<Vec<_>>();
-    let asr_language = match crate::profiles::effective_profile_asr_language(
-        state.profile_store.as_deref(),
-        Some(&session_runtime.profile.profile_id),
-        session_runtime.profile.voice.asr_language.as_deref(),
-    ) {
-        Ok(language) => language,
-        Err(error) => {
-            let _ = send_rpc_error(ws, Some(id), runtime_unavailable_error(error.to_string()));
-            return;
-        }
-    };
-    let outcome =
-        crate::api::voice_turn::transcribe_audio_media(&asr_media, asr_language.as_deref()).await;
-    match outcome.status() {
-        VoiceAsrStatus::Speech => {
-            let transcript = outcome.accepted_transcripts.join("\n");
-            let issued = contracts.voice_admissions.issue(
-                params.request_id,
-                session_id,
-                params.turn_id.clone(),
-                audio_paths,
-                transcript.clone(),
-            );
-            let _ = send_rpc_result(
-                ws,
-                id,
-                json!({
-                    "status": "speech",
-                    "admission_id": issued.admission_id,
-                    "turn_id": params.turn_id,
-                    "transcript": issued.transcript,
-                }),
-            );
-        }
-        VoiceAsrStatus::NoSpeech => {
-            let _ = send_rpc_result(
-                ws,
-                id,
-                json!({
-                    "status": "no_speech",
-                    "turn_id": params.turn_id,
-                    "reject_reasons": outcome.reject_reasons,
-                }),
-            );
-        }
-        VoiceAsrStatus::Failed | VoiceAsrStatus::NoAudio => {
-            let error = RpcError::internal_error("voice ASR preflight failed").with_data(json!({
-                "kind": "voice_asr_unavailable",
-                "failed_count": outcome.failed_count,
-            }));
-            let _ = send_rpc_error(ws, Some(id), error);
-        }
-    }
-}
-
 async fn await_superseded_turn(
     active_turns: &SharedActiveTurns,
     session_id: &SessionKey,
@@ -19000,97 +18794,6 @@ async fn await_superseded_turn(
                     )
                 })
         }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn handle_voice_commit_admission(
-    ws: &WsConnection,
-    state: &Arc<AppState>,
-    ledger: &Arc<UiProtocolLedger>,
-    contracts: &Arc<UiProtocolContractStores>,
-    active_turns: &SharedActiveTurns,
-    connection_turns: &SharedConnectionTurns,
-    connection_profile_id: Option<&str>,
-    features: ConnectionUiFeatures,
-    id: String,
-    request: &RpcRequest<Value>,
-) {
-    let mut params: RawVoiceCommitAdmissionParams = match parse_raw_params(request) {
-        Ok(params) => params,
-        Err(error) => {
-            let _ = send_rpc_error(ws, Some(id), error);
-            return;
-        }
-    };
-    let session_id =
-        voice_session_with_topic(&params.turn.session_id, params.turn.topic.as_deref());
-    if let Err(error) = validate_session_scope(&session_id, None, connection_profile_id) {
-        send_scope_error(ws, id, error);
-        return;
-    }
-    let audio_paths = voice_media_paths(&params.turn.media);
-    let claim = match contracts.voice_admissions.claim(
-        &params.admission_id,
-        &session_id,
-        &params.turn.turn_id,
-        &audio_paths,
-    ) {
-        Ok(claim) => claim,
-        Err(error) => {
-            let _ = send_rpc_error(ws, Some(id), RpcError::invalid_request(error.message()));
-            return;
-        }
-    };
-    if claim == VoiceAdmissionClaim::AlreadyCommitted {
-        let _ = send_rpc_result(
-            ws,
-            id,
-            json!({
-                "accepted": true,
-                "committed": true,
-                "idempotent": true,
-                "turn_id": params.turn.turn_id,
-            }),
-        );
-        return;
-    }
-    if let Some(superseded) = params.supersedes_turn_id.as_ref() {
-        if let Err(error) = await_superseded_turn(active_turns, &session_id, superseded).await {
-            contracts
-                .voice_admissions
-                .release(&params.admission_id, &params.turn.turn_id);
-            let _ = send_rpc_error(ws, Some(id), error);
-            return;
-        }
-    }
-    params.turn.session_id = session_id;
-    params.turn.topic = None;
-    let VoiceAdmissionClaim::Start(transcript) = claim else {
-        unreachable!("already-committed voice admission returned above")
-    };
-    let admission_id = params.admission_id.clone();
-    let turn_id = params.turn.turn_id.clone();
-    let started = handle_turn_start_with_accept(
-        ws,
-        state,
-        ledger,
-        contracts,
-        active_turns,
-        connection_turns,
-        connection_profile_id,
-        None,
-        features,
-        id,
-        params.turn,
-        json!({ "accepted": true, "committed": true, "turn_id": turn_id }),
-        Some(PreAdmittedVoice { transcript }),
-    )
-    .await;
-    if started {
-        contracts.voice_admissions.finalize(&admission_id, &turn_id);
-    } else {
-        contracts.voice_admissions.release(&admission_id, &turn_id);
     }
 }
 
@@ -25576,9 +25279,9 @@ fn prepare_voice_directives(
     messages: &mut [Message],
     had_audio_input: bool,
     incomplete: bool,
-) -> (Option<crate::api::voice_turn::VisualDirective>, bool) {
+) -> (Option<crate::api::voice_text::VisualDirective>, bool) {
     if had_audio_input {
-        let directives = crate::api::voice_turn::strip_control_directives(content, messages);
+        let directives = crate::api::voice_text::strip_control_directives(content, messages);
         if incomplete {
             (None, false)
         } else {
@@ -28114,175 +27817,12 @@ async fn run_standalone_turn(
         Some(session_runtime.profile.profile_id.as_str()),
         &raw_media,
     );
-    // ── 语音轮 STT（serve 路径）────────────────────────────────────
-    // 若 turn 媒体含音频，转写并并入 prompt；并记录"本轮含音频输入"，
-    // 供下方决定是否合成语音回复。
-    // `materialize_turn_uploads` returns workspace-RELATIVE paths
-    // ("uploads/<name>"). That works for the agent's own tools (cwd =
-    // workspace_root), but ominix-api is a SEPARATE process that reads
-    // `audio_path` off disk under ITS own cwd — a relative path 404s there.
-    // Resolve to absolute against workspace_root before transcription.
-    let asr_media: Vec<String> = turn_media_paths
-        .iter()
-        .map(|p| {
-            let pb = std::path::Path::new(p);
-            if pb.is_absolute() {
-                p.clone()
-            } else {
-                session_runtime
-                    .workspace_root
-                    .join(pb)
-                    .to_string_lossy()
-                    .into_owned()
-            }
-        })
-        .collect();
-    let had_audio_media = asr_media.iter().any(|p| octos_bus::media::is_audio(p));
-    // Read the profile override for every voice turn instead of freezing it in
-    // the cached SessionRuntime. A Settings save therefore affects the very
-    // next utterance without restarting `octos serve`. Do not touch the store
-    // for text-only turns; a malformed voice setting must not break chat.
-    let asr_language = if had_audio_media && pre_admitted_voice.is_none() {
-        match crate::profiles::effective_profile_asr_language(
-            state.profile_store.as_deref(),
-            Some(&session_runtime.profile.profile_id),
-            session_runtime.profile.voice.asr_language.as_deref(),
-        ) {
-            Ok(language) => language,
-            Err(error) => {
-                tracing::error!(
-                    profile_id = %session_runtime.profile.profile_id,
-                    %error,
-                    "voice_turn: failed to resolve profile ASR language"
-                );
-                try_emit_terminal(
-                    &turn_state,
-                    TerminalReason::Errored,
-                    &ws,
-                    &ledger,
-                    &session_id,
-                    &turn_id,
-                    Some(("profile_config_unavailable", &error.to_string())),
-                    None,
-                    steer_buffer.as_ref(),
-                    peers_root.as_deref(),
-                    // Outer-loop #4 (§4.2): peer sessions release their held slot at the interrupted terminal; None = no peer context on this path.
-                )
-                .await;
-                contracts.scopes.evict_turn(&session_id, &turn_id);
-                return;
-            }
-        }
-    } else {
-        None
-    };
-    tracing::debug!(media_count = asr_media.len(), "voice_turn: STT input media");
-    let voice_asr = if let Some(admitted) = pre_admitted_voice {
-        crate::api::voice_turn::VoiceAsrOutcome {
-            audio_count: asr_media
-                .iter()
-                .filter(|path| octos_bus::media::is_audio(path))
-                .count(),
-            accepted_transcripts: vec![admitted.transcript],
-            rejected_count: 0,
-            failed_count: 0,
-            reject_reasons: Vec::new(),
-        }
-    } else {
-        crate::api::voice_turn::transcribe_audio_media(&asr_media, asr_language.as_deref()).await
-    };
-    let asr_status = voice_asr.status();
-    tracing::debug!(
-        transcripts = voice_asr.accepted_transcripts.len(),
-        rejected = voice_asr.rejected_count,
-        failed = voice_asr.failed_count,
-        ?asr_status,
-        "voice_turn: STT result"
-    );
-    let had_non_audio_media = asr_media
-        .iter()
-        .any(|path| !octos_bus::media::is_audio(path));
-    if should_short_circuit_no_speech(
-        had_audio_media,
-        had_non_audio_media,
-        !voice_asr.accepted_transcripts.is_empty(),
-        prompt.trim().is_empty(),
-    ) {
-        let mut no_speech_metadata = UiProgressMetadata::new("voice_no_speech");
-        no_speech_metadata.message = Some("no speech detected".to_owned());
-        no_speech_metadata.extra.insert(
-            "client_message_id".to_owned(),
-            Value::String(turn_id.0.to_string()),
-        );
-        let _ = send_notification_durable(
-            &ws,
-            &ledger,
-            UiNotification::ProgressUpdated(UiProgressEvent::new(
-                session_id.clone(),
-                Some(turn_id.clone()),
-                no_speech_metadata,
-            )),
-        );
-        try_emit_terminal(
-            &turn_state,
-            TerminalReason::Completed,
-            &ws,
-            &ledger,
-            &session_id,
-            &turn_id,
-            None,
-            None,
-            steer_buffer.as_ref(),
-            peers_root.as_deref(),
-            // Outer-loop #4 (§4.2): peer sessions release their held slot at the interrupted terminal; None = no peer context on this path.
-        )
-        .await;
-        contracts.scopes.evict_turn(&session_id, &turn_id);
-        return;
-    }
-    if had_audio_media && asr_status == VoiceAsrStatus::Failed {
-        let error_message = "语音识别暂时不可用，请重试";
-        let mut error_metadata = UiProgressMetadata::new("voice_asr_error");
-        error_metadata.message = Some(error_message.to_owned());
-        error_metadata.extra.insert(
-            "client_message_id".to_owned(),
-            Value::String(turn_id.0.to_string()),
-        );
-        let _ = send_notification_durable(
-            &ws,
-            &ledger,
-            UiNotification::ProgressUpdated(UiProgressEvent::new(
-                session_id.clone(),
-                Some(turn_id.clone()),
-                error_metadata,
-            )),
-        );
-        try_emit_terminal(
-            &turn_state,
-            TerminalReason::Errored,
-            &ws,
-            &ledger,
-            &session_id,
-            &turn_id,
-            Some(("voice_asr_unavailable", error_message)),
-            None,
-            None,
-            peers_root.as_deref(),
-            // Outer-loop #4 (§4.2): peer sessions release their held slot at the interrupted terminal; None = no peer context on this path.
-        )
-        .await;
-        contracts.scopes.evict_turn(&session_id, &turn_id);
-        return;
-    }
-    let voice_transcripts = voice_asr.accepted_transcripts;
-    let had_audio_input = !voice_transcripts.is_empty();
-    // #1555 review finding 2: content persisted as the voice turn's user
-    // message. Captured below as the COMBINED user-visible content (typed
-    // prompt + transcript, exactly as merged into the LLM prompt) BEFORE the
-    // `[语音模式:…]` scaffolding is appended, so a mixed typed+voice turn
-    // keeps its typed text in history. `None` for non-voice turns leaves the
-    // persisted message untouched.
+    // Voice-turn STT was removed with the voice product line. Text turns
+    // are unaffected; audio attachments pass through as ordinary media.
+    let had_audio_input = false;
+    let voice_transcripts: Vec<String> = Vec::new();
     let mut voice_user_content_for_persist: Option<String> = None;
+
     if had_audio_input {
         let joined = voice_transcripts.join("\n");
         let mut transcript_metadata = UiProgressMetadata::new("voice_transcript");
@@ -28339,13 +27879,8 @@ async fn run_standalone_turn(
     // capture one classified `TurnFailure` so the error path can speak a short
     // apology. Text turns leave the sink unset and keep the default Normal
     // policy (full retry ladder), byte-for-byte unchanged.
-    let mut voice_failure_rx = if had_audio_input {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<octos_agent::TurnFailure>();
-        request_agent.set_voice_failure_sink(tx);
-        Some(rx)
-    } else {
-        None
-    };
+    let mut voice_failure_rx: Option<tokio::sync::mpsc::Receiver<octos_agent::TurnFailure>> = None;
+
     if let Some(rewrite_for) = params.rewrite_for.as_deref() {
         tracing::debug!(
             session = %session_id.0,
@@ -28410,7 +27945,7 @@ async fn run_standalone_turn(
     // every authoritative surface) and hands it here for the post-turn
     // background dispatch. `None` for text turns or replies without a marker.
     let (visual_directive_tx, visual_directive_rx) =
-        tokio::sync::oneshot::channel::<Option<crate::api::voice_turn::VisualDirective>>();
+        tokio::sync::oneshot::channel::<Option<crate::api::voice_text::VisualDirective>>();
     // Voice exit intent (UPCR-2026-025): the agent task lifts the trailing
     // in-band `[[EXIT]]` marker out of `response.content` (stripping it from
     // every authoritative surface) and signals here whether the user asked to
@@ -29299,7 +28834,7 @@ async fn run_standalone_turn(
     // directive is parsed later from the authoritative final reply (not the
     // splitter), so it is robust whether or not the reply was streamed.
     let mut voice_splitter = if had_audio_input {
-        Some(crate::api::voice_turn::VoiceReplySplitter::new())
+        Some(crate::api::voice_text::VoiceReplySplitter::new())
     } else {
         None
     };
@@ -29309,98 +28844,12 @@ async fn run_standalone_turn(
     // internal control protocol (durable surfaces are stripped in the agent task).
     let mut voice_assistant_iteration = None;
     let mut voice_delta_filter = if had_audio_input {
-        Some(crate::api::voice_turn::VisibleDeltaFilter::new())
+        Some(crate::api::voice_text::VisibleDeltaFilter::new())
     } else {
         None
     };
     let mut voice_streamed_count: usize = 0;
-    let (mut voice_tx, mut voice_handle) = if had_audio_input {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(64);
-        let w_ledger = ledger.clone();
-        let w_session = session_id.clone();
-        let w_turn = turn_id.clone();
-        let w_dir = session_runtime.workspace_root.clone();
-        // Per-tenant reply voice: live override (set via PUT /api/my/voice) wins,
-        // else the profile's bootstrapped default.
-        let w_voice = crate::api::voices::resolve_reply_voice(
-            &session_runtime.profile.profile_id,
-            &session_runtime.profile.voice.default_voice,
-        );
-        let w_provider = session_runtime.profile.voice.tts_provider.clone();
-        let w_cloud = session_runtime.profile.voice.cloud.clone();
-        let w_ws = ws.clone();
-        let w_voice_audio = features.voice_audio;
-        let handle = tokio::spawn(async move {
-            use base64::Engine as _;
-            let mut n: usize = 0;
-            while let Some(sentence) = rx.recv().await {
-                // Streaming cloud path: push reply audio as `voice/audio_chunk`
-                // frames so a negotiated client plays progressively. Falls
-                // through to the whole-file path when the client did not
-                // negotiate, the turn is not cloud-routed, or the stream fails.
-                if w_voice_audio {
-                    let segment_id = uuid::Uuid::now_v7().to_string();
-                    let mut seq: u32 = 0;
-                    let streamed = crate::api::voice_turn::synthesize_reply_streaming(
-                        &sentence,
-                        &w_provider,
-                        w_cloud.as_ref(),
-                        |bytes, last, mime| {
-                            let ev = VoiceAudioChunkEvent {
-                                session_id: w_session.clone(),
-                                topic: None,
-                                turn_id: w_turn.clone(),
-                                segment_id: segment_id.clone(),
-                                seq,
-                                mime: mime.to_string(),
-                                audio_b64: base64::engine::general_purpose::STANDARD.encode(bytes),
-                                last,
-                            };
-                            let _ = send_notification_ephemeral(
-                                &w_ws,
-                                &w_ledger,
-                                UiNotification::VoiceAudioChunk(ev),
-                            );
-                            seq += 1;
-                        },
-                    )
-                    .await;
-                    if streamed.is_some() {
-                        n += 1;
-                        continue;
-                    }
-                }
-                if let Some(path) = crate::api::voice_turn::synthesize_reply(
-                    &sentence,
-                    &w_voice,
-                    &w_provider,
-                    w_cloud.as_ref(),
-                    &w_dir,
-                )
-                .await
-                {
-                    let rel = path
-                        .file_name()
-                        .map(|x| x.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| path.to_string_lossy().into_owned());
-                    super::ui_protocol_alpha9_bridge::emit_files_attached_from_background(
-                        &w_ledger,
-                        &w_session,
-                        &w_turn,
-                        std::slice::from_ref(&rel),
-                        &[],
-                        None,
-                    );
-                    n += 1;
-                }
-            }
-            n
-        });
-        (Some(tx), Some(handle))
-    } else {
-        (None, None)
-    };
-
+    let (mut voice_tx, mut voice_handle): (Option<tokio::sync::mpsc::Sender<String>>, Option<tokio::task::JoinHandle<usize>>) = (None, None);
     loop {
         // Race progress events against the interrupt signal so an interrupt
         // can wake us out of `progress_rx.recv()` even if the agent task is
@@ -29605,34 +29054,17 @@ async fn run_standalone_turn(
                 // the classified variant as the terminal code + the friendly
                 // spoken text as the message. Text turns: unchanged.
                 let voice_failure = voice_failure_rx.as_mut().and_then(|rx| rx.try_recv().ok());
-                let (code, wire_msg): (&str, String) = match &voice_failure {
-                    Some(failure) => {
-                        let speech = crate::api::voice_turn::voice_error_speech(failure);
-                        if let Some(tx) = voice_tx.as_ref() {
-                            let _ = tx.try_send(speech.to_string());
-                        }
-                        if let Some(tx) = voice_tx.take() {
-                            drop(tx);
-                        }
-                        if let Some(handle) = voice_handle.take() {
-                            voice_streamed_count = handle.await.unwrap_or(voice_streamed_count);
-                        }
-                        let code = match failure {
-                            octos_agent::TurnFailure::LlmError { error, .. } => {
-                                error.variant_name()
-                            }
-                            octos_agent::TurnFailure::EmptyResponse => "empty_response",
-                        };
-                        (code, speech.to_string())
-                    }
-                    None => (
+                let (code, wire_msg): (&str, String) = (
                         event
                             .get("code")
                             .and_then(Value::as_str)
                             .unwrap_or("runtime_error"),
-                        message,
-                    ),
-                };
+                        event
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("turn failed")
+                            .to_string(),
+                    );;
                 let turn_outcome = if code.contains("rate_limit")
                     || code.contains("rate_limited")
                     || wire_msg.contains("rate_limit")
@@ -30139,303 +29571,6 @@ async fn run_standalone_turn(
     // told a visual is coming by the typed `visual/generating` event below (no
     // in-band marker is on the wire). The model emits no tool call, so the
     // Gemini-3 thought_signature path never arises.
-    if had_audio_input && !interrupt_observed {
-        if let Some(directive) = visual_directive {
-            use crate::api::voice_turn::VisualKind;
-            // Tell the client a visual is generating (typed signal, replaces the
-            // old in-band-marker scrape). The lifecycle terminates on the typed
-            // `visual/succeeded` or `visual/failed` (below) — never on
-            // `file/attached`, which is a pure artifact-delivery signal.
-            super::ui_protocol_alpha9_bridge::emit_visual_generating_from_background(
-                &ledger,
-                &session_id,
-                &turn_id,
-                directive.kind.as_str(),
-            );
-            // #1477 P2: register the visual generation as a SUPERVISED background
-            // task (not a bare detached spawn) so it is observable in the admin
-            // dashboard, carries terminal status, and is cancelable — both via
-            // the session interrupt path (`cancel_session_spawn_only_tasks`) and
-            // its own cancel token, which the worker races below.
-            let r_supervisor = tool_registry.supervisor();
-            let r_task_call_id = format!("voice-visual-{}", uuid::Uuid::now_v7());
-            // Register under the FULL session key (incl. any `#topic` /
-            // profile dimension), NOT `base_key()`: the interrupt path queries
-            // `get_tasks_for_session(&session_id.to_string())` with an EXACT
-            // string match (`cancel_session_spawn_only_tasks`). A `base_key()`
-            // registration would file the task under `…web-123` while the
-            // interrupt of `…web-123#voice` looks for the full key and miss it.
-            // Using the full key also means an interrupt cancels only THIS
-            // topic's visual task, never a sibling topic's.
-            let r_task_id =
-                r_supervisor.register("voice_visual", &r_task_call_id, Some(session_id.0.as_str()));
-            let r_cancel = r_supervisor.cancel_token(&r_task_id);
-            let r_ledger = ledger.clone();
-            let r_session = session_id.clone();
-            let r_turn = turn_id.clone();
-            let r_dir = session_runtime.workspace_root.clone();
-            let r_provider = llm_provider.clone();
-            let r_registry = tool_registry.clone();
-            let r_transcript = voice_transcripts.join("\n");
-            let r_spoken = final_response_content.clone().unwrap_or_default();
-            // This turn's camera frame(s) → forwarded to the Illustrated path as
-            // reference images so the generated illustration depicts the real
-            // subject in front of the camera. Gated on the EXPLICIT live-video
-            // signal (#1478), consistent with the loop_runner video-call note —
-            // never inferred from "there's an image attached" (a voice note +
-            // uploaded image is not a live camera frame).
-            let r_ref_images: Vec<String> = if params.live_video {
-                asr_media
-                    .iter()
-                    .filter(|p| octos_bus::media::is_image(p))
-                    .cloned()
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            tracing::info!(
-                kind = ?directive.kind,
-                brief = %directive.brief,
-                // Diagnostics for camera-frame grounding: `live_video` is the
-                // explicit signal from the client; `ref_images` is how many
-                // camera frames are forwarded to the illustration generator.
-                // Both 0/false here means the generated image cannot be
-                // grounded on the real subject in front of the camera.
-                live_video = params.live_video,
-                ref_images = r_ref_images.len(),
-                "voice rich: dispatching visual directive"
-            );
-            tokio::spawn(async move {
-                r_supervisor.mark_running(&r_task_id);
-                // Capture the kind token before `produce` consumes `directive`
-                // (its `brief` is moved into the skill calls); needed for the
-                // typed `visual/succeeded` on the success branch.
-                let r_kind = directive.kind.as_str();
-                // #1477 P2: bound the background visual task. Image generation +
-                // HTML authoring are network/LLM calls with no other ceiling on
-                // this detached path, so cap them so a hung skill / provider
-                // cannot leak a task for the process lifetime. On timeout we
-                // deliver nothing (observable via the warn below), matching the
-                // other failure branches.
-                const VISUAL_DISPATCH_TIMEOUT: std::time::Duration =
-                    std::time::Duration::from_secs(180);
-                let produce = async {
-                    let rels: Vec<String> = match directive.kind {
-                        VisualKind::Html => {
-                            let ctx = octos_agent::rich_output::RichHtmlContext {
-                                transcript: r_transcript,
-                                spoken_reply: r_spoken,
-                                brief: directive.brief,
-                                illustration: false,
-                            };
-                            match octos_agent::rich_output::author_html(r_provider.as_ref(), &ctx)
-                                .await
-                            {
-                                Ok(html) => {
-                                    let name = format!("visual-{}.html", uuid::Uuid::now_v7());
-                                    match tokio::fs::write(r_dir.join(&name), html).await {
-                                        Ok(()) => vec![name],
-                                        Err(e) => {
-                                            tracing::warn!(error = %e, "voice rich: html write failed");
-                                            Vec::new()
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!(error = %e, "voice rich: author_html failed");
-                                    Vec::new()
-                                }
-                            }
-                        }
-                        VisualKind::Illustrated => {
-                            // Stage 1: generate a realistic illustration PNG.
-                            let png_bytes = match crate::api::voice_turn::run_illustration_image(
-                                &r_registry,
-                                &directive.brief,
-                                &r_dir,
-                                &r_ref_images,
-                            )
-                            .await
-                            {
-                                Some(p) => tokio::fs::read(&p).await.ok(),
-                                None => None,
-                            };
-                            // Stage 2: author HTML that embeds it (model uses the
-                            // placeholder src), then inline the PNG as a data URI so
-                            // the artifact is a single self-contained file. If image
-                            // gen failed, fall back to a no-illustration document.
-                            let ctx = octos_agent::rich_output::RichHtmlContext {
-                                transcript: r_transcript,
-                                spoken_reply: r_spoken,
-                                brief: directive.brief,
-                                illustration: png_bytes.is_some(),
-                            };
-                            match octos_agent::rich_output::author_html(r_provider.as_ref(), &ctx)
-                                .await
-                            {
-                                Ok(html) => {
-                                    let html = match png_bytes {
-                                        Some(bytes) => {
-                                            octos_agent::rich_output::inline_illustration(
-                                                &html, &bytes,
-                                            )
-                                        }
-                                        None => html,
-                                    };
-                                    let name = format!("visual-{}.html", uuid::Uuid::now_v7());
-                                    match tokio::fs::write(r_dir.join(&name), html).await {
-                                        Ok(()) => vec![name],
-                                        Err(e) => {
-                                            tracing::warn!(error = %e, "voice rich: html write failed");
-                                            Vec::new()
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!(error = %e, "voice rich: author_html (illustrated) failed");
-                                    Vec::new()
-                                }
-                            }
-                        }
-                        VisualKind::Image | VisualKind::Infographic => {
-                            crate::api::voice_turn::run_image_skill(&r_registry, &directive, &r_dir)
-                                .await
-                        }
-                    };
-                    rels
-                };
-                // Race the work against the task's cancel token (fired by the
-                // session interrupt path) and the timeout. Each terminal branch
-                // reports its OWN reason so the supervisor row + `visual/failed`
-                // distinguish cancellation, timeout, and a clean-but-empty
-                // result (rather than folding all three into one message).
-                let rels = tokio::select! {
-                    biased;
-                    _ = r_cancel.cancelled() => {
-                        tracing::info!("voice rich: visual dispatch cancelled");
-                        r_supervisor.mark_failed(&r_task_id, "cancelled".to_owned());
-                        super::ui_protocol_alpha9_bridge::emit_visual_failed_from_background(
-                            &r_ledger,
-                            &r_session,
-                            &r_turn,
-                            Some("cancelled".to_owned()),
-                        );
-                        return;
-                    }
-                    res = tokio::time::timeout(VISUAL_DISPATCH_TIMEOUT, produce) => match res {
-                        Ok(rels) => rels,
-                        Err(_) => {
-                            let reason =
-                                format!("timed out after {}s", VISUAL_DISPATCH_TIMEOUT.as_secs());
-                            tracing::warn!(
-                                timeout_s = VISUAL_DISPATCH_TIMEOUT.as_secs(),
-                                "voice rich: visual dispatch timed out, delivering nothing"
-                            );
-                            r_supervisor.mark_failed(&r_task_id, reason.clone());
-                            super::ui_protocol_alpha9_bridge::emit_visual_failed_from_background(
-                                &r_ledger,
-                                &r_session,
-                                &r_turn,
-                                Some(reason),
-                            );
-                            return;
-                        }
-                    }
-                };
-                if rels.is_empty() {
-                    tracing::warn!("voice rich: produced no artifact to deliver");
-                    r_supervisor.mark_failed(&r_task_id, "produced no artifact".to_owned());
-                    // Clear the client's "generating" placeholder (#1477).
-                    super::ui_protocol_alpha9_bridge::emit_visual_failed_from_background(
-                        &r_ledger,
-                        &r_session,
-                        &r_turn,
-                        Some("visual generation produced no artifact".to_owned()),
-                    );
-                } else {
-                    tracing::info!(files = ?rels, "voice rich: delivering artifact(s)");
-                    r_supervisor.mark_completed(&r_task_id, rels.clone());
-                    // Deliver the artifact(s) AND emit the typed success signal.
-                    // `file/attached` stays a pure artifact-delivery event; the
-                    // visual lifecycle terminates on `visual/succeeded` (#1477),
-                    // so the client never has to infer success from a file
-                    // extension — and the lifecycle survives a future
-                    // `projection.envelope.v1` cutover that supersedes
-                    // `file/attached`.
-                    super::ui_protocol_alpha9_bridge::emit_files_attached_from_background(
-                        &r_ledger,
-                        &r_session,
-                        &r_turn,
-                        &rels,
-                        &[],
-                        None,
-                    );
-                    super::ui_protocol_alpha9_bridge::emit_visual_succeeded_from_background(
-                        &r_ledger, &r_session, &r_turn, r_kind, &rels,
-                    );
-                }
-            });
-        }
-    }
-
-    // ── 语音轮 TTS（serve 路径）────────────────────────────────────
-    // 仅当本轮有音频输入（语音轮）时，把最终文本回复合成为音频并下发，
-    // 客户端据此自动播放。失败静默跳过，不影响文本回复。
-    //
-    // 下发复用既有 file/attached 机制（spawn_only / send_file 产物走的
-    // 同一条通路）：把合成出的 .wav 写到 turn 的 workspace_root 下，
-    // 再通过 `emit_files_attached_from_background` 发一个 file/attached
-    // 信封。SPA 把它折进当前 assistant 消息的 `files`，并经 buildFileUrl
-    // 拉取（workspace_root 即 spawn_only 产物的同一可达目录）。
-    // Fallback: only synthesize the whole reply at once if the sentence-streamed
-    // path above produced no audio (e.g. a reply with no sentence boundaries).
-    if had_audio_input && voice_streamed_count == 0 {
-        if let Some(reply) = final_response_content.as_deref() {
-            // Strip any in-band [[VISUAL:...]] marker so the fallback synth does
-            // not read the marker aloud (the streamed path's splitter already
-            // does this; this is the no-sentence-boundary fallback).
-            let reply = crate::api::voice_turn::strip_visual_marker(reply);
-            // Per-tenant reply voice: live override wins, else profile default.
-            let voice = crate::api::voices::resolve_reply_voice(
-                &session_runtime.profile.profile_id,
-                &session_runtime.profile.voice.default_voice,
-            );
-            let provider = session_runtime.profile.voice.tts_provider.as_str();
-            let cloud = session_runtime.profile.voice.cloud.as_ref();
-            let reply_audio_dir = session_runtime.workspace_root.as_path();
-            if let Some(audio_path) = crate::api::voice_turn::synthesize_reply(
-                reply,
-                &voice,
-                provider,
-                cloud,
-                reply_audio_dir,
-            )
-            .await
-            {
-                // Deliver via the EXISTING file/attached carrier. Emit the
-                // WORKSPACE-RELATIVE filename, NOT the absolute path:
-                // `/api/files` (resolve_within_workspace) rejects absolute
-                // paths and serves only paths resolved inside the session
-                // workspace. The reply wav is written directly under
-                // workspace_root, so the relative form is just its file name.
-                // No `tool_call_id` (server-initiated attach, not a tool result).
-                let audio_rel = audio_path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| audio_path.to_string_lossy().into_owned());
-                super::ui_protocol_alpha9_bridge::emit_files_attached_from_background(
-                    &ledger,
-                    &session_id,
-                    &turn_id,
-                    std::slice::from_ref(&audio_rel),
-                    &[],
-                    None,
-                );
-                tracing::info!(audio = %audio_path.display(), "voice_turn: synthesized reply audio");
-            }
-        }
-    }
-
     // Voice exit intent (UPCR-2026-025): NOW that the farewell reply audio has
     // been attached (streamed sentences awaited above, or the whole-reply
     // fallback synth just above), emit the typed `voice/exit`. Emitting here —
