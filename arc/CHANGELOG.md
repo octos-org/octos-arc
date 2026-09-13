@@ -329,3 +329,20 @@ Cloud: 未评测 (C to rerun). Expected ≈ ¥0.0045 per Smoke task at the obser
 
 Ticket Booking with `OCTOS_ARC_REASONING=none`: first pass 2/6, 11 requests, 122k prompt — kept
 `auto` (low for multi-node). Cloud: 未评测.
+
+## Round 24 — port contract for codegen (cloud TB 3f0124e82113 / 784402a777c2: 0/10)
+
+The specs default to `http://127.0.0.1:3301`; the grader sets only PORT. The codegen prompt had lost
+the PORT CONTRACT, so the generated server bound PORT alone and all 10 tests failed with
+ERR_CONNECTION_REFUSED (our own suite used E2E_BASE_URL and could not see it). Now the codegen prompt
+carries the contract whenever the specs name extra ports, and the grader-like start (final suite,
+rehearsal) verifies those ports are bound; if not, the run counts as a startup failure and is repaired.
+
+| task (local) | result |
+|---|---|
+| Ticket Booking | 3 requests, 16,797 prompt / 18,973 completion (11,361 reasoning), 10/10, grade 100; `curl :3301` and `:PORT` both 200 with only PORT set |
+| Evolution counter (no snapshot) | probe + 1 request 795/181 = 976 tokens, 2/2, grade 100 |
+
+Round 23 cloud (C): Evolution best ¥0.0044 / ¥0.0042 (≈¥0.0086 total, leader ¥0.0188); Smoke ¥0.0050 / ¥0.0044
+(¥0.0095). The two polluted Evolution runs (63,877 / 26,591 tokens with a 1-request log) were foreign usage on the
+shared key at the window start; from now on, check `pgrep -f run-task-local` before requesting a window.
