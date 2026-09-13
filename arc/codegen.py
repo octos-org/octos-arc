@@ -75,6 +75,37 @@ def unescape_flattened(text: str) -> str:
     return text
 
 
+def js_parses(path: Path) -> bool | None:
+    """`node --check`; None when node is unavailable."""
+    import shutil, subprocess
+    node = shutil.which("node")
+    if not node:
+        return None
+    try:
+        return subprocess.run([node, "--check", str(path)], capture_output=True, timeout=20).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def repair_flattened_js(path: Path) -> bool:
+    """Partially flattened blocks (some lines carry literal \\n between statements;
+    local s12 crashed at startup) are only rewritten when the unescaped version
+    parses and the original does not."""
+    text = path.read_text(encoding="utf-8", errors="replace")
+    if "\\n" not in text or js_parses(path) is not False:
+        return False
+    fixed = "\n".join(line.replace("\\n", "\n") if line.count("\\n") >= 2 and not line.lstrip().startswith(("res.", "return"))
+                      else line for line in text.split("\n"))
+    if fixed == text:
+        return False
+    backup = path.read_bytes()
+    path.write_text(fixed, encoding="utf-8")
+    if js_parses(path):
+        return True
+    path.write_bytes(backup)
+    return False
+
+
 def write_files(root: Path, files: dict[str, str]) -> list[str]:
     written = []
     for rel, body in files.items():
@@ -84,5 +115,7 @@ def write_files(root: Path, files: dict[str, str]) -> list[str]:
         if dest.suffix.lower() in (".html", ".htm"):
             body = ensure_charset(body)
         dest.write_text(body, encoding="utf-8")
+        if dest.suffix.lower() in (".js", ".cjs", ".mjs"):
+            repair_flattened_js(dest)
         written.append(rel)
     return written

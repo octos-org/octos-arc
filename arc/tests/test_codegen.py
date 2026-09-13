@@ -64,3 +64,20 @@ class UnescapeFlattenedTests(unittest.TestCase):
         from codegen import unescape_flattened
         normal = "res.end('a\\nb');\n" * 20
         self.assertEqual(unescape_flattened(normal), normal)
+
+
+class RepairFlattenedJsTests(unittest.TestCase):
+    def test_should_unescape_only_when_it_makes_the_file_parse(self):
+        import shutil, tempfile
+        from pathlib import Path
+        from codegen import repair_flattened_js
+        if not shutil.which("node"):
+            self.skipTest("node not on PATH")
+        p = Path(tempfile.mkdtemp()) / "server.js"
+        p.write_text("const a = 1;\nfunction f() {\n  if (a) x = 1;\\n  if (!a) x = 2;\\n  return x;\n}\n")
+        self.assertTrue(repair_flattened_js(p))
+        self.assertNotIn("\\n", p.read_text())
+        good = "const s = 'a\\nb';\nconsole.log(s);\n"
+        p.write_text(good)
+        self.assertFalse(repair_flattened_js(p))
+        self.assertEqual(p.read_text(), good)

@@ -771,7 +771,7 @@ CODEGEN_SIZE_FULL = ("As short as the tests allow; one page file per route. Mech
                      "(2) Session cookie exactly `session=TOKEN; Path=/; HttpOnly; SameSite=Lax`; sign-out clears it and redirects to /. "
                      "(3) Validation: the values produced by the test helpers (see the support file) are valid input and MUST be "
                      "accepted (names with spaces, any document number, phone, email the helper uses); reject only the cases the "
-                     "tests assert are rejected, with the message the test expects, shown in a persistent `role=alert` element. "
+                     "tests assert are rejected; each message is the FIRST alternative of the test's regex copied verbatim, shown in one persistent `role=alert` element. "
                      "(4) Elements the test expects visible have a non-empty box (never an empty div/span). "
                      "(5) No HTML5 validation attributes (required/pattern/type=email): the server validates.")
 
