@@ -814,8 +814,6 @@ pub use crate::dispatch_policy::{
 };
 
 // Robot safety-tier groups consulted by ToolPolicy evaluation.
-pub mod robot_groups;
-pub use robot_groups::{RobotToolRegistry, install_registry as install_robot_registry};
 
 // Shared SSRF protection
 pub mod ssrf;
@@ -833,7 +831,6 @@ pub mod edit_file;
 pub mod glob_tool;
 pub mod grep_tool;
 pub mod list_dir;
-pub mod manage_skills;
 pub mod mcp_agent;
 pub mod memory_note;
 pub mod message;
@@ -882,7 +879,6 @@ pub use edit_file::EditFileTool;
 pub use glob_tool::GlobTool;
 pub use grep_tool::GrepTool;
 pub use list_dir::ListDirTool;
-pub use manage_skills::ManageSkillsTool;
 pub use mcp_agent::{
     DEFAULT_DISPATCH_TIMEOUT_SECS, DEFAULT_HTTP_CONNECT_TIMEOUT_SECS,
     DEFAULT_HTTP_READ_TIMEOUT_SECS, DispatchContextContract, DispatchOutcome, DispatchRequest,

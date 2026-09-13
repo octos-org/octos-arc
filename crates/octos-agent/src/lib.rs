@@ -202,19 +202,18 @@ pub use tools::{
     DEFAULT_DISPATCH_TIMEOUT_SECS, DEFAULT_HTTP_CONNECT_TIMEOUT_SECS,
     DEFAULT_HTTP_READ_TIMEOUT_SECS, DELEGATED_DENY_GROUP, DELEGATION_METRIC, DelegateTool, DelegationEvent, DelegationOutcome, DepthBudget, DiffEditTool,
     DispatchContextContract, DispatchOutcome, DispatchRequest, DispatchResponse, EditFileTool,
-    GlobTool, GrepTool, HttpMcpAgent, ListDirTool, MAX_DEPTH, MakeTypeEntry, ManageSkillsTool,
+    GlobTool, GrepTool, HttpMcpAgent, ListDirTool, MAX_DEPTH, MakeTypeEntry,
     McpAgentBackend, McpAgentBackendConfig, MemoryNoteTool, MessageTool,
     MofaDescribeContentTypeTool, MofaMakeTool,
     PolicyDecision, ReadFileTool, ReadTaskOutputTool, RecallMemoryTool,
-    RecordMemoryUseTool, RobotToolRegistry, SaveMemoryTool, SendAppCardTool, SendFileTool,
+    RecordMemoryUseTool, SaveMemoryTool, SendAppCardTool, SendFileTool,
     SharedBackend, ShellTool, SpawnTool, StdioMcpAgent, Tool,
     UserQuestionRequester, WriteFileTool,
     ToolApprovalDecision, ToolApprovalRequest, ToolApprovalRequester, ToolConfigStore, ToolPolicy,
     ToolRegistry, ToolResult, TurnAttachmentContext, UserQuestionOutcome, UserQuestionRequest,
 
     build_backend_from_config, build_delegated_child_policy, build_dispatch_event_payload,
-    dispatch_with_metrics, install_robot_registry, keep_tool_in_slides_session,
-    make_dispatcher_with_entries, record_dispatch,
+    dispatch_with_metrics, make_dispatcher_with_entries, record_dispatch,
 };
 pub use turn::{Turn, TurnKind, turns_to_messages};
 pub use validators::{

@@ -1234,18 +1234,6 @@ impl WorkspacePolicy {
         // `tools/manage_skills.rs` is the source-of-truth for archive
         // verification; this validator is complementary and asserts the
         // post-extraction binary integrity for raw-binary distributions.
-        let manage_skills_contract = WorkspaceSpawnTaskPolicy {
-            artifact: None,
-            artifacts: Vec::new(),
-            on_verify: Vec::new(),
-            on_complete: vec![],
-            on_deliver: vec![],
-            on_failure: vec!["notify_user:Skill install verification failed".into()],
-            on_completion: vec![SpawnTaskValidatorSpec::Bare(ValidatorSpec::Sha256Match {
-                glob: "${args.skill_dir}/main".into(),
-                sha256: "${args.expected_sha256}".into(),
-            })],
-        };
 
         // Wave-3a wire target for the `soft_fail` tier.
         //
@@ -1342,7 +1330,6 @@ impl WorkspacePolicy {
         spawn_tasks.insert("mofa_infographic".into(), mofa_infographic_contract);
         spawn_tasks.insert("mofa_frame".into(), mofa_frame_contract);
         spawn_tasks.insert("mofa_publish".into(), mofa_publish_contract);
-        spawn_tasks.insert("manage_skills".into(), manage_skills_contract);
         spawn_tasks.insert("synthesize_research".into(), synthesize_research_contract);
         spawn_tasks.insert("deep_search".into(), deep_search_contract);
 
@@ -2885,33 +2872,6 @@ ignore = []
     // Wave-3a: `for_session()` wire targets
     // -----------------------------------------------------------------
 
-    #[test]
-    fn session_policy_declares_sha256_match_contract_for_manage_skills() {
-        // Wire target for the Wave-3a `Sha256Match` variant: lifts the
-        // inline SHA-256 check in `tools/manage_skills.rs::download_binary`
-        // onto the canonical validator path so it surfaces in the contract
-        // diagnostics ledger. The validator interpolates the expected digest
-        // through `${args.expected_sha256}` so the manage_skills tool can
-        // pass the manifest-declared hash without hard-coding it in the
-        // workspace policy.
-        let policy = WorkspacePolicy::for_session();
-        let task = policy
-            .spawn_tasks
-            .get("manage_skills")
-            .expect("manage_skills spawn-task contract should be reserved");
-        let has_sha = task.on_completion.iter().any(|entry| {
-            matches!(
-                entry,
-                SpawnTaskValidatorSpec::Bare(ValidatorSpec::Sha256Match { sha256, .. })
-                    if sha256.contains("${args.expected_sha256}")
-            )
-        });
-        assert!(
-            has_sha,
-            "manage_skills contract should declare Sha256Match interpolated against args.expected_sha256; got {:?}",
-            task.on_completion
-        );
-    }
 
     #[test]
     fn session_policy_declares_soft_fail_sub_artifacts_for_research_skills() {
