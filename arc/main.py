@@ -81,7 +81,7 @@ from acceptance import (  # noqa: E402
     nodes_for_failures, playwright_candidates, playwright_version_hint, restore_tree,
     restore_worktree, snapshot_worktree, tree_digest,
 )
-from codegen import FORMAT_INSTRUCTIONS, parse_file_blocks, write_files  # noqa: E402, dedupe_nav_links
+from codegen import FORMAT_INSTRUCTIONS, dedupe_nav_links, parse_file_blocks, write_files  # noqa: E402
 from guard import TurnMonitor  # noqa: E402
 from llm_proxy import LlmProxy  # noqa: E402
 from requirement_order import ancestors_of, node_fingerprint, topo_order  # noqa: E402
