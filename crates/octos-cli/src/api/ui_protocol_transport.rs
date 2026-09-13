@@ -108,6 +108,7 @@ use super::ui_protocol_task_output;
 use super::ws_slash;
 // Phase 3 (goal-in-chat): the contract stores now live outside the `api` gate
 // so `octos chat --peers` shares the identical process-global registry.
+use crate::peers::*;
 use crate::contracts::approvals::PendingApprovalStore;
 use crate::contracts::diff::PendingDiffPreviewStore;
 use crate::contracts::questions::PendingQuestionStore;
@@ -127,7 +128,6 @@ use crate::context_manager::{
     PromptFrame, load_context_manager_snapshot, load_or_rebuild_context_manager,
     persist_context_manager_snapshot,
 };
-use crate::peers::*;
 use crate::usage_ledger::{
     PersistentUsageLedger, USAGE_LEDGER_FILE, UsageCostSource, UsageEvent, UsageTotals,
 };
@@ -26902,7 +26902,6 @@ async fn run_standalone_turn(
                 Arc::new(AtomicU32::new(0)),
                 emit_staged,
             );
-            tool_registry.register(octos_agent::PeerHandoffTool::new(stage));
         }
 
         // #1801 v3 fan-in — `peer_gather`: the read half of the peer loop
@@ -26918,7 +26917,6 @@ async fn run_standalone_turn(
                 Some((session_id.clone(), gathered_peer_results.clone())),
                 session_runtime.profile.profile_id.clone(),
             );
-            tool_registry.register(octos_agent::PeerGatherTool::new(gather));
         }
 
         // `peer_list` — the compact status INDEX companion to `peer_gather`:
@@ -26942,7 +26940,6 @@ async fn run_standalone_turn(
                 contracts.clone(),
                 session_runtime.profile.profile_id.clone(),
             );
-            tool_registry.register(octos_agent::PeerListTool::new(list));
         }
 
         // #436 — `peer_send_input`: cross-session input injection into a
@@ -27063,8 +27060,6 @@ async fn run_standalone_turn(
                         "peer '{slug}' input queue is unavailable: the goal engine was removed"
                     ))
                 });
-            tool_registry.register(octos_agent::PeerSendInputTool::new(send_input));
-
             // `peer_close` — retire a running peer the caller created (#1842:
             // the close STOPS it — the callback interrupts its in-flight turn).
             // Same depth-1 guard as peer_send_input (originator-authorized,
@@ -27110,8 +27105,6 @@ async fn run_standalone_turn(
                 emit_closed,
                 emit_cancelled,
             );
-            tool_registry.register(octos_agent::PeerCloseTool::new(close));
-
             // #peer-respond — answer a peer BLOCKED on an interactive prompt
             // (tool-approval or clarifying question) so the master acts as its
             // human-in-the-loop. Same depth-1 + originator-auth guards as
@@ -27157,7 +27150,6 @@ async fn run_standalone_turn(
                         req,
                     )
                 });
-            tool_registry.register(octos_agent::PeerRespondTool::new(respond));
         }
 
         // Wire the PARENT `send_file` for the legacy non-contract

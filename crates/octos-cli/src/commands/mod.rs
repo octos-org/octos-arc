@@ -12,7 +12,6 @@ mod init;
 #[cfg(feature = "api")]
 pub(crate) mod oup_client;
 #[cfg(feature = "api")]
-pub(crate) mod oup_peers;
 #[cfg(feature = "api")]
 pub(crate) mod oup_session;
 #[cfg(feature = "api")]
@@ -21,6 +20,7 @@ mod oup_text;
 #[cfg(feature = "api")]
 mod serve;
 pub mod serve_console;
+pub(crate) mod oup_peers;
 pub mod skills;
 pub mod acp;
 pub 
