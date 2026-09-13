@@ -146,9 +146,9 @@ async fn work_secret_ws_denies_raw_surface_but_allows_typed() {
     ws.send(Message::Text(
         json!({
             "jsonrpc": "2.0",
-            "id": "raw-goal-set",
-            "method": "session/goal/set",
-            "params": { "session_id": session_id, "goal": { "text": "escalate" } }
+            "id": "raw-unknown-method",
+            "method": "session/definitely-not-a-method",
+            "params": { "session_id": session_id }
         })
         .to_string()
         .into(),
@@ -165,13 +165,11 @@ async fn work_secret_ws_denies_raw_surface_but_allows_typed() {
         panic!("expected JSON-RPC text response, got {response:?}");
     };
     let body: Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(body["id"], "raw-goal-set");
-    // The goal engine was removed with the autonomy slim-down: a raw
-    // unknown method now surfaces as METHOD_NOT_FOUND (-32601). The
-    // security property under test is unchanged — the raw call is
-    // rejected either way.
+    assert_eq!(body["id"], "raw-unknown-method");
+    // The security property under test: the raw call must be rejected with
+    // an error response (never a successful result).
     assert!(
-        body["error"]["code"] == -32600 || body["error"]["code"] == -32601,
+        body["error"].is_object(),
         "raw method must be rejected, got {body}"
     );
 

@@ -202,9 +202,6 @@ pub const UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1: &str = "coding.autonomy.v1";
 /// Optional M15 feature flag for backend-owned agent lifecycle controls.
 pub const UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1: &str = "coding.agent_control.v1";
 
-/// Optional M15 feature flag for persisted goal runtime controls.
-pub const UI_PROTOCOL_FEATURE_CODING_GOAL_RUNTIME_V1: &str = "coding.goal_runtime.v1";
-
 /// Optional M15 feature flag for recurring loop runtime controls.
 pub const UI_PROTOCOL_FEATURE_CODING_LOOP_RUNTIME_V1: &str = "coding.loop_runtime.v1";
 
@@ -322,7 +319,6 @@ pub const UI_PROTOCOL_KNOWN_FEATURES: &[&str] = &[
     UI_PROTOCOL_FEATURE_AUXILIARY_REST_TO_WS_V1,
     UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1,
     UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1,
-    UI_PROTOCOL_FEATURE_CODING_GOAL_RUNTIME_V1,
     UI_PROTOCOL_FEATURE_CODING_LOOP_RUNTIME_V1,
     UI_PROTOCOL_FEATURE_CODING_MONITOR_RUNTIME_V1,
     UI_PROTOCOL_FEATURE_REVIEW_START_V1,
@@ -379,12 +375,6 @@ fn method_capability_gate(method: &str) -> Option<&'static str> {
         | methods::AGENT_ARTIFACT_READ
         | methods::AGENT_INTERRUPT
         | methods::AGENT_CLOSE => Some(UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1),
-        methods::SESSION_GOAL_GET
-        | methods::SESSION_GOAL_SET
-        | methods::SESSION_GOAL_CLEAR
-        | methods::SESSION_GOAL_OPERATOR_TRANSITION => {
-            Some(UI_PROTOCOL_FEATURE_CODING_GOAL_RUNTIME_V1)
-        }
         methods::LOOP_CREATE
         | methods::LOOP_LIST
         | methods::LOOP_DELETE
@@ -582,10 +572,6 @@ pub mod autonomy_error_kinds {
     pub const AGENT_CONTROL_FORBIDDEN: &str = "agent_control_forbidden";
     pub const AGENT_CONTROL_UNAVAILABLE: &str = "agent_control_unavailable";
     pub const AGENT_ARTIFACT_DENIED: &str = "agent_artifact_denied";
-    pub const GOAL_RUNTIME_UNAVAILABLE: &str = "goal_runtime_unavailable";
-    pub const GOAL_UNAVAILABLE: &str = "goal_unavailable";
-    pub const GOAL_INVALID_STATE: &str = "goal_invalid_state";
-    pub const GOAL_RATE_LIMITED: &str = "goal_rate_limited";
     pub const LOOP_RUNTIME_UNAVAILABLE: &str = "loop_runtime_unavailable";
     pub const LOOP_NOT_FOUND: &str = "loop_not_found";
     pub const LOOP_INVALID_INTERVAL: &str = "loop_invalid_interval";
@@ -1079,14 +1065,6 @@ pub mod methods {
     pub const AGENT_INTERRUPT: &str = "agent/interrupt";
     pub const AGENT_CLOSE: &str = "agent/close";
 
-    /// UPCR-2026-021 M15 persisted goal runtime surface.
-    pub const SESSION_GOAL_GET: &str = "session/goal/get";
-    pub const SESSION_GOAL_SET: &str = "session/goal/set";
-    pub const SESSION_GOAL_CLEAR: &str = "session/goal/clear";
-    /// Operator-only online archive/reopen transition. Unlike the offline CLI
-    /// fallback this mutates the running orchestrator's live goal record.
-    pub const SESSION_GOAL_OPERATOR_TRANSITION: &str = "session/goal/operator_transition";
-
     /// UPCR-2026-021 M15 recurring loop runtime surface.
     pub const LOOP_CREATE: &str = "loop/create";
     pub const LOOP_LIST: &str = "loop/list";
@@ -1271,9 +1249,6 @@ pub mod methods {
     pub const AGENT_UPDATED: &str = "agent/updated";
     pub const AGENT_OUTPUT_DELTA: &str = "agent/output/delta";
     pub const AGENT_ARTIFACT_UPDATED: &str = "agent/artifact/updated";
-    /// UPCR-2026-021 M15 goal runtime notifications.
-    pub const SESSION_GOAL_UPDATED: &str = "session/goal/updated";
-    pub const SESSION_GOAL_CLEARED: &str = "session/goal/cleared";
     /// UPCR-2026-021 M15 loop runtime notifications.
     pub const LOOP_UPDATED: &str = "loop/updated";
     pub const LOOP_FIRED: &str = "loop/fired";
@@ -1353,10 +1328,6 @@ pub const UI_PROTOCOL_COMMAND_METHODS: &[&str] = &[
     methods::TASK_ARTIFACT_READ,
     methods::AGENT_INTERRUPT,
     methods::AGENT_CLOSE,
-    methods::SESSION_GOAL_GET,
-    methods::SESSION_GOAL_SET,
-    methods::SESSION_GOAL_CLEAR,
-    methods::SESSION_GOAL_OPERATOR_TRANSITION,
     methods::LOOP_CREATE,
     methods::LOOP_LIST,
     methods::LOOP_DELETE,
@@ -1429,8 +1400,6 @@ pub const UI_PROTOCOL_NOTIFICATION_METHODS: &[&str] = &[
     methods::AGENT_UPDATED,
     methods::AGENT_OUTPUT_DELTA,
     methods::AGENT_ARTIFACT_UPDATED,
-    methods::SESSION_GOAL_UPDATED,
-    methods::SESSION_GOAL_CLEARED,
     methods::LOOP_UPDATED,
     methods::LOOP_FIRED,
     methods::LOOP_COMPLETED,
@@ -1473,10 +1442,6 @@ pub const UI_PROTOCOL_FIRST_SERVER_METHODS: &[&str] = &[
     methods::TASK_ARTIFACT_READ,
     methods::AGENT_INTERRUPT,
     methods::AGENT_CLOSE,
-    methods::SESSION_GOAL_GET,
-    methods::SESSION_GOAL_SET,
-    methods::SESSION_GOAL_CLEAR,
-    methods::SESSION_GOAL_OPERATOR_TRANSITION,
     methods::LOOP_CREATE,
     methods::LOOP_LIST,
     methods::LOOP_DELETE,
@@ -1582,7 +1547,6 @@ impl UiProtocolCapabilities {
             UI_PROTOCOL_FEATURE_AUXILIARY_REST_TO_WS_V1,
             UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1,
             UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1,
-            UI_PROTOCOL_FEATURE_CODING_GOAL_RUNTIME_V1,
             UI_PROTOCOL_FEATURE_CODING_LOOP_RUNTIME_V1,
             UI_PROTOCOL_FEATURE_CODING_MONITOR_RUNTIME_V1,
             UI_PROTOCOL_FEATURE_REVIEW_START_V1,
@@ -1730,7 +1694,6 @@ fn is_autonomy_optional_feature(feature: &str) -> bool {
     matches!(
         feature,
         UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1
-            | UI_PROTOCOL_FEATURE_CODING_GOAL_RUNTIME_V1
             | UI_PROTOCOL_FEATURE_CODING_LOOP_RUNTIME_V1
             | UI_PROTOCOL_FEATURE_CODING_MONITOR_RUNTIME_V1
     )
@@ -5795,55 +5758,6 @@ pub struct AgentArtifactUpdatedEvent {
     pub artifacts: Vec<UiAgentArtifact>,
 }
 
-/// M15 persisted goal snapshot.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct UiGoalRecord {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile_id: Option<String>,
-    pub goal_id: String,
-    pub objective: String,
-    pub status: String,
-    pub token_budget: u64,
-    pub tokens_used: u64,
-    pub time_used_seconds: u64,
-    pub created_at_ms: i64,
-    pub updated_at_ms: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SessionGoalUpdatedEvent {
-    pub session_id: SessionKey,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile_id: Option<String>,
-    pub goal: UiGoalRecord,
-    pub transition_actor: String,
-    /// #1959 — monotonic generation stamped by the backend on every goal
-    /// event. A client MUST drop a `SessionGoalUpdated` whose `generation` is
-    /// not greater than the last goal event it applied for this session, so a
-    /// stale update can't overtake a `SessionGoalCleared` and resurrect the
-    /// chip. `0` (the serde default) means an older backend that doesn't stamp;
-    /// clients treat `0` as "always apply" for backward compatibility.
-    #[serde(default)]
-    pub generation: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SessionGoalClearedEvent {
-    pub session_id: SessionKey,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile_id: Option<String>,
-    #[serde(default)]
-    pub cleared: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub goal: Option<UiGoalRecord>,
-    pub transition_actor: String,
-    /// #1959 — see [`SessionGoalUpdatedEvent::generation`]. A clear carries a
-    /// generation strictly greater than any update it should supersede, so the
-    /// client keeps the clear and drops a later-arriving stale update.
-    #[serde(default)]
-    pub generation: u64,
-}
-
 /// M15 recurring loop snapshot.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UiLoopRecord {
@@ -5959,8 +5873,6 @@ pub struct UiMonitorRecord {
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pause_reason: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub goal_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_fired_at_ms: Option<i64>,
     pub fires_used: u32,
@@ -6481,10 +6393,6 @@ pub enum UiNotification {
     AgentOutputDelta(AgentOutputDeltaEvent),
     /// UPCR-2026-021 M15: agent artifact metadata changed.
     AgentArtifactUpdated(AgentArtifactUpdatedEvent),
-    /// UPCR-2026-021 M15: persisted session goal changed.
-    SessionGoalUpdated(SessionGoalUpdatedEvent),
-    /// UPCR-2026-021 M15: persisted session goal cleared.
-    SessionGoalCleared(SessionGoalClearedEvent),
     /// UPCR-2026-021 M15: recurring loop metadata changed.
     LoopUpdated(LoopUpdatedEvent),
     /// UPCR-2026-021 M15: loop fired and queued/attempted a continuation.
@@ -6575,8 +6483,6 @@ impl UiNotification {
             Self::AgentUpdated(_) => methods::AGENT_UPDATED,
             Self::AgentOutputDelta(_) => methods::AGENT_OUTPUT_DELTA,
             Self::AgentArtifactUpdated(_) => methods::AGENT_ARTIFACT_UPDATED,
-            Self::SessionGoalUpdated(_) => methods::SESSION_GOAL_UPDATED,
-            Self::SessionGoalCleared(_) => methods::SESSION_GOAL_CLEARED,
             Self::LoopUpdated(_) => methods::LOOP_UPDATED,
             Self::LoopFired(_) => methods::LOOP_FIRED,
             Self::LoopCompleted(_) => methods::LOOP_COMPLETED,
@@ -6631,8 +6537,6 @@ impl UiNotification {
             Self::AgentUpdated(event) => &event.session_id,
             Self::AgentOutputDelta(event) => &event.session_id,
             Self::AgentArtifactUpdated(event) => &event.session_id,
-            Self::SessionGoalUpdated(event) => &event.session_id,
-            Self::SessionGoalCleared(event) => &event.session_id,
             Self::LoopUpdated(event) => &event.session_id,
             Self::LoopFired(event) => &event.session_id,
             Self::LoopCompleted(event) => &event.session_id,
@@ -6796,8 +6700,6 @@ impl UiNotification {
             Self::AgentUpdated(params) => serde_json::to_value(params),
             Self::AgentOutputDelta(params) => serde_json::to_value(params),
             Self::AgentArtifactUpdated(params) => serde_json::to_value(params),
-            Self::SessionGoalUpdated(params) => serde_json::to_value(params),
-            Self::SessionGoalCleared(params) => serde_json::to_value(params),
             Self::LoopUpdated(params) => serde_json::to_value(params),
             Self::LoopFired(params) => serde_json::to_value(params),
             Self::LoopCompleted(params) => serde_json::to_value(params),
@@ -6942,12 +6844,6 @@ impl UiNotification {
             }
             methods::AGENT_ARTIFACT_UPDATED => {
                 Ok(Self::AgentArtifactUpdated(decode_params(method, params)?))
-            }
-            methods::SESSION_GOAL_UPDATED => {
-                Ok(Self::SessionGoalUpdated(decode_params(method, params)?))
-            }
-            methods::SESSION_GOAL_CLEARED => {
-                Ok(Self::SessionGoalCleared(decode_params(method, params)?))
             }
             methods::LOOP_UPDATED => Ok(Self::LoopUpdated(decode_params(method, params)?)),
             methods::LOOP_FIRED => Ok(Self::LoopFired(decode_params(method, params)?)),

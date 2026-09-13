@@ -581,7 +581,7 @@ impl SessionRuntime {
         .with_subagent_output_router(subagent_output_router)
         .with_subagent_summary_generator(subagent_summary_generator)
         .with_sandbox_config(sandbox.clone())
-        // #1696: session-scoped tools (goal_get/goal_update) resolve their
+        // #1696: session-scoped tools resolve their
         // session from ToolContext::parent_session_key — thread it on the
         // runtime-held agent exactly like the per-turn AppUI rebuild does.
         .with_parent_session_key(session_key.to_string())
@@ -1321,7 +1321,6 @@ tools = ["read_file"]
             session_store_root: None,
             config: crate::config::Config::default(),
             llm: Arc::new(StubLlm),
-            goal_verifier_llm: None,
             adaptive_router: None,
             runtime_qos_catalog: None,
             primary_model_id: "stub-model".to_string(),
@@ -2111,7 +2110,6 @@ tools = ["read_file"]
             session_store_root: None,
             config: crate::config::Config::default(),
             llm: Arc::new(StubLlm),
-            goal_verifier_llm: None,
             adaptive_router: None,
             runtime_qos_catalog: None,
             primary_model_id: "stub-model".to_string(),

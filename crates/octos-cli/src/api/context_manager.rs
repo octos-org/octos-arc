@@ -211,13 +211,10 @@ pub(crate) struct ContextSourceRecord {
 
 /// Volatile, model-visible runtime data that must remain at conversation
 /// authority. These values are deliberately not rendered into the System
-/// message: a peer/monitor payload is data, while an active-goal snapshot is
-/// user-owned state whose counters can change every turn.
+/// message: a peer/monitor payload is data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ContextEventKind {
-    GoalSnapshot,
-    GoalProgress,
     PeerResultsReady,
     MonitorEvent,
     MemoryUpdate,
@@ -886,60 +883,6 @@ fn context_ledger_covers_history(manager: &ContextManager, messages: &[Message])
         && manager.source_head_hash() == expected.source_head_hash()
 }
 
-/// Goal-snapshot fields that change on every turn without changing what the
-/// goal is. Fresh counters replace the previous active revision, while the
-/// append-only canonical ledger keeps both revisions for recovery/audit.
-const GOAL_SNAPSHOT_VOLATILE_FIELDS: &[&str] = &[
-    "tokens_used",
-    "tokens_remaining",
-    "time_used_seconds",
-    "continuations_used",
-];
-
-/// Content used to decide whether a context event repeats the latest one of
-/// its kind. Only goal snapshots carry volatile counters; every other kind
-/// coalesces on exact content.
-fn context_event_semantic_content(event_kind: ContextEventKind, content: &str) -> String {
-    if event_kind != ContextEventKind::GoalSnapshot {
-        return content.to_owned();
-    }
-    match serde_json::from_str::<Value>(content) {
-        Ok(Value::Object(mut fields)) => {
-            for field in GOAL_SNAPSHOT_VOLATILE_FIELDS {
-                fields.remove(*field);
-            }
-            Value::Object(fields).to_string()
-        }
-        _ => content.to_owned(),
-    }
-}
-
-/// Keep the latest revision of semantically unchanged goal state in the
-/// active projection. The canonical ledger retains every revision. Rebuild
-/// this selection on hydration as well, including after a compaction.
-fn coalesce_goal_snapshot_revisions(items: &mut Vec<TranscriptItem>) {
-    let mut previous: Option<(TranscriptItemId, String, String)> = None;
-    let mut superseded = HashSet::new();
-    for item in items.iter() {
-        if let TranscriptItemKind::ContextEvent {
-            event_kind: ContextEventKind::GoalSnapshot,
-            label,
-            content,
-        } = &item.kind
-        {
-            let semantic = context_event_semantic_content(ContextEventKind::GoalSnapshot, content);
-            if let Some((id, old_label, old_semantic)) = previous.take()
-                && old_label == *label
-                && old_semantic == semantic
-            {
-                superseded.insert(id);
-            }
-            previous = Some((item.id.clone(), label.clone(), semantic));
-        }
-    }
-    items.retain(|item| !superseded.contains(&item.id));
-}
-
 /// Identity of what an automatic compaction pass under `policy` would
 /// summarize. Two passes with the same fingerprint select the same candidate
 /// rows under the same budgets, so a retry cannot succeed where the previous
@@ -1000,8 +943,7 @@ fn project_canonical_items(
 
 /// Reconstruct the only active projection a coherent v2 snapshot may have.
 /// The latest installed compaction defines its installed base; every later
-/// canonical row is an append-only suffix. Active goal revisions are coalesced
-/// after reconstructing the base; canonical history always retains them all.
+/// canonical row is an append-only suffix.
 fn expected_v2_active_projection(
     snapshot: &ContextSnapshot,
     canonical_items: &[TranscriptItem],
@@ -1017,9 +959,7 @@ fn expected_v2_active_projection(
         {
             return None;
         }
-        let mut active = canonical_items.to_vec();
-        coalesce_goal_snapshot_revisions(&mut active);
-        return Some(active);
+        return Some(canonical_items.to_vec());
     };
     if snapshot
         .compactions
@@ -1113,7 +1053,6 @@ fn expected_v2_active_projection(
     }
 
     installed.extend_from_slice(&canonical_items[summary_ledger_index + 1..]);
-    coalesce_goal_snapshot_revisions(&mut installed);
     if let Some(newest_user) = canonical_items
         .iter()
         .rev()
@@ -1154,13 +1093,11 @@ fn v2_active_projection_is_coherent(
 }
 
 fn raw_recovery_projection(canonical_items: &[TranscriptItem]) -> Vec<TranscriptItem> {
-    let mut active = canonical_items
+    canonical_items
         .iter()
         .filter(|item| !matches!(item.kind, TranscriptItemKind::CompactionSummary { .. }))
         .cloned()
-        .collect();
-    coalesce_goal_snapshot_revisions(&mut active);
-    active
+        .collect()
 }
 
 /// #1477: drop a trailing `[[VISUAL:...]]` rich-output directive from an
@@ -1837,9 +1774,6 @@ impl ContextManager {
             },
             TranscriptItemSource::Supervisor,
         );
-        if event_kind == ContextEventKind::GoalSnapshot {
-            coalesce_goal_snapshot_revisions(&mut self.items);
-        }
         Some(id)
     }
 
@@ -3871,8 +3805,6 @@ fn transcript_item_kind_name(kind: &TranscriptItemKind) -> &'static str {
 
 fn context_event_kind_name(kind: ContextEventKind) -> &'static str {
     match kind {
-        ContextEventKind::GoalSnapshot => "goal_snapshot",
-        ContextEventKind::GoalProgress => "goal_progress",
         ContextEventKind::PeerResultsReady => "peer_results_ready",
         ContextEventKind::MonitorEvent => "monitor_event",
         ContextEventKind::MemoryUpdate => "memory_update",
@@ -6946,32 +6878,6 @@ mod tests {
     }
 
     #[test]
-    fn context_event_coalesces_only_unchanged_latest_snapshot() {
-        let mut manager = ContextManager::new("s", None);
-        assert!(
-            manager
-                .record_context_event(ContextEventKind::GoalSnapshot, "goal", "active: 1")
-                .is_some()
-        );
-        assert!(
-            manager
-                .record_context_event(ContextEventKind::GoalSnapshot, "goal", "active: 1")
-                .is_none()
-        );
-        assert!(
-            manager
-                .record_context_event(ContextEventKind::GoalSnapshot, "goal", "status: none")
-                .is_some()
-        );
-        assert!(
-            manager
-                .record_context_event(ContextEventKind::GoalSnapshot, "goal", "active: 1")
-                .is_some(),
-            "a transition back to an older value must append a superseding event"
-        );
-    }
-
-    #[test]
     fn prompt_cache_epoch_rotates_only_for_cache_relevant_prefix_changes() {
         let mut manager = ContextManager::new("s", None);
         let read_tool = ToolSpec {
@@ -7667,9 +7573,9 @@ mod tests {
         before_crash.record_tool_output("ghost_call_1", "shell", "ghost tool output");
         before_crash.record_message(&Message::assistant("ghost reply"));
         before_crash.record_context_event(
-            ContextEventKind::GoalSnapshot,
-            "session-goal-snapshot",
-            "{\"status\":\"none\"}".to_owned(),
+            ContextEventKind::MonitorEvent,
+            "monitor-event",
+            "{\"wake\":true}".to_owned(),
         );
         persist_context_manager_snapshot(temp.path(), session_id, &before_crash).expect("snapshot");
 
@@ -8009,116 +7915,6 @@ mod tests {
         assert_eq!(status, ContextLedgerLoadStatus::Stale);
         let epoch = rebuilt.reconcile_prompt_cache_epoch("p", "m", "stable", &[]);
         assert_eq!(epoch.last_invalidation_reason, "ledger_rebuilt");
-    }
-
-    #[test]
-    fn should_coalesce_goal_snapshot_when_only_volatile_counters_change() {
-        let mut manager = ContextManager::new("goal-coalesce", None);
-        let snapshot = |used, remaining, seconds, continuations| {
-            json!({
-                "objective": "finish review",
-                "status": "active",
-                "tokens_used": used,
-                "tokens_remaining": remaining,
-                "time_used_seconds": seconds,
-                "continuations_used": continuations,
-            })
-            .to_string()
-        };
-        assert!(
-            manager
-                .record_context_event(
-                    ContextEventKind::GoalSnapshot,
-                    "goal",
-                    snapshot(10, 90, 1, 0),
-                )
-                .is_some()
-        );
-        let old_ledger = manager.ledger_items.clone();
-        assert!(
-            manager
-                .record_context_event(
-                    ContextEventKind::GoalSnapshot,
-                    "goal",
-                    snapshot(20, 80, 2, 1),
-                )
-                .is_some()
-        );
-        assert_eq!(
-            &manager.ledger_items[..old_ledger.len()],
-            old_ledger.as_slice()
-        );
-        assert_eq!(manager.items.len(), 1, "one active snapshot after revision");
-        let frame = manager.for_prompt(&PromptBuildPolicy::default());
-        assert!(
-            frame
-                .messages
-                .iter()
-                .any(|message| message.content.contains(&snapshot(20, 80, 2, 1)))
-        );
-        let reloaded = ContextManager::from_snapshot(manager.snapshot());
-        assert_eq!(reloaded.items, manager.items, "revision survives hydration");
-        assert_eq!(reloaded.recovery_state, manager.recovery_state);
-        assert!(
-            manager
-                .record_context_event(
-                    ContextEventKind::GoalSnapshot,
-                    "goal",
-                    snapshot(20, 80, 2, 1)
-                )
-                .is_none()
-        );
-        let mut changed: Value = serde_json::from_str(&snapshot(20, 80, 2, 1)).unwrap();
-        changed["status"] = json!("complete");
-        assert!(
-            manager
-                .record_context_event(ContextEventKind::GoalSnapshot, "goal", changed.to_string(),)
-                .is_some()
-        );
-    }
-
-    #[test]
-    fn should_restore_latest_goal_counters_after_interleaved_turns_and_compaction() {
-        let mut manager = ContextManager::new("goal-compacted", None);
-        manager.record_message(&Message::user("old request ".repeat(80)));
-        manager.record_message(&Message::assistant("old answer ".repeat(80)));
-        let goal = |used| {
-            json!({"objective": "review", "status": "active", "tokens_used": used}).to_string()
-        };
-        manager.record_context_event(ContextEventKind::GoalSnapshot, "goal", goal(10));
-        manager.record_message(&Message::user("latest request"));
-        manager.record_context_event(ContextEventKind::GoalSnapshot, "goal", goal(20));
-        let compacted = manager.compact_context(
-            "old exchange summary",
-            CompactContextPolicy {
-                keep_recent_tokens: Some(100),
-                ..CompactContextPolicy::default()
-            },
-        );
-        assert_eq!(compacted.status, ContextCompactionStatus::Installed);
-        let canonical_before = manager.ledger_items().to_vec();
-        manager.record_message(&Message::assistant("latest answer"));
-        manager.record_context_event(ContextEventKind::GoalSnapshot, "goal", goal(30));
-        assert_eq!(
-            &manager.ledger_items()[..canonical_before.len()],
-            canonical_before.as_slice()
-        );
-        let loaded = ContextManager::from_snapshot(manager.snapshot());
-        assert_eq!(loaded.items(), manager.items());
-        assert_eq!(loaded.recovery_state, manager.recovery_state);
-        let prompt = loaded.for_prompt(&PromptBuildPolicy::default());
-        assert!(
-            prompt
-                .messages
-                .iter()
-                .any(|message| message.content.contains(&goal(30)))
-        );
-        assert!(
-            !prompt
-                .messages
-                .iter()
-                .any(|message| message.content.contains(&goal(20)))
-        );
     }
 
     #[test]

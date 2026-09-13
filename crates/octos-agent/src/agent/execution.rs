@@ -482,14 +482,6 @@ impl Agent {
             parent_session_key: self.parent_session_key.clone(),
             spawn_depth: self.spawn_depth,
             session_scope: self.session_scope.clone(),
-            // Peer-agent-based goal: forward the agent's (optional) goal
-            // context so goal-aware tools can scope their reads/writes.
-            goal_id: self.goal_id.clone(),
-            task_id: self.task_id.clone(),
-            // Peer-agent-based goal: forward the originator captured at peer
-            // boot so goal-aware tools can enforce binding without re-reading
-            // the mutable originator file on every call.
-            originator_session: self.originator_session.clone(),
             // Outer-loop #4: forward the build-cache slot this peer's turn
             // holds so the shell tool injects CARGO_TARGET_DIR per call
             // (§7.4) — never a process env var (peers share the process).
@@ -589,14 +581,10 @@ impl Agent {
     ) -> JoinHandle<ToolCallResult> {
         // Clone Arc-wrapped fields so the spawned task is 'static
         let tools = self.tools.clone();
-        // Peer-goal soak fix: pre-clone the real LLM provider + this agent's
-        // goal/task/originator identity so the spawned foreground ToolContext
-        // can carry them (see the fields below). Cannot borrow `self` inside
-        // the 'static spawned task.
+        // Outer-loop #4: pre-clone this agent's build-cache identity so the
+        // spawned foreground ToolContext can carry it (see the fields below).
+        // Cannot borrow `self` inside the 'static spawned task.
         let llm = self.llm.clone();
-        let ctx_goal_id = self.goal_id.clone();
-        let ctx_task_id = self.task_id.clone();
-        let ctx_originator_session = self.originator_session.clone();
         let ctx_build_cache_slot = self.build_cache_slot.clone();
         let ctx_build_cache_usage = self.build_cache_usage.clone();
         let reporter = self.reporter();
@@ -668,8 +656,7 @@ impl Agent {
         let captured_user_question_ctx: Option<std::sync::Arc<dyn UserQuestionRequester>> =
             USER_QUESTION_CTX.try_with(std::sync::Arc::clone).ok();
         // #1958: tokio task-locals are not inherited across `tokio::spawn`, so
-        // a tool that makes its OWN `provider.chat()` sub-call (notably
-        // `goal_update`'s completion verifier via `run_goal_completion_verifier`)
+        // a tool that makes its OWN `provider.chat()` sub-call
         // would otherwise run with the DEFAULT routing context — losing the
         // turn's fail-fast policy and originating-session attribution (a
         // verifier failover would then publish unattributed). Capture the call
@@ -2083,26 +2070,10 @@ impl Agent {
                 // Peer-goal soak fix: the foreground tool ctx must carry the
                 // real LLM provider, not the NoopProvider from
                 // `ToolContext::zero()`. Tools that make their own LLM
-                // sub-calls (notably `goal_update`'s completion verifier via
-                // `run_goal_completion_verifier`) run through this ctx; without
-                // the real provider the verifier fails with "no real provider"
-                // and `goal_update(complete)` can never succeed. Mirror the
-                // approval path (`execute_approved_tool`), which already sets
-                // this.
+                // sub-calls run through this ctx; without the real provider
+                // they fail with "no real provider". Mirror the approval
+                // path (`execute_approved_tool`), which already sets this.
                 llm_provider: llm.clone(),
-                // Peer-goal soak fix (codex High #1): thread this agent's
-                // goal/task/originator identity through to the foreground tool
-                // ctx. Peer boot sets these on the Agent (`with_goal_id` etc.),
-                // but they were dropped here — so a peer's `goal_get` took the
-                // session path (its own goal-less session → `status: none`) and
-                // `goal_update` missed its peer-reject branch. These are `None`
-                // for every master agent (interactive AND autonomous — the only
-                // production `Agent::with_goal_id` is the peer-boot guard;
-                // masters carry the goal via `goal_context`), so the master
-                // still reaches the master-completion path.
-                goal_id: ctx_goal_id.clone(),
-                task_id: ctx_task_id.clone(),
-                originator_session: ctx_originator_session.clone(),
                 // Outer-loop #4: the foreground tool ctx carries the peer's
                 // held build-cache slot for per-call CARGO_TARGET_DIR
                 // injection in the shell tool (docs/build-cache-pool.md §7.4).
@@ -2133,8 +2104,8 @@ impl Agent {
             });
             // #1958: re-establish the turn's fail-fast policy + originating-
             // session attribution (captured before the spawn) around the tool
-            // future, so a tool that makes its own provider.chat() call — the
-            // goal completion verifier — keeps them instead of the post-spawn
+            // future, so a tool that makes its own provider.chat() call
+            // keeps them instead of the post-spawn
             // defaults. Lane is intentionally NOT restored here (codex #4 — see
             // the capture comment above). Independent of the approval/question
             // bridges below; wrapped innermost so those still apply.

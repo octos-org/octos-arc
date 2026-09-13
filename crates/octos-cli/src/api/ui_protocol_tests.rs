@@ -13,30 +13,6 @@ use octos_core::ui_protocol::{
     rpc_error_codes,
 };
 
-fn goal_updated_notification(
-    session_id: &SessionKey,
-    profile_id: Option<&str>,
-    objective: &str,
-) -> UiNotification {
-    UiNotification::SessionGoalUpdated(octos_core::ui_protocol::SessionGoalUpdatedEvent {
-        session_id: session_id.clone(),
-        profile_id: profile_id.map(ToOwned::to_owned),
-        goal: octos_core::ui_protocol::UiGoalRecord {
-            profile_id: profile_id.map(ToOwned::to_owned),
-            goal_id: format!("goal-{objective}"),
-            objective: objective.to_owned(),
-            status: "active".to_owned(),
-            token_budget: 1_000,
-            tokens_used: 0,
-            time_used_seconds: 0,
-            created_at_ms: 0,
-            updated_at_ms: 0,
-        },
-        transition_actor: "user".to_owned(),
-        generation: 0,
-    })
-}
-
 #[test]
 fn should_reclaim_expired_context_persist_locks_without_splitting_live_writers() {
     let locks = AppUiContextPersistLocks::default();
@@ -2951,13 +2927,6 @@ fn dispatch_probe_request(method: &str) -> RpcRequest<Value> {
             })
         }
         APPUI_METHOD_ONBOARDING_WORKSPACE_PROBE => json!({ "path": "." }),
-        methods::SESSION_GOAL_OPERATOR_TRANSITION => json!({
-            "session_id": session_id,
-            "profile_id": "dispatch-parity",
-            "goal_id": "goal_probe",
-            "action": "archive",
-            "reason": "dispatch parity probe",
-        }),
         methods::AGENT_LIST
         | methods::AGENT_STATUS_READ
         | methods::AGENT_OUTPUT_READ
@@ -2967,9 +2936,6 @@ fn dispatch_probe_request(method: &str) -> RpcRequest<Value> {
         | methods::TASK_ARTIFACT_READ
         | methods::AGENT_INTERRUPT
         | methods::AGENT_CLOSE
-        | methods::SESSION_GOAL_GET
-        | methods::SESSION_GOAL_SET
-        | methods::SESSION_GOAL_CLEAR
         | methods::LOOP_CREATE
         | methods::LOOP_LIST
         | methods::LOOP_DELETE
@@ -9631,7 +9597,6 @@ fn shell_approval_event_is_typed_only_after_negotiation() {
             auxiliary_rest_to_ws_v1: false,
             coding_autonomy_v1: false,
             coding_agent_control_v1: false,
-            coding_goal_runtime_v1: false,
             coding_loop_runtime_v1: false,
             coding_monitor_runtime_v1: false,
             review_start_v1: false,
@@ -9702,7 +9667,6 @@ fn risk_default_is_unspecified_when_manifest_silent() {
             auxiliary_rest_to_ws_v1: false,
             coding_autonomy_v1: false,
             coding_agent_control_v1: false,
-            coding_goal_runtime_v1: false,
             coding_loop_runtime_v1: false,
             coding_monitor_runtime_v1: false,
             review_start_v1: false,
@@ -9818,7 +9782,6 @@ fn plugin_high_risk_approval_emits_risk_field_on_wire() {
             auxiliary_rest_to_ws_v1: false,
             coding_autonomy_v1: false,
             coding_agent_control_v1: false,
-            coding_goal_runtime_v1: false,
             coding_loop_runtime_v1: false,
             coding_monitor_runtime_v1: false,
             review_start_v1: false,
@@ -9889,7 +9852,6 @@ fn plugin_critical_risk_approval_emits_risk_critical() {
             auxiliary_rest_to_ws_v1: false,
             coding_autonomy_v1: false,
             coding_agent_control_v1: false,
-            coding_goal_runtime_v1: false,
             coding_loop_runtime_v1: false,
             coding_monitor_runtime_v1: false,
             review_start_v1: false,
@@ -9953,7 +9915,6 @@ fn shell_approval_still_emits_risk_field() {
             auxiliary_rest_to_ws_v1: false,
             coding_autonomy_v1: false,
             coding_agent_control_v1: false,
-            coding_goal_runtime_v1: false,
             coding_loop_runtime_v1: false,
             coding_monitor_runtime_v1: false,
             review_start_v1: false,
@@ -10060,7 +10021,6 @@ fn approval_cwd_is_sanitized_against_path_spoof() {
             auxiliary_rest_to_ws_v1: false,
             coding_autonomy_v1: false,
             coding_agent_control_v1: false,
-            coding_goal_runtime_v1: false,
             coding_loop_runtime_v1: false,
             coding_monitor_runtime_v1: false,
             review_start_v1: false,
@@ -11256,31 +11216,6 @@ fn skill_action_job_events_are_visible_only_to_their_profile() {
     ));
 }
 
-// ---------------------------------------------------------------------------
-// #2067 — cross-profile goal frames must not cross the profile scope filter.
-//
-// `SessionGoalUpdated` / `SessionGoalCleared` are appended DURABLY (the
-// `record_autonomy_rpc_evidence` -> `send_notification_durable` path at the raw
-// autonomy RPC dispatch), so they reach every connection subscribed to the wire
-// session key through all three delivery boundaries: the `replay.retain` in
-// `open_session_result`, the session/open replay send loop, and the live
-// forwarder pump. Before the fix all three passed them through `_ => true`.
-// ---------------------------------------------------------------------------
-
-/// A durable `session/goal/cleared` for `profile_id`. The clear RPC emits
-/// `"goal": null`, so the nested record is absent and the top-level
-/// `profile_id` is the only scope the frame carries.
-fn goal_cleared_notification(session_id: &SessionKey, profile_id: Option<&str>) -> UiNotification {
-    UiNotification::SessionGoalCleared(octos_core::ui_protocol::SessionGoalClearedEvent {
-        session_id: session_id.clone(),
-        profile_id: profile_id.map(ToOwned::to_owned),
-        cleared: true,
-        goal: None,
-        transition_actor: "user".to_owned(),
-        generation: 0,
-    })
-}
-
 /// Drain every frame `handle_session_open` queued, up to and including the
 /// `session/open` NOTIFICATION it direct-sends last (distinguished from the
 /// RPC result frame by having no `id`). Frames the replay loop filtered out
@@ -11306,35 +11241,6 @@ async fn drain_session_open_frames(rx: &mut mpsc::Receiver<WsMessage>) -> Vec<Va
     }
 }
 
-/// The `objective` of every `session/goal/updated` frame in `frames`, in order.
-fn replayed_goal_objectives(frames: &[Value]) -> Vec<String> {
-    frames
-        .iter()
-        .filter(|frame| {
-            frame.get("method").and_then(Value::as_str)
-                == Some(octos_core::ui_protocol::methods::SESSION_GOAL_UPDATED)
-        })
-        .map(|frame| {
-            frame["params"]["goal"]["objective"]
-                .as_str()
-                .unwrap_or_default()
-                .to_owned()
-        })
-        .collect()
-}
-
-/// The `profile_id` of every `session/goal/cleared` frame in `frames`.
-fn replayed_cleared_profiles(frames: &[Value]) -> Vec<Value> {
-    frames
-        .iter()
-        .filter(|frame| {
-            frame.get("method").and_then(Value::as_str)
-                == Some(octos_core::ui_protocol::methods::SESSION_GOAL_CLEARED)
-        })
-        .map(|frame| frame["params"]["profile_id"].clone())
-        .collect()
-}
-
 /// Read the next frame, or `None` when nothing arrives within `ms`.
 async fn next_frame_within(rx: &mut mpsc::Receiver<WsMessage>, ms: u64) -> Option<Value> {
     match tokio::time::timeout(std::time::Duration::from_millis(ms), rx.recv()).await {
@@ -11342,116 +11248,6 @@ async fn next_frame_within(rx: &mut mpsc::Receiver<WsMessage>, ms: u64) -> Optio
         Ok(other) => panic!("expected a text frame, got {other:?}"),
         Err(_) => None,
     }
-}
-
-/// #2067 boundaries 1 and 3 (the `open_session_result` retain + live
-/// forwarder), observed on the wire: neither may put profile-b's durable goal
-/// frames on a profile-a connection.
-#[tokio::test]
-async fn should_drop_cross_profile_goal_frames_when_connection_scopes_another_profile() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let state = local_profile_state_with_sessions(temp.path());
-    create_or_get_local_solo_profile(
-        &state,
-        local_profile_params("Alpha Owner", "alpha", "alpha@example.com"),
-    )
-    .expect("create alpha profile");
-    create_or_get_local_solo_profile(
-        &state,
-        local_profile_params("Beta Owner", "beta", "beta@example.com"),
-    )
-    .expect("create beta profile");
-
-    let (ws, mut rx) = ws_connection_for_test(64);
-    let ledger = Arc::new(UiProtocolLedger::new(64));
-    let approvals = PendingApprovalStore::default();
-    let questions = PendingQuestionStore::default();
-    let forwarders: SharedLiveForwarders = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-    let session_id = SessionKey("web-shared-live".into());
-
-    // Durable history on the SHARED wire key, laid down before alpha connects.
-    ledger.append_notification(goal_updated_notification(
-        &session_id,
-        Some("beta"),
-        "beta secret objective",
-    ));
-    ledger.append_notification(goal_cleared_notification(&session_id, Some("beta")));
-    ledger.append_notification(goal_updated_notification(
-        &session_id,
-        Some("alpha"),
-        "alpha objective",
-    ));
-
-    let opened = handle_session_open(
-        &ws,
-        &state,
-        &ledger,
-        &approvals,
-        &questions,
-        &forwarders,
-        Some("alpha"),
-        Some("alpha"),
-        ConnectionUiFeatures::default(),
-        "open-alpha".into(),
-        SessionOpenParams {
-            session_id: session_id.clone(),
-            topic: None,
-            profile_id: None,
-            cwd: None,
-            sandbox: None,
-            after: Some(UiCursor {
-                stream: session_id.0.clone(),
-                seq: 0,
-            }),
-        },
-        false,
-    )
-    .await;
-    assert!(opened, "alpha must be able to open the shared session");
-
-    // Boundary 1's retain, observed through the replay send loop.
-    let frames = drain_session_open_frames(&mut rx).await;
-    assert_eq!(
-        replayed_goal_objectives(&frames),
-        vec!["alpha objective".to_owned()],
-        "replay must not put profile-b's objective on an alpha-scoped connection"
-    );
-    assert!(
-        replayed_cleared_profiles(&frames).is_empty(),
-        "replay must not put profile-b's `session/goal/cleared` on an alpha connection"
-    );
-
-    // Boundary 3 — the live forwarder pump.
-    ledger.append_notification(goal_updated_notification(
-        &session_id,
-        Some("beta"),
-        "beta live objective",
-    ));
-    ledger.append_notification(goal_cleared_notification(&session_id, Some("beta")));
-    ledger.append_notification(goal_updated_notification(
-        &session_id,
-        Some("alpha"),
-        "alpha live objective",
-    ));
-
-    let live = next_frame_within(&mut rx, 2_000)
-        .await
-        .expect("alpha's own live goal frame must still be forwarded");
-    assert_eq!(
-        live.get("method").and_then(Value::as_str),
-        Some(octos_core::ui_protocol::methods::SESSION_GOAL_UPDATED),
-        "the only live goal frame alpha may see is its own: {live}"
-    );
-    assert_eq!(
-        live["params"]["goal"]["objective"],
-        json!("alpha live objective")
-    );
-    assert!(
-        next_frame_within(&mut rx, 250).await.is_none(),
-        "no further live frames may reach an alpha-scoped connection"
-    );
-
-    abort_live_forwarders(&forwarders, &ledger).await;
 }
 
 /// A durable `loop/updated` shaped like the one `loop/pause`, `loop/resume`
@@ -11514,7 +11310,6 @@ fn monitor_updated_notification(
             persistent: false,
             status: "active".to_owned(),
             pause_reason: None,
-            goal_id: None,
             last_fired_at_ms: None,
             fires_used: 0,
             expires_at_ms: None,
@@ -11528,9 +11323,9 @@ fn monitor_updated_notification(
 }
 
 /// #2067 — the `loop/*` and `monitor/*` frames ride the SAME durable dispatch
-/// as the goal frames (`record_autonomy_rpc_evidence` ->
-/// `send_notification_durable`) and carry the same class of tenant text (loop
-/// prompt, monitor argv). They must be scoped the same way — including the
+/// (`record_autonomy_rpc_evidence` -> `send_notification_durable`) and carry
+/// the same class of tenant text (loop prompt, monitor argv). They must be
+/// scoped the same way — including the
 /// `loop/pause`-shaped event whose top-level `profile_id` is absent and whose
 /// only owner stamp is the nested `loop` record.
 #[tokio::test]
@@ -11735,40 +11530,50 @@ async fn should_scope_each_forwarder_independently_when_one_connection_pumps_two
     }
 
     // Each forwarder keeps its OWN scope: the second spawn must not retarget
-    // the first, in either direction.
-    ledger.append_notification(goal_updated_notification(
-        &session_alpha,
-        Some("alpha"),
-        "alpha objective",
-    ));
-    ledger.append_notification(goal_updated_notification(
-        &session_beta,
-        Some("beta"),
-        "beta objective",
-    ));
+    // the first, in either direction. `loop/updated` frames carry a top-level
+    // profile stamp, so they exercise the same scope filter the goal chip
+    // frames used to.
+    let loop_updated = |session_id: &SessionKey, profile: &str, loop_id: &str| {
+        UiNotification::LoopUpdated(octos_core::ui_protocol::LoopUpdatedEvent {
+            session_id: session_id.clone(),
+            profile_id: Some(profile.to_owned()),
+            loop_id: Some(loop_id.to_owned()),
+            loop_state: octos_core::ui_protocol::UiLoopRecord {
+                loop_id: loop_id.to_owned(),
+                session_id: session_id.clone(),
+                profile_id: Some(profile.to_owned()),
+                prompt: "scope probe".to_owned(),
+                mode: "self_paced".to_owned(),
+                interval_seconds: None,
+                status: "active".to_owned(),
+                next_run_at_ms: None,
+                last_run_at_ms: None,
+                expires_at_ms: 0,
+                created_at_ms: 0,
+                updated_at_ms: 0,
+            },
+            ok: Some(true),
+            status: Some("active".to_owned()),
+            deleted: None,
+        })
+    };
+    ledger.append_notification(loop_updated(&session_alpha, "alpha", "loop-alpha-1"));
+    ledger.append_notification(loop_updated(&session_beta, "beta", "loop-beta-1"));
     // …and each still rejects the other's profile on its own stream.
-    ledger.append_notification(goal_updated_notification(
-        &session_alpha,
-        Some("beta"),
-        "beta objective on alpha's session",
-    ));
-    ledger.append_notification(goal_updated_notification(
-        &session_beta,
-        Some("alpha"),
-        "alpha objective on beta's session",
-    ));
+    ledger.append_notification(loop_updated(&session_alpha, "beta", "loop-beta-misfiled"));
+    ledger.append_notification(loop_updated(&session_beta, "alpha", "loop-alpha-misfiled"));
 
     let mut delivered: Vec<(String, String)> = Vec::new();
     while let Some(frame) = next_frame_within(&mut rx, 500).await {
         if frame.get("method").and_then(Value::as_str)
-            == Some(octos_core::ui_protocol::methods::SESSION_GOAL_UPDATED)
+            == Some(octos_core::ui_protocol::methods::LOOP_UPDATED)
         {
             delivered.push((
                 frame["params"]["session_id"]
                     .as_str()
                     .unwrap_or_default()
                     .to_owned(),
-                frame["params"]["goal"]["objective"]
+                frame["params"]["loop_id"]
                     .as_str()
                     .unwrap_or_default()
                     .to_owned(),
@@ -11779,8 +11584,8 @@ async fn should_scope_each_forwarder_independently_when_one_connection_pumps_two
     assert_eq!(
         delivered,
         vec![
-            (session_alpha.0.clone(), "alpha objective".to_owned()),
-            (session_beta.0.clone(), "beta objective".to_owned()),
+            (session_alpha.0.clone(), "loop-alpha-1".to_owned()),
+            (session_beta.0.clone(), "loop-beta-1".to_owned()),
         ],
         "each forwarder must apply its own captured scope, not a shared one"
     );
@@ -12097,11 +11902,6 @@ async fn should_deliver_routed_profile_frames_when_the_connection_scope_is_not_a
     // Durable history produced by THIS connection's own model-created monitor.
     ledger.append_notification(monitor_fired("monitor-model-made"));
     ledger.append_notification(activity("replayed log line"));
-    ledger.append_notification(goal_updated_notification(
-        &session_id,
-        Some("beta"),
-        "routed objective",
-    ));
 
     let opened = handle_session_open(
         &ws,
@@ -12145,10 +11945,6 @@ async fn should_deliver_routed_profile_frames_when_the_connection_scope_is_not_a
     assert!(
         methods.contains(&octos_core::ui_protocol::methods::BACKGROUND_ACTIVITY),
         "background/activity has no other delivery path and must be replayed: {methods:?}"
-    );
-    assert!(
-        methods.contains(&octos_core::ui_protocol::methods::SESSION_GOAL_UPDATED),
-        "the connection's own routed goal frame must be replayed: {methods:?}"
     );
 
     // Same property on the live forwarder.
@@ -13292,7 +13088,6 @@ fn monitor_notifications_gated_by_monitor_runtime_capability() {
         persistent: false,
         status: "active".into(),
         pause_reason: None,
-        goal_id: None,
         last_fired_at_ms: None,
         fires_used: 0,
         expires_at_ms: None,
@@ -13683,7 +13478,6 @@ async fn session_open_includes_pane_snapshot_after_negotiation() {
             auxiliary_rest_to_ws_v1: false,
             coding_autonomy_v1: false,
             coding_agent_control_v1: false,
-            coding_goal_runtime_v1: false,
             coding_loop_runtime_v1: false,
             coding_monitor_runtime_v1: false,
             review_start_v1: false,
@@ -14825,7 +14619,7 @@ fn m15_autonomy_capabilities_require_base_and_group_tokens() {
         UI_FEATURES_HEADER,
         format!(
             "{},{}",
-            UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1, UI_PROTOCOL_FEATURE_CODING_GOAL_RUNTIME_V1
+            UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1, UI_PROTOCOL_FEATURE_CODING_LOOP_RUNTIME_V1
         )
         .parse()
         .expect("header value"),
@@ -14833,26 +14627,25 @@ fn m15_autonomy_capabilities_require_base_and_group_tokens() {
     let features = ConnectionUiFeatures::from_headers_and_query(&headers, None);
     let capabilities = features.negotiated_capabilities();
     assert!(capabilities.supports_feature(UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1));
-    assert!(capabilities.supports_feature(UI_PROTOCOL_FEATURE_CODING_GOAL_RUNTIME_V1));
-    assert!(capabilities.supports_method(methods::SESSION_GOAL_SET));
+    assert!(capabilities.supports_feature(UI_PROTOCOL_FEATURE_CODING_LOOP_RUNTIME_V1));
     assert!(!capabilities.supports_method(methods::AGENT_LIST));
-    assert!(!capabilities.supports_method(methods::LOOP_CREATE));
+    assert!(!capabilities.supports_method(methods::AGENT_INTERRUPT));
+    assert!(capabilities.supports_method(methods::LOOP_LIST));
 
     let mut group_without_base = HeaderMap::new();
     group_without_base.insert(
         UI_FEATURES_HEADER,
-        UI_PROTOCOL_FEATURE_CODING_GOAL_RUNTIME_V1
+        UI_PROTOCOL_FEATURE_CODING_LOOP_RUNTIME_V1
             .parse()
             .expect("header value"),
     );
     let capabilities = ConnectionUiFeatures::from_headers_and_query(&group_without_base, None)
         .negotiated_capabilities();
-    assert!(!capabilities.supports_feature(UI_PROTOCOL_FEATURE_CODING_GOAL_RUNTIME_V1));
-    assert!(!capabilities.supports_method(methods::SESSION_GOAL_SET));
+    assert!(!capabilities.supports_feature(UI_PROTOCOL_FEATURE_CODING_LOOP_RUNTIME_V1));
+    assert!(!capabilities.supports_method(methods::LOOP_LIST));
 
     let stdio = ConnectionUiFeatures::stdio_defaults().negotiated_capabilities();
     assert!(stdio.supports_method(methods::AGENT_LIST));
-    assert!(stdio.supports_method(methods::SESSION_GOAL_SET));
     assert!(stdio.supports_method(methods::LOOP_CREATE));
     assert!(stdio.supports_feature(UI_PROTOCOL_FEATURE_REVIEW_START_V1));
     assert!(stdio.supports_method(methods::REVIEW_START));
@@ -14876,7 +14669,7 @@ fn client_hello_feature_tokens_rebuild_stdio_negotiated_capabilities() {
     assert!(capabilities.supports_feature(UI_PROTOCOL_FEATURE_REVIEW_START_V1));
     assert!(capabilities.supports_method(methods::AGENT_LIST));
     assert!(capabilities.supports_method(methods::REVIEW_START));
-    assert!(!capabilities.supports_method(methods::SESSION_GOAL_SET));
+    assert!(!capabilities.supports_method(methods::LOOP_LIST));
     assert!(capabilities.supports_method(methods::ROUTER_SET_MODE));
 }
 
@@ -17412,27 +17205,6 @@ fn ws_connection_for_test(
 ) -> (WsConnection, mpsc::Receiver<axum::extract::ws::Message>) {
     let (tx, rx) = mpsc::channel(capacity);
     (WsConnection::new(tx), rx)
-}
-
-/// #1969 — an interrupted goal/peer turn must charge its partial spend from the
-/// live tracker (the drain loop breaks before the done/error arm folds usage),
-/// while a completed/errored turn keeps the folded total.
-#[test]
-fn interrupted_goal_charge_falls_back_to_tracker_only_when_interrupted_with_zero_folded() {
-    let tracker = octos_agent::TokenTracker::new();
-    tracker
-        .input_tokens
-        .store(1_000, std::sync::atomic::Ordering::Relaxed);
-    tracker
-        .output_tokens
-        .store(500, std::sync::atomic::Ordering::Relaxed);
-
-    // interrupted + nothing folded → charge the tracker's accumulated spend
-    assert_eq!(interrupted_goal_charge(true, 0, &tracker), 1_500);
-    // NOT interrupted → keep the folded value (0 here), never read the tracker
-    assert_eq!(interrupted_goal_charge(false, 0, &tracker), 0);
-    // interrupted but a real total was already folded → never override it
-    assert_eq!(interrupted_goal_charge(true, 42, &tracker), 42);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -24809,7 +24581,6 @@ async fn make_m11e_profile_with_llm_and_sandbox(
         session_store_root: None,
         config: crate::config::Config::default(),
         llm,
-        goal_verifier_llm: None,
         adaptive_router: None,
         runtime_qos_catalog: None,
         primary_model_id: "m11e-stub".to_string(),
@@ -25286,19 +25057,6 @@ async fn cached_session_messages(
         .expect("session runtime");
     let mut sessions = runtime.sessions.lock().await;
     sessions.get_or_create(session_id).await.messages.clone()
-}
-
-#[test]
-fn terminal_integrity_goal_claim_requires_a_complete_final_reply() {
-    let claim = "Finished <goal:complete>";
-    for reason in [TerminalReason::Errored, TerminalReason::Interrupted] {
-        assert!(goal_completion_reply(&TurnState::Terminal(reason), Some(claim)).is_none());
-    }
-    assert_eq!(
-        goal_completion_reply(&TurnState::Terminal(TerminalReason::Completed), Some(claim)),
-        Some(claim.into())
-    );
-    assert!(goal_completion_reply(&TurnState::Terminal(TerminalReason::Completed), None).is_none());
 }
 
 #[test]
@@ -28288,42 +28046,6 @@ fn session_workspace_store_isolates_same_bare_session_id_by_profile() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// #1959 — goal-event generation guard: a stale update can't overtake a clear.
-// ---------------------------------------------------------------------------
-
-#[test]
-fn goal_event_generation_admits_should_drop_stale_update_after_clear() {
-    let mut last = std::collections::HashMap::new();
-    let s = "dev:local:tui#coding";
-    // The turn snapshots an update at generation 5 (admitted).
-    assert!(goal_event_generation_admits(&mut last, s, 5));
-    // A racing clear bumps to 6 and is emitted first (admitted).
-    assert!(goal_event_generation_admits(&mut last, s, 6));
-    // The stale update (generation 5) now arrives — MUST be dropped so it
-    // cannot resurrect the cleared chip.
-    assert!(!goal_event_generation_admits(&mut last, s, 5));
-    // An equal generation is also stale (strictly-greater rule).
-    assert!(!goal_event_generation_admits(&mut last, s, 6));
-    // A genuinely newer event still passes.
-    assert!(goal_event_generation_admits(&mut last, s, 7));
-}
-
-#[test]
-fn goal_event_generation_admits_should_be_per_session_and_pass_legacy_zero() {
-    let mut last = std::collections::HashMap::new();
-    // Sessions are independent: a high generation on A doesn't gate B.
-    assert!(goal_event_generation_admits(&mut last, "sessionA", 100));
-    assert!(goal_event_generation_admits(&mut last, "sessionB", 1));
-    // Legacy/unstamped events (generation 0) always pass and never move the
-    // watermark (an old backend never stamps, so gating would wedge the chip).
-    assert!(goal_event_generation_admits(&mut last, "sessionA", 0));
-    assert!(goal_event_generation_admits(&mut last, "sessionA", 0));
-    // A's watermark is still 100 from before — a lower real generation drops.
-    assert!(!goal_event_generation_admits(&mut last, "sessionA", 50));
-    assert!(goal_event_generation_admits(&mut last, "sessionA", 101));
-}
-
 /// #1973 fix-round — the process-global event ledger's INIT (including disk
 /// recovery) runs exactly once even when N callers race the first
 /// `event_ledger()` call (global drain vs stdio connection at serve boot).
@@ -28400,15 +28122,6 @@ fn event_ledger_recovery_runs_exactly_once_across_concurrent_initializers() {
         "one recovery → one synthesized orphan terminal, never N interleaved sets"
     );
 }
-
-// ---------------------------------------------------------------------------
-// #1935 — interactive-turn goal-completion sentinel (serve path). Before this,
-// sentinel detection + the independent verifier lived ONLY inside the
-// autonomous `goal_context` accountant: an INTERACTIVE turn whose reply ended
-// in `<goal:complete>` did nothing (only the explicit goal_update tool
-// worked). `run_interactive_sentinel_completion` is the extracted, testable
-// sentinel block `run_standalone_turn`'s interactive branch now calls.
-// ---------------------------------------------------------------------------
 
 /// Call-counting scripted verifier provider for the sentinel tests.
 struct ScriptedSentinelVerifier {
@@ -28921,257 +28634,6 @@ fn should_report_zero_cache_reads_explicitly_on_a_cold_session() {
     let usage = usage_status_json(&totals);
     assert_eq!(usage["cached_input_tokens"], 0);
     assert!(usage.get("cached_input_tokens").is_some());
-}
-
-// ---------------------------------------------------------------------------
-// #2065 — UI-protocol goal-frame substrate: per-scope generation identities
-// for the #1959 send guard, goal-frame capability gating on the shared
-// filter, and live-forwarder lifecycle hardening (cooperative cancellable
-// stdio sends + retire-before-baseline handover).
-//
-// CI: these run under the `goal_scope_guard` / `session_open_goal` name
-// filters in .github/workflows/ci.yml (test-octos-cli job) — the `api`-gated
-// module is invisible to the unfeatured lib/integration steps (#2029).
-// ---------------------------------------------------------------------------
-
-/// A minimal valid frame used to occupy a capacity-1 writer queue.
-fn plug_frame() -> WsMessage {
-    frame_for(&json!({"jsonrpc": "2.0", "method": "test/plug"})).expect("plug frame")
-}
-
-/// #2065 — capability gating on the shared filter: a connection that did
-/// not negotiate `coding.goal_runtime.v1` (the same capability the goal RPC
-/// surface requires) must receive ZERO `session/goal/*` frames through the
-/// full open sequence — replay and live pump alike. Without the gate such a
-/// client received frames it can only report as unknown notifications.
-#[tokio::test]
-async fn session_open_goal_frames_gated_when_goal_runtime_not_negotiated() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let state = state_with_sessions(temp.path());
-    let ledger = Arc::new(UiProtocolLedger::new(16));
-    let session_id = SessionKey("local:goal-null-capability".into());
-    // Seed the REPLAY lane with a durable goal frame from another connection.
-    ledger.append_notification_from(
-        UiNotification::SessionGoalUpdated(octos_core::ui_protocol::SessionGoalUpdatedEvent {
-            session_id: session_id.clone(),
-            profile_id: Some(MAIN_PROFILE_ID.to_owned()),
-            goal: octos_core::ui_protocol::UiGoalRecord {
-                profile_id: Some(MAIN_PROFILE_ID.to_owned()),
-                goal_id: "goal-replayed".into(),
-                objective: "durable goal history".into(),
-                status: "active".into(),
-                token_budget: 1_000,
-                tokens_used: 1,
-                time_used_seconds: 1,
-                created_at_ms: 0,
-                updated_at_ms: 0,
-            },
-            transition_actor: "backend".into(),
-            generation: 0,
-        }),
-        ConnectionId::next(),
-    );
-
-    let features = ConnectionUiFeatures {
-        coding_goal_runtime_v1: false,
-        ..ConnectionUiFeatures::stdio_defaults()
-    };
-    let (ws, mut rx) = ws_connection_for_test(64);
-    let approvals = PendingApprovalStore::default();
-    let questions = PendingQuestionStore::default();
-    let forwarders: SharedLiveForwarders = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-    let opened = handle_session_open(
-        &ws,
-        &state,
-        &ledger,
-        &approvals,
-        &questions,
-        &forwarders,
-        None,
-        // #2067 — the open-path delivery filter pin; no connection-level pin
-        // in this test, so filtering is per-profile-scope only.
-        None,
-        features,
-        "open-no-goal-runtime".into(),
-        SessionOpenParams {
-            session_id: session_id.clone(),
-            topic: None,
-            profile_id: None,
-            cwd: None,
-            sandbox: None,
-            after: None,
-        },
-        false,
-    )
-    .await;
-    assert!(opened, "session/open must succeed");
-    // Feed the LIVE PUMP lane too, from another connection.
-    ledger.append_notification_from(
-        UiNotification::SessionGoalCleared(octos_core::ui_protocol::SessionGoalClearedEvent {
-            session_id: session_id.clone(),
-            profile_id: Some(MAIN_PROFILE_ID.to_owned()),
-            cleared: true,
-            goal: None,
-            transition_actor: "user".into(),
-            generation: 0,
-        }),
-        ConnectionId::next(),
-    );
-    // Collect the full open sequence plus a quiet window of live pumping.
-    let mut goal_frames = Vec::new();
-    let quiet = tokio::time::Duration::from_millis(700);
-    while let Ok(frame) = tokio::time::timeout(quiet, recv_rpc_json(&mut rx)).await {
-        if let Some(method) = frame["method"].as_str() {
-            if method.starts_with("session/goal/") {
-                goal_frames.push(frame.clone());
-            }
-        }
-    }
-    abort_live_forwarders(&forwarders, &ledger).await;
-    assert!(
-        goal_frames.is_empty(),
-        "a connection without coding.goal_runtime.v1 must see zero goal frames: {goal_frames:?}"
-    );
-}
-
-/// #2065 — a re-open must fully
-/// retire the previous live forwarder BEFORE the replacement starts pumping,
-/// so "one live lane per (connection, session)" holds across reopens and an
-/// event is never double-delivered by two overlapping pumps. (The
-/// production open path retires even earlier — before the replay baseline
-/// is computed — this pins the in-spawn defense direct callers rely on.
-/// Handover semantics are at-least-once, not exactly-once: see the
-/// retire-before-baseline comment in `handle_session_open`.)
-#[tokio::test]
-async fn session_open_goal_reopen_hands_over_live_forwarder_lane() {
-    let (ws, mut rx) = ws_connection_for_test(64);
-    let ledger = Arc::new(UiProtocolLedger::new(16));
-    let session_id = SessionKey("local:goal-null-lane-handover".into());
-    let forwarders: SharedLiveForwarders = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-
-    let first_rx = ledger.subscribe(&session_id);
-    spawn_live_forwarder(
-        ws.clone(),
-        ledger.clone(),
-        session_id.clone(),
-        0,
-        ws.connection_id(),
-        ConnectionUiFeatures::stdio_defaults(),
-        None,
-        None,
-        first_rx,
-        forwarders.clone(),
-    )
-    .await;
-
-    // Re-open on the SAME connection and session.
-    let second_rx = ledger.subscribe(&session_id);
-    spawn_live_forwarder(
-        ws.clone(),
-        ledger.clone(),
-        session_id.clone(),
-        0,
-        ws.connection_id(),
-        ConnectionUiFeatures::stdio_defaults(),
-        None,
-        None,
-        second_rx,
-        forwarders.clone(),
-    )
-    .await;
-
-    // An event appended after the handover must arrive exactly once.
-    ledger.append_notification_from(
-        UiNotification::MessageDelta(MessageDeltaEvent {
-            session_id: session_id.clone(),
-            topic: None,
-            turn_id: TurnId::new(),
-            text: "exactly once".into(),
-        }),
-        ConnectionId::next(),
-    );
-    let delivered =
-        tokio::time::timeout(tokio::time::Duration::from_secs(5), recv_rpc_json(&mut rx))
-            .await
-            .expect("the replacement forwarder delivers the live event");
-    assert_eq!(delivered["method"], json!("message/delta"));
-    let duplicate = tokio::time::timeout(
-        tokio::time::Duration::from_millis(400),
-        recv_rpc_json(&mut rx),
-    )
-    .await;
-    assert!(
-        duplicate.is_err(),
-        "the retired forwarder must not double-deliver: {duplicate:?}"
-    );
-    abort_live_forwarders(&forwarders, &ledger).await;
-}
-
-/// #2065 (absence-by-construction) — through `WsConnection::new_stdio`:
-/// the stdio durable lane parks
-/// COOPERATIVELY (non-blocking `try_send` probe + async sleep, see
-/// `send_durable_offloaded`), so a forwarder parked on a FULL stdio queue is
-/// fully retired by abort+join — cancellation lands at the probe's await and
-/// the enqueue is atomic. There is no `spawn_blocking(SyncSender::send)`
-/// closure anymore, so no detached in-flight hop can enqueue a stale frame
-/// AFTER the lane was retired.
-#[tokio::test]
-async fn session_open_goal_stdio_lane_retire_leaves_no_inflight_send() {
-    let (writer, frames) = std::sync::mpsc::sync_channel::<WsMessage>(1);
-    // Fill the single stdio slot BEFORE the pump runs: its send must park.
-    writer.try_send(plug_frame()).expect("plug the stdio queue");
-    let ws = WsConnection::new_stdio(writer);
-    let ledger = Arc::new(UiProtocolLedger::new(16));
-    let session_id = SessionKey("local:goal-null-stdio-retire".into());
-    let forwarders: SharedLiveForwarders = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-
-    let live_rx = ledger.subscribe(&session_id);
-    spawn_live_forwarder(
-        ws.clone(),
-        ledger.clone(),
-        session_id.clone(),
-        0,
-        ws.connection_id(),
-        ConnectionUiFeatures::stdio_defaults(),
-        None,
-        None,
-        live_rx,
-        forwarders.clone(),
-    )
-    .await;
-    // A live event reaches the pump; its stdio enqueue parks on the full
-    // queue (cooperative probe loop, never a blocking SyncSender::send).
-    ledger.append_notification_from(
-        UiNotification::MessageDelta(MessageDeltaEvent {
-            session_id: session_id.clone(),
-            topic: None,
-            turn_id: TurnId::new(),
-            text: "parked in flight".into(),
-        }),
-        ConnectionId::next(),
-    );
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-    // Retire the lane: abort + join. The join is the proof point — after it
-    // returns there is nothing left that could still enqueue.
-    let lane = forwarders
-        .lock()
-        .await
-        .remove(&session_id)
-        .expect("live lane registered");
-    lane.abort();
-    let _ = lane.await;
-
-    // Drain the plug, then nothing else may EVER arrive: the parked frame
-    // died with the lane (its enqueue was atomic and never happened), and
-    // no detached closure exists to deliver it later.
-    let plug = frames.try_recv().expect("plug frame still queued");
-    drop(plug);
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-    assert!(
-        frames.try_recv().is_err(),
-        "no in-flight send may survive lane retirement"
-    );
 }
 
 // ----------------------------------------------------------------------------

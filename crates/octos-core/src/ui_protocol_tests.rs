@@ -764,10 +764,6 @@ fn ui_protocol_v1_wire_contract_is_golden() {
         "coding.agent_control.v1"
     );
     assert_eq!(
-        UI_PROTOCOL_FEATURE_CODING_GOAL_RUNTIME_V1,
-        "coding.goal_runtime.v1"
-    );
-    assert_eq!(
         UI_PROTOCOL_FEATURE_CODING_LOOP_RUNTIME_V1,
         "coding.loop_runtime.v1"
     );
@@ -825,10 +821,6 @@ fn ui_protocol_v1_wire_contract_is_golden() {
             "task/artifact/read",
             "agent/interrupt",
             "agent/close",
-            "session/goal/get",
-            "session/goal/set",
-            "session/goal/clear",
-            "session/goal/operator_transition",
             "loop/create",
             "loop/list",
             "loop/delete",
@@ -902,8 +894,6 @@ fn ui_protocol_v1_wire_contract_is_golden() {
             "agent/updated",
             "agent/output/delta",
             "agent/artifact/updated",
-            "session/goal/updated",
-            "session/goal/cleared",
             "loop/updated",
             "loop/fired",
             "loop/completed",
@@ -947,10 +937,6 @@ fn ui_protocol_v1_wire_contract_is_golden() {
             "task/artifact/read",
             "agent/interrupt",
             "agent/close",
-            "session/goal/get",
-            "session/goal/set",
-            "session/goal/clear",
-            "session/goal/operator_transition",
             "loop/create",
             "loop/list",
             "loop/delete",
@@ -1034,10 +1020,6 @@ fn ui_protocol_v1_representative_wire_payloads_are_golden() {
                 "task/artifact/read",
                 "agent/interrupt",
                 "agent/close",
-                "session/goal/get",
-                "session/goal/set",
-                "session/goal/clear",
-                "session/goal/operator_transition",
                 "loop/create",
                 "loop/list",
                 "loop/delete",
@@ -1108,8 +1090,6 @@ fn ui_protocol_v1_representative_wire_payloads_are_golden() {
                 "agent/updated",
                 "agent/output/delta",
                 "agent/artifact/updated",
-                "session/goal/updated",
-                "session/goal/cleared",
                 "loop/updated",
                 "loop/fired",
                 "loop/completed",
@@ -1136,7 +1116,6 @@ fn ui_protocol_v1_representative_wire_payloads_are_golden() {
                 "auxiliary.rest_to_ws.v1",
                 "coding.autonomy.v1",
                 "coding.agent_control.v1",
-                "coding.goal_runtime.v1",
                 "coding.loop_runtime.v1",
                 "coding.monitor_runtime.v1",
                 "review.start.v1",
@@ -2890,20 +2869,6 @@ fn m15_agent_artifact() -> UiAgentArtifact {
     }
 }
 
-fn m15_goal_record() -> UiGoalRecord {
-    UiGoalRecord {
-        profile_id: Some("coding".into()),
-        goal_id: "goal_01".into(),
-        objective: "finish the review and tests".into(),
-        status: "active".into(),
-        token_budget: 50_000,
-        tokens_used: 3_200,
-        time_used_seconds: 180,
-        created_at_ms: 1_778_870_000_000,
-        updated_at_ms: 1_778_870_030_000,
-    }
-}
-
 fn m15_loop_record(session_id: SessionKey) -> UiLoopRecord {
     UiLoopRecord {
         loop_id: "loop_01".into(),
@@ -2949,27 +2914,6 @@ fn m15_autonomy_notifications_register_methods_and_round_trip() {
                 artifacts: vec![m15_agent_artifact()],
             }),
             methods::AGENT_ARTIFACT_UPDATED,
-        ),
-        (
-            UiNotification::SessionGoalUpdated(SessionGoalUpdatedEvent {
-                session_id: session_id.clone(),
-                profile_id: Some("coding".into()),
-                goal: m15_goal_record(),
-                transition_actor: "user".into(),
-                generation: 0,
-            }),
-            methods::SESSION_GOAL_UPDATED,
-        ),
-        (
-            UiNotification::SessionGoalCleared(SessionGoalClearedEvent {
-                session_id: session_id.clone(),
-                profile_id: Some("coding".into()),
-                cleared: true,
-                goal: None,
-                transition_actor: "user".into(),
-                generation: 0,
-            }),
-            methods::SESSION_GOAL_CLEARED,
         ),
         (
             UiNotification::LoopUpdated(LoopUpdatedEvent {
@@ -4818,26 +4762,6 @@ fn aux_rest_to_ws_v1_methods_are_capability_gated() {
         );
     }
     assert!(with_feature.supports_feature(UI_PROTOCOL_FEATURE_AUXILIARY_REST_TO_WS_V1));
-}
-
-#[test]
-fn autonomy_methods_require_base_and_group_features() {
-    let without_base = UiProtocolCapabilities::for_negotiated_features([
-        UI_PROTOCOL_FEATURE_CODING_GOAL_RUNTIME_V1,
-    ]);
-    assert!(!without_base.supports_feature(UI_PROTOCOL_FEATURE_CODING_GOAL_RUNTIME_V1));
-    assert!(!without_base.supports_method(methods::SESSION_GOAL_SET));
-
-    let base_only =
-        UiProtocolCapabilities::for_negotiated_features([UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1]);
-    assert!(base_only.supports_feature(UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1));
-    assert!(!base_only.supports_method(methods::SESSION_GOAL_SET));
-
-    let with_group = UiProtocolCapabilities::for_negotiated_features([
-        UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1,
-        UI_PROTOCOL_FEATURE_CODING_GOAL_RUNTIME_V1,
-    ]);
-    assert!(with_group.supports_method(methods::SESSION_GOAL_SET));
 }
 
 /// Codex review 2026-05-12 (MEDIUM 2): every M12 Phase D-1
@@ -6968,7 +6892,6 @@ fn monitor_notifications_roundtrip_as_ui_notifications() {
         persistent: false,
         status: "active".into(),
         pause_reason: None,
-        goal_id: None,
         last_fired_at_ms: Some(1_000),
         fires_used: 1,
         expires_at_ms: Some(2_000),

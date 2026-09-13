@@ -3752,8 +3752,6 @@ fn notification_session_id(notification: &UiNotification) -> &SessionKey {
         UiNotification::AgentUpdated(event) => &event.session_id,
         UiNotification::AgentOutputDelta(event) => &event.session_id,
         UiNotification::AgentArtifactUpdated(event) => &event.session_id,
-        UiNotification::SessionGoalUpdated(event) => &event.session_id,
-        UiNotification::SessionGoalCleared(event) => &event.session_id,
         UiNotification::LoopUpdated(event) => &event.session_id,
         UiNotification::LoopFired(event) => &event.session_id,
         UiNotification::LoopCompleted(event) => &event.session_id,

@@ -333,27 +333,10 @@ pub struct ToolContext {
     /// [`SessionScope::workspace`]. See `octos_core::session_scope`
     /// for the contract and migration notes.
     pub session_scope: Option<Arc<SessionScope>>,
-    /// Goal ID this tool call is working under (peer-agent-based goal).
-    /// Populated from `Agent::goal_id` at tool dispatch when the agent runs
-    /// inside a peer staged with a `goal` file. Read by the `goal_*` tool
-    /// family to scope reads/writes to the goal without requiring the model
-    /// to repeat the id on every call.
-    pub goal_id: Option<String>,
-    /// Task ID within the goal (peer-agent-based goal). Populated from
-    /// `Agent::task_id`. May be `None` even when `goal_id` is set (the peer
-    /// is goal-scoped but not task-scoped).
-    pub task_id: Option<String>,
-    /// The session that staged this peer (peer-agent-based goal). Captured
-    /// at peer boot from `peers/<slug>/originator` and threaded through so
-    /// goal-aware tools (`goal_get` by-id, `model_goal_record_peer_finding`)
-    /// can enforce the goal-binding check WITHOUT re-reading the originator
-    /// file on every call. `None` for non-peer sessions.
-    pub originator_session: Option<String>,
     /// Build-cache pool slot this peer's CURRENT turn holds (outer-loop #4,
     /// design docs/build-cache-pool.md §7.4). Populated from
-    /// `Agent::build_cache_slot` at tool dispatch, exactly like
-    /// `goal_id`/`task_id` above. Read by the shell tool to inject
-    /// `CARGO_TARGET_DIR=<slot>/target` + `CARGO_INCREMENTAL=0` PER TOOL
+    /// `Agent::build_cache_slot` at tool dispatch. Read by the shell tool to
+    /// inject `CARGO_TARGET_DIR=<slot>/target` + `CARGO_INCREMENTAL=0` PER TOOL
     /// CALL — never via `std::env::set_var`, because on the serve path a
     /// peer shares the process with the master and every other peer.
     /// `None` for non-peer sessions and a peer turn that failed to acquire
@@ -415,9 +398,6 @@ impl ToolContext {
             parent_session_key: None,
             spawn_depth: 0,
             session_scope: None,
-            goal_id: None,
-            task_id: None,
-            originator_session: None,
             build_cache_slot: None,
             build_cache_usage: None,
             format_after_edit: false,
