@@ -35,12 +35,9 @@ pub mod vision;
 mod cache_manifest;
 pub mod catalog;
 pub mod error;
-pub mod high_level;
-pub mod middleware;
 
 pub mod anthropic;
 pub mod gemini;
-pub mod ominix;
 pub mod openai;
 pub mod openai_responses;
 pub mod openrouter;
@@ -81,14 +78,11 @@ pub use embedding::{EmbeddingProvider, OpenAIEmbedder};
 pub use error::{LlmError, LlmErrorKind, StreamError};
 pub use failover::ProviderChain;
 pub use fallback::FallbackProvider;
-pub use high_level::LlmClient;
 pub use lane::{
     LANE_CONTEXT, Lane, LaneContext, LaneRoutingConfig, current_lane_context,
     default_lane_candidates, resolve_lane_for_topic, topic_prefix, with_lane_context,
 };
 pub use local_context_probe::LocalContextProbe;
-pub use middleware::{LlmMiddleware, MiddlewareStack};
-pub use ominix::{OminixClient, PlatformModels};
 pub use provider::{
     ApiStyle, DEFAULT_EMBEDDING_CONNECT_TIMEOUT_SECS, DEFAULT_EMBEDDING_TIMEOUT_SECS,
     DEFAULT_LLM_CONNECT_TIMEOUT_SECS, DEFAULT_LLM_TIMEOUT_SECS, LaneFailure, LlmProvider,

@@ -736,7 +736,7 @@ mod lane_attribution_helper_tests {
             Some(ApiStyle::AnthropicMessages)
         );
         assert_eq!(
-            crate::middleware::MiddlewareStack::new(inner.clone()).api_style(),
+            inner.api_style(),
             Some(ApiStyle::AnthropicMessages)
         );
         assert_eq!(
