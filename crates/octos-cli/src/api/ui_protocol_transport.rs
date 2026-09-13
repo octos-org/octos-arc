@@ -23687,25 +23687,6 @@ async fn run_standalone_turn(
 
     // Slides session structural guardrail — PR #1265 follow-up.
     //
-    // The gateway path applies the same activate-media + mofa_* retain in
-    // `session_actor.rs` (search for `keep_tool_in_slides_session`). The
-    // WS turn handler was missing the equivalent, so slides topics opened
-    // through the web dashboard kept the full `mofa_*` plugin surface —
-    // weaker fallback models could and did misroute the workflow to
-    // `mofa_list_styles`, `mofa_site`, `mofa_youtube`, etc. instead of
-    // following the prompt's `glob("styles/*.toml")` + `mofa_slides`
-    // discipline (see `prompts/slides_default.txt`). Mirror the gateway
-    // pattern: retain only `mofa_slides` among the `mofa_*` skills.
-    // Non-`mofa_*` tools (file ops, web, shell, send_file, contract
-    // checks) are untouched. RFC-0 (#1289): no `activate("group:media")`
-    // step — deferral was removed, so all enabled tools are already visible.
-    let is_slides_session = session_id
-        .topic()
-        .is_some_and(|topic| topic.starts_with("slides"));
-    if is_slides_session {
-        tool_registry.retain(octos_agent::keep_tool_in_slides_session);
-    }
-
     let workspace_root: Option<PathBuf> = Some(session_runtime.workspace_root.clone());
     let llm_provider: Arc<dyn octos_llm::LlmProvider> = session_runtime.profile.llm.clone();
     let memory_store: Arc<octos_memory::EpisodeStore> = session_runtime.profile.memory.clone();
