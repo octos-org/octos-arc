@@ -38,39 +38,3 @@ pub use session::{
 
 #[cfg(feature = "api")]
 pub use api_channel::{ApiChannel, TaskCancelOutcome, TaskRelaunchOutcome};
-#[cfg(feature = "dingtalk")]
-pub use dingtalk_channel::DingTalkChannel;
-#[cfg(feature = "discord")]
-pub use discord_channel::DiscordChannel;
-#[cfg(feature = "email")]
-pub use email_channel::EmailChannel;
-#[cfg(feature = "feishu")]
-pub use feishu_channel::FeishuChannel;
-#[cfg(feature = "line")]
-pub use line_channel::LineChannel;
-#[cfg(feature = "matrix")]
-pub use matrix_channel::{
-    BotEntry, BotManager, BotRouter, BotVisibility, MatrixChannel, MatrixEventId, MatrixRoomId,
-    MatrixUserId, SWARM_SUPERVISOR_EVENT_SCHEMA_V1, SteeringInput, SwarmHarnessEvent,
-    SwarmSupervisorParams,
-};
-#[cfg(feature = "matrix")]
-pub use matrix_user_channel::{
-    MatrixAutoJoin, MatrixGroupPolicy, MatrixInviteStore, MatrixPendingInvite, MatrixUserChannel,
-};
-#[cfg(feature = "qq-bot")]
-pub use qq_bot_channel::QQBotChannel;
-#[cfg(feature = "slack")]
-pub use slack_channel::SlackChannel;
-#[cfg(feature = "telegram")]
-pub use telegram_channel::TelegramChannel;
-#[cfg(feature = "twilio")]
-pub use twilio_channel::TwilioChannel;
-#[cfg(feature = "wechat")]
-pub use wechat_channel::WeChatChannel;
-#[cfg(feature = "wecom-bot")]
-pub use wecom_bot_channel::WeComBotChannel;
-#[cfg(feature = "wecom")]
-pub use wecom_channel::WeComChannel;
-#[cfg(feature = "whatsapp")]
-pub use whatsapp_channel::WhatsAppChannel;

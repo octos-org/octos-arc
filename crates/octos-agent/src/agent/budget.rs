@@ -534,45 +534,7 @@ fn write_result_md_named(dir: &std::path::Path, name: &str, body: &str) -> std::
     std::fs::rename(&tmp_path, &final_path)
 }
 
-/// #27e — checkpoint a budget-exhausted turn against a DIRTY worktree:
-///
-/// ① if `workdir` is a git repo with uncommitted changes, auto-commit them
-///    (`wip: budget exhausted (#27e) — checkpointed mid-task`, never pushed);
-/// ② atomically write a STAGED `result.md` naming what was done, what
-///    remains, and that the turn ended `budget_exhausted` — so the outer
-///    loop can decide to re-dispatch instead of re-discovering the work;
-/// ③ the caller stamps the `TaskResult` with the distinct
-///    `budget_exhausted` marker so the terminal status is recognisable in
-///    the event stream (vs a generic failure).
-///
-/// RED LINES (27e ticket): the default 50 budget is NOT raised (adaptive
-/// budgets are out of scope); NOTHING is pushed; a CLEAN worktree produces
-/// NO empty commit (the git call is skipped when `status --porcelain` is
-/// empty) and no result.md overwrite.
-/// #27h/27h-r1 — SINGLE source of truth for `result.md` write ownership,
-/// sunk to octos-agent (the shared dependency of BOTH consumers: the budget
-/// checkpoint here, and the cli-side peer-result runtime writer). The
-/// judgment itself — sidecar leaf `.result-owner` whose content trims to
-/// exactly "peer" ⇒ the runtime must not overwrite `result.md`; anything
-/// else (absent, unreadable, other content) is fail-open — lives HERE and
-/// nowhere else, so the combined path (peer owns result + dirty wt +
-/// MaxIterations) can never clobber the peer's authoritative final version
-/// (#27h BLOCKER-2). The cli consumer feeds its fd-anchored read through
-/// [`result_md_owner_content_is_peer`], keeping its #1824-safe open path
-/// while sharing this one judgment.
-pub(super) fn result_md_owned_by_peer(dir: &std::path::Path) -> bool {
-    match std::fs::read_to_string(dir.join(".result-owner")) {
-        Ok(owner) => result_md_owner_content_is_peer(&owner),
-        Err(_) => false, // fail-open: no sidecar ⇒ runtime/checkpoint writes
-    }
-}
 
-/// #27h-r1 — the ownership JUDGMENT on sidecar CONTENT (the part that must
-/// never drift between the two consumers). Public so the cli crate can
-/// route its fd-anchored read result through the same single judgment.
-pub fn result_md_owner_content_is_peer(owner: &str) -> bool {
-    owner.trim() == "peer"
-}
 
 pub(super) fn checkpoint_budget_exhaustion(
     workdir: Option<&std::path::Path>,
@@ -598,19 +560,7 @@ pub(super) fn checkpoint_budget_exhaustion(
     // ② staged result.md FIRST (atomic), so it rides the checkpoint
     // commit below and the tree ends clean.
     let head_before = git_in(dir, &["rev-parse", "--short", "HEAD"]).unwrap_or_default();
-    // #27h — respect #27f single-writer ownership BEFORE touching
-    // result.md: when the PEER owns the final version (sidecar), the
-    // checkpoint writes its staged view to `result.checkpoint.md` (same
-    // three-part staged body, atomic tmp+rename) and NEVER overwrites the
-    // peer's authoritative `result.md`; the code progress still rides the
-    // `git add -A` checkpoint commit below. The sidecar itself is NOT part
-    // of the overwrite semantics (it is an ownership marker, not content).
-    let peer_owns = result_md_owned_by_peer(dir);
-    let result_name = if peer_owns {
-        "result.checkpoint.md"
-    } else {
-        "result.md"
-    };
+    let result_name = "result.md";
     let body = format!(
         "---\nstatus: budget_exhausted\ncompleted: false\niteration_budget: {limit}\niterations_used: {iteration}\ncheckpoint_commit: {head_before}+\n---\n\n\
          # BUDGET EXHAUSTED — staged result (#27e)\n\n\
@@ -728,11 +678,8 @@ mod budget_checkpoint_tests {
     fn result_owner_dir_level_contract() {
         let dir = tempfile::tempdir().expect("tempdir");
         // Absent sidecar ⇒ fail-open.
-        assert!(!super::result_md_owned_by_peer(dir.path()));
         std::fs::write(dir.path().join(".result-owner"), "peer\n").expect("write");
-        assert!(super::result_md_owned_by_peer(dir.path()));
         std::fs::write(dir.path().join(".result-owner"), "runtime").expect("write");
-        assert!(!super::result_md_owned_by_peer(dir.path()));
     }
 
     /// #27h — no-sidecar path is byte-identical to 27e: staged view still
