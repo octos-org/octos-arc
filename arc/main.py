@@ -736,7 +736,7 @@ Requirement {node_id}: {description}
 Acceptance test (ground truth):
 {spec}
 Files (exact): frontend/src/index.html (the page); frontend/package.json = {{"name":"f","scripts":{{"build":"node -e \\"const f=require('fs');f.mkdirSync('dist',{{recursive:true}});for(const n of f.readdirSync('src'))f.copyFileSync('src/'+n,'dist/'+n)\\""}}}}; backend/package.json = {{"name":"b","scripts":{{"start":"node server.js"}}}}; backend/server.js = Node http server on process.env.PORT||{port} serving ../frontend/dist files at / (index.html for /) plus any API routes the requirement needs (in-memory state), 404 for anything else, wrapped in try/catch and process.on('uncaughtException').
-Rules: texts, button names, labels and test ids exactly as in the test; the initial state is literally in the HTML; state lives in the page script unless the requirement says it is persisted; no external resources, no CSS, no comments, no notes. {size_rule}
+Rules: texts, button names, labels and test ids exactly as in the test; the initial state is literally in the HTML; state lives in the page script unless the requirement says it is persisted; no external resources, no CSS, no comments, no notes; every id unique (a label's for= must resolve to its own control). {size_rule}
 """
 
 CODEGEN_SIZE_SMALL = "index.html <= 20 lines, server.js <= 20 lines."
@@ -992,6 +992,7 @@ class Flow:
         self.driver: OctosDriver | None = None
         self.tests_dir: Path | None = None
         self.spec_map: dict = {None: []}
+        self.probe_summaries: dict = {}
         self.aliases: dict[str, str] = {}
         self.runner: AcceptanceRunner | None = None
         self.designs: dict[str, dict] = {}
@@ -1380,11 +1381,12 @@ class Flow:
                     "the served HTML instead of after a fetch), and check the spec's locator against your markup.")
                 log(f"[flow] {node_id}: identical failure twice; switching repairs to tool mode")
             previous_failures = normalized
-            if attempt == 0 and passed < summary.total and self.codegen_mode():
-                # Cloud 91aaecaf31af / 5747e6bcf530: codegen repairs re-emit the same files.
-                # Repairs need tools (inspect the served page, targeted edits).
+            if attempt >= int(os.environ.get("OCTOS_ARC_CODEGEN_REPAIRS", "1")) and passed < summary.total \
+                    and self.codegen_mode():
+                # Cloud 91aaecaf31af / 5747e6bcf530: repeated codegen repairs re-emit the same files.
+                # One cheap codegen repair (failure digest + quoted sources) is allowed; then tools.
                 self.codegen_blocked = True
-                log(f"[flow] {node_id}: codegen first attempt failed; repairs use tool mode")
+                log(f"[flow] {node_id}: codegen attempt {attempt} still failing; repairs use tool mode")
             for line in (failures or "").splitlines():
                 if line.strip().startswith("Observation:"):
                     log(f"[acceptance]   {' '.join(line.strip().split())[:360]}")
@@ -1528,6 +1530,7 @@ class Flow:
                                     tests=self.tests_prompt_for(node_id), smoke=self.smoke_port, port=self.web_port,
                                     performance=self.perf_text(), ui=self.ui_contract(), verify=self.verify_text(total))
         prompt = self.corrections_text() + prompt
+        codegen_prompt = None
         implement_timeout = min(self.node_timeout, self.implement_fraction * node_budget, deadline - time.time())
         if self.codegen_mode():
             compact = CODEGEN_PROMPT.format(node_id=node_id, description=str(node.get("description") or "").strip(),
@@ -1537,6 +1540,7 @@ class Flow:
                 compact = (compact.replace("Files (exact):", "Existing app below; keep everything that works and output "
                                            "every changed file complete. Files (exact):", 1)
                            + inline_sources(self.output_dir, 30000, exts=(".html", ".js")))
+            codegen_prompt = compact
             ok, text = self.codegen_turn(compact, implement_timeout, f"{node_id} implement")
         else:
             ok, text = self.turn(prompt, implement_timeout, f"{node_id} implement")
@@ -1583,6 +1587,10 @@ class Flow:
         self.commit(f"{node_id} (implement): {node.get('name', '')}")
 
         def rebuild_prompt(failures: str) -> str:
+            if self.codegen_mode() and codegen_prompt:
+                return (codegen_prompt + "\nYour previous files (quoted below) failed every test. Failures:\n" + failures
+                        + "\n" + inline_sources(self.output_dir, 30000, exts=(".html", ".js"))
+                        + "Fix the root causes and return every file you change, complete.\n")
             return (prompt + "\nYOUR PREVIOUS ATTEMPT FAILED EVERY ACCEPTANCE TEST — the failures (Feature / where / "
                     "observation / steps):\n" + failures + "\n" + self.sources_text()
                     + "Rewrite the files for this node completely (full write_file for each file, not edits), "
@@ -1614,6 +1622,7 @@ class Flow:
             log(f"[acceptance] probe {node_id}: {summary.passed}/{summary.total} against the existing app")
             if summary.all_passed:
                 out.add(node_id)
+                self.probe_summaries[node_id] = summary  # regression_cycle reuses it
         return out
 
     def regression_cycle(self, node: dict) -> None:
@@ -1626,7 +1635,7 @@ class Flow:
         self.mark("implementation_done", node_id, "carried over from the template application")
         verdict = None
         if self.runner is not None and specs:
-            summary = self.run_specs(specs)
+            summary = self.probe_summaries.pop(node_id, None) or self.run_specs(specs)
             if summary.error:
                 log(f"[acceptance] regression {node_id} infrastructure error: {summary.error[:300]}")
             else:
