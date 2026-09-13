@@ -32,7 +32,7 @@
 
 改动位置：`.github/workflows/arc-linux-release.yml`。
 
-新增唯一的 ARC 专用 `workflow_dispatch` 工作流。它按输入的精确 ref 构建 `x86_64-unknown-linux-gnu` runtime 和 bundled tools，生成 `octos-bundle-x86_64-unknown-linux-gnu.tar.gz`，并在 Release 中上传 bundle SHA-256、`octos` 二进制 SHA-256、源码提交、rustc 和版本信息。工作流只在 `wf-kernel` 合入默认分支后才会被 GitHub 注册并允许 dispatch；当前分支上的 API dispatch 被 GitHub 拒绝（workflow 尚未存在于 default branch），所以本轮没有伪造 Release，也没有回填 `runtime_release`。
+新增唯一的 ARC 专用 `workflow_dispatch` 工作流。它按输入的精确 ref 构建 `x86_64-unknown-linux-gnu` runtime 和 bundled tools，生成 `octos-bundle-x86_64-unknown-linux-gnu.tar.gz`，并在 Release 中上传 bundle SHA-256、`octos` 二进制 SHA-256、源码提交、rustc 和版本信息。工作流已在 `origin/main` 注册并成功运行 `34741413085`，创建了 [v2.0.3-rc.11-arc.2](https://github.com/octos-org/octos-arc/releases/tag/v2.0.3-rc.11-arc.2)。源码提交为 `78394e5032cfe0ed8387c0b226250c229d9fbfa8`，rustc 为 `1.98.0 (88d9e12ae 2026-08-18)`；bundle SHA-256 为 `9b2f8a34831148a4650e9f91b862fec0e0bf1f9ea3bc965573e60f23cd0d4f2d`，`octos` SHA-256 为 `bca911a3690be992da01b0d116ab21064c673d65303aa1b79bc16d22c3a00afb`。下载后使用两份发布的 checksum 文件核验均为 `OK`，并确认归档内 `octos` 是 Linux x86-64 ELF；`arc-runtime-lock.json.runtime_release` 已回填真实值。
 
 ### B2：DeepSeek 费用异常
 

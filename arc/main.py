@@ -312,7 +312,7 @@ def source_listing(output_dir: Path, limit: int = 60) -> str:
 # ---------------------------------------------------------------- octos driver
 
 OCTOS_RELEASE_URL = (
-    "https://github.com/octos-org/octos/releases/download/v2.0.2/"
+    "https://github.com/octos-org/octos-arc/releases/download/v2.0.3-rc.11-arc.2/"
     "octos-bundle-x86_64-unknown-linux-gnu.tar.gz"
 )
 
