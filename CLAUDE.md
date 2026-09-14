@@ -35,7 +35,7 @@ octos is a Rust-native agentic coding runtime. 8-crate workspace, layered:
 ```
 octos-cli  (CLI: clap commands, config loading, config watcher, api/serve, session actor)
     |
-octos-agent  (Agent loop, tool system, sandbox, MCP, compaction, plugins)
+octos-agent  (Agent loop, tool system, sandbox, MCP, compaction, skills loader)
     |          \
 octos-memory   octos-llm  (hybrid search + memory store | LLM providers)
     \           /
@@ -44,12 +44,13 @@ octos-memory   octos-llm  (hybrid search + memory store | LLM providers)
 
 Alongside octos-agent:
 - **octos-bus**: session persistence, cron service, resume policy (the channel fleet was removed)
-- **octos-plugin**: Plugin SDK — manifest parsing, discovery, gating (binary/env/OS checks)
 - **octos-arc**: the `octos arc` competition workflow (drives `octos chat`)
 
-Bundled skills: none in this downstream build (`octos-agent::bundled_app_skills` ships
-empty tables; skill bootstrap is a no-op). `octos skills install` can install skills at
-runtime; the built-in `cron` skill is the notable exception that ships in the binary.
+Skills are pure SKILL.md prompt injections (`octos-agent/src/skills.rs`: `SkillsLoader`
+parses frontmatter + body, builds an XML summary for the system prompt and injects
+marked content). The binary plugin protocol (`octos-plugin` crate + plugin tools/
+skill actions/multi-user onboarding) was retired in the round-4 slimming; `octos
+skills install` is file-copy + git only.
 
 Commands: chat, arc, cache (status/gc/gate), config (show/path), init, serve (`#[cfg(feature = "api")]`), clean, completions, skills (list/install/remove), auth (login/logout/status).
 
@@ -58,11 +59,11 @@ Runtime modes:
 - `octos serve --stdio --solo` — NDJSON JSON-RPC transport over stdin/stdout; this is the
   ARC bench driver (one process per session, no HTTP)
 - `octos serve` (HTTP) — WS UI Protocol v1 at `/api/ui-protocol/ws` plus a small REST
-  surface (~20 endpoints: uploads `/api/upload`, file serving `/api/files*`, task control
-  `/api/tasks/{id}/cancel|restart-from-node`, provider/usage diagnostics `/api/my/*`,
-  `/metrics`, `/api/version`, `/health`, session-ingress WS). The legacy chat SSE/REST
-  transports and the ~91-endpoint dashboard surface were retired; session/status reads
-  moved to WS RPC methods.
+  surface (~12 endpoints: uploads `/api/upload`, file serving `/api/files*`, task control
+  `/api/tasks/{id}/cancel|restart-from-node`, `/metrics`, `/api/version`, `/health`,
+  session-ingress WS). Legacy chat SSE/REST, the dashboard, provider/usage diagnostics,
+  the binary plugin protocol, and the multi-user identity system were retired;
+  session/status reads moved to WS RPC methods.
 - `octos arc` — competition workflow that drives `octos chat` end to end
 
 Auth module (`octos-cli/src/auth/`): OAuth PKCE + device code for OpenAI, paste-token for others. Stored in `~/.octos/auth.json`. `config.rs` checks auth store before env vars.
@@ -97,11 +98,13 @@ Token-aware message compaction: estimates tokens, strips tool arguments, summari
 
 `LlmProvider` trait with `chat()` method. Four native providers: `AnthropicProvider`, `OpenAIProvider`, `GeminiProvider`, `OpenRouterProvider`. OpenAI-compatible families via `with_base_url()`, registered in `registry/` (one module per family + one line in `ALL`; `model_catalog.json` is the SSOT for model names/defaults and gates onboarding visibility). The unified `local` family (aliases: llamacpp/llama.cpp/llama-server/lmstudio/openai-compatible) covers any local OpenAI-compatible server — keyless, zero-config default `http://127.0.0.1:8080/v1`; `local_discovery.rs` holds candidate ports + `/v1/models` parsing (surfaced through the local context probe at serve/chat startup). 3-layer failover: `RetryProvider` (exponential backoff on 429/5xx) → `ProviderChain` → `AdaptiveRouter` (hedge racing, lane scoring, circuit breakers).
 
-### Plugin System (`octos-agent/src/plugins/`, `octos-plugin/`)
+### Skills (`octos-agent/src/skills.rs`)
 
-Skills are self-contained binaries with `manifest.json` declarations. Binary protocol: `./skill_binary <tool_name>` with JSON on stdin, JSON `{success, output, files_to_send}` on stdout. Discovery scans directories with precedence rules. Gating checks binary existence, env, and OS requirements.
-
-**spawn_only tools**: Manifest field `spawn_only: true` marks tools for background execution. Auto-intercepted in the execution loop — wrapped in `tokio::spawn`, returns immediately. No LLM cooperation needed. SKILL.md auto-injected as system prompt for skills with spawn_only tools.
+SKILL.md frontmatter + body; `SkillsLoader` scans `<data_dir>/skills/` (+ builtin),
+filters via `SkillFilter`, injects the XML summary + `always: true` content into the
+system prompt. The binary plugin protocol (manifest.json executables, skill actions,
+spawn_only plugin tools) was retired in round 4 — the spawn family (spawn/spawn_agent
+etc., `group:sessions`) remains the one background-subagent mechanism.
 
 ### Memory (`octos-memory/src/`)
 
@@ -152,6 +155,5 @@ All code changes follow the RED -> GREEN -> REFACTOR cycle.
 - Shared SSRF protection (`tools/ssrf.rs`): blocks private IPs, IPv6 ULA/link-local, IPv4-mapped/compatible addresses
 - Symlink-safe file I/O via `O_NOFOLLOW` on Unix (eliminates TOCTOU races); symlink-check fallback on Windows
 - Cross-platform: shell via `cmd /C` on Windows, `sh -c` on Unix; process kill via `taskkill` on Windows, `kill` signals on Unix; `where` on Windows, `which` on Unix for binary discovery
-- Plugin skills use binary protocol: `./binary <tool_name>` with JSON stdin/stdout
 - `deny(unsafe_code)` workspace-wide lint
 - API server (`octos serve`) binds to 127.0.0.1 by default (`--host` to override)
