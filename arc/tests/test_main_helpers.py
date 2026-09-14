@@ -338,3 +338,22 @@ class CostGuardTests(unittest.TestCase):
         self.assertFalse(flow.wound_down())
         flow.llm_proxy.total_tokens = 75_000_000
         self.assertTrue(flow.wound_down())
+
+
+class ProbePolicyTests(unittest.TestCase):
+    def test_all_specs_tiny_requires_every_spec_node_small(self):
+        import argparse, tempfile
+        from pathlib import Path
+        root = Path(tempfile.mkdtemp())
+        (root / "a.spec.ts").write_text("x" * 400); (root / "b.spec.ts").write_text("y" * 4000)
+        flow = m.Flow(argparse.Namespace(web_port=1), root, root)
+        flow.tests_dir = root
+        flow.spec_map = {"REQ-1": ["a.spec.ts"], "REQ-2": ["b.spec.ts"], "REQ-3": [], None: []}
+        self.assertFalse(flow.all_specs_tiny(["REQ-1", "REQ-2", "REQ-3"]))
+        self.assertTrue(flow.all_specs_tiny(["REQ-1", "REQ-3"]))
+        self.assertFalse(flow.all_specs_tiny(["REQ-3"]))
+
+    def test_looks_like_markup_accepts_fragments(self):
+        self.assertTrue(m.looks_like_markup('<div data-testid="count">0</div><button>Increment</button><script>1</script>'))
+        self.assertTrue(m.looks_like_markup("<!DOCTYPE html><html></html>"))
+        self.assertFalse(m.looks_like_markup("dry run: no model call; nothing written."))

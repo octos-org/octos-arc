@@ -629,3 +629,18 @@ Guard defaults (derived once the tree is known; explicit env overrides; 0 = off)
 Kept as generic: repair rounds 3 for >2-node trees (keep barely repaired), final-suite workers 450 MiB each
 (→4 in 2 GiB, matching the grader), per-node reap of leftover node processes. Dropped: raising
 `OCTOS_MIN_REPAIR_SECONDS` (1 CPU did not slow node cycles: 282 s/node observed, budget 1500 s).
+
+## Round 34 (phase 3 §1.2) — probe policy by tier; body-only tiny reply
+
+- The endpoint probe moved from `main()` into the flow, after the spec map is known: tiny-tier tasks (every
+  node with specs below `OCTOS_ARC_TINY_SPEC_CHARS`) skip it entirely — the first real request is the probe
+  and a failure there surfaces through the normal turn error path; other tasks keep the token-free
+  GET /models probe with the `thinking: disabled`, `max_tokens: 1` fallback (round 33). Dry runs skip it.
+- Tiny reply is page markup only (no doctype/head/CSS/comments/blank lines); the harness injects the charset
+  head (`ensure_charset`) and a fragment is accepted as the page (`looks_like_markup`).
+
+Offline estimate (chars ÷ 3.8 prose, ÷ 3.3 code): counter prompt 657 chars ≈ 173 tokens + 6 system, minimal
+fragment ≈ 80–110 → ≈ 260–290 total worst case, ≈ 240 typical; dice 421 chars ≈ 111 + 6, reply ≈ 70–90 →
+≈ 190–210. At the fitted ¥2/M in, ¥7.5/M out: counter ≈ ¥0.0011–0.0012, dice ≈ ¥0.0009. Dry run traverses
+tiny → spec check → compact fallback. Generality: tier by spec size only; probe policy by tier; no task text.
+Cloud: 未评测 (next gap). Unit tests 97 OK.

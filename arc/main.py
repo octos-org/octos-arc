@@ -626,7 +626,7 @@ class DryRunDriver:
         time.sleep(0.05)
         if "<<<FILE" in prompt:
             return True, DRYRUN_FILES
-        if "index.html only" in prompt:
+        if "page markup only" in prompt:
             return True, "<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head><body><main>dry run</main></body></html>"
         return True, "dry run: no model call; nothing written."
 
@@ -826,7 +826,7 @@ TINY_SYSTEM = "Reply with HTML only."
 TINY_PROMPT = """\
 Playwright test the page at / must pass:
 {spec}
-Reply with the complete index.html only: minimal markup, one inline <script>, no CSS, no comments, no blank lines.
+Reply with the page markup only: minimal elements + one inline <script>; no doctype, head, CSS, comments or blank lines.
 """
 
 TINY_PROMPT_EVOLUTION = """\
@@ -834,7 +834,7 @@ Current index.html:
 {page}
 Additional Playwright test it must also pass (keep existing behaviour):
 {spec}
-Reply with the complete updated index.html only: minimal markup, one inline <script>, no CSS, no comments, no blank lines.
+Reply with the complete updated page markup only: minimal elements + one inline <script>; no doctype, head, CSS, comments or blank lines.
 """
 
 TINY_SERVER_JS = """\
@@ -853,6 +853,11 @@ http.createServer(handler).listen(process.env.PORT || {port});
 if (process.env.ARC_EXTRA_PORTS !== '0') for (const p of {extra_ports}) if (String(p) !== String(process.env.PORT || {port})) http.createServer(handler).listen(p);
 process.on('uncaughtException', () => {{}}); process.on('unhandledRejection', () => {{}});
 """
+
+
+def looks_like_markup(text: str) -> bool:
+    """A bare page or page fragment (the tiny tier asks for markup without doctype/head)."""
+    return bool(re.search(r"<(html|body|main|div|section|form|button|script|span|p|h[1-6]|input|label|ul|table)\b", text, re.IGNORECASE))
 
 
 def strip_code_fences(text: str) -> str:
@@ -1268,6 +1273,22 @@ class Flow:
                 and not getattr(self, "codegen_blocked", False)
                 and getattr(self, "n_nodes", 99) <= int(os.environ.get("OCTOS_ARC_CODEGEN_MAX_NODES", "2")))
 
+    def all_specs_tiny(self, node_ids: list[str]) -> bool:
+        """True when every node that has specs falls in the tiny tier (and at least one does)."""
+        sizes = [len(self.spec_bodies(n)) for n in node_ids if self.spec_map.get(n)]
+        return bool(sizes) and all(self.tiny_mode(n) for n in sizes)
+
+    def maybe_probe(self, node_ids: list[str]) -> None:
+        """Endpoint probe policy: none in dry runs; none when the whole task is tiny-tier
+        (the first real request is the probe — a failure there is diagnosed by the normal
+        turn error path); otherwise the token-free GET /models probe with a minimal fallback."""
+        if os.environ.get("OCTOS_ARC_DRYRUN") == "1":
+            log("[probe] skipped (OCTOS_ARC_DRYRUN=1)")
+        elif self.all_specs_tiny(node_ids):
+            log("[probe] skipped (tiny-tier task: the first real request doubles as the probe)")
+        else:
+            probe_endpoint()
+
     def tiny_mode(self, spec_chars: int) -> bool:
         threshold = int(os.environ.get("OCTOS_ARC_TINY_SPEC_CHARS", "1500"))
         return os.environ.get("OCTOS_ARC_TINY", "1") != "0" and 0 < spec_chars < threshold
@@ -1331,7 +1352,7 @@ class Flow:
         files = parse_file_blocks(text) if ok else {}
         if ok and not files and raw_target:
             html = strip_code_fences(text)
-            if re.search(r"<html|<!doctype", html, re.IGNORECASE):
+            if looks_like_markup(html):
                 files = {raw_target: html}
         if files:
             written = write_files(self.output_dir, files)
@@ -2103,6 +2124,7 @@ class Flow:
             else:
                 log("[tests] no acceptance specs found; building from requirement text only")
 
+            self.maybe_probe(node_ids)
             self.runtime.git.ensure_repo()
             self.setup_playwright()
             if self.evolution and self.runner is not None:
@@ -2342,11 +2364,6 @@ def main() -> int:
     print(f"[env] ARCBENCH_TEMPLATE_DIR={os.environ.get('ARCBENCH_TEMPLATE_DIR', '<unset>')}", flush=True)
     print(f"[env] ARCBENCH_TASK_DIR={os.environ.get('ARCBENCH_TASK_DIR', '<unset>')}", flush=True)
     print(f"[env] argv requirement_path={args.requirement_path}", flush=True)
-    if os.environ.get("OCTOS_ARC_DRYRUN") == "1":
-        log("[probe] skipped (OCTOS_ARC_DRYRUN=1)")
-    else:
-        probe_endpoint()
-
     req_src = Path(args.requirement_path).resolve()
     if args.output_dir:
         output_dir = Path(args.output_dir).resolve()
