@@ -227,3 +227,16 @@ class CodegenReasoningTests(unittest.TestCase):
             self.assertIsNone(flow.codegen_reasoning(1200))
         finally:
             del os.environ["OCTOS_ARC_REASONING"]
+
+
+class DryRunDriverTests(unittest.TestCase):
+    def test_should_return_parseable_file_blocks_for_codegen_prompts(self):
+        from codegen import parse_file_blocks
+        d = m.DryRunDriver()
+        ok, text = d.run("Requirement ...\n<<<FILE relative/path>>>\ncontents\n<<<END FILE>>>", 10)
+        self.assertTrue(ok)
+        files = parse_file_blocks(text)
+        self.assertEqual(sorted(files), ["backend/server.js", "frontend/src/index.html"])
+        ok, text = d.run("Implement the node with tools.", 10)
+        self.assertTrue(ok); self.assertIn("dry run", text)
+        self.assertEqual(d.turns, 2)

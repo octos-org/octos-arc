@@ -552,3 +552,17 @@ pass 0/1).
 
 Generality check: decision derived from probe results only; thresholds from spec size; no task/template
 names. Cloud: 未评测.
+
+## Round 31 — OCTOS_ARC_DRYRUN=1 (structural parity runs for workflow D)
+
+`OCTOS_ARC_DRYRUN=1` replaces the kernel driver with `DryRunDriver`: no kernel, no model, the endpoint
+preflight is skipped. Every turn returns a fixed reply (a placeholder index.html + static server as file
+blocks for codegen prompts, a sentence for tool-mode prompts), so the whole flow runs end to end — tree order,
+skeleton folding, mode selection, Evolution probe/discard, per-node acceptance and repair stops
+(rewrite-on-zero, identical failure, no improvement), source snapshots, final grader-like suite (port
+contract, robustness probe), rehearsal, traceability/runner events, usage summary. Real-path behaviour is
+untouched (the switch only selects the driver and skips the preflight).
+
+Verified locally with a dummy key: smoke--counter (1 node) and ticket-booking (2 nodes, `OCTOS_REPAIR_ROUNDS=1`)
+both complete with exit 0; TB emits 68 runner events (37 signal / 29 requirement_state / 2 runner_state) and
+its rehearsal reports the PORT CONTRACT violation of the placeholder server, as intended.

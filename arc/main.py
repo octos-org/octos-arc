@@ -593,6 +593,49 @@ def run_octos(octos_bin: str, cwd: Path, prompt: str, env: dict, data_dir: Path,
         return True, out[-4000:]
 
 
+DRYRUN_FILES = """\
+<<<FILE frontend/src/index.html>>>
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>dry run</title></head>
+<body><!--NAV--><main data-testid="dryrun">dry run placeholder</main></body></html>
+<<<END FILE>>>
+<<<FILE backend/server.js>>>
+const http = require('http'); const fs = require('fs'); const path = require('path');
+const dist = path.join(__dirname, '..', 'frontend', 'dist');
+const handler = (req, res) => { try {
+  const file = path.join(dist, req.url === '/' ? 'index.html' : req.url.split('?')[0]);
+  if (!file.startsWith(dist) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) { res.writeHead(404); return res.end('not found'); }
+  res.writeHead(200, {'Content-Type': 'text/html; charset=utf-8'}); res.end(fs.readFileSync(file));
+} catch (e) { res.writeHead(500); res.end('error'); } };
+http.createServer(handler).listen(process.env.PORT || 3000);
+process.on('uncaughtException', () => {});
+<<<END FILE>>>
+"""
+
+
+class DryRunDriver:
+    """OCTOS_ARC_DRYRUN=1: no kernel, no model. Every turn returns a fixed reply
+    (file blocks for codegen prompts, a sentence otherwise) so the whole flow —
+    tree order, mode selection, probes, acceptance, repair/budget logic, events —
+    runs end to end for structural parity checks. Real-path behaviour is untouched."""
+
+    def __init__(self) -> None:
+        self.hooks: list = []
+        self.turns = 0
+
+    def run(self, prompt: str, timeout: int, monitor: TurnMonitor | None = None) -> tuple[bool, str]:
+        self.turns += 1
+        time.sleep(0.05)
+        if "<<<FILE" in prompt:
+            return True, DRYRUN_FILES
+        return True, "dry run: no model call; nothing written."
+
+    def end_scope(self, *args, **kwargs) -> None:
+        pass
+
+    def close(self, *args, **kwargs) -> None:
+        pass
+
+
 class OctosDriver:
     """stdio UI-protocol session (default) or one-shot chat turns.
 
@@ -1938,7 +1981,12 @@ class Flow:
                 log(f"[flow] {'evolution' if self.evolution else 'fresh build'} after probing the existing app: "
                     f"unchanged {sorted(unchanged)}, to implement {[i for i in node_ids if i not in unchanged]}")
 
-            octos_bin = find_octos()
+            dry_run = os.environ.get("OCTOS_ARC_DRYRUN") == "1"
+            if dry_run:
+                octos_bin = "(dry run: no kernel)"
+                log("[octos] OCTOS_ARC_DRYRUN=1: fixed placeholder replies, no model calls")
+            else:
+                octos_bin = find_octos()
             log(f"[octos] binary {octos_bin}")
             data_dir = Path(tempfile.mkdtemp(prefix="octos-data-"))
             protected = [p for p in (self.tests_dir, self.req_dir) if p and p.is_dir()]
@@ -1948,9 +1996,9 @@ class Flow:
             write_profile_defaults(data_dir, config_dir, protected_hooks(protected))
             self.snapshot_protected()
             env["PORT"] = str(self.smoke_port)  # a bare `npm start` inside a turn must not hit the grading port
-            self.driver = OctosDriver(octos_bin, self.output_dir, env, data_dir,
-                                      int(os.environ.get("OCTOS_MAX_ITERATIONS", "500")),
-                                      events_log=self.output_dir / ".arc" / "octos-events.jsonl")
+            self.driver = DryRunDriver() if dry_run else OctosDriver(
+                octos_bin, self.output_dir, env, data_dir, int(os.environ.get("OCTOS_MAX_ITERATIONS", "500")),
+                events_log=self.output_dir / ".arc" / "octos-events.jsonl")
             self.driver.hooks = protected_hooks(protected)
             threading.Thread(target=_port_watchdog, args=(self.web_port, self.output_dir, watchdog_stop),
                              daemon=True).start()
@@ -2117,7 +2165,10 @@ def main() -> int:
     print(f"[env] ARCBENCH_TEMPLATE_DIR={os.environ.get('ARCBENCH_TEMPLATE_DIR', '<unset>')}", flush=True)
     print(f"[env] ARCBENCH_TASK_DIR={os.environ.get('ARCBENCH_TASK_DIR', '<unset>')}", flush=True)
     print(f"[env] argv requirement_path={args.requirement_path}", flush=True)
-    probe_endpoint()
+    if os.environ.get("OCTOS_ARC_DRYRUN") == "1":
+        log("[probe] skipped (OCTOS_ARC_DRYRUN=1)")
+    else:
+        probe_endpoint()
 
     req_src = Path(args.requirement_path).resolve()
     if args.output_dir:
