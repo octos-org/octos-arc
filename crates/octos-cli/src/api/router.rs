@@ -310,21 +310,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/health", get(handlers::health));
 
     // Unauthenticated routes (metrics + internal ingress + version)
-    //
-    // Issue #994 (P0 sev2 cross-tenant data read): `/api/preview/...`
-    // used to live here. It now sits on the authenticated `chat_api`
-    // group above — the handler asserts identity-owns-profile +
-    // session-belongs-to-profile, so the URL tuple is no longer
-    // sufficient to read another tenant's built site.
-    //
-    // Issue #1001 follow-up: the signed-URL preview route
-    // `/api/preview-signed/{token}/{*path}` lives here so the SPA
-    // iframe can GET it without `Authorization: Bearer ...`. The
-    // token itself is the credential — `handlers::serve_signed_preview`
-    // looks the token up in `AppState.preview_tokens`, re-validates the
-    // issuer bearer, and re-checks identity ↔ profile authorisation
-    // before serving content. Daemon restart drops the token cache and
-    // every outstanding preview link invalidates with it.
     let public = Router::new()
         .merge(metrics_route)
         .route(

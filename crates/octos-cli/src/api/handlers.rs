@@ -2057,7 +2057,7 @@ fn modified_rfc3339(meta: &std::fs::Metadata) -> String {
         .unwrap_or_default()
 }
 
-/// GET /api/files/list?dirs=research,slides,skill-output&session_id=... — list files in profile content directories.
+/// GET /api/files/list?dirs=<comma-separated>&session_id=... — list files in profile content directories.
 fn should_skip_listing_dir(dir_name: &str, include_build: bool) -> bool {
     let lower = dir_name.to_ascii_lowercase();
     lower.starts_with('.')
@@ -2081,7 +2081,7 @@ pub async fn list_content_files(
     let dirs_param = params
         .get("dirs")
         .cloned()
-        .unwrap_or_else(|| "research,slides,skill-output".to_string());
+        .unwrap_or_else(|| "skill-output".to_string());
     let requested_dirs: Vec<String> = dirs_param
         .split(',')
         .map(|s| s.trim())
@@ -2194,7 +2194,7 @@ pub async fn list_content_files(
         }
         if lower.contains("-ref.") {
             return false;
-        } // mofa reference images
+        }
         // Only keep meaningful output extensions
         matches!(
             lower.rsplit('.').next().unwrap_or(""),
@@ -2380,10 +2380,6 @@ pub struct StatusResponse {
     pub provider: String,
     pub uptime_secs: i64,
     pub agent_configured: bool,
-    /// Operator-configured public base domain (via `config.base_domain` /
-    /// `OCTOS_BASE_DOMAIN`). Empty when unconfigured — there is no
-    /// fleet-default domain anymore.
-    pub base_domain: String,
 }
 
 // Helper for `ui_protocol_transport::handle_system_status_get` (M12 Phase D-5).
@@ -2400,19 +2396,17 @@ pub async fn status(State(state): State<Arc<AppState>>) -> Json<StatusResponse> 
         Some(rt) => (rt.primary_model_id.clone(), rt.provider_name.clone()),
         None => ("none".to_string(), "none".to_string()),
     };
-    let base_domain = state.base_domain.clone().unwrap_or_default();
     Json(StatusResponse {
         version: env!("CARGO_PKG_VERSION").to_string(),
         model,
         provider,
         uptime_secs: uptime.num_seconds(),
         agent_configured: main_runtime.is_some() || !state.profiles.is_empty(),
-        base_domain,
     })
 }
 
 /// GET /api/version — public version endpoint (no auth required).
-pub async fn version(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+pub async fn version() -> Json<serde_json::Value> {
     let version = env!("CARGO_PKG_VERSION");
     let git_hash = option_env!("OCTOS_GIT_HASH").unwrap_or("");
     let build_date = option_env!("OCTOS_BUILD_DATE").unwrap_or("");
@@ -2425,7 +2419,6 @@ pub async fn version(State(state): State<Arc<AppState>>) -> Json<serde_json::Val
         "service": "octos",
         "version": full,
         "build_date": build_date,
-        "tunnel_domain": state.tunnel_domain,
     }))
 }
 
@@ -2444,30 +2437,7 @@ pub async fn health() -> Json<serde_json::Value> {
         "version": full,
     }))
 }
-
-// ───────────────────────────────────────────────────────────────────────────
-//  Issue #1001 follow-up: signed-URL preview endpoint.
-//
-//  PR #1001 required `Authorization: Bearer ...` on
-//  `/api/preview/{profile_id}/{session_id}/{site_slug}/{*path}`. The SPA's
-//  `<iframe src=/api/preview/...>` cannot inject headers, so the iframe
-//  401-loops after PR #1001 landed.
-//
-//  Codex design: mint a 256-bit random token via
-//  `POST /api/my/preview/sign`, store a server-side grant
-//  `{issuer_bearer, identity_snapshot, profile_id, session_id, site_slug,
-//  expires_at}` in `AppState.preview_tokens`, and serve the preview via
-//  PUBLIC route `GET /api/preview-signed/{token}/{*path}`. The token IS the
-//  auth credential.
-//
-//  Revocation: `serve_signed_preview` re-resolves the issuer bearer on
-//  every request — logout / session-delete invalidate naturally because
-//  `resolve_identity` will return `None` for a revoked bearer. Daemon
-//  restart drops the in-memory `PreviewTokens` cache, invalidating every
-//  outstanding grant.
-//
-//  See `crates/octos-cli/src/api/preview_tokens.rs` for full design
-//  rationale on the token-cache module itself.#[cfg(test)]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -2622,7 +2592,6 @@ mod tests {
             provider: "openai".into(),
             uptime_secs: 120,
             agent_configured: true,
-            base_domain: "bot.example.com".into(),
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["version"], "0.1.0");
@@ -2630,29 +2599,6 @@ mod tests {
         assert_eq!(json["provider"], "openai");
         assert_eq!(json["uptime_secs"], 120);
         assert_eq!(json["agent_configured"], true);
-        assert_eq!(json["base_domain"], "bot.example.com");
-    }
-
-    #[tokio::test]
-    async fn status_returns_configured_base_domain() {
-        let state = Arc::new(crate::api::AppState {
-            base_domain: Some("bot.ominix.io".into()),
-            ..crate::api::AppState::empty_for_tests()
-        });
-        let resp = status(State(state)).await;
-        assert_eq!(resp.0.base_domain, "bot.ominix.io");
-    }
-
-    #[tokio::test]
-    async fn status_defaults_base_domain_when_unconfigured() {
-        let state = Arc::new(crate::api::AppState {
-            base_domain: None,
-            ..crate::api::AppState::empty_for_tests()
-        });
-        let resp = status(State(state)).await;
-        // No fleet-default domain: unconfigured deployments surface an empty
-        // `base_domain` instead of a historical default.
-        assert_eq!(resp.0.base_domain, "");
     }
 
     #[test]

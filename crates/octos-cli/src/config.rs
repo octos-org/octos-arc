@@ -9,14 +9,6 @@ use serde::{Deserialize, Serialize};
 const CURRENT_CONFIG_VERSION: u32 = 1;
 
 /// Deployment mode determines how octos serve behaves.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum DeploymentMode {
-    /// Standalone install.
-    #[default]
-    Local,
-}
-
 /// LLM provider configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Config {
@@ -191,42 +183,6 @@ pub struct Config {
     /// voice messages and auto-TTS replies for voice conversations.
     #[serde(default)]
     pub voice: Option<VoiceConfig>,
-
-    /// Deployment mode. Only `local` (standalone) deployments exist.
-    #[serde(default)]
-    pub mode: DeploymentMode,
-
-    /// Tunnel domain for cloud-host or tenant tunnel setups (e.g. "octos-cloud.org").
-    /// Also read from TUNNEL_DOMAIN env var.
-    #[serde(default)]
-    pub tunnel_domain: Option<String>,
-
-    /// Public-facing base domain each mini serves profiles under
-    /// (e.g. `"crew.ominix.io"`, `"bot.ominix.io"`, `"ocean.ominix.io"`).
-    ///
-    /// Used to compose CORS allowlist entries and surface preview URLs
-    /// in the admin dashboard. When `None` the server defaults to
-    /// `"crew.ominix.io"` for backward compatibility. Also read from
-    /// `OCTOS_BASE_DOMAIN` env var, which takes precedence over the
-    /// value in `config.json` when both are set.
-    #[serde(default)]
-    pub base_domain: Option<String>,
-
-    /// frps server address for cloud/tenant mode (e.g. "163.192.33.32").
-    /// Also read from FRPS_SERVER env var.
-    #[serde(default)]
-    pub frps_server: Option<String>,
-
-    /// Enable the admin shell endpoint (POST /api/admin/shell).
-    /// Default: false. Only enable for development/debugging.
-    /// A leaked admin token with this enabled grants full server access.
-    #[serde(default)]
-    pub allow_admin_shell: bool,
-
-    /// Monitor configuration for watchdog auto-restart and alerts.
-    #[cfg(feature = "api")]
-    #[serde(default)]
-    pub monitor: Option<MonitorConfig>,
 
     /// Credential pool configuration (M6.5, F-005). Named pool of API
     /// keys / OAuth tokens with persistent cooldowns and rotation
@@ -1180,37 +1136,6 @@ fn default_weight_priority() -> f64 {
 }
 fn default_weight_cost() -> f64 {
     0.2
-}
-
-/// Monitor configuration for watchdog auto-restart and alerts.
-#[cfg(feature = "api")]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MonitorConfig {
-    /// Enable proactive alerts (default: true).
-    #[serde(default = "monitor_default_true")]
-    pub alerts_enabled: bool,
-    /// Enable watchdog auto-restart (default: true).
-    #[serde(default = "monitor_default_true")]
-    pub watchdog_enabled: bool,
-    /// Health check interval in seconds (default: 60).
-    #[serde(default = "monitor_default_health_interval")]
-    pub health_check_interval_secs: u64,
-    /// Max auto-restart attempts before giving up (default: 3).
-    #[serde(default = "monitor_default_max_restart")]
-    pub max_restart_attempts: u32,
-}
-
-#[cfg(feature = "api")]
-fn monitor_default_true() -> bool {
-    true
-}
-#[cfg(feature = "api")]
-fn monitor_default_health_interval() -> u64 {
-    60
-}
-#[cfg(feature = "api")]
-fn monitor_default_max_restart() -> u32 {
-    3
 }
 
 impl Config {
@@ -2893,13 +2818,6 @@ mod tests {
         assert!(config.format_after_edit);
     }
 
-    #[test]
-    fn should_deserialize_base_domain_from_config_json() {
-        let json = r#"{"base_domain": "ocean.ominix.io"}"#;
-        let config: Config = serde_json::from_str(json).unwrap();
-        assert_eq!(config.base_domain.as_deref(), Some("ocean.ominix.io"));
-    }
-
     /// Section A of the per-profile-skills migration: the legacy HOME-rooted
     /// globals (`~/.octos/skills`, `~/.octos/plugins`) MUST NOT appear in the
     /// scan list anymore. Installs live under `<data_dir>/skills/` for
@@ -3003,16 +2921,6 @@ mod tests {
             scan.contains(&project_skills),
             "`<octos_home>/skills` must still be scanned; got: {scan:?}"
         );
-    }
-
-    #[test]
-    fn should_default_base_domain_to_none_when_absent() {
-        // Backward compat: existing configs without `base_domain` must
-        // deserialize to `None` so read sites fall back to the legacy
-        // `crew.ominix.io` default.
-        let json = r#"{"provider": "anthropic"}"#;
-        let config: Config = serde_json::from_str(json).unwrap();
-        assert!(config.base_domain.is_none());
     }
 
     #[test]

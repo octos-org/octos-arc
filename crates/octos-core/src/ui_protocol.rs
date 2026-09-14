@@ -243,7 +243,6 @@ pub const UI_PROTOCOL_FEATURE_HARNESS_TASK_SUPERVISION_INSPECTION_V1: &str =
 /// `agent/artifact/list`, `agent/artifact/read`, `agent/artifact/updated`).
 /// The canonical `task/artifact/*` methods are gated on this flag; legacy
 /// `agent/artifact/*` aliases remain gated on agent control.
-pub const UI_PROTOCOL_FEATURE_HARNESS_TASK_ARTIFACTS_V1: &str = "harness.task_artifacts.v1";
 
 /// Feature flag for UPCR-2026-023 structured `AskUserQuestion` mid-turn
 /// user questions. Gates the `user_question/respond` command, the
@@ -289,15 +288,6 @@ pub const UI_PROTOCOL_FEATURE_TURN_STEER_DROPPED_V1: &str = "event.turn_steer_dr
 /// on the legacy `tool/completed` `structured_metadata` path.
 pub const UI_PROTOCOL_FEATURE_PLAN_TODOS_V1: &str = "plan.todos.v1";
 
-/// Smart-home bridge control (self-hosted/LAN bridge only). Gates
-/// `smart_home/status.get`, `smart_home/device.list`,
-/// `smart_home/device.command`, `smart_home/camera.stream_start`, and
-/// `smart_home/camera.stream_stop`. Device control/state moved server-side
-/// so the profile's bridge credentials never reach the browser; camera video
-/// itself still streams directly browser-to-bridge (these methods only
-/// return the playback URL).
-pub const UI_PROTOCOL_FEATURE_SMART_HOME_V1: &str = "smart_home.v1";
-
 /// Server-known feature registry. Used by
 /// [`UiProtocolCapabilities::for_negotiated_features`] (UPCR-2026-007) to
 /// intersect a client's `X-Octos-Ui-Features` request with the names the
@@ -325,13 +315,11 @@ pub const UI_PROTOCOL_KNOWN_FEATURES: &[&str] = &[
     UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1,
     UI_PROTOCOL_FEATURE_CONTEXT_SEMANTIC_CACHE_V1,
     UI_PROTOCOL_FEATURE_HARNESS_TASK_SUPERVISION_INSPECTION_V1,
-    UI_PROTOCOL_FEATURE_HARNESS_TASK_ARTIFACTS_V1,
     UI_PROTOCOL_FEATURE_USER_QUESTION_V1,
     UI_PROTOCOL_FEATURE_VOICE_AUDIO_V1,
     UI_PROTOCOL_FEATURE_PLAN_TODOS_V1,
     UI_PROTOCOL_FEATURE_BACKGROUND_ACTIVITY_V1,
     UI_PROTOCOL_FEATURE_TURN_STEER_DROPPED_V1,
-    UI_PROTOCOL_FEATURE_SMART_HOME_V1,
 ];
 
 /// Returns the feature flag that gates `method` per spec § 7 capability
@@ -348,9 +336,6 @@ fn method_capability_gate(method: &str) -> Option<&'static str> {
     match method {
         methods::TASK_LIST | methods::TASK_CANCEL | methods::TASK_RESTART_FROM_NODE => {
             Some(UI_PROTOCOL_FEATURE_HARNESS_TASK_CONTROL_V1)
-        }
-        methods::TASK_ARTIFACT_LIST | methods::TASK_ARTIFACT_READ => {
-            Some(UI_PROTOCOL_FEATURE_HARNESS_TASK_ARTIFACTS_V1)
         }
         methods::SESSION_HYDRATE => Some(UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1),
         methods::THREAD_GRAPH_GET => Some(UI_PROTOCOL_FEATURE_THREAD_GRAPH_V1),
@@ -388,11 +373,6 @@ fn method_capability_gate(method: &str) -> Option<&'static str> {
         | methods::MONITOR_DELETE => Some(UI_PROTOCOL_FEATURE_CODING_MONITOR_RUNTIME_V1),
         methods::REVIEW_START => Some(UI_PROTOCOL_FEATURE_REVIEW_START_V1),
         methods::USER_QUESTION_RESPOND => Some(UI_PROTOCOL_FEATURE_USER_QUESTION_V1),
-        methods::SMART_HOME_STATUS_GET
-        | methods::SMART_HOME_DEVICE_LIST
-        | methods::SMART_HOME_DEVICE_COMMAND
-        | methods::SMART_HOME_CAMERA_STREAM_START
-        | methods::SMART_HOME_CAMERA_STREAM_STOP => Some(UI_PROTOCOL_FEATURE_SMART_HOME_V1),
         _ => None,
     }
 }
@@ -1060,8 +1040,6 @@ pub mod methods {
     /// served by `agent/artifact/*`. Servers dispatch both into the same
     /// handlers; clients can use either name (the `task/*` form is the
     /// long-term direction per the M13 contract).
-    pub const TASK_ARTIFACT_LIST: &str = "task/artifact/list";
-    pub const TASK_ARTIFACT_READ: &str = "task/artifact/read";
     pub const AGENT_INTERRUPT: &str = "agent/interrupt";
     pub const AGENT_CLOSE: &str = "agent/close";
 
@@ -1270,24 +1248,6 @@ pub mod methods {
     /// back into model context. Gated on
     /// [`super::UI_PROTOCOL_FEATURE_BACKGROUND_ACTIVITY_V1`].
     pub const BACKGROUND_ACTIVITY: &str = "background/activity";
-
-    // ---- Smart-home bridge integration ----
-    // Device control/state moved server-side from octos-web's client-only
-    // widget so bridge credentials never reach the browser. Camera video
-    // stays a direct browser-to-bridge stream; these methods only return
-    // the playback URL. All five are capability-gated on
-    // `UI_PROTOCOL_FEATURE_SMART_HOME_V1`.
-
-    /// Bridge configuration/reachability status for the current profile.
-    pub const SMART_HOME_STATUS_GET: &str = "smart_home/status.get";
-    /// Device list + state, proxied from the configured bridge.
-    pub const SMART_HOME_DEVICE_LIST: &str = "smart_home/device.list";
-    /// Send a device command (on/off, temperature, mode, action, ...).
-    pub const SMART_HOME_DEVICE_COMMAND: &str = "smart_home/device.command";
-    /// Start a camera stream; returns the bridge's playback URL.
-    pub const SMART_HOME_CAMERA_STREAM_START: &str = "smart_home/camera.stream_start";
-    /// Stop a camera stream.
-    pub const SMART_HOME_CAMERA_STREAM_STOP: &str = "smart_home/camera.stream_stop";
 }
 
 /// Reason codes for `approval/cancelled` notifications. The registry is
@@ -1324,8 +1284,6 @@ pub const UI_PROTOCOL_COMMAND_METHODS: &[&str] = &[
     methods::AGENT_OUTPUT_READ,
     methods::AGENT_ARTIFACT_LIST,
     methods::AGENT_ARTIFACT_READ,
-    methods::TASK_ARTIFACT_LIST,
-    methods::TASK_ARTIFACT_READ,
     methods::AGENT_INTERRUPT,
     methods::AGENT_CLOSE,
     methods::LOOP_CREATE,
@@ -1355,11 +1313,6 @@ pub const UI_PROTOCOL_COMMAND_METHODS: &[&str] = &[
     methods::ROUTER_SET_MODE,
     methods::ROUTER_GET_METRICS,
     methods::LAUNCH_RESOLVE,
-    methods::SMART_HOME_STATUS_GET,
-    methods::SMART_HOME_DEVICE_LIST,
-    methods::SMART_HOME_DEVICE_COMMAND,
-    methods::SMART_HOME_CAMERA_STREAM_START,
-    methods::SMART_HOME_CAMERA_STREAM_STOP,
 ];
 
 /// Notification methods defined by the v1alpha1 protocol model.
@@ -1438,8 +1391,6 @@ pub const UI_PROTOCOL_FIRST_SERVER_METHODS: &[&str] = &[
     methods::AGENT_OUTPUT_READ,
     methods::AGENT_ARTIFACT_LIST,
     methods::AGENT_ARTIFACT_READ,
-    methods::TASK_ARTIFACT_LIST,
-    methods::TASK_ARTIFACT_READ,
     methods::AGENT_INTERRUPT,
     methods::AGENT_CLOSE,
     methods::LOOP_CREATE,
@@ -1469,11 +1420,6 @@ pub const UI_PROTOCOL_FIRST_SERVER_METHODS: &[&str] = &[
     methods::ROUTER_SET_MODE,
     methods::ROUTER_GET_METRICS,
     methods::LAUNCH_RESOLVE,
-    methods::SMART_HOME_STATUS_GET,
-    methods::SMART_HOME_DEVICE_LIST,
-    methods::SMART_HOME_DEVICE_COMMAND,
-    methods::SMART_HOME_CAMERA_STREAM_START,
-    methods::SMART_HOME_CAMERA_STREAM_STOP,
 ];
 
 /// Protocol methods known but not implemented by the first server/runtime slice.
@@ -1539,7 +1485,6 @@ impl UiProtocolCapabilities {
             UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1,
             UI_PROTOCOL_FEATURE_SESSION_SANDBOX_V1,
             UI_PROTOCOL_FEATURE_HARNESS_TASK_CONTROL_V1,
-            UI_PROTOCOL_FEATURE_HARNESS_TASK_ARTIFACTS_V1,
             UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1,
             UI_PROTOCOL_FEATURE_THREAD_GRAPH_V1,
             UI_PROTOCOL_FEATURE_TURN_STATE_GET_V1,
@@ -1554,7 +1499,6 @@ impl UiProtocolCapabilities {
             UI_PROTOCOL_FEATURE_CONTEXT_SEMANTIC_CACHE_V1,
             UI_PROTOCOL_FEATURE_USER_QUESTION_V1,
             UI_PROTOCOL_FEATURE_PLAN_TODOS_V1,
-            UI_PROTOCOL_FEATURE_SMART_HOME_V1,
         ])
     }
 
@@ -1845,8 +1789,6 @@ pub enum UiResultKind {
     TaskCancel,
     TaskRestartFromNode,
     TaskOutputRead,
-    TaskArtifactList,
-    TaskArtifactRead,
     SessionHydrate,
     SessionRollback,
     SessionFork,
@@ -1871,8 +1813,6 @@ pub fn first_server_result_kind_for_method(method: &str) -> Option<UiResultKind>
         methods::TASK_CANCEL => Some(UiResultKind::TaskCancel),
         methods::TASK_RESTART_FROM_NODE => Some(UiResultKind::TaskRestartFromNode),
         methods::TASK_OUTPUT_READ => Some(UiResultKind::TaskOutputRead),
-        methods::TASK_ARTIFACT_LIST => Some(UiResultKind::TaskArtifactList),
-        methods::TASK_ARTIFACT_READ => Some(UiResultKind::TaskArtifactRead),
         methods::SESSION_HYDRATE => Some(UiResultKind::SessionHydrate),
         methods::SESSION_ROLLBACK => Some(UiResultKind::SessionRollback),
         methods::SESSION_FORK => Some(UiResultKind::SessionFork),
@@ -2400,34 +2340,6 @@ pub struct TaskOutputReadParams {
     pub limit_bytes: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TaskArtifactListParams {
-    pub session_id: SessionKey,
-    pub task_id: TaskId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TaskArtifactReadParams {
-    pub session_id: SessionKey,
-    pub task_id: TaskId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub artifact_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<OutputCursor>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub limit_bytes: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_id: Option<String>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskListParams {
     pub session_id: SessionKey,
@@ -2462,47 +2374,6 @@ pub struct TaskListResult {
     pub topic: Option<String>,
     #[serde(default)]
     pub tasks: Vec<TaskListEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TaskArtifactRecord {
-    pub id: String,
-    pub title: String,
-    pub kind: String,
-    pub status: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
-    #[serde(default, flatten, skip_serializing_if = "BTreeMap::is_empty")]
-    pub extra: BTreeMap<String, Value>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TaskArtifactListResult {
-    pub session_id: SessionKey,
-    pub task_id: TaskId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_id: Option<String>,
-    #[serde(default)]
-    pub artifacts: Vec<TaskArtifactRecord>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TaskArtifactReadResult {
-    pub session_id: SessionKey,
-    pub task_id: TaskId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_id: Option<String>,
-    pub artifact: TaskArtifactRecord,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<OutputCursor>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next_cursor: Option<OutputCursor>,
-    #[serde(default)]
-    pub has_more: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3078,78 +2949,6 @@ pub struct SessionListParams {
 pub struct SessionListResult {
     pub sessions: Value,
 }
-
-// ----- Smart-home bridge integration -----
-//
-// Mirrors the REST-facing bridge client in
-// `crates/octos-cli/src/api/smart_home_bridge.rs`. Result payloads that
-// carry bridge data are typed as opaque [`Value`] containers — same
-// rationale as the M12 Phase D-1 frames above: octos-core cannot depend on
-// octos-cli (`SmartHomeDevice`, `DeviceListResponse`, `CameraStreamInfo` live
-// there), so the bridge's JSON contract stays the single source of truth in
-// octos-cli and this crate stays a schema-agnostic envelope layer. Gated on
-// [`UI_PROTOCOL_FEATURE_SMART_HOME_V1`].
-
-/// Params for `smart_home/status.get`. Empty request — reports whether this
-/// profile has a bridge configured without exposing its URL/token.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SmartHomeStatusGetParams {}
-
-/// Result for `smart_home/status.get`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SmartHomeStatusGetResult {
-    pub configured: bool,
-}
-
-/// Params for `smart_home/device.list`. Empty request.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SmartHomeDeviceListParams {}
-
-/// Result for `smart_home/device.list`. `devices` is the bridge's
-/// `DeviceListResponse` JSON body, forwarded byte-for-byte.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SmartHomeDeviceListResult {
-    pub devices: Value,
-}
-
-/// Params for `smart_home/device.command`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SmartHomeDeviceCommandParams {
-    pub device_id: String,
-    /// Command payload, forwarded to the bridge as a form-encoded POST body
-    /// (see `send_device_command`), e.g. `{"on": true}`.
-    pub params: Value,
-}
-
-/// Result for `smart_home/device.command`. Empty on success — bridge/request
-/// failures surface as a JSON-RPC error response instead.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SmartHomeDeviceCommandResult {}
-
-/// Params for `smart_home/camera.stream_start`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SmartHomeCameraStreamStartParams {
-    pub device_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub quality: Option<u32>,
-}
-
-/// Result for `smart_home/camera.stream_start`. `stream` is the bridge's
-/// `CameraStreamInfo` JSON body, forwarded byte-for-byte.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SmartHomeCameraStreamStartResult {
-    pub stream: Value,
-}
-
-/// Params for `smart_home/camera.stream_stop`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SmartHomeCameraStreamStopParams {
-    pub device_id: String,
-}
-
-/// Result for `smart_home/camera.stream_stop`. Empty on success.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SmartHomeCameraStreamStopResult {}
 
 /// Params for `launch/resolve` — the pre-session launch probe. Given the
 /// project `cwd` and the optionally requested profile, the server decides
@@ -4034,8 +3833,6 @@ pub enum UiCommand {
     TaskCancel(TaskCancelParams),
     TaskRestartFromNode(TaskRestartFromNodeParams),
     TaskOutputRead(TaskOutputReadParams),
-    TaskArtifactList(TaskArtifactListParams),
-    TaskArtifactRead(TaskArtifactReadParams),
     SessionHydrate(SessionHydrateParams),
     SessionRollback(SessionRollbackParams),
     SessionFork(SessionForkParams),
@@ -4060,12 +3857,6 @@ pub enum UiCommand {
     RouterGetMetrics(RouterGetMetricsParams),
     // ---- launch/resolve: pre-session launch probe ----
     LaunchResolve(LaunchResolveParams),
-    // ---- Smart-home bridge integration ----
-    SmartHomeStatusGet(SmartHomeStatusGetParams),
-    SmartHomeDeviceList(SmartHomeDeviceListParams),
-    SmartHomeDeviceCommand(SmartHomeDeviceCommandParams),
-    SmartHomeCameraStreamStart(SmartHomeCameraStreamStartParams),
-    SmartHomeCameraStreamStop(SmartHomeCameraStreamStopParams),
 }
 
 impl UiCommand {
@@ -4085,8 +3876,6 @@ impl UiCommand {
             Self::TaskCancel(_) => methods::TASK_CANCEL,
             Self::TaskRestartFromNode(_) => methods::TASK_RESTART_FROM_NODE,
             Self::TaskOutputRead(_) => methods::TASK_OUTPUT_READ,
-            Self::TaskArtifactList(_) => methods::TASK_ARTIFACT_LIST,
-            Self::TaskArtifactRead(_) => methods::TASK_ARTIFACT_READ,
             Self::SessionHydrate(_) => methods::SESSION_HYDRATE,
             Self::SessionRollback(_) => methods::SESSION_ROLLBACK,
             Self::SessionFork(_) => methods::SESSION_FORK,
@@ -4108,11 +3897,6 @@ impl UiCommand {
             Self::RouterSetMode(_) => methods::ROUTER_SET_MODE,
             Self::RouterGetMetrics(_) => methods::ROUTER_GET_METRICS,
             Self::LaunchResolve(_) => methods::LAUNCH_RESOLVE,
-            Self::SmartHomeStatusGet(_) => methods::SMART_HOME_STATUS_GET,
-            Self::SmartHomeDeviceList(_) => methods::SMART_HOME_DEVICE_LIST,
-            Self::SmartHomeDeviceCommand(_) => methods::SMART_HOME_DEVICE_COMMAND,
-            Self::SmartHomeCameraStreamStart(_) => methods::SMART_HOME_CAMERA_STREAM_START,
-            Self::SmartHomeCameraStreamStop(_) => methods::SMART_HOME_CAMERA_STREAM_STOP,
         }
     }
 
@@ -4136,8 +3920,6 @@ impl UiCommand {
             Self::TaskCancel(params) => serde_json::to_value(params),
             Self::TaskRestartFromNode(params) => serde_json::to_value(params),
             Self::TaskOutputRead(params) => serde_json::to_value(params),
-            Self::TaskArtifactList(params) => serde_json::to_value(params),
-            Self::TaskArtifactRead(params) => serde_json::to_value(params),
             Self::SessionHydrate(params) => serde_json::to_value(params),
             Self::SessionRollback(params) => serde_json::to_value(params),
             Self::SessionFork(params) => serde_json::to_value(params),
@@ -4159,11 +3941,6 @@ impl UiCommand {
             Self::RouterSetMode(params) => serde_json::to_value(params),
             Self::RouterGetMetrics(params) => serde_json::to_value(params),
             Self::LaunchResolve(params) => serde_json::to_value(params),
-            Self::SmartHomeStatusGet(params) => serde_json::to_value(params),
-            Self::SmartHomeDeviceList(params) => serde_json::to_value(params),
-            Self::SmartHomeDeviceCommand(params) => serde_json::to_value(params),
-            Self::SmartHomeCameraStreamStart(params) => serde_json::to_value(params),
-            Self::SmartHomeCameraStreamStop(params) => serde_json::to_value(params),
         }?;
 
         Ok(RpcRequest::new(id, method, params))
@@ -4209,12 +3986,6 @@ impl UiCommand {
                 Ok(Self::TaskRestartFromNode(decode_params(method, params)?))
             }
             methods::TASK_OUTPUT_READ => Ok(Self::TaskOutputRead(decode_params(method, params)?)),
-            methods::TASK_ARTIFACT_LIST => {
-                Ok(Self::TaskArtifactList(decode_params(method, params)?))
-            }
-            methods::TASK_ARTIFACT_READ => {
-                Ok(Self::TaskArtifactRead(decode_params(method, params)?))
-            }
             methods::SESSION_HYDRATE => Ok(Self::SessionHydrate(decode_params(method, params)?)),
             methods::SESSION_ROLLBACK => Ok(Self::SessionRollback(decode_params(method, params)?)),
             methods::SESSION_FORK => Ok(Self::SessionFork(decode_params(method, params)?)),
@@ -4250,21 +4021,6 @@ impl UiCommand {
             methods::ROUTER_GET_METRICS => {
                 Ok(Self::RouterGetMetrics(decode_params(method, params)?))
             }
-            methods::SMART_HOME_STATUS_GET => Ok(Self::SmartHomeStatusGet(decode_optional_params(
-                method, params,
-            )?)),
-            methods::SMART_HOME_DEVICE_LIST => Ok(Self::SmartHomeDeviceList(
-                decode_optional_params(method, params)?,
-            )),
-            methods::SMART_HOME_DEVICE_COMMAND => {
-                Ok(Self::SmartHomeDeviceCommand(decode_params(method, params)?))
-            }
-            methods::SMART_HOME_CAMERA_STREAM_START => Ok(Self::SmartHomeCameraStreamStart(
-                decode_params(method, params)?,
-            )),
-            methods::SMART_HOME_CAMERA_STREAM_STOP => Ok(Self::SmartHomeCameraStreamStop(
-                decode_params(method, params)?,
-            )),
             _ => Err(RpcError::method_not_found(method)),
         }
     }
@@ -4572,8 +4328,6 @@ pub enum UiRpcResult {
     TaskCancel(TaskCancelResult),
     TaskRestartFromNode(TaskRestartFromNodeResult),
     TaskOutputRead(TaskOutputReadResult),
-    TaskArtifactList(TaskArtifactListResult),
-    TaskArtifactRead(TaskArtifactReadResult),
     SessionHydrate(SessionHydrateResult),
     SessionRollback(SessionRollbackResult),
     SessionFork(SessionForkResult),
@@ -4599,8 +4353,6 @@ impl UiRpcResult {
             Self::TaskCancel(_) => UiResultKind::TaskCancel,
             Self::TaskRestartFromNode(_) => UiResultKind::TaskRestartFromNode,
             Self::TaskOutputRead(_) => UiResultKind::TaskOutputRead,
-            Self::TaskArtifactList(_) => UiResultKind::TaskArtifactList,
-            Self::TaskArtifactRead(_) => UiResultKind::TaskArtifactRead,
             Self::SessionHydrate(_) => UiResultKind::SessionHydrate,
             Self::SessionRollback(_) => UiResultKind::SessionRollback,
             Self::SessionFork(_) => UiResultKind::SessionFork,
@@ -4626,8 +4378,6 @@ impl UiRpcResult {
             Self::TaskCancel(_) => Some(methods::TASK_CANCEL),
             Self::TaskRestartFromNode(_) => Some(methods::TASK_RESTART_FROM_NODE),
             Self::TaskOutputRead(_) => Some(methods::TASK_OUTPUT_READ),
-            Self::TaskArtifactList(_) => Some(methods::TASK_ARTIFACT_LIST),
-            Self::TaskArtifactRead(_) => Some(methods::TASK_ARTIFACT_READ),
             Self::SessionHydrate(_) => Some(methods::SESSION_HYDRATE),
             Self::SessionRollback(_) => Some(methods::SESSION_ROLLBACK),
             Self::SessionFork(_) => Some(methods::SESSION_FORK),
@@ -4653,8 +4403,6 @@ impl UiRpcResult {
             Self::TaskCancel(result) => serde_json::to_value(result),
             Self::TaskRestartFromNode(result) => serde_json::to_value(result),
             Self::TaskOutputRead(result) => serde_json::to_value(result),
-            Self::TaskArtifactList(result) => serde_json::to_value(result),
-            Self::TaskArtifactRead(result) => serde_json::to_value(result),
             Self::SessionHydrate(result) => serde_json::to_value(result),
             Self::SessionRollback(result) => serde_json::to_value(result),
             Self::SessionFork(result) => serde_json::to_value(result),
@@ -4707,12 +4455,6 @@ impl UiRpcResult {
                 Ok(Self::TaskRestartFromNode(decode_result(method, result)?))
             }
             methods::TASK_OUTPUT_READ => Ok(Self::TaskOutputRead(decode_result(method, result)?)),
-            methods::TASK_ARTIFACT_LIST => {
-                Ok(Self::TaskArtifactList(decode_result(method, result)?))
-            }
-            methods::TASK_ARTIFACT_READ => {
-                Ok(Self::TaskArtifactRead(decode_result(method, result)?))
-            }
             methods::SESSION_HYDRATE => Ok(Self::SessionHydrate(decode_result(method, result)?)),
             methods::SESSION_ROLLBACK => Ok(Self::SessionRollback(decode_result(method, result)?)),
             methods::SESSION_FORK => Ok(Self::SessionFork(decode_result(method, result)?)),

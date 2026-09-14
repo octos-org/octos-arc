@@ -254,12 +254,9 @@ fn protocol_version_and_first_server_capabilities_round_trip() {
     assert!(capabilities.supports_feature(UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1));
     assert!(capabilities.supports_feature(UI_PROTOCOL_FEATURE_SESSION_SANDBOX_V1));
     assert!(capabilities.supports_feature(UI_PROTOCOL_FEATURE_HARNESS_TASK_CONTROL_V1));
-    assert!(capabilities.supports_feature(UI_PROTOCOL_FEATURE_HARNESS_TASK_ARTIFACTS_V1));
     assert!(capabilities.supports_method(methods::TASK_LIST));
     assert!(capabilities.supports_method(methods::TASK_CANCEL));
     assert!(capabilities.supports_method(methods::TASK_RESTART_FROM_NODE));
-    assert!(capabilities.supports_method(methods::TASK_ARTIFACT_LIST));
-    assert!(capabilities.supports_method(methods::TASK_ARTIFACT_READ));
     assert!(capabilities.unsupported.is_empty());
 
     let json = serde_json::to_string(&capabilities).expect("serialize capabilities");
@@ -309,7 +306,6 @@ fn capabilities_accept_absent_supported_features() {
     assert!(!decoded.supports_feature(UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1));
     assert!(!decoded.supports_feature(UI_PROTOCOL_FEATURE_SESSION_SANDBOX_V1));
     assert!(!decoded.supports_feature(UI_PROTOCOL_FEATURE_HARNESS_TASK_CONTROL_V1));
-    assert!(!decoded.supports_feature(UI_PROTOCOL_FEATURE_HARNESS_TASK_ARTIFACTS_V1));
 }
 
 #[test]
@@ -321,9 +317,6 @@ fn full_protocol_capabilities_advertise_harness_task_control() {
     assert!(capabilities.supports_method(methods::TASK_RESTART_FROM_NODE));
     assert!(capabilities.supports_method(methods::TASK_OUTPUT_READ));
     assert!(capabilities.supports_feature(UI_PROTOCOL_FEATURE_HARNESS_TASK_CONTROL_V1));
-    assert!(capabilities.supports_method(methods::TASK_ARTIFACT_LIST));
-    assert!(capabilities.supports_method(methods::TASK_ARTIFACT_READ));
-    assert!(capabilities.supports_feature(UI_PROTOCOL_FEATURE_HARNESS_TASK_ARTIFACTS_V1));
     assert!(capabilities.unsupported.is_empty());
 }
 
@@ -628,8 +621,6 @@ fn negotiated_capabilities_advertise_full_protocol_when_no_features_requested() 
     assert!(!capabilities.supports_method(methods::TASK_LIST));
     assert!(!capabilities.supports_method(methods::TASK_CANCEL));
     assert!(!capabilities.supports_method(methods::TASK_RESTART_FROM_NODE));
-    assert!(!capabilities.supports_method(methods::TASK_ARTIFACT_LIST));
-    assert!(!capabilities.supports_method(methods::TASK_ARTIFACT_READ));
 }
 
 #[test]
@@ -648,15 +639,12 @@ fn negotiated_capabilities_intersect_requested_with_known_features() {
     assert!(!capabilities.supports_feature(UI_PROTOCOL_FEATURE_APPROVAL_TYPED_V1));
     assert!(!capabilities.supports_feature(UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1));
     assert!(!capabilities.supports_feature(UI_PROTOCOL_FEATURE_HARNESS_TASK_CONTROL_V1));
-    assert!(!capabilities.supports_feature(UI_PROTOCOL_FEATURE_HARNESS_TASK_ARTIFACTS_V1));
     // Task-control methods are gated by harness.task_control.v1 — they
     // must not appear in the advertised method set when the gating
     // feature is not negotiated.
     assert!(!capabilities.supports_method(methods::TASK_LIST));
     assert!(!capabilities.supports_method(methods::TASK_CANCEL));
     assert!(!capabilities.supports_method(methods::TASK_RESTART_FROM_NODE));
-    assert!(!capabilities.supports_method(methods::TASK_ARTIFACT_LIST));
-    assert!(!capabilities.supports_method(methods::TASK_ARTIFACT_READ));
     // Unconditional methods stay present.
     assert!(capabilities.supports_method(methods::SESSION_OPEN));
     assert!(capabilities.supports_method(methods::TURN_START));
@@ -680,31 +668,6 @@ fn negotiated_capabilities_advertise_task_control_methods_when_feature_requested
 }
 
 #[test]
-fn negotiated_capabilities_hide_task_and_agent_artifact_methods_without_feature() {
-    // #965/#1084 — task artifact methods have their own harness feature
-    // gate, while legacy agent artifact aliases stay under agent control.
-    let capabilities = UiProtocolCapabilities::for_negotiated_features(Vec::<String>::new());
-    assert!(!capabilities.supports_feature(UI_PROTOCOL_FEATURE_HARNESS_TASK_ARTIFACTS_V1));
-    assert!(!capabilities.supports_feature(UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1));
-    assert!(!capabilities.supports_method(methods::TASK_ARTIFACT_LIST));
-    assert!(!capabilities.supports_method(methods::TASK_ARTIFACT_READ));
-    assert!(!capabilities.supports_method(methods::AGENT_ARTIFACT_LIST));
-    assert!(!capabilities.supports_method(methods::AGENT_ARTIFACT_READ));
-}
-
-#[test]
-fn negotiated_capabilities_advertise_task_artifact_methods_when_feature_requested() {
-    let capabilities = UiProtocolCapabilities::for_negotiated_features([
-        UI_PROTOCOL_FEATURE_HARNESS_TASK_ARTIFACTS_V1,
-    ]);
-    assert!(capabilities.supports_feature(UI_PROTOCOL_FEATURE_HARNESS_TASK_ARTIFACTS_V1));
-    assert!(capabilities.supports_method(methods::TASK_ARTIFACT_LIST));
-    assert!(capabilities.supports_method(methods::TASK_ARTIFACT_READ));
-    assert!(!capabilities.supports_method(methods::AGENT_ARTIFACT_LIST));
-    assert!(!capabilities.supports_method(methods::AGENT_ARTIFACT_READ));
-}
-
-#[test]
 fn negotiated_capabilities_advertise_agent_artifact_methods_when_agent_control_requested() {
     let capabilities = UiProtocolCapabilities::for_negotiated_features([
         UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1,
@@ -713,8 +676,6 @@ fn negotiated_capabilities_advertise_agent_artifact_methods_when_agent_control_r
     assert!(capabilities.supports_feature(UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1));
     assert!(capabilities.supports_method(methods::AGENT_ARTIFACT_LIST));
     assert!(capabilities.supports_method(methods::AGENT_ARTIFACT_READ));
-    assert!(!capabilities.supports_method(methods::TASK_ARTIFACT_LIST));
-    assert!(!capabilities.supports_method(methods::TASK_ARTIFACT_READ));
 }
 
 #[test]
@@ -732,10 +693,6 @@ fn ui_protocol_v1_wire_contract_is_golden() {
     assert_eq!(
         UI_PROTOCOL_FEATURE_HARNESS_TASK_CONTROL_V1,
         "harness.task_control.v1"
-    );
-    assert_eq!(
-        UI_PROTOCOL_FEATURE_HARNESS_TASK_ARTIFACTS_V1,
-        "harness.task_artifacts.v1"
     );
     assert_eq!(
         UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1,
@@ -784,10 +741,6 @@ fn ui_protocol_v1_wire_contract_is_golden() {
         UI_PROTOCOL_FEATURE_HARNESS_TASK_SUPERVISION_INSPECTION_V1,
         "harness.task_supervision_inspection.v1"
     );
-    assert_eq!(
-        UI_PROTOCOL_FEATURE_HARNESS_TASK_ARTIFACTS_V1,
-        "harness.task_artifacts.v1"
-    );
 
     assert_eq!(
         UI_PROTOCOL_COMMAND_METHODS,
@@ -817,8 +770,6 @@ fn ui_protocol_v1_wire_contract_is_golden() {
             "agent/output/read",
             "agent/artifact/list",
             "agent/artifact/read",
-            "task/artifact/list",
-            "task/artifact/read",
             "agent/interrupt",
             "agent/close",
             "loop/create",
@@ -848,11 +799,6 @@ fn ui_protocol_v1_wire_contract_is_golden() {
             "router/set_mode",
             "router/get_metrics",
             "launch/resolve",
-            "smart_home/status.get",
-            "smart_home/device.list",
-            "smart_home/device.command",
-            "smart_home/camera.stream_start",
-            "smart_home/camera.stream_stop",
         ]
     );
     assert_eq!(
@@ -933,8 +879,6 @@ fn ui_protocol_v1_wire_contract_is_golden() {
             "agent/output/read",
             "agent/artifact/list",
             "agent/artifact/read",
-            "task/artifact/list",
-            "task/artifact/read",
             "agent/interrupt",
             "agent/close",
             "loop/create",
@@ -964,11 +908,6 @@ fn ui_protocol_v1_wire_contract_is_golden() {
             "router/set_mode",
             "router/get_metrics",
             "launch/resolve",
-            "smart_home/status.get",
-            "smart_home/device.list",
-            "smart_home/device.command",
-            "smart_home/camera.stream_start",
-            "smart_home/camera.stream_stop",
         ]
     );
     assert_eq!(UI_PROTOCOL_FIRST_SERVER_UNSUPPORTED_METHODS.len(), 0);
@@ -1016,9 +955,7 @@ fn ui_protocol_v1_representative_wire_payloads_are_golden() {
                 "agent/output/read",
                 "agent/artifact/list",
                 "agent/artifact/read",
-                "task/artifact/list",
-                "task/artifact/read",
-                "agent/interrupt",
+                        "agent/interrupt",
                 "agent/close",
                 "loop/create",
                 "loop/list",
@@ -1047,12 +984,7 @@ fn ui_protocol_v1_representative_wire_payloads_are_golden() {
                 "router/set_mode",
                 "router/get_metrics",
                 "launch/resolve",
-                "smart_home/status.get",
-                "smart_home/device.list",
-                "smart_home/device.command",
-                "smart_home/camera.stream_start",
-                "smart_home/camera.stream_stop"
-            ],
+                            ],
             "supported_notifications": [
                 "session/open",
                 "turn/started",
@@ -1121,13 +1053,11 @@ fn ui_protocol_v1_representative_wire_payloads_are_golden() {
                 "review.start.v1",
                 "context.lifecycle.v1",
                 "harness.task_supervision_inspection.v1",
-                "harness.task_artifacts.v1",
                 "user_question.v1",
                 "event.voice_audio.v1",
                 "plan.todos.v1",
                 "event.background_activity.v1",
-                "event.turn_steer_dropped.v1",
-                "smart_home.v1"
+                "event.turn_steer_dropped.v1"
             ]
         })
     );
@@ -2176,166 +2106,6 @@ fn task_control_commands_build_and_parse_json_rpc_requests() {
         restart
     );
 
-    let artifact_list = UiCommand::TaskArtifactList(TaskArtifactListParams {
-        session_id: SessionKey("local:demo".into()),
-        task_id: task_id.clone(),
-        profile_id: Some("coding".into()),
-        agent_id: None,
-    });
-    assert_eq!(artifact_list.method(), methods::TASK_ARTIFACT_LIST);
-    let artifact_list_wire = artifact_list
-        .clone()
-        .into_rpc_request("task-artifact-list")
-        .expect("serialize task/artifact/list");
-    assert_eq!(artifact_list_wire.params["task_id"], json!(task_id));
-    assert_eq!(
-        UiCommand::from_rpc_request(artifact_list_wire).expect("decode task/artifact/list"),
-        artifact_list
-    );
-
-    let artifact_read = UiCommand::TaskArtifactRead(TaskArtifactReadParams {
-        session_id: SessionKey("local:demo".into()),
-        task_id: TaskId(Uuid::from_u128(45)),
-        artifact_id: Some("summary".into()),
-        path: None,
-        cursor: None,
-        limit_bytes: Some(1024),
-        profile_id: None,
-        agent_id: Some("agent-1".into()),
-    });
-    assert_eq!(artifact_read.method(), methods::TASK_ARTIFACT_READ);
-    let artifact_read_wire = artifact_read
-        .clone()
-        .into_rpc_request("task-artifact-read")
-        .expect("serialize task/artifact/read");
-    assert_eq!(artifact_read_wire.params["artifact_id"], json!("summary"));
-    assert_eq!(artifact_read_wire.params["agent_id"], json!("agent-1"));
-    assert_eq!(
-        UiCommand::from_rpc_request(artifact_read_wire).expect("decode task/artifact/read"),
-        artifact_read
-    );
-}
-
-#[test]
-fn typed_rpc_results_map_from_methods_and_round_trip() {
-    let opened = SessionOpened {
-        session_id: SessionKey("local:demo".into()),
-        active_profile_id: Some("coding".into()),
-        workspace_root: None,
-        context: None,
-        context_state: None,
-        cursor: Some(UiCursor {
-            stream: "events".into(),
-            seq: 42,
-        }),
-        panes: None,
-        capabilities: UiProtocolCapabilities::first_server_slice(),
-        reasoning_effort: None,
-    };
-
-    let session_result = UiRpcResult::SessionOpen(SessionOpenResult::new(opened));
-    assert_eq!(session_result.kind(), UiResultKind::SessionOpen);
-    assert_eq!(session_result.method(), Some(methods::SESSION_OPEN));
-
-    let response = session_result
-        .clone()
-        .into_rpc_response("open-1")
-        .expect("serialize session/open result");
-    assert_eq!(response.id, "open-1");
-    assert_eq!(response.result["opened"]["session_id"], json!("local:demo"));
-
-    let decoded = UiRpcResult::from_method_and_result(methods::SESSION_OPEN, response.result)
-        .expect("decode session/open result");
-    assert_eq!(decoded, session_result);
-
-    let turn_start = UiRpcResult::TurnStart(TurnStartResult::accepted());
-    let value = turn_start
-        .clone()
-        .into_result_value()
-        .expect("serialize turn/start result");
-    assert_eq!(value, json!({ "accepted": true }));
-    assert_eq!(
-        UiRpcResult::from_method_and_result(methods::TURN_START, value)
-            .expect("decode turn/start result"),
-        turn_start
-    );
-
-    let turn_interrupt = UiRpcResult::TurnInterrupt(TurnInterruptResult::new(false));
-    let value = turn_interrupt
-        .clone()
-        .into_result_value()
-        .expect("serialize turn/interrupt result");
-    assert_eq!(value, json!({ "interrupted": false }));
-    assert_eq!(
-        UiRpcResult::from_method_and_result(methods::TURN_INTERRUPT, value)
-            .expect("decode turn/interrupt result"),
-        turn_interrupt
-    );
-
-    let approval_id = ApprovalId::new();
-    let approval =
-        UiRpcResult::ApprovalRespond(ApprovalRespondResult::accepted(approval_id.clone()));
-    assert_eq!(approval.kind(), UiResultKind::ApprovalRespond);
-    assert_eq!(approval.method(), Some(methods::APPROVAL_RESPOND));
-    let value = approval
-        .clone()
-        .into_result_value()
-        .expect("serialize approval/respond result");
-    assert_eq!(value["approval_id"], json!(approval_id));
-    assert_eq!(value["status"], json!("accepted"));
-    assert_eq!(
-        UiRpcResult::from_method_and_result(methods::APPROVAL_RESPOND, value)
-            .expect("decode approval/respond result"),
-        approval
-    );
-
-    let scopes_result = UiRpcResult::ApprovalScopesList(ApprovalScopesListResult {
-        scopes: vec![ApprovalScopeEntry {
-            session_id: SessionKey("local:demo".into()),
-            scope: approval_scopes::SESSION.into(),
-            scope_match: "shell".into(),
-            decision: ApprovalDecision::Approve,
-            turn_id: None,
-        }],
-    });
-    assert_eq!(scopes_result.kind(), UiResultKind::ApprovalScopesList);
-    assert_eq!(scopes_result.method(), Some(methods::APPROVAL_SCOPES_LIST));
-    let value = scopes_result
-        .clone()
-        .into_result_value()
-        .expect("serialize approval/scopes/list result");
-    assert_eq!(value["scopes"][0]["scope"], json!(approval_scopes::SESSION));
-    assert_eq!(
-        UiRpcResult::from_method_and_result(methods::APPROVAL_SCOPES_LIST, value)
-            .expect("decode approval/scopes/list result"),
-        scopes_result
-    );
-
-    assert_eq!(
-        first_server_result_kind_for_method(methods::DIFF_PREVIEW_GET),
-        Some(UiResultKind::DiffPreviewGet)
-    );
-    assert_eq!(
-        first_server_result_kind_for_method(methods::TASK_LIST),
-        Some(UiResultKind::TaskList)
-    );
-    assert_eq!(
-        first_server_result_kind_for_method(methods::TASK_CANCEL),
-        Some(UiResultKind::TaskCancel)
-    );
-    assert_eq!(
-        first_server_result_kind_for_method(methods::TASK_RESTART_FROM_NODE),
-        Some(UiResultKind::TaskRestartFromNode)
-    );
-    assert_eq!(
-        first_server_result_kind_for_method(methods::TASK_ARTIFACT_LIST),
-        Some(UiResultKind::TaskArtifactList)
-    );
-    assert_eq!(
-        first_server_result_kind_for_method(methods::TASK_ARTIFACT_READ),
-        Some(UiResultKind::TaskArtifactRead)
-    );
-
     let preview_id = PreviewId::new();
     let diff_result = UiRpcResult::DiffPreviewGet(DiffPreviewGetResult {
         status: DiffPreviewGetStatus::Ready,
@@ -2424,148 +2194,6 @@ fn typed_rpc_results_map_from_methods_and_round_trip() {
         UiRpcResult::from_method_and_result(methods::TASK_LIST, value)
             .expect("decode task/list result"),
         task_list
-    );
-
-    let task_artifact_list = UiRpcResult::TaskArtifactList(TaskArtifactListResult {
-        session_id: SessionKey("local:demo".into()),
-        task_id: list_task_id.clone(),
-        agent_id: Some("agent-1".into()),
-        artifacts: vec![TaskArtifactRecord {
-            id: "summary".into(),
-            title: "Summary".into(),
-            kind: "markdown".into(),
-            status: "ready".into(),
-            path: None,
-            content: None,
-            extra: BTreeMap::new(),
-        }],
-    });
-    assert_eq!(task_artifact_list.kind(), UiResultKind::TaskArtifactList);
-    assert_eq!(
-        task_artifact_list.method(),
-        Some(methods::TASK_ARTIFACT_LIST)
-    );
-    let value = task_artifact_list
-        .clone()
-        .into_result_value()
-        .expect("serialize task/artifact/list result");
-    assert_eq!(value["artifacts"][0]["id"], json!("summary"));
-    assert_eq!(
-        UiRpcResult::from_method_and_result(methods::TASK_ARTIFACT_LIST, value)
-            .expect("decode task/artifact/list result"),
-        task_artifact_list
-    );
-
-    let task_artifact_read = UiRpcResult::TaskArtifactRead(TaskArtifactReadResult {
-        session_id: SessionKey("local:demo".into()),
-        task_id: list_task_id.clone(),
-        agent_id: Some("agent-1".into()),
-        artifact: TaskArtifactRecord {
-            id: "summary".into(),
-            title: "Summary".into(),
-            kind: "markdown".into(),
-            status: "ready".into(),
-            path: None,
-            content: None,
-            extra: BTreeMap::new(),
-        },
-        content: Some("done".into()),
-        cursor: Some(OutputCursor { offset: 0 }),
-        next_cursor: Some(OutputCursor { offset: 4 }),
-        has_more: false,
-    });
-    assert_eq!(task_artifact_read.kind(), UiResultKind::TaskArtifactRead);
-    assert_eq!(
-        task_artifact_read.method(),
-        Some(methods::TASK_ARTIFACT_READ)
-    );
-    let value = task_artifact_read
-        .clone()
-        .into_result_value()
-        .expect("serialize task/artifact/read result");
-    assert_eq!(value["content"], json!("done"));
-    assert_eq!(
-        UiRpcResult::from_method_and_result(methods::TASK_ARTIFACT_READ, value)
-            .expect("decode task/artifact/read result"),
-        task_artifact_read
-    );
-
-    let cancel_result = UiRpcResult::TaskCancel(TaskCancelResult {
-        task_id: TaskId(Uuid::from_u128(45)),
-        status: TaskRuntimeState::Cancelled,
-    });
-    assert_eq!(cancel_result.kind(), UiResultKind::TaskCancel);
-    assert_eq!(cancel_result.method(), Some(methods::TASK_CANCEL));
-    let value = cancel_result
-        .clone()
-        .into_result_value()
-        .expect("serialize task/cancel result");
-    assert_eq!(value["status"], json!("cancelled"));
-    assert_eq!(
-        UiRpcResult::from_method_and_result(methods::TASK_CANCEL, value)
-            .expect("decode task/cancel result"),
-        cancel_result
-    );
-
-    let restart_result = UiRpcResult::TaskRestartFromNode(TaskRestartFromNodeResult {
-        original_task_id: TaskId(Uuid::from_u128(46)),
-        new_task_id: TaskId(Uuid::from_u128(47)),
-        from_node: Some("node-7".into()),
-    });
-    assert_eq!(restart_result.kind(), UiResultKind::TaskRestartFromNode);
-    assert_eq!(
-        restart_result.method(),
-        Some(methods::TASK_RESTART_FROM_NODE)
-    );
-    let value = restart_result
-        .clone()
-        .into_result_value()
-        .expect("serialize task/restart_from_node result");
-    assert_eq!(value["from_node"], json!("node-7"));
-    assert_eq!(
-        UiRpcResult::from_method_and_result(methods::TASK_RESTART_FROM_NODE, value)
-            .expect("decode task/restart_from_node result"),
-        restart_result
-    );
-
-    let task_result = UiRpcResult::TaskOutputRead(TaskOutputReadResult {
-        session_id: SessionKey("local:demo".into()),
-        task_id: TaskId::new(),
-        source: TaskOutputReadSource::RuntimeProjection,
-        cursor: OutputCursor { offset: 0 },
-        next_cursor: OutputCursor { offset: 4 },
-        text: "done".into(),
-        bytes_read: 4,
-        total_bytes: 4,
-        truncated: false,
-        complete: true,
-        live_tail_supported: false,
-        is_snapshot_projection: true,
-        task_status: "failed".into(),
-        runtime_state: "delivering_outputs".into(),
-        lifecycle_state: "completed".into(),
-        runtime_detail: Some(json!({ "phase": "collecting_output" })),
-        output_files: vec!["octos-file://output".into()],
-        limitations: vec![TaskOutputReadLimitation {
-            code: "live_tail_unavailable".into(),
-            message: "task/output/delta is not emitted".into(),
-        }],
-    });
-    let value = task_result
-        .clone()
-        .into_result_value()
-        .expect("serialize task/output/read result");
-    assert_eq!(value["source"], json!("runtime_projection"));
-    assert_eq!(value["next_cursor"]["offset"], json!(4));
-    // Audit issue #707 / accepted UPCR-2026-006: clients must be able to
-    // distinguish a snapshot projection read from a (future) live-tail
-    // read on the wire, not just by inferring it from `live_tail_supported
-    // == false` or the `runtime_projection` source label.
-    assert_eq!(value["is_snapshot_projection"], json!(true));
-    assert_eq!(
-        UiRpcResult::from_method_and_result(methods::TASK_OUTPUT_READ, value)
-            .expect("decode task/output/read result"),
-        task_result
     );
 }
 
@@ -6628,174 +6256,6 @@ fn tool_started_topic_field_round_trips_on_the_wire() {
     assert!(
         wire["params"].get("topic").is_none(),
         "absent topic field must stay omitted on the wire (no v0 breakage)"
-    );
-}
-
-/// Smart-home bridge integration: `smart_home/status.get` and
-/// `smart_home/device.list` both accept an omitted (`{}`/null) params
-/// object, matching the `session/list`-style empty-request convention.
-#[test]
-fn smart_home_status_get_and_device_list_accept_omitted_params() {
-    assert_eq!(
-        UiCommand::from_method_and_params(methods::SMART_HOME_STATUS_GET, Value::Null)
-            .expect("decode smart_home/status.get with omitted params"),
-        UiCommand::SmartHomeStatusGet(SmartHomeStatusGetParams {})
-    );
-    assert_eq!(
-        UiCommand::from_method_and_params(methods::SMART_HOME_DEVICE_LIST, json!({}))
-            .expect("decode smart_home/device.list with empty object params"),
-        UiCommand::SmartHomeDeviceList(SmartHomeDeviceListParams {})
-    );
-}
-
-/// `smart_home/status.get` result round-trips its `configured` flag.
-#[test]
-fn smart_home_status_get_result_round_trips() {
-    let result = SmartHomeStatusGetResult { configured: true };
-    let json = serde_json::to_string(&result).expect("serialize result");
-    let parsed: SmartHomeStatusGetResult = serde_json::from_str(&json).expect("deserialize result");
-    assert_eq!(parsed, result);
-}
-
-/// `smart_home/device.list` command round-trips through the RPC envelope,
-/// and its result forwards the bridge's device-list JSON byte-for-byte
-/// (opaque `Value`, same pattern as `SessionListResult`).
-#[test]
-fn smart_home_device_list_command_and_result_round_trip() {
-    let command = UiCommand::SmartHomeDeviceList(SmartHomeDeviceListParams {});
-    assert_eq!(command.method(), methods::SMART_HOME_DEVICE_LIST);
-
-    let rpc = command
-        .clone()
-        .into_rpc_request("req-device-list")
-        .expect("serialize smart_home/device.list");
-    let json = serde_json::to_string(&rpc).expect("to_string");
-    let parsed_rpc: RpcRequest<Value> = serde_json::from_str(&json).expect("from_str");
-    let decoded = UiCommand::from_rpc_request(parsed_rpc).expect("decode smart_home/device.list");
-    assert_eq!(decoded, command);
-
-    let result = SmartHomeDeviceListResult {
-        devices: json!({
-            "source": "home_assistant",
-            "ok": true,
-            "devices": [{"id": "tv1", "name": "Living Room TV", "kind": "tv", "on": true}]
-        }),
-    };
-    let json = serde_json::to_string(&result).expect("serialize result");
-    let parsed: SmartHomeDeviceListResult =
-        serde_json::from_str(&json).expect("deserialize result");
-    assert_eq!(parsed, result);
-}
-
-/// `smart_home/device.command` requires `device_id` + `params` and
-/// round-trips through the RPC envelope.
-#[test]
-fn smart_home_device_command_round_trips() {
-    let mut params = serde_json::Map::new();
-    params.insert("on".into(), json!(true));
-    let command = UiCommand::SmartHomeDeviceCommand(SmartHomeDeviceCommandParams {
-        device_id: "tv1".into(),
-        params: Value::Object(params),
-    });
-    assert_eq!(command.method(), methods::SMART_HOME_DEVICE_COMMAND);
-
-    let rpc = command
-        .clone()
-        .into_rpc_request("req-device-command")
-        .expect("serialize smart_home/device.command");
-    assert_eq!(rpc.params["device_id"], json!("tv1"));
-    assert_eq!(rpc.params["params"]["on"], json!(true));
-
-    let json = serde_json::to_string(&rpc).expect("to_string");
-    let parsed_rpc: RpcRequest<Value> = serde_json::from_str(&json).expect("from_str");
-    let decoded =
-        UiCommand::from_rpc_request(parsed_rpc).expect("decode smart_home/device.command");
-    assert_eq!(decoded, command);
-}
-
-/// `smart_home/camera.stream_start` round-trips its optional `quality`
-/// field and its result forwards the bridge's `CameraStreamInfo` JSON.
-#[test]
-fn smart_home_camera_stream_start_command_and_result_round_trip() {
-    let command = UiCommand::SmartHomeCameraStreamStart(SmartHomeCameraStreamStartParams {
-        device_id: "cam1".into(),
-        quality: Some(2),
-    });
-    assert_eq!(command.method(), methods::SMART_HOME_CAMERA_STREAM_START);
-
-    let rpc = command
-        .clone()
-        .into_rpc_request("req-stream-start")
-        .expect("serialize smart_home/camera.stream_start");
-    assert_eq!(rpc.params["quality"], json!(2));
-
-    let json = serde_json::to_string(&rpc).expect("to_string");
-    let parsed_rpc: RpcRequest<Value> = serde_json::from_str(&json).expect("from_str");
-    let decoded =
-        UiCommand::from_rpc_request(parsed_rpc).expect("decode smart_home/camera.stream_start");
-    assert_eq!(decoded, command);
-
-    // Omitted quality stays omitted on the wire (server picks a default).
-    let bare = UiCommand::SmartHomeCameraStreamStart(SmartHomeCameraStreamStartParams {
-        device_id: "cam1".into(),
-        quality: None,
-    });
-    let rpc = bare
-        .into_rpc_request("req-stream-start-bare")
-        .expect("serialize bare");
-    assert!(rpc.params.get("quality").is_none());
-
-    let result = SmartHomeCameraStreamStartResult {
-        stream: json!({"ok": true, "protocol": "hls", "playback_url": "http://bridge/hls/cam1.m3u8"}),
-    };
-    let json = serde_json::to_string(&result).expect("serialize result");
-    let parsed: SmartHomeCameraStreamStartResult =
-        serde_json::from_str(&json).expect("deserialize result");
-    assert_eq!(parsed, result);
-}
-
-/// `smart_home/camera.stream_stop` round-trips through the RPC envelope.
-#[test]
-fn smart_home_camera_stream_stop_command_round_trips() {
-    let command = UiCommand::SmartHomeCameraStreamStop(SmartHomeCameraStreamStopParams {
-        device_id: "cam1".into(),
-    });
-    assert_eq!(command.method(), methods::SMART_HOME_CAMERA_STREAM_STOP);
-
-    let rpc = command
-        .clone()
-        .into_rpc_request("req-stream-stop")
-        .expect("serialize smart_home/camera.stream_stop");
-    let json = serde_json::to_string(&rpc).expect("to_string");
-    let parsed_rpc: RpcRequest<Value> = serde_json::from_str(&json).expect("from_str");
-    let decoded =
-        UiCommand::from_rpc_request(parsed_rpc).expect("decode smart_home/camera.stream_stop");
-    assert_eq!(decoded, command);
-}
-
-/// The `smart_home.v1` feature gates all 5 smart-home methods, and is
-/// advertised in `full_protocol()` but withheld from a server that hasn't
-/// negotiated it — same pattern as `user_question_methods_and_feature_are_registered`.
-#[test]
-fn smart_home_methods_are_gated_on_smart_home_v1() {
-    for method in [
-        methods::SMART_HOME_STATUS_GET,
-        methods::SMART_HOME_DEVICE_LIST,
-        methods::SMART_HOME_DEVICE_COMMAND,
-        methods::SMART_HOME_CAMERA_STREAM_START,
-        methods::SMART_HOME_CAMERA_STREAM_STOP,
-    ] {
-        assert_eq!(
-            method_capability_gate(method),
-            Some(UI_PROTOCOL_FEATURE_SMART_HOME_V1),
-            "{method} must be gated on smart_home.v1"
-        );
-    }
-
-    let full = UiProtocolCapabilities::full_protocol();
-    assert!(
-        full.supported_features
-            .contains(&UI_PROTOCOL_FEATURE_SMART_HOME_V1.to_string())
     );
 }
 

@@ -496,7 +496,6 @@ fn local_profile_state(dir: &Path) -> AppState {
             crate::profiles::ProfileStore::open_unified(dir).unwrap(),
         )),
         user_store: Some(Arc::new(crate::user_store::UserStore::open(dir).unwrap())),
-        deployment_mode: crate::config::DeploymentMode::Local,
         // Solo profile creation is opt-in; the TUI/WS tests exercise the
         // supported path, so enable it here.
         solo_login_enabled: true,
@@ -4254,7 +4253,6 @@ fn profile_local_create_returns_typed_errors_for_invalid_or_nonlocal_requests() 
     );
 
     let tenant_state = AppState {
-        deployment_mode: crate::config::DeploymentMode::Local,
         profile_store: state.profile_store.clone(),
         user_store: state.user_store.clone(),
         ..AppState::empty_for_tests()
@@ -4462,7 +4460,6 @@ fn workspace_probe_capability_is_local_solo_only() {
     );
 
     let tenant = AppState {
-        deployment_mode: crate::config::DeploymentMode::Local,
         profile_store: local.profile_store.clone(),
         user_store: local.user_store.clone(),
         ..AppState::empty_for_tests()
@@ -4582,7 +4579,6 @@ fn permission_profile_handlers_are_server_owned_and_reject_danger_outside_local(
     );
 
     let tenant = AppState {
-        deployment_mode: crate::config::DeploymentMode::Local,
         ..AppState::empty_for_tests()
     };
     let tenant_list = permission_profile_list_result(
@@ -4683,10 +4679,6 @@ fn danger_full_access_requires_solo_opt_in_on_local_server() {
 
     // Local mode, NO --solo opt-in (empty_for_tests: solo_login_enabled=false).
     let local_no_solo = AppState::empty_for_tests();
-    assert_eq!(
-        local_no_solo.deployment_mode,
-        crate::config::DeploymentMode::Local
-    );
     assert!(!local_no_solo.solo_login_enabled);
     let session_id = SessionKey("local:yolo-solo-gate".into());
 
@@ -5359,7 +5351,6 @@ fn capabilities_advertise_local_solo_profile_create_only_when_supported() {
     assert!(!no_profile_capabilities.supports_feature(APPUI_FEATURE_SKILL_ACTIONS_V1));
 
     let tenant = AppState {
-        deployment_mode: crate::config::DeploymentMode::Local,
         profile_store: local.profile_store.clone(),
         user_store: local.user_store.clone(),
         ..AppState::empty_for_tests()
@@ -9128,7 +9119,6 @@ fn shell_approval_event_is_typed_only_after_negotiation() {
             session_workspace_cwd: false,
             session_sandbox: false,
             harness_task_control: false,
-            harness_task_artifacts: false,
             session_hydrate: false,
             thread_graph: false,
             turn_state_get: false,
@@ -9198,7 +9188,6 @@ fn risk_default_is_unspecified_when_manifest_silent() {
             session_workspace_cwd: false,
             session_sandbox: false,
             harness_task_control: false,
-            harness_task_artifacts: false,
             session_hydrate: false,
             thread_graph: false,
             turn_state_get: false,
@@ -9313,7 +9302,6 @@ fn plugin_high_risk_approval_emits_risk_field_on_wire() {
             session_workspace_cwd: false,
             session_sandbox: false,
             harness_task_control: false,
-            harness_task_artifacts: false,
             session_hydrate: false,
             thread_graph: false,
             turn_state_get: false,
@@ -9383,7 +9371,6 @@ fn plugin_critical_risk_approval_emits_risk_critical() {
             session_workspace_cwd: false,
             session_sandbox: false,
             harness_task_control: false,
-            harness_task_artifacts: false,
             session_hydrate: false,
             thread_graph: false,
             turn_state_get: false,
@@ -9446,7 +9433,6 @@ fn shell_approval_still_emits_risk_field() {
             session_workspace_cwd: false,
             session_sandbox: false,
             harness_task_control: false,
-            harness_task_artifacts: false,
             session_hydrate: false,
             thread_graph: false,
             turn_state_get: false,
@@ -9552,7 +9538,6 @@ fn approval_cwd_is_sanitized_against_path_spoof() {
             session_workspace_cwd: false,
             session_sandbox: false,
             harness_task_control: false,
-            harness_task_artifacts: false,
             session_hydrate: false,
             thread_graph: false,
             turn_state_get: false,
@@ -13009,7 +12994,6 @@ async fn session_open_includes_pane_snapshot_after_negotiation() {
             session_workspace_cwd: false,
             session_sandbox: false,
             harness_task_control: false,
-            harness_task_artifacts: false,
             session_hydrate: false,
             thread_graph: false,
             turn_state_get: false,

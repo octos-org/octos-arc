@@ -50,21 +50,21 @@ use octos_core::ui_protocol::{
     UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1, UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1,
     UI_PROTOCOL_FEATURE_CODING_LOOP_RUNTIME_V1, UI_PROTOCOL_FEATURE_CODING_MONITOR_RUNTIME_V1,
     UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1, UI_PROTOCOL_FEATURE_CONTEXT_SEMANTIC_CACHE_V1,
-    UI_PROTOCOL_FEATURE_FILE_ATTACHED_V1, UI_PROTOCOL_FEATURE_HARNESS_TASK_ARTIFACTS_V1,
-    UI_PROTOCOL_FEATURE_HARNESS_TASK_CONTROL_V1, UI_PROTOCOL_FEATURE_PANE_SNAPSHOTS_V1,
-    UI_PROTOCOL_FEATURE_PLAN_TODOS_V1, UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V1,
-    UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2, UI_PROTOCOL_FEATURE_REVIEW_START_V1,
-    UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1, UI_PROTOCOL_FEATURE_SESSION_SANDBOX_V1,
-    UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1, UI_PROTOCOL_FEATURE_SPAWN_COMPLETE_V1,
-    UI_PROTOCOL_FEATURE_THREAD_GRAPH_V1, UI_PROTOCOL_FEATURE_TURN_STATE_GET_V1,
-    UI_PROTOCOL_FEATURE_TURN_STEER_DROPPED_V1, UI_PROTOCOL_FEATURE_USER_QUESTION_V1,
-    UI_PROTOCOL_FEATURE_VOICE_AUDIO_V1, UiAgentRecord, UiArtifactPaneItem, UiArtifactPaneSnapshot,
-    UiCommand, UiContextCompactionRecord, UiContextNormalizationReport, UiContextState, UiCursor,
-    UiFileMutationNotice, UiGitHistoryItem, UiGitPaneSnapshot, UiGitStatusItem, UiNotification,
-    UiPaneSnapshot, UiPaneSnapshotLimitation, UiProgressEvent, UiProgressMetadata,
-    UiProtocolCapabilities, UiRpcResult, UiWorkspacePaneEntry, UiWorkspacePaneSnapshot,
-    UnsupportedCapabilityReport, UserQuestionRequestedEvent, UserQuestionRespondParams,
-    approval_cancelled_reasons, approval_kinds, hydrate_sections, thread_status,
+    UI_PROTOCOL_FEATURE_FILE_ATTACHED_V1, UI_PROTOCOL_FEATURE_HARNESS_TASK_CONTROL_V1,
+    UI_PROTOCOL_FEATURE_PANE_SNAPSHOTS_V1, UI_PROTOCOL_FEATURE_PLAN_TODOS_V1,
+    UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V1, UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2,
+    UI_PROTOCOL_FEATURE_REVIEW_START_V1, UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1,
+    UI_PROTOCOL_FEATURE_SESSION_SANDBOX_V1, UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1,
+    UI_PROTOCOL_FEATURE_SPAWN_COMPLETE_V1, UI_PROTOCOL_FEATURE_THREAD_GRAPH_V1,
+    UI_PROTOCOL_FEATURE_TURN_STATE_GET_V1, UI_PROTOCOL_FEATURE_TURN_STEER_DROPPED_V1,
+    UI_PROTOCOL_FEATURE_USER_QUESTION_V1, UI_PROTOCOL_FEATURE_VOICE_AUDIO_V1, UiAgentRecord,
+    UiArtifactPaneItem, UiArtifactPaneSnapshot, UiCommand, UiContextCompactionRecord,
+    UiContextNormalizationReport, UiContextState, UiCursor, UiFileMutationNotice, UiGitHistoryItem,
+    UiGitPaneSnapshot, UiGitStatusItem, UiNotification, UiPaneSnapshot, UiPaneSnapshotLimitation,
+    UiProgressEvent, UiProgressMetadata, UiProtocolCapabilities, UiRpcResult, UiWorkspacePaneEntry,
+    UiWorkspacePaneSnapshot, UnsupportedCapabilityReport, UserQuestionRequestedEvent,
+    UserQuestionRespondParams, approval_cancelled_reasons, approval_kinds, hydrate_sections,
+    thread_status,
 };
 
 #[cfg(test)]
@@ -326,11 +326,6 @@ const APPUI_STDIO_AUTH_BOUND_UNAVAILABLE_METHODS: &[&str] = &[
     APPUI_METHOD_AUTH_LOGOUT,
     octos_core::ui_protocol::methods::CRON_LIST,
     octos_core::ui_protocol::methods::CRON_TOGGLE,
-    octos_core::ui_protocol::methods::SMART_HOME_STATUS_GET,
-    octos_core::ui_protocol::methods::SMART_HOME_DEVICE_LIST,
-    octos_core::ui_protocol::methods::SMART_HOME_DEVICE_COMMAND,
-    octos_core::ui_protocol::methods::SMART_HOME_CAMERA_STREAM_START,
-    octos_core::ui_protocol::methods::SMART_HOME_CAMERA_STREAM_STOP,
 ];
 type WsSink = futures::stream::SplitSink<WebSocket, WsMessage>;
 type SharedActiveTurns = Arc<tokio::sync::Mutex<HashMap<SessionKey, ActiveTurn>>>;
@@ -1024,10 +1019,7 @@ fn effective_session_permission_state(
     // `permission_selection_allowed` applies, so a tenant-scoped session
     // can't be handed host access via the fallback). A session that fails
     // either check falls through to the gated workspace-write default.
-    if state.dangerous_default_permissions
-        && state.deployment_mode == crate::config::DeploymentMode::Local
-        && !session_id_encodes_non_solo_scope(session_id)
-    {
+    if state.dangerous_default_permissions && !session_id_encodes_non_solo_scope(session_id) {
         return StoredSessionPermissionProfile {
             selection: octos_core::ui_protocol::PermissionProfileSelection {
                 mode: octos_core::ui_protocol::PermissionProfileMode::DangerFullAccess,
@@ -1044,10 +1036,7 @@ fn effective_session_permission_state(
     // a session key that doesn't encode a tenant/cloud scope) so cloud/tenant
     // stays network-denied. Opt OUT with `--no-network` (`OCTOS_NO_NETWORK=1`).
     // An explicit `/permissions` choice still overrides this.
-    if !state.default_network_denied
-        && state.deployment_mode == crate::config::DeploymentMode::Local
-        && !session_id_encodes_non_solo_scope(session_id)
-    {
+    if !state.default_network_denied && !session_id_encodes_non_solo_scope(session_id) {
         return StoredSessionPermissionProfile {
             selection: octos_core::ui_protocol::PermissionProfileSelection {
                 mode: octos_core::ui_protocol::PermissionProfileMode::WorkspaceWrite,
@@ -1256,7 +1245,6 @@ struct ConnectionUiFeatures {
     session_workspace_cwd: bool,
     session_sandbox: bool,
     harness_task_control: bool,
-    harness_task_artifacts: bool,
     /// UPCR-2026-009 `state.session_hydrate.v1` negotiated.
     session_hydrate: bool,
     /// UPCR-2026-010 `state.thread_graph.v1` negotiated.
@@ -1381,11 +1369,6 @@ impl ConnectionUiFeatures {
                 query,
                 UI_PROTOCOL_FEATURE_HARNESS_TASK_CONTROL_V1,
             ),
-            harness_task_artifacts: has_ui_feature(
-                headers,
-                query,
-                UI_PROTOCOL_FEATURE_HARNESS_TASK_ARTIFACTS_V1,
-            ),
             session_hydrate: has_ui_feature(headers, query, UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1),
             thread_graph: has_ui_feature(headers, query, UI_PROTOCOL_FEATURE_THREAD_GRAPH_V1),
             turn_state_get: has_ui_feature(headers, query, UI_PROTOCOL_FEATURE_TURN_STATE_GET_V1),
@@ -1468,7 +1451,6 @@ impl ConnectionUiFeatures {
             session_workspace_cwd: true,
             session_sandbox: true,
             harness_task_control: true,
-            harness_task_artifacts: true,
             session_hydrate: true,
             thread_graph: true,
             turn_state_get: true,
@@ -1530,7 +1512,6 @@ impl ConnectionUiFeatures {
             session_workspace_cwd: has(UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1),
             session_sandbox: has(UI_PROTOCOL_FEATURE_SESSION_SANDBOX_V1),
             harness_task_control: has(UI_PROTOCOL_FEATURE_HARNESS_TASK_CONTROL_V1),
-            harness_task_artifacts: has(UI_PROTOCOL_FEATURE_HARNESS_TASK_ARTIFACTS_V1),
             session_hydrate: has(UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1),
             thread_graph: has(UI_PROTOCOL_FEATURE_THREAD_GRAPH_V1),
             turn_state_get: has(UI_PROTOCOL_FEATURE_TURN_STATE_GET_V1),
@@ -1590,9 +1571,6 @@ impl ConnectionUiFeatures {
         }
         if self.harness_task_control {
             requested.push(UI_PROTOCOL_FEATURE_HARNESS_TASK_CONTROL_V1);
-        }
-        if self.harness_task_artifacts {
-            requested.push(UI_PROTOCOL_FEATURE_HARNESS_TASK_ARTIFACTS_V1);
         }
         if self.session_hydrate {
             requested.push(UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1);
@@ -1806,10 +1784,6 @@ impl ConnectionUiFeatures {
             push_capability_feature(
                 &mut capabilities.supported_features,
                 octos_core::ui_protocol::UI_PROTOCOL_FEATURE_HARNESS_TASK_SUPERVISION_INSPECTION_V1,
-            );
-            push_capability_feature(
-                &mut capabilities.supported_features,
-                octos_core::ui_protocol::UI_PROTOCOL_FEATURE_HARNESS_TASK_ARTIFACTS_V1,
             );
         }
         if supports_local_solo_profile_create(state) {
@@ -5272,7 +5246,7 @@ fn decide_ui_ws_origin_gate(
 ) -> WsOriginDecision {
     decide_ws_origin_gate(
         headers,
-        state.base_domain.as_deref(),
+        None,
         &state.appui_allowed_origins,
         is_authenticated,
     )
@@ -5284,12 +5258,7 @@ fn decide_session_ingress_ws_origin_gate(
 ) -> WsOriginDecision {
     // The work secret authenticates and scopes the session independently.
     // It does not replace the browser Origin gate.
-    decide_ws_origin_gate(
-        headers,
-        state.base_domain.as_deref(),
-        &state.appui_allowed_origins,
-        true,
-    )
+    decide_ws_origin_gate(headers, None, &state.appui_allowed_origins, true)
 }
 
 /// GET /api/ui-protocol/ws — JSON-RPC over WebSocket for UI Protocol v1.
@@ -5679,12 +5648,6 @@ async fn ui_protocol_connection(
         }
 
         match command {
-            UiCommand::SmartHomeStatusGet(_)
-            | UiCommand::SmartHomeDeviceList(_)
-            | UiCommand::SmartHomeDeviceCommand(_)
-            | UiCommand::SmartHomeCameraStreamStart(_)
-            | UiCommand::SmartHomeCameraStreamStop(_) => {}
-            UiCommand::TaskArtifactList(_) | UiCommand::TaskArtifactRead(_) => {}
             UiCommand::ProfileLocalCreate(params) => {
                 match create_or_get_local_solo_profile(&state, params) {
                     Ok(result) => {
@@ -6348,11 +6311,6 @@ where
             };
 
             match command {
-                UiCommand::SmartHomeStatusGet(_)
-                | UiCommand::SmartHomeDeviceList(_)
-                | UiCommand::SmartHomeDeviceCommand(_)
-                | UiCommand::SmartHomeCameraStreamStart(_)
-                | UiCommand::SmartHomeCameraStreamStop(_) => {}
                 UiCommand::ProfileLocalCreate(params) => {
                     match create_or_get_local_solo_profile(&state, params) {
                         Ok(result) => {
@@ -6484,7 +6442,6 @@ where
                     )
                     .await;
                 }
-                UiCommand::TaskArtifactList(_) | UiCommand::TaskArtifactRead(_) => {}
                 UiCommand::TaskList(params) => {
                     handle_task_list(
                         &ws,
@@ -7598,10 +7555,7 @@ fn raw_profile_id(params: &RawProfileParams, connection_profile_id: Option<&str>
 /// never set the opt-in, so solo stays off there; a genuine solo install runs
 /// `octos serve --solo` / `OCTOS_SOLO_LOGIN=1`.
 pub(crate) fn supports_local_solo_profile_create(state: &AppState) -> bool {
-    state.solo_login_enabled
-        && state.deployment_mode == crate::config::DeploymentMode::Local
-        && state.profile_store.is_some()
-        && state.user_store.is_some()
+    state.solo_login_enabled && state.profile_store.is_some() && state.user_store.is_some()
 }
 
 /// Whether this server is a genuine local single-user box that may opt into
@@ -7621,7 +7575,7 @@ pub(crate) fn supports_local_solo_profile_create(state: &AppState) -> bool {
 /// profile/user stores, because a dangerous session runtime is bootstrapped
 /// independently of the no-password login primitive.
 fn local_solo_danger_allowed(state: &AppState) -> bool {
-    state.solo_login_enabled && state.deployment_mode == crate::config::DeploymentMode::Local
+    state.solo_login_enabled
 }
 
 fn local_profile_error(kind: &str, message: impl Into<String>) -> RpcError {
@@ -7678,10 +7632,8 @@ fn local_profile_permission_error(
     }))
 }
 
-fn runtime_mode_for_state(state: &AppState) -> &'static str {
-    match state.deployment_mode {
-        crate::config::DeploymentMode::Local => "solo",
-    }
+fn runtime_mode_for_state(_state: &AppState) -> &'static str {
+    "solo"
 }
 
 fn validate_local_name(name: &str) -> Result<String, RpcError> {
@@ -8793,11 +8745,10 @@ fn effective_permissions_for_session(
     // `EffectivePermissions::for_runtime` rejects `danger_full_access` (a
     // Caddy-fronted fleet daemon can never bootstrap a dangerous session
     // runtime). See `local_solo_danger_allowed`.
-    let runtime_mode = match state.deployment_mode {
-        crate::config::DeploymentMode::Local if local_solo_danger_allowed(state) => {
-            octos_agent::RuntimeMode::Solo
-        }
-        crate::config::DeploymentMode::Local => octos_agent::RuntimeMode::Local,
+    let runtime_mode = if local_solo_danger_allowed(state) {
+        octos_agent::RuntimeMode::Solo
+    } else {
+        octos_agent::RuntimeMode::Local
     };
     let mut permissions = octos_agent::EffectivePermissions::for_runtime(requested, runtime_mode)
         .map_err(|err| {
@@ -12730,10 +12681,6 @@ fn route_rpc_command(
             | octos_core::ui_protocol::methods::TASK_RESTART_FROM_NODE => {
                 Some(features.harness_task_control)
             }
-            octos_core::ui_protocol::methods::TASK_ARTIFACT_LIST
-            | octos_core::ui_protocol::methods::TASK_ARTIFACT_READ => {
-                Some(features.harness_task_artifacts)
-            }
             _ => None,
         };
         if let Some(false) = gated {
@@ -12824,11 +12771,6 @@ fn session_ingress_callable_method(method: &str) -> bool {
             | octos_core::ui_protocol::methods::CRON_LIST
             | octos_core::ui_protocol::methods::CRON_TOGGLE
             | octos_core::ui_protocol::methods::SESSION_FORK
-            | octos_core::ui_protocol::methods::SMART_HOME_STATUS_GET
-            | octos_core::ui_protocol::methods::SMART_HOME_DEVICE_LIST
-            | octos_core::ui_protocol::methods::SMART_HOME_DEVICE_COMMAND
-            | octos_core::ui_protocol::methods::SMART_HOME_CAMERA_STREAM_START
-            | octos_core::ui_protocol::methods::SMART_HOME_CAMERA_STREAM_STOP
     )
 }
 
@@ -12853,11 +12795,7 @@ fn validate_session_ingress_command_scope(
         | UiCommand::CronList(_)
         | UiCommand::CronToggle(_)
         | UiCommand::SessionFork(_)
-        | UiCommand::SmartHomeStatusGet(_)
-        | UiCommand::SmartHomeDeviceList(_)
-        | UiCommand::SmartHomeDeviceCommand(_)
-        | UiCommand::SmartHomeCameraStreamStart(_)
-        | UiCommand::SmartHomeCameraStreamStop(_) => {
+ => {
             return Err(RpcError::invalid_request(
                 "session ingress credentials may only call session-scoped methods",
             ));
@@ -12889,8 +12827,6 @@ fn validate_session_ingress_command_scope(
             )
         })?,
         UiCommand::TaskOutputRead(params) => params.session_id.clone(),
-        UiCommand::TaskArtifactList(params) => params.session_id.clone(),
-        UiCommand::TaskArtifactRead(params) => params.session_id.clone(),
         UiCommand::SessionHydrate(params) => params.session_id.clone(),
         UiCommand::SessionRollback(params) => params.session_id.clone(),
         UiCommand::ThreadGraphGet(params) => params.session_id.clone(),

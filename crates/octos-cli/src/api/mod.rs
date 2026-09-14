@@ -216,37 +216,19 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     /// Path to the global config.json file (for admin bot config editing).
     pub config_path: Option<PathBuf>,
-    /// Monitor watchdog flag (shared with Monitor task).
-    pub watchdog_enabled: Option<Arc<std::sync::atomic::AtomicBool>>,
-    /// Monitor alerts flag (shared with Monitor task).
-    pub alerts_enabled: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// Persistent sysinfo instance for accurate CPU metrics across polls.
     pub sysinfo: tokio::sync::Mutex<sysinfo::System>,
     /// Tenant store for tunnel management.
     /// Cache of frps run_id → tenant_id from Login verification.
-    /// Tunnel domain (e.g. "octos-cloud.org").
-    pub tunnel_domain: Option<String>,
-    /// Public-facing base domain each mini serves profiles under
-    /// (e.g. `"crew.ominix.io"`, `"bot.ominix.io"`, `"ocean.ominix.io"`).
-    /// `None` is treated as `"crew.ominix.io"` by callers for backward
-    /// compatibility. See `crate::config::Config::base_domain` for the
-    /// config / env-var wiring.
-    pub base_domain: Option<String>,
     /// Startup-normalized exact origins from `appui.allowed_origins` (or its
     /// non-empty environment override), plus loopback origins for the active
     /// serve port. CORS and both browser WebSocket gates consume this same
     /// list; authentication and work-secret validation remain separate.
     pub appui_allowed_origins: Vec<String>,
-    /// frps server address for tunnel config generation.
-    pub frps_server: Option<String>,
-    /// frps control port.
-    pub frps_port: Option<u16>,
-    /// Deployment mode (local, tenant, or cloud).
-    pub deployment_mode: crate::config::DeploymentMode,
     /// Opt-in for the no-password "solo" REST login (`/api/auth/solo*`).
     /// OFF by default; set by `octos serve --solo` / `OCTOS_SOLO_LOGIN=1`.
     ///
-    /// SECURITY: `deployment_mode == Local` is NOT sufficient to enable solo
+    /// SECURITY: this flag alone is NOT sufficient to enable solo
     /// login. A hosted fleet daemon runs Local mode behind a Caddy reverse
     /// proxy, so every request reaches the daemon over loopback and would
     /// otherwise pass the loopback guard. This explicit opt-in (which fleet
@@ -280,11 +262,9 @@ pub struct AppState {
     /// lazily-bootstrapped profile runtimes so a host opt-out of memory
     /// refresh (DEFAULT-ON) also binds profiles created after startup.
     pub host_memory: Option<crate::config::MemoryConfig>,
-    /// Whether the admin shell endpoint is enabled (default: false).
     /// Solo-profile id/email ledger (multi-user accounts were removed with
     /// the dashboard; the store remains for `profile/local/create`).
     pub user_store: Option<Arc<crate::user_store::UserStore>>,
-    pub allow_admin_shell: bool,
     /// Optional path to the JSONL harness-event sink. When `Some`,
     /// typed harness events (e.g. `SwarmReviewDecision`) are appended
     /// to the file in addition to being broadcast live to harness
@@ -361,22 +341,14 @@ impl AppState {
             profile_store: None,
             http_client: reqwest::Client::new(),
             config_path: None,
-            watchdog_enabled: None,
-            alerts_enabled: None,
             sysinfo: tokio::sync::Mutex::new(crate::sysinfo_budget::new_metrics_system()),
-            tunnel_domain: None,
-            base_domain: None,
             appui_allowed_origins: Vec::new(),
-            frps_server: None,
-            frps_port: None,
-            deployment_mode: crate::config::DeploymentMode::Local,
             solo_login_enabled: false,
             dangerous_default_permissions: false,
             default_network_denied: false,
             llm_compaction: false,
             host_memory: None,
             user_store: None,
-            allow_admin_shell: false,
             harness_event_sink_path: None,
             credential_pool: None,
             task_query_store: None,

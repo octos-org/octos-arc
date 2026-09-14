@@ -136,18 +136,5 @@ pub fn profile_plugin_env(profile: &crate::profiles::UserProfile) -> Vec<(String
         }
     }
 
-    // Smart-home bridge: forward the RESOLVED bridge config to the
-    // `smart-home` skill as `SMART_HOME_BRIDGE_URL` / `SMART_HOME_BRIDGE_TOKEN`.
-    // Callers pass the runtime-resolved profile (parent + defaults merged) and
-    // `resolved_env_vars` is keychain-aware, so this covers two cases the
-    // skill's own profile-JSON fallback cannot: a sub-account inheriting
-    // `config.smart_home` from its parent, and a `token_env` whose value is a
-    // keychain marker.
-    if let Some(smart_home) = profile.config.smart_home.as_ref() {
-        for (key, value) in smart_home.to_env_vars(&resolved_env_vars) {
-            push_env_once(&mut env, key, value);
-        }
-    }
-
     env
 }

@@ -230,9 +230,6 @@ pub struct ProfileConfig {
     /// Gateway-specific settings.
     #[serde(default)]
     pub gateway: GatewaySettings,
-    /// Smart-home bridge integration (self-hosted/LAN-reachable bridge only).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub smart_home: Option<SmartHomeConfig>,
     /// API protocol type: "openai" or "anthropic". Overrides provider default.
     #[serde(default)]
     pub api_type: Option<String>,
@@ -538,8 +535,6 @@ pub struct ProfileConfigPatch {
     pub llm: PatchField<LlmProfileConfig>,
     #[serde(default)]
     pub gateway: Option<GatewaySettingsPatch>,
-    #[serde(default)]
-    pub smart_home: PatchField<SmartHomeConfig>,
     #[serde(default, deserialize_with = "deserialize_profile_asr_language_patch")]
     pub asr_language: PatchField<String>,
     #[serde(default)]
@@ -672,45 +667,6 @@ pub struct LlmRouteConfig {
     pub api_type: Option<String>,
 }
 
-/// Smart-home bridge integration for a profile.
-///
-/// Scope: self-hosted / same-LAN bridges only (e.g. a Home Assistant bridge
-/// reachable at `http://192.168.x.x:8787`). Cloud-tenant deployments where the
-/// backend isn't on the user's home network are out of scope for now.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct SmartHomeConfig {
-    /// Base URL of the smart-home bridge (e.g. `http://192.168.1.50:8787`).
-    /// Not a secret — left in the clear by `mask_secrets`.
-    #[serde(default)]
-    pub bridge_url: Option<String>,
-    /// Bridge auth token (literal value, preferred over token_env).
-    #[serde(default)]
-    pub token: Option<String>,
-    /// Env var name holding the bridge auth token (legacy/reference pattern).
-    #[serde(default)]
-    pub token_env: Option<String>,
-}
-
-impl SmartHomeConfig {
-    /// Return env var pairs that the `smart-home` plugin skill and the
-    /// backend's own bridge client expect.
-    /// `env_vars` is the profile's env_vars map used to resolve `token_env`.
-    pub fn to_env_vars(&self, env_vars: &HashMap<String, String>) -> Vec<(String, String)> {
-        let mut out = Vec::new();
-        if let Some(ref url) = self.bridge_url {
-            out.push(("SMART_HOME_BRIDGE_URL".into(), url.clone()));
-        }
-        if let Some(ref token) = self.token {
-            out.push(("SMART_HOME_BRIDGE_TOKEN".into(), token.clone()));
-        } else if let Some(ref token_env) = self.token_env {
-            if let Some(token_val) = env_vars.get(token_env) {
-                out.push(("SMART_HOME_BRIDGE_TOKEN".into(), token_val.clone()));
-            }
-        }
-        out
-    }
-}
-
 impl ProfileConfig {
     pub fn primary_llm(&self) -> Option<&LlmModelSelectionConfig> {
         self.llm.as_ref().and_then(|llm| llm.primary.as_ref())
@@ -734,11 +690,6 @@ impl ProfileConfig {
         }
         if let Some(gateway) = patch.gateway {
             gateway.apply_to(&mut self.gateway);
-        }
-        match patch.smart_home {
-            PatchField::Absent => {}
-            PatchField::Clear => self.smart_home = None,
-            PatchField::Value(smart_home) => self.smart_home = Some(smart_home),
         }
         match patch.asr_language {
             PatchField::Absent => {}
@@ -1226,11 +1177,6 @@ impl ProfileStore {
                         *new_val = old_val.clone();
                     }
                 }
-            }
-            if let (Some(new_smart_home), Some(old_smart_home)) =
-                (&mut profile.config.smart_home, &existing.config.smart_home)
-            {
-                restore_masked_optional_secret(&mut new_smart_home.token, &old_smart_home.token);
             }
         }
         self.save(profile)
@@ -1758,22 +1704,8 @@ pub fn mask_secrets(profile: &UserProfile) -> UserProfile {
             *value = mask_value(value);
         }
     }
-    if let Some(smart_home) = &mut masked.config.smart_home {
-        mask_smart_home_secrets(smart_home);
-    }
     masked.config.normalize_llm_contract();
     masked
-}
-
-/// Mask the literal secret in `config.smart_home`.
-///
-/// `token` holds a real credential; `bridge_url` is not a secret (just a LAN
-/// address the user needs to see/edit), and `token_env` holds only an env var
-/// NAME, so both stay in the clear.
-fn mask_smart_home_secrets(smart_home: &mut SmartHomeConfig) {
-    if let Some(token) = &mut smart_home.token {
-        *token = mask_value(token);
-    }
 }
 
 /// Display string for keychain-backed values in API responses.
@@ -1794,16 +1726,6 @@ fn mask_value(s: &str) -> String {
         "***".into()
     } else {
         String::new()
-    }
-}
-
-fn restore_masked_optional_secret(new_value: &mut Option<String>, old_value: &Option<String>) {
-    let should_restore = new_value
-        .as_deref()
-        .map(is_display_secret_value)
-        .unwrap_or(false);
-    if should_restore {
-        *new_value = old_value.clone();
     }
 }
 
@@ -1955,14 +1877,8 @@ pub(crate) fn config_from_profile(profile: &UserProfile) -> Config {
         auth_token: None,
         adaptive_routing: profile.config.adaptive_routing.clone(),
         voice: None,
-        mode: Default::default(),
-        tunnel_domain: None,
-        base_domain: None,
-        frps_server: None,
-        allow_admin_shell: false,
         #[cfg(feature = "api")]
         #[cfg(feature = "api")]
-        monitor: None,
         // F-005: credential pool + content routing are per-profile
         // fields on `ProfileConfig`; the flattened `Config` used by
         // gateway consumers does not currently surface them, so leave
@@ -2063,121 +1979,6 @@ pub fn diff_profiles(old: &UserProfile, new: &UserProfile) -> ProfileChange {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn should_include_bridge_url_in_env_vars_when_set() {
-        let config = SmartHomeConfig {
-            bridge_url: Some("http://localhost:8787".into()),
-            ..Default::default()
-        };
-        let env_vars = HashMap::new();
-        let out = config.to_env_vars(&env_vars);
-        assert!(
-            out.contains(&(
-                "SMART_HOME_BRIDGE_URL".to_string(),
-                "http://localhost:8787".to_string()
-            )),
-            "expected SMART_HOME_BRIDGE_URL in {out:?}"
-        );
-    }
-
-    #[test]
-    fn should_resolve_token_env_when_literal_token_absent() {
-        let config = SmartHomeConfig {
-            bridge_url: None,
-            token: None,
-            token_env: Some("SH_TOKEN".into()),
-        };
-        let mut env_vars = HashMap::new();
-        env_vars.insert("SH_TOKEN".to_string(), "secret123".to_string());
-        let out = config.to_env_vars(&env_vars);
-        assert!(
-            out.contains(&(
-                "SMART_HOME_BRIDGE_TOKEN".to_string(),
-                "secret123".to_string()
-            )),
-            "expected resolved token in {out:?}"
-        );
-    }
-
-    #[test]
-    fn should_prefer_literal_token_over_token_env() {
-        let config = SmartHomeConfig {
-            bridge_url: None,
-            token: Some("literal-token".into()),
-            token_env: Some("SH_TOKEN".into()),
-        };
-        let mut env_vars = HashMap::new();
-        env_vars.insert("SH_TOKEN".to_string(), "should-not-be-used".to_string());
-        let out = config.to_env_vars(&env_vars);
-        assert!(
-            out.contains(&(
-                "SMART_HOME_BRIDGE_TOKEN".to_string(),
-                "literal-token".to_string()
-            )),
-            "expected literal token to win in {out:?}"
-        );
-    }
-
-    #[test]
-    fn should_mask_smart_home_token_but_not_url_when_masking_profile() {
-        let profile = UserProfile {
-            id: "test".into(),
-            name: "Test".into(),
-            public_subdomain: None,
-            enabled: true,
-            data_dir: None,
-            parent_id: None,
-            config: ProfileConfig {
-                smart_home: Some(SmartHomeConfig {
-                    bridge_url: Some("http://192.168.1.50:8787".into()),
-                    token: Some("supersecret-token-value".into()),
-                    token_env: None,
-                }),
-                ..Default::default()
-            },
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
-        let profile = mask_secrets(&profile);
-        let smart_home = profile.config.smart_home.expect("smart_home present");
-        assert_eq!(
-            smart_home.bridge_url.as_deref(),
-            Some("http://192.168.1.50:8787"),
-            "bridge_url is not a secret and must not be masked"
-        );
-        let masked_token = smart_home.token.expect("token present");
-        assert_ne!(masked_token, "supersecret-token-value");
-        assert_eq!(masked_token, "supe***lue");
-    }
-
-    #[test]
-    fn should_apply_smart_home_patch_value_and_clear() {
-        let mut config = ProfileConfig::default();
-        let patch = ProfileConfigPatch {
-            smart_home: PatchField::Value(SmartHomeConfig {
-                bridge_url: Some("http://localhost:8787".into()),
-                token: None,
-                token_env: None,
-            }),
-            ..Default::default()
-        };
-        config.apply_patch(patch);
-        assert_eq!(
-            config
-                .smart_home
-                .as_ref()
-                .and_then(|s| s.bridge_url.clone()),
-            Some("http://localhost:8787".to_string())
-        );
-
-        let clear_patch = ProfileConfigPatch {
-            smart_home: PatchField::Clear,
-            ..Default::default()
-        };
-        config.apply_patch(clear_patch);
-        assert!(config.smart_home.is_none());
-    }
 
     fn llm_selection(
         family_id: &str,

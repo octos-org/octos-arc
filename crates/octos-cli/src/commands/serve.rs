@@ -512,18 +512,6 @@ impl ServeCommand {
         );
 
         // Spawn auth cleanup task if auth manager is active
-        // Pre-create watchdog/alerts flags for both Monitor and AppState
-        let (watchdog_flag, alerts_flag) = {
-            let wf = config
-                .monitor
-                .as_ref()
-                .map(|m| Arc::new(std::sync::atomic::AtomicBool::new(m.watchdog_enabled)));
-            let af = config
-                .monitor
-                .as_ref()
-                .map(|m| Arc::new(std::sync::atomic::AtomicBool::new(m.alerts_enabled)));
-            (wf, af)
-        };
 
         // F-005: Wire the credential pool at startup. Absent config →
         // stays `None` so the session actor falls back to the legacy
@@ -560,20 +548,6 @@ impl ServeCommand {
                 "--danger-full-access requires --solo (local single-user opt-in); \
                  refusing to default sessions to the dangerous profile on a \
                  potentially shared host"
-            );
-        }
-        // `effective_permissions_for_session` only grants DangerFullAccess in
-        // Local deployment mode; enabling the default under Tenant/Cloud would
-        // fail every unselected `session/open` at permission resolution and
-        // let `profile/list` advertise a current profile the runtime rejects
-        // (codex P2 on #1639). Refuse the misconfiguration at startup.
-        if dangerous_default_permissions_flag && config.mode != crate::config::DeploymentMode::Local
-        {
-            eyre::bail!(
-                "--danger-full-access requires Local deployment mode (mode is {:?}); \
-                 the full-access profile is not grantable under Tenant/Cloud, so an \
-                 unselected session would fail permission resolution",
-                config.mode
             );
         }
         // Resolve browser origins once, before any HTTP route is exposed.
@@ -613,35 +587,15 @@ impl ServeCommand {
             // `T/config.json`, not a recomputed XDG path. (admin_setup's own
             // None branch can't see the CLI flag; this closes that leak.)
             config_path: resolved_config_path.or_else(|| Some(ctx.config_home.join("config.json"))),
-            watchdog_enabled: watchdog_flag.clone(),
-            alerts_enabled: alerts_flag.clone(),
             // task-sysinfo-proc-stat-fd-budget: no startup process snapshot,
             // no retained /proc handles (see sysinfo_budget).
             sysinfo: tokio::sync::Mutex::new(crate::sysinfo_budget::new_metrics_system()),
-            tunnel_domain: config
-                .tunnel_domain
-                .clone()
-                .or_else(|| std::env::var("TUNNEL_DOMAIN").ok()),
-            // `OCTOS_BASE_DOMAIN` (env) takes precedence over config.json so
-            // operators can override without touching the file. `None` leaves
-            // base-domain read sites (status payload, tenant WS gate) unset.
-            base_domain: std::env::var("OCTOS_BASE_DOMAIN")
-                .ok()
-                .filter(|s| !s.trim().is_empty())
-                .or_else(|| config.base_domain.clone().filter(|s| !s.trim().is_empty())),
             appui_allowed_origins,
-            frps_server: config
-                .frps_server
-                .clone()
-                .or_else(|| std::env::var("FRPS_SERVER").ok()),
-            frps_port: std::env::var("FRPS_PORT").ok().and_then(|p| p.parse().ok()),
-            deployment_mode: config.mode.clone(),
             host_memory: config.memory.clone(),
             solo_login_enabled: solo_login_enabled_flag,
             dangerous_default_permissions: dangerous_default_permissions_flag,
             default_network_denied: default_network_denied_flag,
             llm_compaction: self.llm_compaction,
-            allow_admin_shell: config.allow_admin_shell,
             // Harness JSONL event sink — wired from the
             // `OCTOS_HARNESS_EVENT_SINK` env var when the caller wants
             // review decisions and swarm dispatch events persisted (see
@@ -848,17 +802,5 @@ mod tests {
         drop(relaunch);
         let _next = acquire_serve_data_dir_lock(dir.path())
             .expect("the new guard still releases its own lock on drop");
-    }
-
-    #[test]
-    fn deployment_mode_is_explicit_and_ignores_tunnel_settings() {
-        let config = Config {
-            mode: crate::config::DeploymentMode::Local,
-            tunnel_domain: Some("octos-cloud.org".to_string()),
-            frps_server: Some("127.0.0.1".to_string()),
-            ..Default::default()
-        };
-
-        assert_eq!(config.mode, crate::config::DeploymentMode::Local);
     }
 }
