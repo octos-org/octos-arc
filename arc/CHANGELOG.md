@@ -496,3 +496,31 @@ feature-rate prefix matching; container now 2 GiB / 1 CPU / `--workers=4` (keep 
 
 **Local tooling**: `run-task-local.py` (`--template` for Evolution), `grade-local.py` (restores worktree),
 `pack.sh` bundle list, `metrics.py`; unit tests `cd arc && python3 -m unittest discover -s tests -t .` (85).
+
+## Round 29 — generality review of the prompts (user rule: no task-specific strategy)
+
+Rule applied: a rule may only depend on what the run can derive from its own inputs (requirements.yaml,
+spec text, container facts, failure text); every prompt sentence must be a general engineering rule that
+matters for at least two tasks; no competition/task names, titles or known failing cases.
+
+Rewritten (main.py): strict-mode bullet no longer names "Register"/"Login" links or `a[href="/register"]`;
+echoed-value examples generic; "live indicators" no longer enumerates controls (meters/counters/previews);
+codegen multi-node mechanism (1) describes the NAV placeholder generically (link texts come from the tests)
+instead of hard-coding Chinese link texts and USERNAME; mechanism (3) says "values the test helpers generate
+must be accepted; do not invent stricter rules" instead of listing name/document/phone/email; performance
+contract says "a few ms per hash call, no default-cost KDF / native module" instead of scrypt parameters.
+codegen.py: `dedupe_nav_links` derives the hrefs to strip from the anchors the server itself renders into the
+placeholder (was a fixed /login|/register|/logout list).
+
+通用性自查 (checklist, all ✔):
+- [✔] No task id / title / competition name in any prompt constant or decision (`grep` for ticket|dice|counter|
+  keep in prompt text: none; only code comments and evidence ids remain, which are not sent to the model).
+- [✔] Ports: derived from spec text (`spec_base_ports`), never a literal.
+- [✔] Session/login rules: gated by requirement/spec keywords (`needs_session`), phrased as generic web rules.
+- [✔] Codegen mechanisms: placeholder/cookie/validation/visibility/no-HTML5-validation are generic; the only
+  literal is the placeholder token `<!--NAV-->` the harness itself introduces.
+- [✔] Deterministic post-processing: charset meta, extensionless page copies, flattened-newline repair, NAV
+  dedupe — all input-derived, none keyed to a task.
+- [✔] Acceptance/robustness probes: /favicon.ico + unknown path/API are browser/grader facts, not task facts.
+- [✔] Local parity: prompts render for Counter/Dice/Evolution/TB offline (1,940 / 1,577 / 2,521 / 14,791 chars,
+  ports clause only where a spec names a port); unit tests 79 OK. Live runs 未评测 (key reserved for keep).

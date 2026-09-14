@@ -745,10 +745,10 @@ UI_CONTRACT_CORE = """\
 UI contract (the hidden Playwright tests depend on these; a violation scores 0):
 - Buttons are real <button> elements, links are <a href>, every form control has a visible <label for=id>; their texts are copied VERBATIM from the requirement/spec (anchored regexes like /^name$/i reject "Full Name"). Use plain text/password/email inputs, native <select>/checkbox/radio; NEVER type="date"/"number". All controls exist in the served HTML itself and stay visible, enabled and editable at all times; no CSS transitions/animations and no JavaScript that re-renders or re-creates form controls after load (Playwright waits for elements to be "stable" — cloud run 954a231a3d23 timed out on a checkbox that kept changing).
 - No native HTML5 validation attributes; validate in JavaScript and show ONE inline error element (role="alert") naming the problem (required / invalid / match / terms / duplicate). On error stay on the page and create no record.
-- Strict mode: every echoed value (username, city, date) appears in EXACTLY ONE element per page; every link target appears in EXACTLY ONE <a> per page (one "Register" link, one "Login" link — never a nav link plus a call-to-action to the same href; the specs click `a[href="/register"]` and fail on two matches); never both a short and a long form of one entity, never a per-field error plus a summary. Serve a SEPARATE HTML document per route (`/`, `/register`, `/login`, ...) — never several forms in one document with hidden views: hidden inputs and labels still collide in getByLabel/getByRole.
+- Strict mode: every echoed value (an entered name, a chosen option, a date) appears in EXACTLY ONE element per page; every link target appears in EXACTLY ONE <a> per page (never a nav link plus a call-to-action to the same href: a spec that clicks `a[href=...]` fails on two matches); never both a short and a long form of one entity, never a per-field error plus a summary. Serve a SEPARATE HTML document per route (`/`, `/register`, `/login`, ...) — never several forms in one document with hidden views: hidden inputs and labels still collide in getByLabel/getByRole.
 - State: persist ONLY what the requirement says is persisted and reproduce that seed on EVERY fresh start; a page's initial state (e.g. "the count is initially 0") is per-page-load client state, never a shared server value — the grader runs several test files in parallel against ONE server. The initial state must already be in the served HTML (e.g. the element contains `0` in the markup); never leave it empty until a fetch completes — the tests assert immediately after load.
 - Zero external requests (no CDN, fonts, analytics); assets small and same-origin.
-- Live indicators (password-strength meters, counters, previews) update their OWN element's text/attributes synchronously in the `input` event handler — never on change/blur, never debounced, never only a wrapper's class (specs compare the element's outerHTML before and after typing).
+- Live indicators (any element the spec reads back after typing) update their OWN element's text/attributes synchronously in the `input` event handler — never on change/blur, never debounced, never only a wrapper's class (specs compare the element's outerHTML before and after typing).
 - Text only: never OCR reference images. Write files in your first actions.
 """
 
@@ -765,13 +765,12 @@ Rules: texts, button names, labels and test ids exactly as in the test; the init
 
 CODEGEN_SIZE_SMALL = "index.html <= 20 lines, server.js <= 20 lines."
 CODEGEN_SIZE_FULL = ("As short as the tests allow; one page file per route. Mechanisms (follow exactly): "
-                     "(1) every page contains the literal `<!--NAV-->` and no other navigation links; the server replaces it "
-                     "with `<a href=\"/login\">登录</a> <a href=\"/register\">Register</a>` when signed out or "
-                     "`<span>USERNAME</span> <a href=\"/logout\">退出登录</a>` when signed in (read from the cookie) before sending. "
+                     "(1) every page contains the literal `<!--NAV-->` and no other navigation links; before sending, the server "
+                     "replaces it with the signed-out links or the signed-in header (the exact link texts and labels the tests "
+                     "expect, each exactly once), decided from the session cookie. "
                      "(2) Session cookie exactly `session=TOKEN; Path=/; HttpOnly; SameSite=Lax`; sign-out clears it and redirects to /. "
-                     "(3) Validation: the values produced by the test helpers (see the support file) are valid input and MUST be "
-                     "accepted (names with spaces, any document number, phone, email the helper uses); reject only the cases the "
-                     "tests assert are rejected; each message is the FIRST alternative of the test's regex copied verbatim, shown in one persistent `role=alert` element. "
+                     "(3) Validation: every value the test helpers generate is valid input and MUST be accepted; do not invent "
+                     "stricter rules than the requirement states; reject only the cases the tests assert are rejected; each message is the FIRST alternative of the test's regex copied verbatim, shown in one persistent `role=alert` element. "
                      "(4) Elements the test expects visible have a non-empty box (never an empty div/span). "
                      "(5) No HTML5 validation attributes (required/pattern/type=email): the server validates.")
 
@@ -787,7 +786,7 @@ UI_CONTRACT = UI_CONTRACT_CORE + UI_CONTRACT_DATA + UI_CONTRACT_SESSION  # full 
 
 PERFORMANCE_CONTRACT = """\
 Performance & robustness (the grader is a slow container, tests run in parallel, EACH TEST HAS A 10 s BUDGET including reloads):
-- The grader CPU is 5–10x slower than a laptop and runs 4 browsers at once, so budget CPU per request at 30 ms: hash passwords with crypto.scryptSync(password, salt, 64, {N: 4096, r: 8, p: 1}) or pbkdf2Sync with <= 10000 iterations — never the default scrypt cost, never bcrypt; keep the JSON store small and rewrite it only on mutation.
+- The grader CPU is 5–10x slower than a laptop and runs 4 browsers at once, so budget CPU per request at 30 ms: any password hashing must cost a few milliseconds per call (a low-cost KDF parameter or a single digest), never a default-cost KDF or a native hashing module; keep the JSON store small and rewrite it only on mutation.
 - Session cookie: HttpOnly; Path=/; SameSite=Lax; Max-Age at least 7 days; NO `Secure`, NO `Domain` attribute (tests run on http://127.0.0.1). Render every page server-side from the cookie (signed-in header, username) so a page needs NO XHR after load; keep pages tiny (one small inline script, no separate JS bundles) — the grader's browsers are slow and memory-starved.
 - Persistence: the in-memory store is the single source of truth; never re-read the JSON file per request. Mutations update memory first and then write the whole file synchronously (writeFileSync to a temp file, then rename) — never an async read-modify-write, because the grader runs 2–4 test files in parallel against ONE backend and a concurrent register/login pair must never lose a user. No setTimeout delays, polling, service workers, beforeunload handlers, or debounced writes.
 """

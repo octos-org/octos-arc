@@ -107,27 +107,33 @@ def repair_flattened_js(path: Path) -> bool:
 
 
 NAV_PLACEHOLDER = "<!--NAV-->"
-NAV_LINK = re.compile(r"""<a\b[^>]*href=["'](?:/login|/register|/logout)["'][^>]*>.*?</a>\s*""", re.IGNORECASE | re.DOTALL)
+HREF = re.compile(r"""href=["'](/[^"'#?]*)["']""", re.IGNORECASE)
 
 
 def dedupe_nav_links(root: Path) -> list[str]:
     """The multi-node prompt mandates one navigation mechanism: pages carry the
     NAV placeholder, the server fills it. Models keep adding static copies of the
-    same links next to it (local s2/s3/s15: strict-mode violation, 0/6). When the
-    server implements the placeholder, drop the static duplicates from pages that
-    carry it."""
+    same links next to it (strict-mode violation). When the server implements the
+    placeholder, drop static anchors whose href the server also renders."""
     server = root / "backend" / "server.js"
     try:
-        if NAV_PLACEHOLDER not in server.read_text(encoding="utf-8", errors="replace"):
-            return []
+        server_text = server.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return []
+    if NAV_PLACEHOLDER not in server_text:
+        return []
+    # The links the server itself renders into the placeholder (derived, not a fixed list).
+    nav_hrefs = {h for h in HREF.findall(server_text)}
+    if not nav_hrefs:
+        return []
+    pattern = re.compile(r"""<a\b[^>]*href=["'](?:%s)["'][^>]*>.*?</a>\s*""" % "|".join(re.escape(h) for h in sorted(nav_hrefs)),
+                         re.IGNORECASE | re.DOTALL)
     changed = []
     for page in sorted((root / "frontend" / "src").glob("*.html")):
         text = page.read_text(encoding="utf-8", errors="replace")
         if NAV_PLACEHOLDER not in text:
             continue
-        cleaned = NAV_LINK.sub("", text)
+        cleaned = pattern.sub("", text)
         if cleaned != text:
             page.write_text(cleaned, encoding="utf-8")
             changed.append(page.name)

@@ -90,13 +90,15 @@ class DedupeNavLinksTests(unittest.TestCase):
         from codegen import dedupe_nav_links
         root = Path(tempfile.mkdtemp())
         (root / "frontend/src").mkdir(parents=True); (root / "backend").mkdir()
-        page = '<body><!--NAV-->\n<a href="/register">Register</a>\n<a href="/about">About</a></body>'
+        page = '<body><!--NAV-->\n<a href="/register">Register</a>\n<a href="/about">About</a>\n<a href="/help">Help</a></body>'
         (root / "frontend/src/index.html").write_text(page)
         (root / "backend/server.js").write_text("x")
         self.assertEqual(dedupe_nav_links(root), [])
-        (root / "backend/server.js").write_text("html.replace('<!--NAV-->', nav)")
+        (root / "backend/server.js").write_text("""const nav = '<a href="/register">R</a> <a href="/about">A</a>'; html.replace('<!--NAV-->', nav)""")
         self.assertEqual(dedupe_nav_links(root), ["index.html"])
         out = (root / "frontend/src/index.html").read_text()
         self.assertNotIn('href="/register"', out)
-        self.assertIn('href="/about"', out)
+        self.assertNotIn('href="/about"', out)
+        self.assertIn('href="/help"', out)  # not rendered by the server: kept
+        self.assertIn("<!--NAV-->", out)
         self.assertIn("<!--NAV-->", out)
