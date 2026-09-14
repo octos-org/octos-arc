@@ -1140,17 +1140,31 @@ class Flow:
                 and not getattr(self, "codegen_blocked", False)
                 and getattr(self, "n_nodes", 99) <= int(os.environ.get("OCTOS_ARC_CODEGEN_MAX_NODES", "2")))
 
-    def codegen_turn(self, prompt: str, timeout: int, label: str) -> tuple[bool, str]:
+    def codegen_reasoning(self, spec_chars: int) -> str | None:
+        """Reasoning effort for a codegen turn, derived from the size of the spec it
+        must satisfy (OCTOS_ARC_CODEGEN_REASONING_CHARS, default 5000): small specs are
+        generated correctly without reasoning; large ones keep the base mode."""
+        if os.environ.get("OCTOS_ARC_REASONING", "auto") != "auto":
+            return None
+        threshold = int(os.environ.get("OCTOS_ARC_CODEGEN_REASONING_CHARS", "5000"))
+        return "none" if spec_chars and spec_chars < threshold else None
+
+    def codegen_turn(self, prompt: str, timeout: int, label: str, spec_chars: int = 0) -> tuple[bool, str]:
         """Run a tool-less turn; parse and write the file blocks from the reply."""
         proxy = self.llm_proxy
         proxy.no_tools = True
         proxy.system_override = CODEGEN_SYSTEM
+        mode_override = self.codegen_reasoning(spec_chars)
+        saved_base = getattr(self, "base_reasoning_mode", proxy.mode)
+        if mode_override:
+            self.base_reasoning_mode = mode_override
         try:
             ok, text = self.turn(prompt + "\n" + FORMAT_INSTRUCTIONS, timeout, label, expect_verification=False,
                                  request_budget=int(os.environ.get("OCTOS_ARC_CODEGEN_REQUESTS", "3")))
         finally:
             proxy.no_tools = False
             proxy.system_override = None
+            self.base_reasoning_mode = saved_base
         files = parse_file_blocks(text) if ok else {}
         if files:
             written = write_files(self.output_dir, files)
@@ -1474,7 +1488,8 @@ class Flow:
                 log(f"[flow] {node_id}: nothing passed; one full rewrite turn instead of a patch")
                 prompt = rebuild_prompt(failures or "(no detail)")
                 if self.codegen_mode():
-                    self.codegen_turn(prompt, min(self.node_timeout, left), f"{node_id} rewrite (repair {attempt + 1})")
+                    self.codegen_turn(prompt, min(self.node_timeout, left), f"{node_id} rewrite (repair {attempt + 1})",
+                                      spec_chars=getattr(self, "current_spec_chars", 0))
                 else:
                     self.turn(prompt, min(self.node_timeout, left), f"{node_id} rewrite (repair {attempt + 1})",
                               request_budget=int(os.environ.get("OCTOS_ARC_IMPLEMENT_REQUESTS", "20")))
@@ -1485,7 +1500,8 @@ class Flow:
                                           sources=self.sources_text())
             if self.codegen_mode():
                 self.codegen_turn(prompt + "\nReturn every file you change as a complete file block.",
-                                  min(self.node_timeout, left), f"{node_id} repair {attempt + 1}/{self.repair_rounds}")
+                                  min(self.node_timeout, left), f"{node_id} repair {attempt + 1}/{self.repair_rounds}",
+                                  spec_chars=getattr(self, "current_spec_chars", 0))
             else:
                 self.turn(prompt, min(self.node_timeout, left), f"{node_id} repair {attempt + 1}/{self.repair_rounds}")
         if best_passed > 0 and best_sha and self.head() != best_sha:
@@ -1587,8 +1603,9 @@ class Flow:
                                            "every changed file complete. Files:", 1)
                            + inline_sources(self.output_dir, 30000, exts=(".html", ".js")))
             codegen_prompt = compact
+            self.current_spec_chars = len(self.spec_bodies(node_id))
             write_codegen_manifests(self.output_dir)
-            ok, text = self.codegen_turn(compact, implement_timeout, f"{node_id} implement")
+            ok, text = self.codegen_turn(compact, implement_timeout, f"{node_id} implement", spec_chars=self.current_spec_chars)
         else:
             ok, text = self.turn(prompt, implement_timeout, f"{node_id} implement")
         if not ok and "truncated" in text.lower():

@@ -212,3 +212,18 @@ class DiscardTemplateTests(unittest.TestCase):
         self.assertFalse(flow.has_app())
         self.assertTrue((dest / "frontend/package.json").is_file())
         self.assertTrue((dest / "backend/package.json").is_file())
+
+
+class CodegenReasoningTests(unittest.TestCase):
+    def test_should_drop_reasoning_for_small_specs_only(self):
+        import argparse, os
+        from pathlib import Path
+        flow = m.Flow(argparse.Namespace(web_port=1), Path("."), Path("."))
+        self.assertEqual(flow.codegen_reasoning(1200), "none")
+        self.assertIsNone(flow.codegen_reasoning(14000))
+        self.assertIsNone(flow.codegen_reasoning(0))
+        os.environ["OCTOS_ARC_REASONING"] = "low"
+        try:
+            self.assertIsNone(flow.codegen_reasoning(1200))
+        finally:
+            del os.environ["OCTOS_ARC_REASONING"]
