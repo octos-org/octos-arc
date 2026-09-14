@@ -614,8 +614,10 @@ probe and output rule are endpoint/format facts, no task content. Cloud: 未评�
 ## wf-adapter-30 (unmerged) — cost guard recalibrated on keep 2224a9013528
 
 Calibration: keep PASSED 32/32, 9,038 s, ¥16.58, no OOM at 2 per-node workers, graded at 4 workers in
-2 GiB / 1 CPU; ≈282 s and ¥0.52 per node; ≈26M platform tokens (¥0.63/M observed on 29c840566f36) and ~35
-turns → ~0.8M tokens and ~1.1 turns per node.
+2 GiB / 1 CPU; ≈282 s and ¥0.52 per node; measured `[usage]`: 1,152 requests, 28.05M prompt (91% cache hits) + 0.76M completion
+= 28.8M total = platform token_count; ≈0.9M tokens and 36 requests per node; grading 4 workers, 32 tests in
+24.6 s, peak memory 0.96 GiB, oom 0. Derived defaults therefore sit ≈2.8× (tokens) and ≈3× (turns) above a
+healthy run.
 
 Guard defaults (derived once the tree is known; explicit env overrides; 0 = off):
 - `OCTOS_ARC_MAX_TOTAL_TOKENS` = max(6M, 2.5M × nodes) ≈ 3× a healthy run (keep: 80M vs 26M used).
