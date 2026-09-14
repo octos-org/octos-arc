@@ -359,6 +359,69 @@ def inline_sources(output_dir: Path, max_chars: int = 40000, exts: tuple = (".js
     return ("Current source files (quoted; edit them directly, no need to read):\n" + "".join(parts)) if parts else ""
 
 
+SOURCE_EXTS = (".html", ".js", ".mjs", ".cjs", ".css")
+
+
+def app_source_files(output_dir: Path, exts: tuple = SOURCE_EXTS) -> list[Path]:
+    files: list[Path] = []
+    for part in ("frontend", "backend"):
+        base = output_dir / part
+        if not base.is_dir():
+            continue
+        for path in sorted(base.rglob("*")):
+            rel = path.relative_to(output_dir)
+            if any(seg in ("node_modules", "dist", ".git", "data") for seg in rel.parts):
+                continue
+            if path.is_file() and path.suffix in exts:
+                files.append(path)
+    return files
+
+
+def spec_terms(spec_text: str) -> set[str]:
+    """Identifiers, paths and quoted strings a spec mentions (≥ 3 chars), lower-cased."""
+    terms = set(re.findall(r"[A-Za-z_][A-Za-z0-9_-]{2,}", spec_text))
+    terms |= set(re.findall(r"['\"`](/[^'\"`\s]{1,60})['\"`]", spec_text))
+    terms |= set(re.findall(r"['\"`]([^'\"`\n]{3,40})['\"`]", spec_text))
+    stop = {"await", "page", "expect", "const", "test", "async", "import", "from", "playwright", "toBeVisible",
+            "toHaveText", "getByRole", "getByTestId", "getByLabel", "getByText", "click", "fill", "goto", "name",
+            "button", "link", "true", "false", "null", "let", "var", "return", "function"}
+    return {t.lower() for t in terms if t not in stop}
+
+
+def relevant_sources(output_dir: Path, spec_text: str, max_chars: int) -> str:
+    """Quote the existing sources a node most likely touches: every backend entry
+    file first (the router every node extends), then pages ranked by how many
+    of the spec's terms (locators, texts, routes) they contain, until the budget
+    is spent; the rest are listed by name so the model knows they exist."""
+    files = app_source_files(output_dir)
+    if not files:
+        return ""
+    terms = spec_terms(spec_text)
+    scored = []
+    for path in files:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        low = text.lower()
+        hits = sum(1 for t in terms if t in low)
+        rel = path.relative_to(output_dir)
+        is_backend = rel.parts[0] == "backend"
+        scored.append((0 if is_backend else 1, -hits, len(text), rel, text))
+    scored.sort(key=lambda x: (x[0], x[1], x[2]))
+    parts, omitted, total = [], [], 0
+    for _, neg_hits, size, rel, text in scored:
+        if total + size > max_chars and parts:
+            omitted.append(f"{rel} ({size} chars, {-neg_hits} spec terms)")
+            continue
+        total += size
+        parts.append(f"--- {rel} ---\n{text.rstrip()}\n")
+    out = "Current source files (quoted; return every file you change, complete):\n" + "".join(parts)
+    if omitted:
+        out += "Other files, unchanged unless the requirement needs them: " + "; ".join(omitted) + "\n"
+    return out
+
+
 def source_listing(output_dir: Path, limit: int = 60) -> str:
     """Short, stable listing of the app sources for evolution prompts."""
     lines = []
@@ -1268,10 +1331,12 @@ class Flow:
         return VERIFY_MINIMAL if minimal else VERIFY_FULL.format(smoke=self.smoke_port)
 
     def codegen_mode(self) -> bool:
-        """One-request generation for one-node tasks (OCTOS_ARC_CODEGEN=0 disables)."""
+        """One-request generation per node (OCTOS_ARC_CODEGEN=0 disables; OCTOS_ARC_CODEGEN_MAX_NODES caps the
+        tree size, default unlimited). Per node, `codegen_context_fits` decides whether the spec plus the
+        relevant sources fit the prompt budget; otherwise that node uses tool mode."""
         return (os.environ.get("OCTOS_ARC_CODEGEN", "1") != "0" and getattr(self, "llm_proxy", None) is not None
                 and not getattr(self, "codegen_blocked", False)
-                and getattr(self, "n_nodes", 99) <= int(os.environ.get("OCTOS_ARC_CODEGEN_MAX_NODES", "2")))
+                and getattr(self, "n_nodes", 99) <= int(os.environ.get("OCTOS_ARC_CODEGEN_MAX_NODES", "999")))
 
     def all_specs_tiny(self, node_ids: list[str]) -> bool:
         """True when every node that has specs falls in the tiny tier (and at least one does)."""
@@ -1288,6 +1353,15 @@ class Flow:
             log("[probe] skipped (tiny-tier task: the first real request doubles as the probe)")
         else:
             probe_endpoint()
+
+    def codegen_context_chars(self) -> int:
+        return int(os.environ.get("OCTOS_ARC_CODEGEN_CONTEXT_CHARS", "60000"))
+
+    def codegen_context_fits(self, spec_text: str) -> bool:
+        """Spec + (trimmed) sources must fit the codegen prompt budget; the source
+        quote is bounded to the budget minus the spec, so this only fails when
+        the spec alone (with helpers) is too large for one request."""
+        return len(spec_text) < self.codegen_context_chars() * 0.6
 
     def tiny_mode(self, spec_chars: int) -> bool:
         threshold = int(os.environ.get("OCTOS_ARC_TINY_SPEC_CHARS", "1500"))
@@ -1790,7 +1864,7 @@ class Flow:
             self.current_spec_chars = len(self.spec_bodies(node_id))
         if tiny_ok:
             ok, text = True, "tiny tier: specs pass"
-        elif self.codegen_mode():
+        elif self.codegen_mode() and self.codegen_context_fits(self.spec_bodies(node_id)):
             spec_text = self.spec_bodies(node_id)
             self.current_spec_chars = len(spec_text)
             # Small specs (by size, an input-derived measure) get the compact rule; the multi-page
@@ -1799,14 +1873,17 @@ class Flow:
             compact = CODEGEN_PROMPT.format(node_id=node_id, description=str(node.get("description") or "").strip(),
                                             spec=spec_text, port=self.web_port, ports=self.codegen_ports_clause(),
                                             size_rule=CODEGEN_SIZE_SMALL if small else CODEGEN_SIZE_FULL)
-            if self.has_app():  # evolution: keep the existing app, return every changed file complete
+            if self.has_app():  # existing app (evolution or later nodes): quote the relevant sources
                 compact = (compact.replace("Files:", "Existing app below; keep everything that works and output "
                                            "every changed file complete. Files:", 1)
-                           + inline_sources(self.output_dir, 30000, exts=(".html", ".js")))
+                           + relevant_sources(self.output_dir, spec_text,
+                                              max(8000, self.codegen_context_chars() - len(spec_text))))
             codegen_prompt = compact
             write_codegen_manifests(self.output_dir)
             ok, text = self.codegen_turn(compact, implement_timeout, f"{node_id} implement", spec_chars=self.current_spec_chars)
         else:
+            if self.codegen_mode():
+                log(f"[flow] {node_id}: spec too large for one request ({len(self.spec_bodies(node_id))} chars); tool mode")
             ok, text = self.turn(prompt, implement_timeout, f"{node_id} implement")
         if not ok and "truncated" in text.lower():
             # Cloud 76fb32a69d81: output cut by max_tokens, nothing written. Retry
@@ -1853,7 +1930,8 @@ class Flow:
         def rebuild_prompt(failures: str) -> str:
             if self.codegen_mode() and codegen_prompt:
                 return (codegen_prompt + "\nYour previous files (quoted below) failed every test. Failures:\n" + failures
-                        + "\n" + inline_sources(self.output_dir, 30000, exts=(".html", ".js"))
+                        + "\n" + relevant_sources(self.output_dir, self.spec_bodies(node_id),
+                                                   max(8000, self.codegen_context_chars() - len(codegen_prompt)))
                         + "Fix the root causes and return every file you change, complete.\n")
             return (prompt + "\nYOUR PREVIOUS ATTEMPT FAILED EVERY ACCEPTANCE TEST — the failures (Feature / where / "
                     "observation / steps):\n" + failures + "\n" + self.sources_text()
@@ -2165,8 +2243,10 @@ class Flow:
             threading.Thread(target=_port_watchdog, args=(self.web_port, self.output_dir, watchdog_stop),
                              daemon=True).start()
             try:
-                if not self.evolution and (len(ordered) >= self.skeleton_min_nodes
-                                           or os.environ.get("OCTOS_SKELETON_ALWAYS") == "1"):
+                if not self.evolution and self.codegen_mode() and os.environ.get("OCTOS_SKELETON_ALWAYS") != "1":
+                    log(f"[flow] {len(ordered)}-node tree: codegen mode, harness manifests replace the skeleton turn")
+                elif not self.evolution and (len(ordered) >= self.skeleton_min_nodes
+                                             or os.environ.get("OCTOS_SKELETON_ALWAYS") == "1"):
                     self.skeleton(tree)
                     self.driver.end_scope("node")
                 elif not self.evolution:

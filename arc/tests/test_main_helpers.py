@@ -357,3 +357,35 @@ class ProbePolicyTests(unittest.TestCase):
         self.assertTrue(m.looks_like_markup('<div data-testid="count">0</div><button>Increment</button><script>1</script>'))
         self.assertTrue(m.looks_like_markup("<!DOCTYPE html><html></html>"))
         self.assertFalse(m.looks_like_markup("dry run: no model call; nothing written."))
+
+
+class RelevantSourcesTests(unittest.TestCase):
+    def test_should_quote_backend_first_then_pages_by_spec_overlap_within_budget(self):
+        import tempfile
+        from pathlib import Path
+        root = Path(tempfile.mkdtemp())
+        (root / "frontend/src").mkdir(parents=True); (root / "backend").mkdir()
+        (root / "backend/server.js").write_text("const http = require('http'); // router")
+        (root / "frontend/src/index.html").write_text("<a href='/notes'>Notes</a>" + "x" * 300)
+        (root / "frontend/src/notes.html").write_text("<h1>Notes</h1><button>New note</button><ul data-testid='note-list'></ul>" + "y" * 300)
+        (root / "frontend/src/settings.html").write_text("<h1>Settings</h1>" + "z" * 300)
+        spec = "await page.goto('/notes'); await page.getByRole('button', { name: 'New note' }).click(); await expect(page.getByTestId('note-list')).toBeVisible();"
+        out = m.relevant_sources(root, spec, max_chars=800)
+        self.assertLess(out.index("backend/server.js"), out.index("frontend/src/notes.html"))
+        self.assertIn("--- frontend/src/notes.html ---", out)
+        self.assertIn("settings.html", out)  # listed as omitted
+        self.assertNotIn("--- frontend/src/settings.html ---", out)
+
+    def test_codegen_applies_to_big_trees_unless_capped(self):
+        import argparse, os
+        from pathlib import Path
+        from types import SimpleNamespace
+        flow = m.Flow(argparse.Namespace(web_port=1), Path("."), Path("."))
+        flow.llm_proxy = SimpleNamespace(); flow.n_nodes = 32
+        self.assertTrue(flow.codegen_mode())
+        os.environ["OCTOS_ARC_CODEGEN_MAX_NODES"] = "2"
+        try:
+            self.assertFalse(flow.codegen_mode())
+        finally:
+            del os.environ["OCTOS_ARC_CODEGEN_MAX_NODES"]
+        self.assertTrue(flow.codegen_context_fits("x" * 20000)); self.assertFalse(flow.codegen_context_fits("x" * 40000))
