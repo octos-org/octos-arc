@@ -219,3 +219,24 @@ class RobustnessProbeTests(unittest.TestCase):
             s.bind(("127.0.0.1", 0)); free = s.getsockname()[1]
         err = robustness_probe(free, None, timeout=2)
         self.assertIn("no HTTP response", err)
+
+
+class FinalWorkersAndReapTests(unittest.TestCase):
+    def test_should_pick_final_workers_by_450mib_per_worker(self):
+        from acceptance import workers_for_final
+        self.assertEqual(workers_for_final(2 * 1024**3, 4), 4)
+        self.assertEqual(workers_for_final(512 * 1024**2, 4), 1)
+        self.assertEqual(workers_for_final(None, 4), 4)
+
+    def test_should_reap_only_node_processes_inside_app_dirs(self):
+        import tempfile
+        from pathlib import Path
+        from acceptance import should_reap
+        root = Path(tempfile.mkdtemp())
+        (root / "backend").mkdir(); (root / ".octos").mkdir()
+        self.assertTrue(should_reap("node", str(root / "backend"), root))
+        self.assertTrue(should_reap("/usr/bin/node", str(root / "frontend" / "x"), root))
+        self.assertFalse(should_reap("node", str(root / ".octos"), root))
+        self.assertFalse(should_reap("node", str(root), root))
+        self.assertFalse(should_reap("octos", str(root / "backend"), root))
+        self.assertFalse(should_reap("node", None, root))

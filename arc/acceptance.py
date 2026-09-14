@@ -375,6 +375,73 @@ def workers_for_memory(limit: int | None, requested: int) -> int:
     return max(1, min(requested, limit // (700 * 1024 * 1024)))
 
 
+def workers_for_final(limit: int | None, requested: int) -> int:
+    """Full-suite workers: the platform grades with --workers=4; mimic it when memory
+    allows (~450 MiB per Chromium worker + app), so slow tests surface before grading.
+    2 GiB -> 4, 512 MiB -> 1."""
+    if not limit:
+        return requested
+    return max(1, min(requested, limit // (450 * 1024 * 1024)))
+
+
+REAP_COMMANDS = ("node", "npm", "npx", "sh", "bash")
+
+
+def should_reap(comm: str, cwd: str | None, root: Path) -> bool:
+    """A leftover server/build process from a tool turn: a node/npm process whose
+    cwd is inside the app (frontend/ or backend/), never the kernel or the harness."""
+    if not cwd or Path(comm).name not in REAP_COMMANDS:
+        return False
+    try:
+        rel = Path(cwd).resolve().relative_to(root.resolve())
+    except (ValueError, OSError):
+        return False
+    return bool(rel.parts) and rel.parts[0] in ("frontend", "backend")
+
+
+def process_cwd(pid: int) -> str | None:
+    proc = Path(f"/proc/{pid}/cwd")
+    try:
+        return os.readlink(proc)
+    except OSError:
+        pass
+    try:
+        out = subprocess.run(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    for line in out.splitlines():
+        if line.startswith("n"):
+            return line[1:]
+    return None
+
+
+def reap_workspace_processes(root: Path, log: Callable[[str], None]) -> int:
+    """Kill node/npm processes left running inside the app directories (cloud
+    29c840566f36: 346 strays at postflight; on a 1-CPU grader they starve the
+    acceptance runs). Returns how many were killed."""
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,comm="], capture_output=True, text=True, timeout=15).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return 0
+    killed = 0
+    for line in out.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) != 2 or not parts[0].isdigit():
+            continue
+        pid, comm = int(parts[0]), parts[1].strip()
+        if pid == os.getpid() or Path(comm).name not in REAP_COMMANDS:
+            continue
+        if should_reap(comm, process_cwd(pid), root):
+            try:
+                os.kill(pid, signal.SIGKILL)
+                killed += 1
+            except (ProcessLookupError, PermissionError):
+                pass
+    if killed:
+        log(f"[reap] killed {killed} leftover process(es) inside frontend/ or backend/")
+    return killed
+
+
 def free_owned_ports(ports: list[int], root: Path) -> None:
     """Kill listeners on `ports` that were started from inside `root` (our own
     leftovers), leaving foreign processes alone. Works on macOS and Linux."""

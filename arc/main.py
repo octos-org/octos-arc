@@ -79,8 +79,7 @@ from acceptance import (  # noqa: E402
     AcceptanceRunner, AppServer, RunSummary, acceptance_work_dir, container_memory_limit, ensure_playwright,
     failure_summaries, find_playwright_by_search, find_playwright_root, map_specs_to_nodes,
     nodes_for_failures, playwright_candidates, playwright_version_hint, restore_tree,
-    restore_worktree, snapshot_worktree, tree_digest,
-)
+    restore_worktree, snapshot_worktree, tree_digest, workers_for_final, reap_workspace_processes)
 from codegen import FORMAT_INSTRUCTIONS, dedupe_nav_links, parse_file_blocks, write_files  # noqa: E402
 from guard import TurnMonitor  # noqa: E402
 from llm_proxy import LlmProxy  # noqa: E402
@@ -1109,6 +1108,12 @@ class Flow:
         self.min_repair_seconds = int(os.environ.get("OCTOS_MIN_REPAIR_SECONDS", "300"))
         self.node_budget_cap = int(os.environ.get("OCTOS_NODE_TIME_BUDGET", "1500"))
         self.repair_rounds = int(os.environ.get("OCTOS_REPAIR_ROUNDS", "5"))
+        self.repair_rounds_explicit = bool(os.environ.get("OCTOS_REPAIR_ROUNDS"))
+        # Run-wide cost guard (0 = off): billable tokens (prompt + completion) and agent turns.
+        self.max_total_tokens = int(os.environ.get("OCTOS_ARC_MAX_TOTAL_TOKENS", "0"))
+        self.max_turns = int(os.environ.get("OCTOS_ARC_MAX_TURNS", "0"))
+        self.turn_count = 0
+        self._wound_down_logged = False
         self.design_enabled = os.environ.get("OCTOS_DESIGN_TURN", "1") != "0"
         self.design_min_nodes = int(os.environ.get("OCTOS_DESIGN_MIN_NODES", "3"))
         self.skeleton_min_nodes = int(os.environ.get("OCTOS_SKELETON_MIN_NODES", "3"))
@@ -1138,6 +1143,19 @@ class Flow:
         self.folder_children: dict[str, list[str]] = {}
 
     # -- helpers ----------------------------------------------------------
+    def wound_down(self) -> bool:
+        """True once the run has spent its token or turn allowance: no more repair
+        turns, remaining nodes get one implement turn each, one final suite, done."""
+        proxy = getattr(self, "llm_proxy", None)
+        tokens = proxy.total_tokens if proxy is not None else 0
+        over = (self.max_total_tokens and tokens >= self.max_total_tokens) or \
+               (self.max_turns and self.turn_count >= self.max_turns)
+        if over and not self._wound_down_logged:
+            self._wound_down_logged = True
+            log(f"[guard] cost guard tripped: {tokens} billable tokens, {self.turn_count} turns "
+                f"(limits {self.max_total_tokens} / {self.max_turns}); no further repair turns")
+        return bool(over)
+
     def remaining(self) -> float:
         return self.budget - (time.time() - self.t_start)
 
@@ -1186,6 +1204,7 @@ class Flow:
                     int(os.environ.get("OCTOS_ARC_IMPLEMENT_REQUESTS", "20" if self.minimal_mode(getattr(self, "n_nodes", 99)) else "0"))
             proxy.begin_turn(request_budget)
         t0 = time.time()
+        self.turn_count += 1
         ok, text = self.driver.run(prompt, max(60, int(timeout)), monitor)
         log(f"[flow] {label} {'ok' if ok else 'FAILED'} in {time.time()-t0:.0f}s "
             f"(tools={monitor.tool_calls} wrote={monitor.wrote_files} verified={monitor.verified}): {text[-240:]!r}")
@@ -1610,7 +1629,7 @@ class Flow:
                         f"Your last two repairs made the tests worse; the harness restored frontend/ and backend/ "
                         f"to the best state ({best_passed}/{summary.total}). Start from that code.")
                     regressions = 0
-            if attempt == self.repair_rounds:
+            if attempt == self.repair_rounds or self.wound_down():
                 break
             left = deadline - time.time()
             if left < self.min_repair_seconds or self.time_up():
@@ -1696,6 +1715,8 @@ class Flow:
         node_id = str(node.get("id"))
         specs = list(self.spec_map.get(node_id) or [])
         self.codegen_blocked = False  # a previous node's fallback to tool mode must not leak into this one
+        if index > 1:
+            reap_workspace_processes(self.output_dir, log)
         nodes_left = total - index + 1
         node_budget = min(self.node_budget_cap, max(240, self.remaining() / nodes_left))
         deadline = time.time() + node_budget
@@ -1931,7 +1952,7 @@ class Flow:
         if len(all_specs) < 2 and not unverified:
             return  # single spec already judged by the node run
         rounds = int(os.environ.get("OCTOS_FINAL_REPAIR_ROUNDS", "2"))
-        workers = workers_for_memory(getattr(self, "mem_limit", None), int(os.environ.get("OCTOS_ARC_FINAL_WORKERS", "4")))
+        workers = workers_for_final(getattr(self, "mem_limit", None), int(os.environ.get("OCTOS_ARC_FINAL_WORKERS", "4")))
         previous_failing: set[str] | None = None
         for attempt in range(rounds + 1):
             summary = self.run_specs(all_specs, workers=workers, grader_like=True)
@@ -1968,7 +1989,7 @@ class Flow:
                 log("[acceptance] full suite: same failures as the previous round; stopping repairs")
                 break
             previous_failing = failing_titles
-            if attempt == rounds or self.remaining() < 240:
+            if attempt == rounds or self.remaining() < 240 or self.wound_down():
                 break
             failing = sorted(k for k in grouped if k) or ["all nodes"]
             prompt = REPAIR_PROMPT.format(
@@ -2057,6 +2078,8 @@ class Flow:
                     f"to implement {[i for i in node_ids if i not in unchanged]}")
             self.nodes_to_implement = len([n for n in node_ids if n not in unchanged])
             self.n_nodes = len(ordered)
+            if not self.repair_rounds_explicit and self.n_nodes > 2:
+                self.repair_rounds = 3  # big trees: identical-failure/no-improvement stops make 5 rounds rare anyway
 
             self.tests_dir = locate_acceptance_tests(tree, BUNDLE_DIR)
             if self.tests_dir:

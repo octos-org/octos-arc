@@ -296,3 +296,27 @@ class ProbeTests(unittest.TestCase):
             self.assertTrue(m.endpoint_is_up(code))
         for code in (500, 502, 503, 504):
             self.assertFalse(m.endpoint_is_up(code))
+class CostGuardTests(unittest.TestCase):
+    def test_should_wind_down_on_token_or_turn_limit(self):
+        import argparse, os
+        from pathlib import Path
+        from types import SimpleNamespace
+        os.environ["OCTOS_ARC_MAX_TOTAL_TOKENS"] = "1000"; os.environ["OCTOS_ARC_MAX_TURNS"] = "3"
+        try:
+            flow = m.Flow(argparse.Namespace(web_port=1), Path("."), Path("."))
+        finally:
+            del os.environ["OCTOS_ARC_MAX_TOTAL_TOKENS"]; del os.environ["OCTOS_ARC_MAX_TURNS"]
+        flow.llm_proxy = SimpleNamespace(total_tokens=999)
+        self.assertFalse(flow.wound_down())
+        flow.llm_proxy.total_tokens = 1000
+        self.assertTrue(flow.wound_down())
+        flow.llm_proxy.total_tokens = 0; flow.turn_count = 3
+        self.assertTrue(flow.wound_down())
+
+    def test_should_be_off_by_default(self):
+        import argparse
+        from pathlib import Path
+        from types import SimpleNamespace
+        flow = m.Flow(argparse.Namespace(web_port=1), Path("."), Path("."))
+        flow.llm_proxy = SimpleNamespace(total_tokens=10**9); flow.turn_count = 10**6
+        self.assertFalse(flow.wound_down())

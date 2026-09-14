@@ -326,6 +326,9 @@ class LlmProxy:
         self.turn_budget = 0
         self.turn_requests = 0
         self.budget_hits = 0
+        # Run-wide billable usage (prompt + completion), for the flow's cost guard.
+        self.total_requests = 0
+        self.total_tokens = 0
         self.log_path = log_path
         self.dump_dir = dump_dir      # OCTOS_ARC_PROXY_DUMP=1: first N request bodies for prefix analysis
         self.dump_limit = dump_limit
@@ -421,6 +424,9 @@ class LlmProxy:
         rec = usage_record(payload, elapsed_ms, self.mode)
         if rec is None:
             return
+        with self._lock:
+            self.total_requests += 1
+            self.total_tokens += int(rec.get("prompt_tokens") or 0) + int(rec.get("completion_tokens") or 0)
         rec["request_bytes"], rec["response_bytes"] = req_bytes, resp_bytes
         shape = request_shape(request_body)
         if shape:
