@@ -269,23 +269,6 @@ fn protocol_version_and_first_server_capabilities_round_trip() {
             .supported_notifications
             .contains(&methods::SESSION_OPEN.to_owned())
     );
-    // #1477: the typed visual lifecycle events are advertised as supported
-    // notifications, so a negotiating client knows to expect them.
-    assert!(
-        decoded
-            .supported_notifications
-            .contains(&methods::VISUAL_GENERATING.to_owned())
-    );
-    assert!(
-        decoded
-            .supported_notifications
-            .contains(&methods::VISUAL_SUCCEEDED.to_owned())
-    );
-    assert!(
-        decoded
-            .supported_notifications
-            .contains(&methods::VISUAL_FAILED.to_owned())
-    );
 }
 
 #[test]
@@ -826,12 +809,7 @@ fn ui_protocol_v1_wire_contract_is_golden() {
             "protocol/replay_lossy",
             "turn/spawn_complete",
             "file/attached",
-            "visual/generating",
-            "visual/succeeded",
-            "visual/failed",
-            "voice/exit",
             "skill/action/job/updated",
-            "voice/audio_chunk",
             "projection/envelope",
             "session/event",
             "router/status",
@@ -1008,13 +986,8 @@ fn ui_protocol_v1_representative_wire_payloads_are_golden() {
                 "protocol/replay_lossy",
                 "turn/spawn_complete",
                 "file/attached",
-                "visual/generating",
-                "visual/succeeded",
-                "visual/failed",
-                "voice/exit",
-                "skill/action/job/updated",
-                "voice/audio_chunk",
-                "projection/envelope",
+                                "skill/action/job/updated",
+                    "projection/envelope",
                 "session/event",
                 "router/status",
                 "router/failover",
@@ -1054,8 +1027,7 @@ fn ui_protocol_v1_representative_wire_payloads_are_golden() {
                 "context.lifecycle.v1",
                 "harness.task_supervision_inspection.v1",
                 "user_question.v1",
-                "event.voice_audio.v1",
-                "plan.todos.v1",
+                    "plan.todos.v1",
                 "event.background_activity.v1",
                 "event.turn_steer_dropped.v1"
             ]
@@ -1609,87 +1581,6 @@ fn user_question_requested_event_round_trips_with_structured_questions() {
     let decoded =
         UiNotification::from_rpc_notification(wire).expect("decode user_question/requested");
     assert_eq!(decoded, notification);
-}
-
-// #1477 voice rich output: the typed visual lifecycle events carry the
-// right method + snake_case wire fields (server→client only).
-#[test]
-fn visual_generating_and_failed_wire_contract() {
-    let generating = UiNotification::VisualGenerating(VisualGeneratingEvent {
-        session_id: SessionKey("local:voice".into()),
-        topic: None,
-        turn_id: TurnId(Uuid::from_u128(1)),
-        kind: "illustrated".into(),
-    });
-    assert_eq!(generating.method(), methods::VISUAL_GENERATING);
-    let wire = generating
-        .clone()
-        .into_rpc_notification()
-        .expect("serialize visual/generating");
-    assert_eq!(wire.method, methods::VISUAL_GENERATING);
-    assert_eq!(wire.params["kind"], json!("illustrated"));
-    // Round-trip: decode must reconstruct the same notification.
-    let decoded = UiNotification::from_rpc_notification(wire).expect("decode visual/generating");
-    assert_eq!(decoded, generating);
-
-    let succeeded = UiNotification::VisualSucceeded(VisualSucceededEvent {
-        session_id: SessionKey("local:voice".into()),
-        topic: None,
-        turn_id: TurnId(Uuid::from_u128(1)),
-        kind: "html".into(),
-        files: vec!["visual-abc.html".into()],
-    });
-    assert_eq!(succeeded.method(), methods::VISUAL_SUCCEEDED);
-    let wire = succeeded
-        .clone()
-        .into_rpc_notification()
-        .expect("serialize visual/succeeded");
-    assert_eq!(wire.method, methods::VISUAL_SUCCEEDED);
-    assert_eq!(wire.params["kind"], json!("html"));
-    assert_eq!(wire.params["files"], json!(["visual-abc.html"]));
-    let decoded = UiNotification::from_rpc_notification(wire).expect("decode visual/succeeded");
-    assert_eq!(decoded, succeeded);
-
-    let failed = UiNotification::VisualFailed(VisualFailedEvent {
-        session_id: SessionKey("local:voice".into()),
-        topic: None,
-        turn_id: TurnId(Uuid::from_u128(1)),
-        reason: Some("timed out".into()),
-    });
-    assert_eq!(failed.method(), methods::VISUAL_FAILED);
-    let wire = failed
-        .clone()
-        .into_rpc_notification()
-        .expect("serialize visual/failed");
-    assert_eq!(wire.method, methods::VISUAL_FAILED);
-    assert_eq!(wire.params["reason"], json!("timed out"));
-    let decoded = UiNotification::from_rpc_notification(wire).expect("decode visual/failed");
-    assert_eq!(decoded, failed);
-}
-
-#[test]
-fn voice_exit_wire_contract() {
-    // UPCR-2026-025: the typed exit notification carries session_id + turn_id
-    // (and an optional topic); it round-trips intact and the topic is stamped
-    // from a topic-scoped session key, mirroring the visual/* lifecycle.
-    let exit = UiNotification::VoiceExit(VoiceExitEvent {
-        session_id: SessionKey("local:voice#exit".into()),
-        topic: None,
-        turn_id: TurnId(Uuid::from_u128(42)),
-    });
-    assert_eq!(exit.method(), methods::VOICE_EXIT);
-    let wire = exit
-        .clone()
-        .into_rpc_notification()
-        .expect("serialize voice/exit");
-    assert_eq!(wire.method, methods::VOICE_EXIT);
-    // Topic is stamped from the `#exit` suffix of the session key on the wire.
-    assert_eq!(wire.params["topic"], json!("exit"));
-    let decoded = UiNotification::from_rpc_notification(wire).expect("decode voice/exit");
-    // Equality holds after the topic was stamped from the session key.
-    assert_eq!(decoded.method(), methods::VOICE_EXIT);
-    assert_eq!(decoded.session_id().0, "local:voice#exit");
-    assert_eq!(decoded.topic(), Some("exit"));
 }
 
 #[test]
@@ -5874,28 +5765,6 @@ fn topic_session() -> SessionKey {
 
 fn bare_session() -> SessionKey {
     SessionKey("local:slides-soak".into())
-}
-
-#[test]
-fn voice_audio_chunk_round_trips_through_rpc_notification() {
-    let event = VoiceAudioChunkEvent {
-        session_id: bare_session(),
-        topic: None,
-        turn_id: TurnId::new(),
-        segment_id: "seg-1".into(),
-        seq: 0,
-        mime: "audio/mpeg".into(),
-        audio_b64: "QUJD".into(),
-        last: false,
-    };
-    let notif = UiNotification::VoiceAudioChunk(event.clone());
-    assert_eq!(notif.method(), methods::VOICE_AUDIO_CHUNK);
-
-    let rpc = notif.into_rpc_notification().expect("to rpc notification");
-    assert_eq!(rpc.method, "voice/audio_chunk");
-
-    let back = UiNotification::from_rpc_notification(rpc).expect("from rpc notification");
-    assert_eq!(back, UiNotification::VoiceAudioChunk(event));
 }
 
 #[test]

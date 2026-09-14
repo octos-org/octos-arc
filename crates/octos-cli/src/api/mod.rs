@@ -34,7 +34,6 @@ mod ui_protocol_reasoning_effort;
 pub(crate) use crate::contracts::sanitize as ui_protocol_sanitize;
 pub(crate) use crate::contracts::scope as ui_protocol_scope;
 mod ui_protocol_task_output;
-pub mod voice_text;
 pub mod ws_slash;
 
 pub use metrics::init_metrics;

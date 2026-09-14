@@ -57,14 +57,13 @@ use octos_core::ui_protocol::{
     UI_PROTOCOL_FEATURE_SESSION_SANDBOX_V1, UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1,
     UI_PROTOCOL_FEATURE_SPAWN_COMPLETE_V1, UI_PROTOCOL_FEATURE_THREAD_GRAPH_V1,
     UI_PROTOCOL_FEATURE_TURN_STATE_GET_V1, UI_PROTOCOL_FEATURE_TURN_STEER_DROPPED_V1,
-    UI_PROTOCOL_FEATURE_USER_QUESTION_V1, UI_PROTOCOL_FEATURE_VOICE_AUDIO_V1, UiAgentRecord,
-    UiArtifactPaneItem, UiArtifactPaneSnapshot, UiCommand, UiContextCompactionRecord,
-    UiContextNormalizationReport, UiContextState, UiCursor, UiFileMutationNotice, UiGitHistoryItem,
-    UiGitPaneSnapshot, UiGitStatusItem, UiNotification, UiPaneSnapshot, UiPaneSnapshotLimitation,
-    UiProgressEvent, UiProgressMetadata, UiProtocolCapabilities, UiRpcResult, UiWorkspacePaneEntry,
-    UiWorkspacePaneSnapshot, UnsupportedCapabilityReport, UserQuestionRequestedEvent,
-    UserQuestionRespondParams, approval_cancelled_reasons, approval_kinds, hydrate_sections,
-    thread_status,
+    UI_PROTOCOL_FEATURE_USER_QUESTION_V1, UiAgentRecord, UiArtifactPaneItem,
+    UiArtifactPaneSnapshot, UiCommand, UiContextCompactionRecord, UiContextNormalizationReport,
+    UiContextState, UiCursor, UiFileMutationNotice, UiGitHistoryItem, UiGitPaneSnapshot,
+    UiGitStatusItem, UiNotification, UiPaneSnapshot, UiPaneSnapshotLimitation,
+    UiProtocolCapabilities, UiRpcResult, UiWorkspacePaneEntry, UiWorkspacePaneSnapshot,
+    UnsupportedCapabilityReport, UserQuestionRequestedEvent, UserQuestionRespondParams,
+    approval_cancelled_reasons, approval_kinds, hydrate_sections, thread_status,
 };
 
 #[cfg(test)]
@@ -1264,11 +1263,6 @@ struct ConnectionUiFeatures {
     /// where the richer envelopes' placement logic dropped PPTX
     /// deliveries on the SPA's chat thread.
     file_attached: bool,
-    /// `event.voice_audio.v1` negotiated. When set, the voice turn streams
-    /// reply audio as `voice/audio_chunk` notifications (base64 frames) for
-    /// progressive MSE playback; otherwise it falls back to whole-file
-    /// `file/attached` audio.
-    voice_audio: bool,
     /// `plan.todos.v1` negotiated. When set, the server streams the
     /// `update_plan` tool's checklist as `plan/updated` notifications and
     /// replays the latest snapshot on `session/open`. Otherwise the plan rides
@@ -1374,7 +1368,6 @@ impl ConnectionUiFeatures {
             turn_state_get: has_ui_feature(headers, query, UI_PROTOCOL_FEATURE_TURN_STATE_GET_V1),
             spawn_complete: has_ui_feature(headers, query, UI_PROTOCOL_FEATURE_SPAWN_COMPLETE_V1),
             file_attached: has_ui_feature(headers, query, UI_PROTOCOL_FEATURE_FILE_ATTACHED_V1),
-            voice_audio: has_ui_feature(headers, query, UI_PROTOCOL_FEATURE_VOICE_AUDIO_V1),
             plan_todos: has_ui_feature(headers, query, UI_PROTOCOL_FEATURE_PLAN_TODOS_V1),
             background_activity: has_ui_feature(
                 headers,
@@ -1456,7 +1449,6 @@ impl ConnectionUiFeatures {
             turn_state_get: true,
             spawn_complete: true,
             file_attached: true,
-            voice_audio: true,
             plan_todos: true,
             background_activity: true,
             // Do NOT auto-enable `projection.envelope.v1` for stdio
@@ -1517,7 +1509,6 @@ impl ConnectionUiFeatures {
             turn_state_get: has(UI_PROTOCOL_FEATURE_TURN_STATE_GET_V1),
             spawn_complete: has(UI_PROTOCOL_FEATURE_SPAWN_COMPLETE_V1),
             file_attached: has(UI_PROTOCOL_FEATURE_FILE_ATTACHED_V1),
-            voice_audio: has(UI_PROTOCOL_FEATURE_VOICE_AUDIO_V1),
             plan_todos: has(UI_PROTOCOL_FEATURE_PLAN_TODOS_V1),
             background_activity: has(UI_PROTOCOL_FEATURE_BACKGROUND_ACTIVITY_V1),
             projection_envelope: has(UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V1),
@@ -1586,9 +1577,6 @@ impl ConnectionUiFeatures {
         }
         if self.file_attached {
             requested.push(UI_PROTOCOL_FEATURE_FILE_ATTACHED_V1);
-        }
-        if self.voice_audio {
-            requested.push(UI_PROTOCOL_FEATURE_VOICE_AUDIO_V1);
         }
         if self.plan_todos {
             requested.push(UI_PROTOCOL_FEATURE_PLAN_TODOS_V1);
@@ -3413,13 +3401,6 @@ struct AppUiLoopPromptScratch {
     source_watermark: Option<usize>,
 }
 
-/// Default per-turn history budget (tokens) for the model prompt on a voice
-/// turn. Caps ONLY the outgoing projection the model sees — the persisted
-/// transcript is untouched — so older turns are trimmed (recent-first kept,
-/// any compaction summary preserved) to keep the spoken-turn prefill small.
-/// Override via `OCTOS_VOICE_MAX_PROMPT_TOKENS`.
-const VOICE_TURN_MAX_PROMPT_TOKENS: usize = 8000;
-
 /// Delivery hook for mid-turn (in-loop) compaction lifecycle notifications.
 /// Captures the turn's `WsConnection` + ledger + negotiated features so the
 /// (sync) bridge can reach the client without owning connection state.
@@ -3430,9 +3411,6 @@ struct AppUiPromptContextBridge {
     data_dir: PathBuf,
     context_manager: Arc<StdMutex<ContextManager>>,
     scratch: StdMutex<Option<AppUiLoopPromptScratch>>,
-    /// When true, the outgoing model prompt is capped at
-    /// [`VOICE_TURN_MAX_PROMPT_TOKENS`] (see [`Self::outgoing_prompt_policy`]).
-    voice_turn: bool,
     /// UPCR-2026-026 follow-up: the in-loop compaction pass previously ran
     /// SILENTLY (tracing + passive status store only), so a session whose
     /// context fills mid-turn never surfaced any compaction UX — and the
@@ -3454,14 +3432,12 @@ impl AppUiPromptContextBridge {
         session_id: SessionKey,
         data_dir: PathBuf,
         context_manager: Arc<StdMutex<ContextManager>>,
-        voice_turn: bool,
     ) -> Self {
         Self {
             session_id,
             data_dir,
             context_manager,
             scratch: StdMutex::new(None),
-            voice_turn,
             context_lifecycle_notify: None,
             llm_compaction_provider: None,
         }
@@ -3477,27 +3453,13 @@ impl AppUiPromptContextBridge {
         self
     }
 
-    /// Voice-turn history budget (tokens), env-overridable.
-    fn voice_prompt_budget() -> usize {
-        std::env::var("OCTOS_VOICE_MAX_PROMPT_TOKENS")
-            .ok()
-            .and_then(|raw| raw.parse::<usize>().ok())
-            .unwrap_or(VOICE_TURN_MAX_PROMPT_TOKENS)
-    }
-
     /// Policy for the FINAL outgoing projection (`for_prompt`) sent to the
-    /// model. Identical to [`Self::prompt_policy`] except that voice turns add
-    /// a `max_prompt_token_estimate` cap. Kept separate from `prompt_policy`
-    /// because the coverage/record and compaction passes MUST run uncapped —
-    /// capping their `for_prompt` view would make the manager treat trimmed-off
-    /// older messages as "not covered" and re-record them, duplicating the
-    /// persisted transcript.
+    /// model. Kept separate from `prompt_policy` because the coverage/record
+    /// and compaction passes MUST run uncapped — capping their `for_prompt`
+    /// view would make the manager treat trimmed-off older messages as
+    /// "not covered" and re-record them, duplicating the persisted transcript.
     fn outgoing_prompt_policy(&self, request: &PromptContextRequest) -> PromptBuildPolicy {
-        let mut policy = Self::prompt_policy(request);
-        if self.voice_turn {
-            policy.max_prompt_token_estimate = Some(Self::voice_prompt_budget());
-        }
-        policy
+        Self::prompt_policy(request)
     }
 
     fn threshold_tokens(request: &PromptContextRequest) -> usize {
@@ -3942,34 +3904,6 @@ fn record_appui_context_manager_background_message(
             error = %error,
             "failed to persist appui background context boundary"
         );
-    }
-}
-
-fn replace_voice_user_message_content(messages: &mut [Message], transcript: Option<&str>) {
-    let Some(transcript) = transcript.map(str::trim).filter(|s| !s.is_empty()) else {
-        return;
-    };
-    if let Some(message) = messages
-        .iter_mut()
-        .find(|message| message.role == MessageRole::User)
-    {
-        message.content = transcript.to_owned();
-    }
-}
-
-/// User-visible content of a voice turn: the typed prompt (if any) combined
-/// with the ASR transcript, exactly as the LLM prompt is assembled — but
-/// WITHOUT the `[语音模式:…]` scaffolding that gets appended to the prompt
-/// afterwards. This is both the base the prompt builds on and the value
-/// persisted into history via [`replace_voice_user_message_content`], so a
-/// mixed typed-text + audio turn keeps the typed text in the persisted user
-/// message (#1555 review). Pure-voice turns (empty typed prompt) persist the
-/// bare transcript, unchanged from before.
-fn combine_typed_prompt_with_transcript(typed_prompt: &str, transcript: &str) -> String {
-    if typed_prompt.trim().is_empty() {
-        transcript.to_owned()
-    } else {
-        format!("{typed_prompt}\n{transcript}")
     }
 }
 
@@ -13972,14 +13906,6 @@ fn live_event_passes_capability_filter(
             return false;
         }
     }
-    // `event.voice_audio.v1` gate: streamed reply-audio chunks only reach
-    // connections that negotiated progressive playback. Others keep the
-    // whole-file `file/attached` audio path.
-    if !features.voice_audio {
-        if let UiProtocolLedgerEvent::Notification(UiNotification::VoiceAudioChunk(_)) = event {
-            return false;
-        }
-    }
     // `plan.todos.v1` gate: the model-authored plan checklist only reaches
     // connections that negotiated it (and know how to render `plan/updated`).
     // Applies on both the live broadcast and reconnect replay, since both
@@ -15113,7 +15039,6 @@ pub(crate) async fn ensure_session_profile_runtime(
             Some(store.octos_home_dir()),
             crate::runtime::BootstrapRole::Serve,
             None,
-            None,
             state.host_memory.as_ref(),
         )
         .await
@@ -15758,26 +15683,12 @@ async fn handle_turn_start_with_accept(
     let prompt = match prompt_text(&params.input) {
         Some(p) => p,
         None => {
-            // Voice turns carry audio media and NO text item — the
-            // serve-path STT inside `run_standalone_turn` transcribes the
-            // audio into the prompt. Accept such a turn with an empty
-            // prompt; reject only when there is neither text nor audio to
-            // act on (the original "requires a text input item" contract
-            // for text-only clients).
-            if params
-                .media
-                .iter()
-                .any(|m| octos_bus::media::is_audio(&m.path))
-            {
-                String::new()
-            } else {
-                let _ = send_rpc_error(
-                    ws,
-                    Some(id),
-                    RpcError::invalid_params("turn/start requires at least one text input item"),
-                );
-                return false;
-            }
+            let _ = send_rpc_error(
+                ws,
+                Some(id),
+                RpcError::invalid_params("turn/start requires at least one text input item"),
+            );
+            return false;
         }
     };
 
@@ -20009,24 +19920,6 @@ fn task_relaunch_rpc_error(task_id: &TaskId, error: octos_agent::TaskRelaunchErr
     }
 }
 
-fn prepare_voice_directives(
-    content: &mut String,
-    messages: &mut [Message],
-    had_audio_input: bool,
-    incomplete: bool,
-) -> (Option<crate::api::voice_text::VisualDirective>, bool) {
-    if had_audio_input {
-        let directives = crate::api::voice_text::strip_control_directives(content, messages);
-        if incomplete {
-            (None, false)
-        } else {
-            directives
-        }
-    } else {
-        (None, false)
-    }
-}
-
 /// #1134 — pick the LAST non-empty assistant row after `pre` from a
 /// pre-fetched session history slice.
 ///
@@ -20268,9 +20161,7 @@ async fn run_standalone_turn(
     contracts: Arc<UiProtocolContractStores>,
     features: ConnectionUiFeatures,
     params: TurnStartParams,
-    // Voice (语音轮): made `mut` so the serve/WS turn/start path can merge
-    // transcribed audio media into the prompt text before the agent runs.
-    mut prompt: String,
+    prompt: String,
     routed_profile_id: Option<String>,
     turn_state: Arc<TokioMutex<TurnState>>,
     mut interrupt_rx: mpsc::Receiver<()>,
@@ -20517,17 +20408,6 @@ async fn run_standalone_turn(
     } else {
         None
     };
-    // Voice-turn lean-prompt signal. Derived cheaply from the turn's media
-    // (an audio attachment) WITHOUT waiting for STT — a safe over-approximation
-    // of `had_audio_input` that is available before the tool registry and the
-    // prompt-context bridge are built. When set we (1) defer all non-essential
-    // tools so the spoken turn's first LLM call carries a lean tool set, and
-    // (2) cap the projected history the context bridge sends to the model.
-    // Both shrink the prompt prefill, which dominates voice-turn latency.
-    let voice_turn_hint = params
-        .media
-        .iter()
-        .any(|file_ref| octos_bus::media::is_audio(&file_ref.path));
     let mut tool_registry = session_runtime.tools.snapshot_excluding(&[]);
     tool_registry.set_active_context(normalize_tool_context(params.tool_context.as_deref()));
     // Stamp the per-turn snapshot with this session's key so
@@ -21246,8 +21126,6 @@ async fn run_standalone_turn(
                     child_session_id,
                     child_context_data_dir.clone(),
                     Arc::new(StdMutex::new(child_manager)),
-                    // Spawned subagent: not a spoken turn, never voice-capped.
-                    false,
                 )))
             },
         ));
@@ -21544,7 +21422,6 @@ async fn run_standalone_turn(
         // cross-project isolation as the pre/post-turn sites above (#1666).
         session_runtime.sessions_root.clone(),
         context_manager.clone(),
-        voice_turn_hint,
     )
     .with_context_lifecycle_notify(context_lifecycle_notify);
     // Only wire the provider when `--llm-compaction` is on; a present provider
@@ -21747,7 +21624,7 @@ async fn run_standalone_turn(
         .iter()
         .map(|file_ref| file_ref.path.clone())
         .collect();
-    let mut turn_media_paths: Vec<String> = octos_bus::file_handle::materialize_turn_uploads(
+    let turn_media_paths: Vec<String> = octos_bus::file_handle::materialize_turn_uploads(
         &session_runtime.workspace_root,
         // #1377: bind to the session's OWNING TENANT so the materializer only
         // copies uploads owned by this tenant (cross-tenant handles dropped).
@@ -21758,70 +21635,6 @@ async fn run_standalone_turn(
         Some(session_runtime.profile.profile_id.as_str()),
         &raw_media,
     );
-    // Voice-turn STT was removed with the voice product line. Text turns
-    // are unaffected; audio attachments pass through as ordinary media.
-    let had_audio_input = false;
-    let voice_transcripts: Vec<String> = Vec::new();
-    let mut voice_user_content_for_persist: Option<String> = None;
-
-    if had_audio_input {
-        let joined = voice_transcripts.join("\n");
-        let mut transcript_metadata = UiProgressMetadata::new("voice_transcript");
-        transcript_metadata.message = Some(joined.clone());
-        transcript_metadata
-            .extra
-            .insert("transcript".to_owned(), Value::String(joined.clone()));
-        transcript_metadata.extra.insert(
-            "client_message_id".to_owned(),
-            Value::String(turn_id.0.to_string()),
-        );
-        let _ = send_notification_durable(
-            &ws,
-            &ledger,
-            UiNotification::ProgressUpdated(UiProgressEvent::new(
-                session_id.clone(),
-                Some(turn_id.clone()),
-                transcript_metadata,
-            )),
-        );
-        prompt = combine_typed_prompt_with_transcript(&prompt, &joined);
-        voice_user_content_for_persist = Some(prompt.clone());
-        // Voice-turn only (had_audio_input): replies are spoken aloud by TTS, so
-        // ask for short, speakable answers. Text chat (had_audio_input == false)
-        // keeps its normal detailed/formatted persona — this branch never runs there.
-        prompt = format!(
-            "{prompt}\n\n[语音模式:用口语化中文、一两句话简短回答;不要使用 Markdown、列表、代码块或 emoji。\
-             \n若(且仅若)可视化更能帮助用户理解——例如他想『看到/画出/演示/直观理解』某个结构性、空间性或图示性的东西(电路、波形、数学曲线、流程、UI 草图等)——\
-             在口播正文之后【另起一行】追加一个标记:[[VISUAL:kind|brief]]。\
-             按【用户的认知需求】选 kind:\
-             html=纯动态/可调交互、靠动手玩参数理解、不需要看实物的样子(电路、波形、数学曲线、流程、算法);\
-             illustrated=既要看清实物真实样子、又要交互讲解/标注的结构性内容(细胞、器官、动植物、解剖、天体、机械构造等)——系统会先生成写实插图再叠加交互标注;\
-             image=只要一张写实或艺术单图(某物长什么样、画作);\
-             infographic=多段并列要点/步骤的信息图。\
-             brief 是给生成器的一句话简述。\
-             普通问答/闲聊/事实回答【不要】加标记。\
-             示例1:用户说『我想直观看到负反馈电路如何负反馈』→ 口播『我给你画一个可调增益的负反馈电路,你可以拖滑块看输出怎么被拉回来。』,然后另起一行:[[VISUAL:html|可调增益的负反馈电路交互演示,滑块调增益,实时显示反馈如何稳定输出]]\
-             示例2:用户说『能结合图片讲讲人类细胞的结构吗』→ 口播『我给你画一张细胞结构图,点各个部分能看它们的作用。』,然后另起一行:[[VISUAL:illustrated|人类动物细胞结构写实插图,标注细胞核、线粒体、细胞膜、细胞质、内质网]]\
-             \n退出意图:当用户明确想结束对话/离开/不聊了/再见/拜拜/静音/退出语音助手时——先用一句简短自然的话告别(如『好的,再见啦!』),然后【另起一行】只追加一个标记:[[EXIT]]。\
-             仅在用户确实想退出时才加;普通问答/闲聊/继续提问【绝对不要】加。\
-             示例:用户说『再见』或『退出吧』→ 口播『好的,再见!』,然后另起一行:[[EXIT]]]"
-        );
-        // The audio is now in the prompt as text. Drop it from the
-        // agent-visible media so the model answers the transcript directly
-        // instead of re-transcribing the workspace audio file — with the
-        // always-on voice skill present, an audio attachment otherwise lures
-        // the agent into calling `voice_transcribe` / exploring the workspace.
-        turn_media_paths.retain(|p| !octos_bus::media::is_audio(p));
-    }
-    // Voice fail-fast activation: `had_audio_input` (ASR produced spoken text)
-    // is the authoritative voice flag. Run the agent under the FailFast LLM
-    // call policy (single attempt — no retry/failover/hedge, so a 429/quota
-    // stall releases the session lock fast instead of retrying for ~30s+) and
-    // capture one classified `TurnFailure` so the error path can speak a short
-    // apology. Text turns leave the sink unset and keep the default Normal
-    // policy (full retry ladder), byte-for-byte unchanged.
-    let mut voice_failure_rx: Option<tokio::sync::mpsc::Receiver<octos_agent::TurnFailure>> = None;
-
     if let Some(rewrite_for) = params.rewrite_for.as_deref() {
         tracing::debug!(
             session = %session_id.0,
@@ -21876,19 +21689,6 @@ async fn run_standalone_turn(
     // most one final response and we only need it once in the post-turn
     // block.
     let (final_reply_tx, final_reply_rx) = tokio::sync::oneshot::channel::<Option<String>>();
-    // Voice rich output (#1477): the agent task lifts the trailing in-band
-    // `[[VISUAL:...]]` directive out of `response.content` (and strips it from
-    // every authoritative surface) and hands it here for the post-turn
-    // background dispatch. `None` for text turns or replies without a marker.
-    let (visual_directive_tx, visual_directive_rx) =
-        tokio::sync::oneshot::channel::<Option<crate::api::voice_text::VisualDirective>>();
-    // Voice exit intent (UPCR-2026-025): the agent task lifts the trailing
-    // in-band `[[EXIT]]` marker out of `response.content` (stripping it from
-    // every authoritative surface) and signals here whether the user asked to
-    // leave. The post-turn block emits the typed `voice/exit` event so the
-    // client returns home after the farewell audio. `false` for text turns or
-    // replies without the marker.
-    let (exit_directive_tx, exit_directive_rx) = tokio::sync::oneshot::channel::<bool>();
     // #1969 — shared token tracker, moved into the spawned agent task below.
     let token_tracker_task = std::sync::Arc::new(octos_agent::TokenTracker::new());
     // task-turn-interrupt-steer-correlation-logs: every agent-side log line
@@ -21941,24 +21741,12 @@ async fn run_standalone_turn(
             }
             None => Box::pin(message_future),
         };
-        // Voice fail-fast: wrap the whole provider stack outermost so every
-        // wrapper + the leaf provider short-circuit retry/failover/hedge no
-        // matter how deep the agent loop recurses into `chat()`. Text turns run
-        // Normal (full retry ladder), unchanged.
-        let call_policy = if had_audio_input {
-            octos_llm::LlmCallPolicy::FailFast
-        } else {
-            octos_llm::LlmCallPolicy::Normal
-        };
-        let result = octos_llm::with_llm_call_policy(
-            call_policy,
-            octos_llm::with_router_context(
-                router_ctx,
-                octos_llm::with_lane_context(
-                    lane_ctx,
-                    octos_agent::tools::TOOL_APPROVAL_CTX
-                        .scope(approval_requester, scoped_message_future),
-                ),
+        let result = octos_llm::with_router_context(
+            router_ctx,
+            octos_llm::with_lane_context(
+                lane_ctx,
+                octos_agent::tools::TOOL_APPROVAL_CTX
+                    .scope(approval_requester, scoped_message_future),
             ),
         )
         .await;
@@ -21985,29 +21773,7 @@ async fn run_standalone_turn(
             result => result,
         };
         match result {
-            Ok(mut response) => {
-                // Voice control markers: lift the trailing in-band
-                // `[[VISUAL:...]]` (#1477) and `[[EXIT]]` (UPCR-2026-025)
-                // directives out of the reply and strip them from
-                // `response.content` AND every Assistant carrier in
-                // `response.messages` BEFORE capture / persist / done, so the
-                // internal control protocol never reaches the wire
-                // (`message/delta` from `done`, canonical projection envelopes) or storage
-                // (session JSONL). Stacked markers in either order are both
-                // peeled (review fix). The directives are dispatched post-turn
-                // from the oneshots below; the client learns a visual is coming
-                // from `visual/generating` and an exit from `voice/exit`. Gated
-                // on voice turns. No-op (returns `(None, false)`, mutates
-                // nothing) without a real trailing marker.
-                let (visual_directive, exit_requested) = prepare_voice_directives(
-                    &mut response.content, &mut response.messages, had_audio_input, incomplete_message.is_some(),
-                );
-                let _ = visual_directive_tx.send(visual_directive);
-                let _ = exit_directive_tx.send(exit_requested);
-                replace_voice_user_message_content(
-                    &mut response.messages,
-                    voice_user_content_for_persist.as_deref(),
-                );
+            Ok(response) => {
                 // #1134 — capture the LLM reply for the post-turn
                 // self-paced reschedule block. The receiver of this
                 // oneshot uses the captured content instead of
@@ -22597,8 +22363,6 @@ async fn run_standalone_turn(
                 // back to the session-history scan, matching the
                 // pre-#1134 behaviour.
                 let _ = final_reply_tx.send(None);
-                // No reply → no rich-output directive to dispatch.
-                let _ = visual_directive_tx.send(None);
                 // Codex round-2 MAJOR 2: prefer the typed user-actionable
                 // message over the raw LLM Display string. The agent
                 // loop's classifier (`HarnessError::classify_report` at
@@ -22662,37 +22426,6 @@ async fn run_standalone_turn(
     let progress_context = ProgressMappingContext::new(session_id.clone(), turn_id.clone());
     let mut interrupt_observed = false;
 
-    // ── Voice turn: sentence-streamed TTS ─────────────────────────────
-    // For voice turns, synthesize the reply sentence-by-sentence AS the LLM
-    // streams `token` events, instead of waiting for the whole reply. A FIFO
-    // worker keeps the emitted audio ordered without blocking this loop. All
-    // gated on `had_audio_input`, so text chat is untouched.
-    // Voice turn: a `VoiceReplySplitter` feeds complete sentences to the TTS
-    // worker AS tokens stream, while holding back any trailing in-band
-    // `[[VISUAL:kind|brief]]` marker so it never reaches TTS. Sentence-splitting
-    // lives in `voice_turn::VoiceReplySplitter` (unit-tested). The rich-output
-    // directive is parsed later from the authoritative final reply (not the
-    // splitter), so it is robust whether or not the reply was streamed.
-    let mut voice_splitter = if had_audio_input {
-        Some(crate::api::voice_text::VoiceReplySplitter::new())
-    } else {
-        None
-    };
-    // Voice turn: marker-aware UI delta filter (#1477). Streams the reply to the
-    // chat bubble token-by-token while holding back the trailing
-    // `[[VISUAL:...]]` marker, so the live `message/delta` wire never carries the
-    // internal control protocol (durable surfaces are stripped in the agent task).
-    let mut voice_assistant_iteration = None;
-    let mut voice_delta_filter = if had_audio_input {
-        Some(crate::api::voice_text::VisibleDeltaFilter::new())
-    } else {
-        None
-    };
-    let mut voice_streamed_count: usize = 0;
-    let (mut voice_tx, mut voice_handle): (
-        Option<tokio::sync::mpsc::Sender<String>>,
-        Option<tokio::task::JoinHandle<usize>>,
-    ) = (None, None);
     loop {
         // Race progress events against the interrupt signal so an interrupt
         // can wake us out of `progress_rx.recv()` even if the agent task is
@@ -22815,15 +22548,6 @@ async fn run_standalone_turn(
                     .and_then(Value::as_str)
                     .unwrap_or("turn failed")
                     .to_string();
-                // Voice fail-fast: a classified `TurnFailure` rode the side
-                // channel. Speak a short apology through the SAME TTS worker as
-                // a normal reply, and DRAIN the worker before the terminal so
-                // the audio is emitted ahead of the terminal frame (a canonical
-                // client's post-completion barrier would otherwise drop a
-                // file/attached envelope emitted after the terminal). Surface
-                // the classified variant as the terminal code + the friendly
-                // spoken text as the message. Text turns: unchanged.
-                let _voice_failure = voice_failure_rx.as_mut().and_then(|rx| rx.try_recv().ok());
                 let (code, wire_msg): (&str, String) = (
                     event
                         .get("code")
@@ -22872,52 +22596,6 @@ async fn run_standalone_turn(
                 break;
             }
             _ => {
-                // Voice turn: accumulate streamed `token` text and hand off each
-                // complete sentence to the FIFO TTS worker for immediate synthesis,
-                // AND emit the same text — minus the trailing `[[VISUAL:...]]`
-                // marker — as the UI `message/delta`, then SKIP the generic token
-                // forward so the raw marker never reaches the wire (#1477).
-                if let (Some(tx), Some(sp), Some(uf)) = (
-                    voice_tx.as_ref(),
-                    voice_splitter.as_mut(),
-                    voice_delta_filter.as_mut(),
-                ) {
-                    if event.get("type").and_then(Value::as_str) == Some("token") {
-                        voice_assistant_iteration = progress_assistant_iteration(&event);
-                        if let Some(t) = event.get("text").and_then(Value::as_str) {
-                            for sentence in sp.push(t) {
-                                if tx.try_send(sentence).is_ok() {
-                                    voice_streamed_count += 1;
-                                }
-                            }
-                            let visible = uf.push(t);
-                            if !visible.is_empty() {
-                                // #1477 P2: dual-emit the canonical envelope so
-                                // projection.envelope.v1 clients also receive the
-                                // voice delta — a bare ephemeral send is filtered
-                                // out for them. Mirrors forward_progress_event's
-                                // MessageDelta handling (emit envelope, then legacy).
-                                let delta = UiNotification::MessageDelta(MessageDeltaEvent {
-                                    session_id: session_id.clone(),
-                                    topic: None,
-                                    turn_id: turn_id.clone(),
-                                    text: visible,
-                                });
-                                emit_progress_envelope(
-                                    &ledger,
-                                    &session_id,
-                                    &delta,
-                                    voice_assistant_iteration,
-                                );
-                                let _ = send_notification_ephemeral(&ws, &ledger, delta);
-                                saw_delta = true;
-                            }
-                        }
-                        // Token handled for this voice turn — do NOT forward the
-                        // raw token (it may carry the in-band marker).
-                        continue;
-                    }
-                }
                 forward_progress_event(
                     &ws,
                     &ledger,
@@ -22930,47 +22608,6 @@ async fn run_standalone_turn(
                     &event,
                 );
             }
-        }
-    }
-
-    // Voice turn: flush the trailing partial sentence (marker already held back
-    // by the splitter), close the channel, and wait for the FIFO TTS worker.
-    if let Some(tx) = voice_tx.take() {
-        if let Some(sp) = voice_splitter.take() {
-            let (tail, _directive) = sp.finish();
-            if !interrupt_observed {
-                if let Some(t) = tail {
-                    if tx.try_send(t).is_ok() {
-                        voice_streamed_count += 1;
-                    }
-                }
-            }
-        }
-        // Flush any held UI text the marker-aware filter retained that turned out
-        // NOT to be a real trailing marker (rare mid-reply `[[VISUAL:`); a genuine
-        // trailing marker yields nothing so it never reaches the wire (#1477).
-        if let Some(uf) = voice_delta_filter.take() {
-            if !interrupt_observed {
-                let recovered = uf.finish();
-                if !recovered.is_empty() {
-                    // #1477 P2: dual-emit the envelope (see the streaming path
-                    // above) so projection.envelope.v1 clients also get the
-                    // recovered tail delta.
-                    let delta = UiNotification::MessageDelta(MessageDeltaEvent {
-                        session_id: session_id.clone(),
-                        topic: None,
-                        turn_id: turn_id.clone(),
-                        text: recovered,
-                    });
-                    emit_progress_envelope(&ledger, &session_id, &delta, voice_assistant_iteration);
-                    let _ = send_notification_ephemeral(&ws, &ledger, delta);
-                }
-            }
-        }
-        drop(tx);
-        if let Some(handle) = voice_handle.take() {
-            voice_streamed_count = handle.await.unwrap_or(voice_streamed_count);
-            let _ = voice_streamed_count;
         }
     }
 
@@ -23234,44 +22871,6 @@ async fn run_standalone_turn(
     // half is guaranteed to be either delivered or dropped — this
     // `await` will not block.
     let final_response_content: Option<String> = final_reply_rx.await.ok().flatten();
-    // Voice rich output (#1477): the directive was lifted + stripped inside the
-    // agent task; receive it here (`None` for text turns / replies with no
-    // marker). `final_response_content` is now the clean spoken reply (marker
-    // already gone), so it doubles as the HTML author's "spoken_reply" context.
-    let _visual_directive = visual_directive_rx.await.ok().flatten();
-
-    // Voice exit intent (UPCR-2026-025): the agent task signalled whether the
-    // user asked to leave (the `[[EXIT]]` marker was lifted + stripped there).
-    // Receive the flag now, but DEFER emitting `voice/exit` until AFTER the
-    // farewell reply audio has been attached (the streamed path above, or the
-    // whole-reply fallback synth below) — review fix: emitting here would let a
-    // no-sentence-boundary reply's `voice/exit` reach the client before its
-    // farewell `file/attached`, so the client could navigate away before the
-    // goodbye is heard, violating the "farewell first" contract.
-    let exit_requested = exit_directive_rx.await.unwrap_or(false);
-
-    // Voice rich output: dispatch the in-band [[VISUAL]] directive.
-    // HTML → a focused tool-less LLM call (rich_output); image-class → a
-    // backend-orchestrated mofa skill. Fire-and-forget: the artifact arrives
-    // async via the same `files_attached` channel as the reply audio, so the
-    // turn completes while the client shows a "generating" state. The client is
-    // told a visual is coming by the typed `visual/generating` event below (no
-    // in-band marker is on the wire). The model emits no tool call, so the
-    // Gemini-3 thought_signature path never arises.
-    // Voice exit intent (UPCR-2026-025): NOW that the farewell reply audio has
-    // been attached (streamed sentences awaited above, or the whole-reply
-    // fallback synth just above), emit the typed `voice/exit`. Emitting here —
-    // strictly AFTER the farewell `file/attached` — guarantees the client has
-    // the goodbye audio queued before it sees the exit signal, so it plays the
-    // farewell before leaving /voice (the events share the ordered ledger live
-    // path). No in-band marker is on the wire.
-    if had_audio_input && !interrupt_observed && exit_requested {
-        super::ui_protocol_alpha9_bridge::emit_voice_exit_from_background(
-            &ledger,
-            &session_id,
-            &turn_id,
-        );
-    }
 
     // #1128 codex P1 re-review #2 — apply self-paced rescheduling
     // AFTER the model reply has been persisted to the per-session
@@ -26511,10 +26110,6 @@ fn ledger_event_cursor(event: &UiProtocolLedgerEvent) -> Option<UiCursor> {
             UiNotification::TurnStarted(_)
             | UiNotification::MessageDelta(_)
             | UiNotification::ReasoningDelta(_)
-            | UiNotification::VisualGenerating(_)
-            | UiNotification::VisualSucceeded(_)
-            | UiNotification::VisualFailed(_)
-            | UiNotification::VoiceExit(_)
             | UiNotification::SkillActionJobUpdated(_)
             | UiNotification::ToolStarted(_)
             | UiNotification::ToolProgress(_)
@@ -26547,7 +26142,6 @@ fn ledger_event_cursor(event: &UiProtocolLedgerEvent) -> Option<UiCursor> {
             | UiNotification::FileAttached(_)
             // Streamed reply-audio chunks are ephemeral; their ordering lives
             // in the segment_id/seq, not a durable ledger cursor.
-            | UiNotification::VoiceAudioChunk(_)
             | UiNotification::SessionEventBridged(_)
             // Wave4-A: router/queue notifications don't carry their own
             // cursor — they're stateless lifecycle pushes.

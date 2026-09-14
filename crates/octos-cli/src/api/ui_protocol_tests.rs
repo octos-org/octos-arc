@@ -8,8 +8,8 @@ use octos_core::ui_protocol::{
     ApprovalDecision, ApprovalId, ApprovalRespondParams, ApprovalRespondStatus, DiffPreview,
     DiffPreviewFile, DiffPreviewFileStatus, DiffPreviewGetParams, DiffPreviewGetStatus,
     DiffPreviewHunk, DiffPreviewLine, DiffPreviewLineKind, DiffPreviewSource, PreviewId,
-    QuestionId, ReasoningDeltaEvent, SessionSandboxParams, approval_scopes, methods,
-    rpc_error_codes,
+    QuestionId, ReasoningDeltaEvent, SessionSandboxParams, UiProgressEvent, UiProgressMetadata,
+    approval_scopes, methods, rpc_error_codes,
 };
 
 #[test]
@@ -3393,7 +3393,7 @@ fn appui_prompt_context_bridge_preserves_current_user_turn() {
     )));
     let dir = tempfile::tempdir().unwrap();
     let bridge =
-        AppUiPromptContextBridge::new(session_id.clone(), dir.path().to_path_buf(), manager, false);
+        AppUiPromptContextBridge::new(session_id.clone(), dir.path().to_path_buf(), manager);
     let mut prompt = vec![test_message(MessageRole::System, "runtime system")];
     prompt.extend(history);
     prompt.push(test_message(MessageRole::User, "current request"));
@@ -3458,7 +3458,6 @@ fn effective_provider_route_updates_scratch_and_persists_exactly_one_epoch_rotat
         session_id.clone(),
         dir.path().to_path_buf(),
         manager.clone(),
-        false,
     );
 
     // Initialize the per-loop scratch exactly as a real TurnStart does.
@@ -3557,7 +3556,7 @@ fn in_loop_compaction_emits_lifecycle_notifications() {
     let captured: Arc<StdMutex<Vec<UiNotification>>> = Arc::new(StdMutex::new(Vec::new()));
     let sink = captured.clone();
     let bridge =
-        AppUiPromptContextBridge::new(session_id.clone(), dir.path().to_path_buf(), manager, false)
+        AppUiPromptContextBridge::new(session_id.clone(), dir.path().to_path_buf(), manager)
             .with_context_lifecycle_notify(Arc::new(move |notification| {
                 sink.lock()
                     .unwrap_or_else(|error| error.into_inner())
@@ -3624,51 +3623,6 @@ fn in_loop_compaction_emits_lifecycle_notifications() {
     );
     assert!(done.context_state.semantic_head_id.is_some());
     assert!(done.context_state.semantic_head_kind.is_some());
-}
-
-#[test]
-fn voice_turn_bridge_caps_outgoing_prompt_only() {
-    // Lever 2: a voice turn caps the OUTGOING projection at the voice
-    // budget so the spoken-turn prefill stays small; a text turn leaves it
-    // uncapped. The cap lives on `outgoing_prompt_policy` only — the
-    // record/coverage/compaction passes use the uncapped `prompt_policy`,
-    // so the persisted transcript is never re-recorded from a trimmed view.
-    let session_id = SessionKey::new("api", "voice-cap");
-    let dir = tempfile::tempdir().unwrap();
-    let manager = Arc::new(StdMutex::new(ContextManager::from_session_history(
-        session_id.to_string(),
-        None,
-        &[],
-    )));
-    let request = PromptContextRequest {
-        phase: PromptContextPhase::TurnStart,
-        iteration: 1,
-        provider_name: "test".to_string(),
-        model_id: "m".to_string(),
-        context_window: 16_000,
-    };
-
-    let voice = AppUiPromptContextBridge::new(
-        session_id.clone(),
-        dir.path().to_path_buf(),
-        manager.clone(),
-        true,
-    );
-    assert_eq!(
-        voice
-            .outgoing_prompt_policy(&request)
-            .max_prompt_token_estimate,
-        Some(AppUiPromptContextBridge::voice_prompt_budget()),
-        "voice turns must cap the outgoing prompt projection"
-    );
-
-    let text = AppUiPromptContextBridge::new(session_id, dir.path().to_path_buf(), manager, false);
-    assert_eq!(
-        text.outgoing_prompt_policy(&request)
-            .max_prompt_token_estimate,
-        None,
-        "text turns must leave the outgoing prompt uncapped"
-    );
 }
 
 /// #1134 — when the oneshot didn't fire (interrupt / agent error
@@ -9124,7 +9078,6 @@ fn shell_approval_event_is_typed_only_after_negotiation() {
             turn_state_get: false,
             spawn_complete: false,
             file_attached: false,
-            voice_audio: false,
             plan_todos: false,
             background_activity: false,
             projection_envelope: false,
@@ -9193,7 +9146,6 @@ fn risk_default_is_unspecified_when_manifest_silent() {
             turn_state_get: false,
             spawn_complete: false,
             file_attached: false,
-            voice_audio: false,
             plan_todos: false,
             background_activity: false,
             projection_envelope: false,
@@ -9307,7 +9259,6 @@ fn plugin_high_risk_approval_emits_risk_field_on_wire() {
             turn_state_get: false,
             spawn_complete: false,
             file_attached: false,
-            voice_audio: false,
             plan_todos: false,
             background_activity: false,
             projection_envelope: false,
@@ -9376,7 +9327,6 @@ fn plugin_critical_risk_approval_emits_risk_critical() {
             turn_state_get: false,
             spawn_complete: false,
             file_attached: false,
-            voice_audio: false,
             plan_todos: false,
             background_activity: false,
             projection_envelope: false,
@@ -9438,7 +9388,6 @@ fn shell_approval_still_emits_risk_field() {
             turn_state_get: false,
             spawn_complete: false,
             file_attached: false,
-            voice_audio: false,
             plan_todos: false,
             background_activity: false,
             projection_envelope: false,
@@ -9543,7 +9492,6 @@ fn approval_cwd_is_sanitized_against_path_spoof() {
             turn_state_get: false,
             spawn_complete: false,
             file_attached: false,
-            voice_audio: false,
             plan_todos: false,
             background_activity: false,
             projection_envelope: false,
@@ -12999,7 +12947,6 @@ async fn session_open_includes_pane_snapshot_after_negotiation() {
             turn_state_get: false,
             spawn_complete: false,
             file_attached: false,
-            voice_audio: false,
             plan_todos: false,
             background_activity: false,
             projection_envelope: false,
@@ -20498,48 +20445,6 @@ async fn bounded_channel_reporter_emits_typed_thread_id_on_progress_events() {
 }
 
 #[test]
-fn voice_user_message_persist_uses_transcript_not_prompt_scaffolding() {
-    let mut messages = vec![
-        Message::user("帮我记住我喜欢乌龙茶\n\n[语音模式:用口语化中文、一两句话简短回答]"),
-        Message::assistant("记住了。"),
-    ];
-
-    replace_voice_user_message_content(&mut messages, Some("帮我记住我喜欢乌龙茶"));
-
-    assert_eq!(messages[0].content, "帮我记住我喜欢乌龙茶");
-    assert_eq!(messages[1].content, "记住了。");
-}
-
-#[test]
-fn voice_user_message_persist_keeps_typed_text_for_mixed_turn() {
-    // #1555 review finding 2: a mixed typed-text + audio turn persists the
-    // COMBINED user-visible content (typed + transcript), not the
-    // transcript alone — the typed text must survive in history.
-    let persisted = combine_typed_prompt_with_transcript("请看看这份周报", "帮我念一下重点");
-    assert_eq!(persisted, "请看看这份周报\n帮我念一下重点");
-
-    let mut messages = vec![
-        Message::user(
-            "请看看这份周报\n帮我念一下重点\n\n[语音模式:用口语化中文、一两句话简短回答]",
-        ),
-        Message::assistant("好的。"),
-    ];
-
-    replace_voice_user_message_content(&mut messages, Some(&persisted));
-
-    assert_eq!(messages[0].content, "请看看这份周报\n帮我念一下重点");
-    assert_eq!(messages[1].content, "好的。");
-}
-
-#[test]
-fn voice_combine_falls_back_to_transcript_for_pure_voice_turn() {
-    // Pure-voice turn (no typed prompt): persisted content stays the bare
-    // transcript — unchanged behavior.
-    assert_eq!(combine_typed_prompt_with_transcript("", "你好"), "你好");
-    assert_eq!(combine_typed_prompt_with_transcript("  \n", "你好"), "你好");
-}
-
-#[test]
 fn legacy_voice_turn_only_short_circuits_when_no_other_input_remains() {
     assert!(should_short_circuit_no_speech(true, false, false, true));
     assert!(!should_short_circuit_no_speech(true, false, false, false));
@@ -24085,7 +23990,6 @@ async fn make_m11e_profile_with_llm_and_sandbox(
         runtime_lifecycle: None,
         hook_executor: None,
         lane_routing: None,
-        voice: crate::config::VoiceConfig::default(),
     })
 }
 
@@ -24500,17 +24404,6 @@ impl octos_llm::LlmProvider for AppuiContinuationLlm {
     fn model_id(&self) -> &str {
         "appui-continuation-stub"
     }
-}
-
-#[test]
-fn terminal_integrity_truncated_voice_strips_but_does_not_execute_directives() {
-    let mut content = "A partial answer [[EXIT]]".to_owned();
-    let mut messages = vec![Message::assistant(content.clone())];
-    let directives = prepare_voice_directives(&mut content, &mut messages, true, true);
-    assert!(directives.0.is_none());
-    assert!(!directives.1);
-    assert_eq!(content, "A partial answer");
-    assert_eq!(messages[0].content, content);
 }
 
 /// M11-E acceptance §1: a session opened with a custom `cwd` materializes
@@ -28035,7 +27928,6 @@ fn should_keep_mid_turn_canonical_merge_when_scratch_copies_back() {
         session_id.clone(),
         dir.path().to_path_buf(),
         manager.clone(),
-        false,
     );
     let request = |phase, iteration| PromptContextRequest {
         phase,
@@ -28785,42 +28677,6 @@ fn should_keep_synthetic_final_distinct_from_same_iteration_model_preamble() {
 }
 
 #[test]
-fn should_preserve_producer_identity_on_filtered_voice_delta_and_held_back_tail() {
-    let ledger = UiProtocolLedger::new(32);
-    let session = SessionKey("local:voice-segment-identity".into());
-    let turn = TurnId::new();
-    let mut filter = crate::api::voice_text::VisibleDeltaFilter::new();
-    let visible = filter.push("Spoken answer [[VI");
-    let tail = filter.finish();
-    for text in [visible, tail] {
-        assert!(!text.is_empty());
-        let delta = UiNotification::MessageDelta(MessageDeltaEvent {
-            session_id: session.clone(),
-            topic: None,
-            turn_id: turn.clone(),
-            text,
-        });
-        emit_progress_envelope(&ledger, &session, &delta, Some(7));
-    }
-    let replay = ledger
-        .replay_after(
-            &session,
-            Some(&UiCursor {
-                stream: session.0.clone(),
-                seq: 0,
-            }),
-        )
-        .unwrap();
-    assert_eq!(replay.len(), 2);
-    for source in replay {
-        assert_eq!(
-            projected_delta_segment(&ledger, &source),
-            format!("{}:assistant:iteration:7", turn.0)
-        );
-    }
-}
-
-#[test]
 fn should_record_one_failed_compaction_while_pinned_tail_stays_infeasible_across_iterations() {
     let session_id = SessionKey::new("api", "context-pinned-retry");
     let history = vec![test_message(MessageRole::User, "x".repeat(4_000))];
@@ -28833,7 +28689,7 @@ fn should_record_one_failed_compaction_while_pinned_tail_stays_infeasible_across
     let captured: Arc<StdMutex<Vec<UiNotification>>> = Arc::new(StdMutex::new(Vec::new()));
     let sink = captured.clone();
     let bridge =
-        AppUiPromptContextBridge::new(session_id, dir.path().to_path_buf(), manager.clone(), false)
+        AppUiPromptContextBridge::new(session_id, dir.path().to_path_buf(), manager.clone())
             .with_context_lifecycle_notify(Arc::new(move |notification| {
                 sink.lock()
                     .unwrap_or_else(|error| error.into_inner())

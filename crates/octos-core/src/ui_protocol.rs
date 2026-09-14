@@ -255,12 +255,6 @@ pub const UI_PROTOCOL_FEATURE_HARNESS_TASK_SUPERVISION_INSPECTION_V1: &str =
 pub const UI_PROTOCOL_FEATURE_USER_QUESTION_V1: &str = "user_question.v1";
 
 /// Feature flag for streamed voice-reply audio. When negotiated, the server
-/// pushes `voice/audio_chunk` notifications (base64 audio frames) as the
-/// cloud TTS synthesizes, so the client can play progressively (MSE) instead
-/// of waiting for a complete `file/attached` reply. Not negotiated → the voice
-/// turn keeps emitting whole-file `file/attached` audio.
-pub const UI_PROTOCOL_FEATURE_VOICE_AUDIO_V1: &str = "event.voice_audio.v1";
-
 /// #2019 — feature flag for the HUMAN sink over background events that
 /// otherwise only wake the model. Monitor event lines (#1977) and claimed
 /// fleet outbox events already exist, are already durable, and already have
@@ -316,7 +310,6 @@ pub const UI_PROTOCOL_KNOWN_FEATURES: &[&str] = &[
     UI_PROTOCOL_FEATURE_CONTEXT_SEMANTIC_CACHE_V1,
     UI_PROTOCOL_FEATURE_HARNESS_TASK_SUPERVISION_INSPECTION_V1,
     UI_PROTOCOL_FEATURE_USER_QUESTION_V1,
-    UI_PROTOCOL_FEATURE_VOICE_AUDIO_V1,
     UI_PROTOCOL_FEATURE_PLAN_TODOS_V1,
     UI_PROTOCOL_FEATURE_BACKGROUND_ACTIVITY_V1,
     UI_PROTOCOL_FEATURE_TURN_STEER_DROPPED_V1,
@@ -1115,39 +1108,9 @@ pub mod methods {
     /// event mirroring the SSE `file:` frame from `files_to_send` tool
     /// surfaces.
     pub const FILE_ATTACHED: &str = "file/attached";
-    /// #1477 voice rich output — a background visual artifact (illustrated
-    /// HTML / image / infographic) began generating for the turn. Lets the
-    /// client show a "generating" placeholder WITHOUT scraping an in-band
-    /// marker out of the assistant text. Ungated; emitted on the same
-    /// ledger-backed live path as `file/attached` (durable append, so a
-    /// reconnecting client replays it). The lifecycle is terminated by a typed
-    /// `visual/succeeded` or `visual/failed` — NOT by `file/attached` (which is
-    /// purely an artifact-delivery signal).
-    pub const VISUAL_GENERATING: &str = "visual/generating";
-    /// #1477 voice rich output — the background visual task produced its
-    /// artifact(s). The structured success counterpart of `visual/generating`:
-    /// the client clears the "generating" placeholder off THIS event, keeping
-    /// the visual lifecycle decoupled from `file/attached`. Emitted alongside
-    /// `file/attached` on the success branch.
-    pub const VISUAL_SUCCEEDED: &str = "visual/succeeded";
-    /// #1477 voice rich output — the background visual task failed or timed
-    /// out, so the client should clear the "generating" placeholder.
-    pub const VISUAL_FAILED: &str = "visual/failed";
-    /// UPCR-2026-025 voice exit intent — the voice turn detected an end /
-    /// goodbye / mute intent (the model appended an in-band `[[EXIT]]` control
-    /// marker, which the backend strips from every model-/client-facing surface
-    /// and replaces with this typed event). The client uses it to leave the
-    /// `/voice` screen and return home AFTER the turn's farewell audio finishes
-    /// playing — it must NOT navigate before the reply audio drains. Ungated;
-    /// emitted on the same ledger-backed live path as `file/attached`.
-    pub const VOICE_EXIT: &str = "voice/exit";
     /// UPCR-2026-027 `skill/action/job/updated` — latest persisted snapshot
     /// for a manifest-declared background skill action job.
     pub const SKILL_ACTION_JOB_UPDATED: &str = "skill/action/job/updated";
-    /// Streamed voice-reply audio chunk (gated by `event.voice_audio.v1`).
-    /// One per audio frame from cloud TTS; carries base64 audio plus a
-    /// `segment_id`/`seq`/`last` so the client groups and plays chunks in order.
-    pub const VOICE_AUDIO_CHUNK: &str = "voice/audio_chunk";
     /// UPCR-2026-014 (M9-γ) `projection/envelope` — canonical projection
     /// envelope notification (spec § 14). γ-1 reserves the method name
     /// in the notification methods list as part of capability negotiation
@@ -1339,12 +1302,7 @@ pub const UI_PROTOCOL_NOTIFICATION_METHODS: &[&str] = &[
     methods::REPLAY_LOSSY,
     methods::TURN_SPAWN_COMPLETE,
     methods::FILE_ATTACHED,
-    methods::VISUAL_GENERATING,
-    methods::VISUAL_SUCCEEDED,
-    methods::VISUAL_FAILED,
-    methods::VOICE_EXIT,
     methods::SKILL_ACTION_JOB_UPDATED,
-    methods::VOICE_AUDIO_CHUNK,
     methods::PROJECTION_ENVELOPE,
     methods::SESSION_EVENT,
     methods::ROUTER_STATUS,
@@ -4812,68 +4770,6 @@ pub struct ReasoningDeltaEvent {
     pub text: String,
 }
 
-/// #1477 voice rich output: a background visual artifact began generating for
-/// the turn. The client renders a "generating" placeholder keyed off this
-/// typed event instead of scraping an in-band `[[VISUAL:...]]` marker out of the
-/// assistant text (which the backend now keeps out of the wire/persisted
-/// surfaces entirely). The lifecycle terminates on `visual/succeeded` or
-/// `visual/failed`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct VisualGeneratingEvent {
-    pub session_id: SessionKey,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub topic: Option<String>,
-    pub turn_id: TurnId,
-    /// `html` | `illustrated` | `image` | `infographic`.
-    pub kind: String,
-}
-
-/// #1477 voice rich output: the background visual task produced its artifact(s).
-/// The structured success counterpart of [`VisualGeneratingEvent`] — the client
-/// clears the "generating" placeholder off this, NOT off `file/attached` (which
-/// stays a pure artifact-delivery signal). Emitted alongside `file/attached` on
-/// the success branch.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct VisualSucceededEvent {
-    pub session_id: SessionKey,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub topic: Option<String>,
-    pub turn_id: TurnId,
-    /// `html` | `illustrated` | `image` | `infographic`.
-    pub kind: String,
-    /// Workspace-relative filenames of the delivered artifact(s) — the same
-    /// paths carried on the accompanying `file/attached` event(s).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub files: Vec<String>,
-}
-
-/// #1477 voice rich output: the background visual task failed or timed out, so
-/// the client should clear the "generating" placeholder.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct VisualFailedEvent {
-    pub session_id: SessionKey,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub topic: Option<String>,
-    pub turn_id: TurnId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-}
-
-/// UPCR-2026-025 voice exit intent: the voice turn detected an end / goodbye /
-/// mute intent. The model appended an in-band `[[EXIT]]` control marker; the
-/// backend strips it from every model-/client-facing surface (so it never
-/// reaches TTS, the `message/delta` wire, or the persisted session) and emits
-/// this typed event instead. The client leaves the `/voice` screen and returns
-/// home — but only AFTER the turn's farewell audio finishes playing, so the
-/// goodbye is heard before navigation.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct VoiceExitEvent {
-    pub session_id: SessionKey,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub topic: Option<String>,
-    pub turn_id: TurnId,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolStartedEvent {
     pub session_id: SessionKey,
@@ -5900,28 +5796,6 @@ pub struct FileAttachedEvent {
     pub mime: Option<String>,
 }
 
-/// A streamed voice-reply audio chunk (`voice/audio_chunk`). Emitted per
-/// audio frame as cloud TTS synthesizes, gated by `event.voice_audio.v1`.
-/// Chunks sharing a `segment_id` form one playable utterance (one reply
-/// sentence); `seq` orders them and `last` marks the segment's final chunk.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct VoiceAudioChunkEvent {
-    pub session_id: SessionKey,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub topic: Option<String>,
-    pub turn_id: TurnId,
-    /// Groups chunks into one playable utterance (per reply sentence).
-    pub segment_id: String,
-    /// Chunk order within the segment (0-based).
-    pub seq: u32,
-    /// MIME type of the audio bytes, e.g. "audio/mpeg".
-    pub mime: String,
-    /// Base64-encoded raw audio bytes for this chunk.
-    pub audio_b64: String,
-    /// True on the final chunk of the segment.
-    pub last: bool,
-}
-
 /// UPCR-2026-014 (M9-α-9): wrapper for legacy
 /// `/api/sessions/:id/events/stream` SSE frames bridged onto the WS
 /// surface. `kind` is the legacy SSE `type` field; `payload` is the
@@ -6073,15 +5947,6 @@ pub enum UiNotification {
     TurnStarted(TurnStartedEvent),
     MessageDelta(MessageDeltaEvent),
     ReasoningDelta(ReasoningDeltaEvent),
-    /// #1477 voice rich output: a background visual artifact started generating.
-    VisualGenerating(VisualGeneratingEvent),
-    /// #1477 voice rich output: a background visual artifact was produced.
-    VisualSucceeded(VisualSucceededEvent),
-    /// #1477 voice rich output: a background visual task failed / timed out.
-    VisualFailed(VisualFailedEvent),
-    /// UPCR-2026-025 voice exit intent: the voice turn detected an end /
-    /// goodbye / mute intent; the client returns home after the farewell audio.
-    VoiceExit(VoiceExitEvent),
     /// UPCR-2026-027: latest background skill action job snapshot.
     SkillActionJobUpdated(SkillActionJobUpdatedEvent),
     ToolStarted(ToolStartedEvent),
@@ -6111,8 +5976,6 @@ pub enum UiNotification {
     TurnSpawnComplete(TurnSpawnCompleteEvent),
     /// UPCR-2026-014 (M9-α-9): per-turn file attachment event.
     FileAttached(FileAttachedEvent),
-    /// Streamed voice-reply audio chunk (gated by `event.voice_audio.v1`).
-    VoiceAudioChunk(VoiceAudioChunkEvent),
     /// UPCR-2026-014 (M9-α-9): wrapper for legacy
     /// `/api/sessions/:id/events/stream` SSE frames bridged onto the
     /// unified v1 ledger.
@@ -6193,10 +6056,6 @@ impl UiNotification {
             Self::TurnStarted(_) => methods::TURN_STARTED,
             Self::MessageDelta(_) => methods::MESSAGE_DELTA,
             Self::ReasoningDelta(_) => methods::MESSAGE_REASONING_DELTA,
-            Self::VisualGenerating(_) => methods::VISUAL_GENERATING,
-            Self::VisualSucceeded(_) => methods::VISUAL_SUCCEEDED,
-            Self::VisualFailed(_) => methods::VISUAL_FAILED,
-            Self::VoiceExit(_) => methods::VOICE_EXIT,
             Self::SkillActionJobUpdated(_) => methods::SKILL_ACTION_JOB_UPDATED,
             Self::ToolStarted(_) => methods::TOOL_STARTED,
             Self::ToolProgress(_) => methods::TOOL_PROGRESS,
@@ -6217,7 +6076,6 @@ impl UiNotification {
             Self::ReplayLossy(_) => methods::REPLAY_LOSSY,
             Self::TurnSpawnComplete(_) => methods::TURN_SPAWN_COMPLETE,
             Self::FileAttached(_) => methods::FILE_ATTACHED,
-            Self::VoiceAudioChunk(_) => methods::VOICE_AUDIO_CHUNK,
             Self::SessionEventBridged(_) => methods::SESSION_EVENT,
             Self::RouterStatus(_) => methods::ROUTER_STATUS,
             Self::RouterFailover(_) => methods::ROUTER_FAILOVER,
@@ -6247,10 +6105,6 @@ impl UiNotification {
             Self::TurnStarted(event) => &event.session_id,
             Self::MessageDelta(event) => &event.session_id,
             Self::ReasoningDelta(event) => &event.session_id,
-            Self::VisualGenerating(event) => &event.session_id,
-            Self::VisualSucceeded(event) => &event.session_id,
-            Self::VisualFailed(event) => &event.session_id,
-            Self::VoiceExit(event) => &event.session_id,
             Self::SkillActionJobUpdated(event) => &event.session_id,
             Self::ToolStarted(event) => &event.session_id,
             Self::ToolProgress(event) => &event.session_id,
@@ -6271,7 +6125,6 @@ impl UiNotification {
             Self::ReplayLossy(event) => &event.session_id,
             Self::TurnSpawnComplete(event) => &event.session_id,
             Self::FileAttached(event) => &event.session_id,
-            Self::VoiceAudioChunk(event) => &event.session_id,
             Self::SessionEventBridged(event) => &event.session_id,
             Self::RouterStatus(event) => &event.session_id,
             Self::RouterFailover(event) => &event.session_id,
@@ -6302,16 +6155,6 @@ impl UiNotification {
                 event.topic.as_deref().or_else(|| event.session_id.topic())
             }
             Self::ReasoningDelta(event) => {
-                event.topic.as_deref().or_else(|| event.session_id.topic())
-            }
-            Self::VisualGenerating(event) => {
-                event.topic.as_deref().or_else(|| event.session_id.topic())
-            }
-            Self::VisualSucceeded(event) => {
-                event.topic.as_deref().or_else(|| event.session_id.topic())
-            }
-            Self::VoiceExit(event) => event.topic.as_deref().or_else(|| event.session_id.topic()),
-            Self::VisualFailed(event) => {
                 event.topic.as_deref().or_else(|| event.session_id.topic())
             }
             Self::ToolStarted(event) => event.topic.as_deref().or_else(|| event.session_id.topic()),
@@ -6354,9 +6197,6 @@ impl UiNotification {
             Self::FileAttached(event) => {
                 event.topic.as_deref().or_else(|| event.session_id.topic())
             }
-            Self::VoiceAudioChunk(event) => {
-                event.topic.as_deref().or_else(|| event.session_id.topic())
-            }
             Self::SessionEventBridged(event) => {
                 event.topic.as_deref().or_else(|| event.session_id.topic())
             }
@@ -6374,10 +6214,6 @@ impl UiNotification {
             Self::TurnStarted(event) => set_topic_if_absent(&mut event.topic, &topic),
             Self::MessageDelta(event) => set_topic_if_absent(&mut event.topic, &topic),
             Self::ReasoningDelta(event) => set_topic_if_absent(&mut event.topic, &topic),
-            Self::VisualGenerating(event) => set_topic_if_absent(&mut event.topic, &topic),
-            Self::VisualSucceeded(event) => set_topic_if_absent(&mut event.topic, &topic),
-            Self::VisualFailed(event) => set_topic_if_absent(&mut event.topic, &topic),
-            Self::VoiceExit(event) => set_topic_if_absent(&mut event.topic, &topic),
             Self::ToolStarted(event) => set_topic_if_absent(&mut event.topic, &topic),
             Self::ToolProgress(event) => set_topic_if_absent(&mut event.topic, &topic),
             Self::ToolCompleted(event) => set_topic_if_absent(&mut event.topic, &topic),
@@ -6394,7 +6230,6 @@ impl UiNotification {
             Self::TurnSteerDropped(event) => set_topic_if_absent(&mut event.topic, &topic),
             Self::TurnSpawnComplete(event) => set_topic_if_absent(&mut event.topic, &topic),
             Self::FileAttached(event) => set_topic_if_absent(&mut event.topic, &topic),
-            Self::VoiceAudioChunk(event) => set_topic_if_absent(&mut event.topic, &topic),
             Self::SessionEventBridged(event) => set_topic_if_absent(&mut event.topic, &topic),
             Self::Envelope(event) => set_topic_if_absent(&mut event.topic, &topic),
             Self::EnvelopeV2(event) => set_topic_if_absent(&mut event.topic, &topic),
@@ -6410,10 +6245,6 @@ impl UiNotification {
             Self::TurnStarted(params) => serde_json::to_value(params),
             Self::MessageDelta(params) => serde_json::to_value(params),
             Self::ReasoningDelta(params) => serde_json::to_value(params),
-            Self::VisualGenerating(params) => serde_json::to_value(params),
-            Self::VisualSucceeded(params) => serde_json::to_value(params),
-            Self::VisualFailed(params) => serde_json::to_value(params),
-            Self::VoiceExit(params) => serde_json::to_value(params),
             Self::SkillActionJobUpdated(params) => serde_json::to_value(params),
             Self::ToolStarted(params) => serde_json::to_value(params),
             Self::ToolProgress(params) => serde_json::to_value(params),
@@ -6434,7 +6265,6 @@ impl UiNotification {
             Self::ReplayLossy(params) => serde_json::to_value(params),
             Self::TurnSpawnComplete(params) => serde_json::to_value(params),
             Self::FileAttached(params) => serde_json::to_value(params),
-            Self::VoiceAudioChunk(params) => serde_json::to_value(params),
             Self::SessionEventBridged(params) => serde_json::to_value(params),
             Self::RouterStatus(params) => serde_json::to_value(params),
             Self::RouterFailover(params) => serde_json::to_value(params),
@@ -6535,12 +6365,6 @@ impl UiNotification {
             methods::MESSAGE_REASONING_DELTA => {
                 Ok(Self::ReasoningDelta(decode_params(method, params)?))
             }
-            methods::VISUAL_GENERATING => {
-                Ok(Self::VisualGenerating(decode_params(method, params)?))
-            }
-            methods::VISUAL_SUCCEEDED => Ok(Self::VisualSucceeded(decode_params(method, params)?)),
-            methods::VISUAL_FAILED => Ok(Self::VisualFailed(decode_params(method, params)?)),
-            methods::VOICE_EXIT => Ok(Self::VoiceExit(decode_params(method, params)?)),
             methods::SKILL_ACTION_JOB_UPDATED => {
                 Ok(Self::SkillActionJobUpdated(decode_params(method, params)?))
             }
@@ -6575,7 +6399,6 @@ impl UiNotification {
                 Ok(Self::TurnSpawnComplete(decode_params(method, params)?))
             }
             methods::FILE_ATTACHED => Ok(Self::FileAttached(decode_params(method, params)?)),
-            methods::VOICE_AUDIO_CHUNK => Ok(Self::VoiceAudioChunk(decode_params(method, params)?)),
             methods::SESSION_EVENT => Ok(Self::SessionEventBridged(decode_params(method, params)?)),
             methods::ROUTER_STATUS => Ok(Self::RouterStatus(decode_params(method, params)?)),
             methods::ROUTER_FAILOVER => Ok(Self::RouterFailover(decode_params(method, params)?)),

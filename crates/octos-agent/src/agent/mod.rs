@@ -20,7 +20,6 @@ mod prompt_cache;
 pub mod prompt_segments;
 pub mod rich_output;
 mod streaming;
-pub mod turn_failure;
 mod turn_state;
 pub mod verifier;
 
@@ -533,13 +532,6 @@ pub struct Agent {
     /// by default so legacy agent loops do not spend verifier calls or write
     /// verifier sidecars unless a caller opts in explicitly.
     pub(super) verifier_config: Option<AgentVerifierConfig>,
-    /// Voice-turn failure projection sink (Task 8). When the agent loop runs
-    /// under [`octos_llm::LlmCallPolicy::FailFast`] and a FOREGROUND LLM call
-    /// fails terminally, the loop emits a single [`crate::TurnFailure`] here so
-    /// the voice closeout (octos-cli) can render a spoken error/empty message.
-    /// `None` keeps pre-Task-8 behaviour byte-for-byte — the original
-    /// `eyre::Report` still flows out of the loop unchanged.
-    pub(super) voice_failure_sink: Option<tokio::sync::mpsc::UnboundedSender<crate::TurnFailure>>,
     /// Git-backed workspace snapshot store (#1768, opt-in). When present,
     /// `execute_tools` records a snapshot of the workspace before any
     /// batch containing a mutating tool so the user can restore
@@ -615,7 +607,6 @@ impl Agent {
             build_cache_slot: None,
             build_cache_usage: None,
             verifier_config: None,
-            voice_failure_sink: None,
             snapshot_manager: None,
             steer_buffer: None,
             steer_drained_callback: None,
@@ -673,7 +664,6 @@ impl Agent {
             build_cache_slot: None,
             build_cache_usage: None,
             verifier_config: None,
-            voice_failure_sink: None,
             snapshot_manager: None,
             steer_buffer: None,
             steer_drained_callback: None,
@@ -785,19 +775,6 @@ impl Agent {
     /// Cancellation handle for embedders using the canonical session agent.
     pub fn shutdown_signal(&self) -> Arc<AtomicBool> {
         self.shutdown.clone()
-    }
-
-    /// Attach the voice-turn failure projection sink (Task 8). When set and the
-    /// loop runs under [`octos_llm::LlmCallPolicy::FailFast`], a single
-    /// [`crate::TurnFailure`] is emitted on terminal foreground-LLM failure
-    /// (empty response or classified LLM error). Hook-deny LLM failures are
-    /// intentionally excluded so the existing permission behaviour is
-    /// preserved.
-    pub fn set_voice_failure_sink(
-        &mut self,
-        tx: tokio::sync::mpsc::UnboundedSender<crate::TurnFailure>,
-    ) {
-        self.voice_failure_sink = Some(tx);
     }
 
     /// Attach the per-turn pending-input buffer for mid-turn prompt

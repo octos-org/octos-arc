@@ -402,13 +402,6 @@ pub struct ProfileRuntime {
     /// change because the [`octos_llm::AdaptiveRouter`] silently falls
     /// through when zero candidates match.
     pub lane_routing: Option<octos_llm::LaneRoutingConfig>,
-
-    /// The profile's resolved voice (ASR/TTS) configuration, captured at
-    /// bootstrap from `config.voice` (defaults applied when the profile has no
-    /// `voice` block). The serve voice-turn path reads this for the STT
-    /// language hint and the TTS voice / route (`tts_provider`) so those are
-    /// configurable per profile instead of hardcoded.
-    pub voice: crate::config::VoiceConfig,
 }
 
 /// Which OS process is calling [`ProfileRuntime::bootstrap`].
@@ -659,7 +652,6 @@ impl ProfileRuntime {
             runtime_lifecycle: self.runtime_lifecycle.clone(),
             hook_executor,
             lane_routing: self.lane_routing.clone(),
-            voice: self.voice.clone(),
         }))
     }
 
@@ -705,8 +697,7 @@ impl ProfileRuntime {
         octos_home: Option<&Path>,
         role: BootstrapRole,
     ) -> Result<Arc<Self>> {
-        Self::bootstrap_with_host_plugins(profile, data_dir, octos_home, role, None, None, None)
-            .await
+        Self::bootstrap_with_host_plugins(profile, data_dir, octos_home, role, None, None).await
     }
 
     /// Section B (codex review round-3): bootstrap a profile runtime while
@@ -722,7 +713,6 @@ impl ProfileRuntime {
         octos_home: Option<&Path>,
         role: BootstrapRole,
         host_plugins: Option<&crate::config::PluginsConfig>,
-        host_voice: Option<&crate::config::VoiceConfig>,
         host_memory: Option<&crate::config::MemoryConfig>,
     ) -> Result<Arc<Self>> {
         // Step 1: derive the per-profile Config. Apply the host plugin
@@ -735,15 +725,12 @@ impl ProfileRuntime {
             }
         }
         // Host memory settings apply field-by-field when the profile doesn't
-        // override them (same host-default pattern as plugins/voice). A
+        // override them (same host-default pattern as plugins). A
         // profile serialized with an empty `memory: {}` block must still
         // inherit the host budget.
         crate::config::merge_host_memory_into_profile(&mut config.memory, host_memory);
 
-        Self::bootstrap_resolved(
-            profile, data_dir, octos_home, role, config, host_voice, false, None,
-        )
-        .await
+        Self::bootstrap_resolved(profile, data_dir, octos_home, role, config, false, None).await
     }
 
     /// Local OUP adapters use the same assembler with their already-resolved
@@ -757,7 +744,6 @@ impl ProfileRuntime {
         octos_home: Option<&Path>,
         role: BootstrapRole,
         config: Config,
-        host_voice: Option<&crate::config::VoiceConfig>,
         no_retry: bool,
         provider_override: Option<Arc<dyn LlmProvider>>,
     ) -> Result<Arc<Self>> {
@@ -1246,23 +1232,6 @@ impl ProfileRuntime {
             runtime_lifecycle,
             hook_executor,
             lane_routing: profile.config.lane_routing.clone(),
-            // Voice (ASR/TTS) route/ASR settings are a serve-level platform
-            // setting living on the top-level config.json, not on per-profile
-            // JSON. `config_from_profile` drops it, so the caller (serve/gateway)
-            // passes the host's `config.voice` here; fall back to defaults when
-            // absent. Per-tenant settings (*timbre*, TTS route, cloud config) are
-            // overlaid: `voice_default` (reply voice via `PUT /api/my/voice`),
-            // `tts_provider` (route: auto/local/cloud), and `tts_cloud` (cloud
-            // credentials).
-            voice: config
-                .voice
-                .clone()
-                .or_else(|| host_voice.cloned())
-                .unwrap_or_default()
-                .with_default_voice_override(profile.config.voice_default.as_deref())
-                .with_tts_provider_override(profile.config.tts_provider.as_deref())
-                .with_cloud_override(profile.config.tts_cloud.as_ref())
-                .with_cloud_token_from_env(&profile.config.env_vars),
         }))
     }
 }
@@ -1926,7 +1895,6 @@ mod tests {
             BootstrapRole::Serve,
             Some(&host_plugins),
             None,
-            None,
         )
         .await
         .expect("bootstrap should succeed (the rejection only suppresses the plugin)");
@@ -2094,7 +2062,6 @@ mod tests {
             Some(&octos_home),
             BootstrapRole::Serve,
             Some(&strict),
-            None,
             None,
         )
         .await

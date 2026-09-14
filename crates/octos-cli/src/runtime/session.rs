@@ -1335,7 +1335,6 @@ tools = ["read_file"]
             runtime_lifecycle: None,
             hook_executor: None,
             lane_routing: None,
-            voice: crate::config::VoiceConfig::default(),
         })
     }
 
@@ -2121,7 +2120,6 @@ tools = ["read_file"]
             runtime_lifecycle: None,
             hook_executor: Some(executor),
             lane_routing: None,
-            voice: crate::config::VoiceConfig::default(),
         })
     }
 

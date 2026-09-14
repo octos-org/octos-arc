@@ -220,7 +220,6 @@ async fn make_m11g_profile(profile_id: &str, data_dir: &std::path::Path) -> Arc<
             pre_memory: "test-system-prompt".to_string(),
             post_memory: String::new(),
         },
-        voice: octos_cli::config::VoiceConfig::default(),
         memory,
         memory_store,
         embedder: None,

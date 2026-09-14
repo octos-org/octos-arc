@@ -4,7 +4,6 @@
 pub mod cron_service;
 pub mod cron_types;
 pub mod file_handle;
-pub mod media;
 pub mod resume_policy;
 pub mod session;
 

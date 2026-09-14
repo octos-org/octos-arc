@@ -494,8 +494,9 @@ fn scoped_child_session_scope(
         .transpose()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BackgroundResultKind {
+    #[default]
     Notification,
     Report,
 }
@@ -574,6 +575,23 @@ pub struct BackgroundResultPayload {
     /// terminal state to a specific background task. `None` for legacy
     /// callers and tests that do not track the terminal status.
     pub terminal_status: Option<crate::task_supervisor::TaskStatus>,
+}
+
+impl Default for BackgroundResultPayload {
+    fn default() -> Self {
+        Self {
+            task_label: String::new(),
+            content: String::new(),
+            kind: BackgroundResultKind::default(),
+            media: Vec::new(),
+            envelope_media: Vec::new(),
+            originating_thread_id: None,
+            task_id: None,
+            tool_call_id: None,
+            originating_client_message_id: None,
+            terminal_status: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

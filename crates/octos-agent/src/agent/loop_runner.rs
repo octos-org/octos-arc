@@ -551,10 +551,9 @@ impl Agent {
     ///      behaviour is preserved byte-for-byte.
     ///   2. Otherwise runs [`Self::classify_loop_error`] EXACTLY ONCE (records
     ///      the metric + harness event; honours the "all escaping Reports go
-    ///      through the classifier" invariant), emits a single
-    ///      [`crate::TurnFailure::LlmError`] on the voice failure sink (if one
-    ///      is attached), and returns `true` so the caller bails with the
-    ///      ORIGINAL `report` (NOT through `handle_loop_error_with_dispatch`).
+    ///      through the classifier" invariant) and returns `true` so the caller
+    ///      bails with the ORIGINAL `report` (NOT through
+    ///      `handle_loop_error_with_dispatch`).
     ///
     /// Returns `false` under Normal policy so non-FailFast behaviour — and the
     /// entire `handle_loop_error_with_dispatch` path — is unchanged.
@@ -568,15 +567,9 @@ impl Agent {
             return false;
         }
         // Classify exactly once (keeps metric + harness-event side effects and
-        // the #488 invariant). The classified error is carried by the voice
-        // projection; the original `report` still bubbles out to the caller.
-        let classified = self.classify_loop_error(report, None);
-        if let Some(sink) = &self.voice_failure_sink {
-            let _ = sink.send(crate::TurnFailure::LlmError {
-                error: classified,
-                raw_detail: report.to_string(),
-            });
-        }
+        // the #488 invariant). The original `report` still bubbles out to the
+        // caller.
+        let _classified = self.classify_loop_error(report, None);
         true
     }
 
@@ -1462,16 +1455,12 @@ impl Agent {
                     {
                         Ok(r) => r,
                         Err(e) if e.to_string().contains("empty response after") => {
-                            // Task 8: under FailFast an empty response is
-                            // TERMINAL — do NOT make the adaptive 2nd call.
-                            // Emit the voice EmptyResponse projection once and
-                            // bail with the original error.
+                            // Under FailFast an empty response is TERMINAL —
+                            // do NOT make the adaptive 2nd call; bail with the
+                            // original error.
                             if octos_llm::current_llm_call_policy()
                                 == octos_llm::LlmCallPolicy::FailFast
                             {
-                                if let Some(sink) = &self.voice_failure_sink {
-                                    let _ = sink.send(crate::TurnFailure::EmptyResponse);
-                                }
                                 return Err(attach_partial_usage(e, turn.total_usage().clone()));
                             }
                             // Empty response after retries -- try once more (adaptive router

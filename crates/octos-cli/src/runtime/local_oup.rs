@@ -86,7 +86,6 @@ async fn bootstrap_with_profile_root(
             BootstrapRole::Serve
         },
         options.config,
-        None,
         options.no_retry,
         options.provider,
     )

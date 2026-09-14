@@ -1607,13 +1607,7 @@ impl UiProtocolLedger {
     /// with a pre-completion cursor still observes the full envelope
     /// history.
     ///
-    /// Topic defaults to `session_id.topic()`. Callers that have stripped
-    /// the topic suffix from `session_id` (see the P0-A wire-gap fix in
-    /// `emit_files_attached_from_background`) MUST use
-    /// [`emit_envelope_with_topic`] to thread the captured topic
-    /// explicitly. This single-arg helper preserves the call sites that
-    /// emit on an unmodified `SessionKey` and do not have a separate
-    /// topic source.
+    /// Topic defaults to `session_id.topic()`.
     pub(crate) fn emit_envelope(
         &self,
         session_id: &SessionKey,
@@ -1622,32 +1616,6 @@ impl UiProtocolLedger {
         client_message_id: Option<String>,
     ) -> Option<LedgeredUiProtocolEvent> {
         let topic = session_id.topic().map(ToOwned::to_owned);
-        self.emit_envelope_inner(session_id, thread_id, payload, client_message_id, topic)
-    }
-
-    /// Codex BLOCKER #1336-round-2 (BLOCKER 5): variant of
-    /// [`emit_envelope`] that accepts an explicit topic. Required by
-    /// callers that strip the `#<topic>` suffix from `session_id` before
-    /// publishing — without this hook the envelope would derive topic
-    /// from `session_id.topic()` (which is now `None`) and silently lose
-    /// routing.
-    ///
-    /// The caller-provided `topic` is the SOURCE OF TRUTH: an
-    /// `Some("…")` always wins over `session_id.topic()`, and `None`
-    /// means "no topic" (the call site has already decided the envelope
-    /// does not belong to any topic scope).
-    pub(crate) fn emit_envelope_with_topic(
-        &self,
-        session_id: &SessionKey,
-        thread_id: String,
-        payload: Payload,
-        client_message_id: Option<String>,
-        topic: Option<&str>,
-    ) -> Option<LedgeredUiProtocolEvent> {
-        let topic = topic
-            .map(str::trim)
-            .filter(|t| !t.is_empty())
-            .map(ToOwned::to_owned);
         self.emit_envelope_inner(session_id, thread_id, payload, client_message_id, topic)
     }
 
@@ -3722,10 +3690,6 @@ fn notification_session_id(notification: &UiNotification) -> &SessionKey {
         UiNotification::PlanUpdated(event) => &event.session_id,
         UiNotification::MessageDelta(event) => &event.session_id,
         UiNotification::ReasoningDelta(event) => &event.session_id,
-        UiNotification::VisualGenerating(event) => &event.session_id,
-        UiNotification::VisualSucceeded(event) => &event.session_id,
-        UiNotification::VisualFailed(event) => &event.session_id,
-        UiNotification::VoiceExit(event) => &event.session_id,
         UiNotification::SkillActionJobUpdated(event) => &event.session_id,
         UiNotification::ToolStarted(event) => &event.session_id,
         UiNotification::ToolProgress(event) => &event.session_id,
@@ -3744,7 +3708,6 @@ fn notification_session_id(notification: &UiNotification) -> &SessionKey {
         UiNotification::ReplayLossy(event) => &event.session_id,
         UiNotification::TurnSpawnComplete(event) => &event.session_id,
         UiNotification::FileAttached(event) => &event.session_id,
-        UiNotification::VoiceAudioChunk(event) => &event.session_id,
         UiNotification::SessionEventBridged(event) => &event.session_id,
         UiNotification::RouterStatus(event) => &event.session_id,
         UiNotification::RouterFailover(event) => &event.session_id,
