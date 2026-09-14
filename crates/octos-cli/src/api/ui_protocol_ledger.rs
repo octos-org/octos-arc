@@ -1100,10 +1100,6 @@ impl UiProtocolLedger {
         > = std::collections::HashMap::new();
         let mut terminal_turns: std::collections::HashSet<String> =
             std::collections::HashSet::new();
-        let mut agents: std::collections::HashMap<
-            String,
-            octos_core::ui_protocol::AgentUpdatedEvent,
-        > = std::collections::HashMap::new();
         for event in &events {
             let UiProtocolLedgerEvent::Notification(notification) = &event.event else {
                 continue;
@@ -1132,9 +1128,6 @@ impl UiProtocolLedger {
                 }
                 UiNotification::TurnError(turn) => {
                     terminal_turns.insert(turn.turn_id.0.to_string());
-                }
-                UiNotification::AgentUpdated(agent) => {
-                    agents.insert(agent.agent.agent_id.clone(), agent.clone());
                 }
                 _ => {}
             }
@@ -1174,22 +1167,6 @@ impl UiProtocolLedger {
                     token_usage: None,
                     partial_result: None,
                 })),
-                None,
-            );
-            swept += 1;
-        }
-        for (_, mut agent) in agents {
-            if matches!(
-                agent.agent.status.as_str(),
-                "completed" | "failed" | "cancelled" | "closed" | "interrupted"
-            ) {
-                continue;
-            }
-            agent.agent.status = "failed".to_owned();
-            agent.agent.summary = Some("orphaned by server restart".to_owned());
-            self.append_with_storage_id(
-                session_id.clone(),
-                UiProtocolLedgerEvent::Notification(UiNotification::AgentUpdated(agent)),
                 None,
             );
             swept += 1;
@@ -3044,14 +3021,6 @@ impl UiProtocolLedger {
         evicted
     }
 
-    /// Test helper: count broadcast senders currently held in the
-    /// subscribers map. Used to assert pruning behaviour.
-    #[cfg(test)]
-    pub(crate) fn subscriber_count(&self) -> usize {
-        let inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        inner.subscribers.len()
-    }
-
     #[cfg(test)]
     pub(crate) fn has_session_in_memory_for_test(&self, session_id: &SessionKey) -> bool {
         let session_id = self.storage_session_id(session_id);
@@ -3707,16 +3676,6 @@ fn notification_session_id(notification: &UiNotification) -> &SessionKey {
         UiNotification::ReplayLossy(event) => &event.session_id,
         UiNotification::TurnSpawnComplete(event) => &event.session_id,
         UiNotification::FileAttached(event) => &event.session_id,
-        UiNotification::QueueState(event) => &event.session_id,
-        UiNotification::AgentUpdated(event) => &event.session_id,
-        UiNotification::AgentOutputDelta(event) => &event.session_id,
-        UiNotification::AgentArtifactUpdated(event) => &event.session_id,
-        UiNotification::LoopUpdated(event) => &event.session_id,
-        UiNotification::LoopFired(event) => &event.session_id,
-        UiNotification::LoopCompleted(event) => &event.session_id,
-        UiNotification::MonitorUpdated(event) => &event.session_id,
-        UiNotification::MonitorFired(event) => &event.session_id,
-        UiNotification::MonitorExpired(event) => &event.session_id,
         UiNotification::ContextCompactionCompleted(event) => &event.session_id,
         UiNotification::ContextCompactionStarted(event) => &event.session_id,
         UiNotification::ContextNormalizationReported(event) => &event.session_id,
@@ -4731,111 +4690,6 @@ mod tests {
         assert_eq!(replay_texts(&events), vec!["msg-4", "msg-5", "msg-6"]);
     }
 
-    /// Boot recovery must synthesize terminal events for task/turn/agent
-    /// rows the dead server generation left non-terminal — otherwise every
-    /// hydrate replays phantom running work forever.
-    #[test]
-    fn recovery_sweeps_rows_orphaned_by_restart() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let session_id = SessionKey("local:orphan-sweep".into());
-        let turn_id = octos_core::TurnId::new();
-        let ghost_task = octos_core::TaskId::new();
-        {
-            let config = LedgerConfig::durable(temp.path().into());
-            let ledger = UiProtocolLedger::with_config(config);
-            let task: octos_core::ui_protocol::TaskUpdatedEvent = serde_json::from_value(json!({
-                "session_id": session_id.0.clone(),
-                "task_id": ghost_task.to_string(),
-                "title": "astro dev server",
-                "state": "running",
-            }))
-            .expect("task event");
-            ledger.append_notification(UiNotification::TaskUpdated(task));
-            let started: octos_core::ui_protocol::TurnStartedEvent =
-                serde_json::from_value(json!({
-                    "session_id": session_id.0,
-                    "turn_id": turn_id.0,
-                    "timestamp": chrono::Utc::now(),
-                }))
-                .expect("turn started");
-            ledger.append_notification(UiNotification::TurnStarted(started));
-            let agent: octos_core::ui_protocol::AgentUpdatedEvent = serde_json::from_value(json!({
-                "session_id": session_id.0,
-                "agent": {
-                    "agent_id": "agent-ghost",
-                    "session_id": session_id.0,
-                    "path": "root/agent-ghost",
-                    "role": "worker",
-                    "nickname": "ghost",
-                    "backend_kind": "native",
-                    "status": "running",
-                    "profile_id": "dev",
-                    "created_at_ms": 1,
-                    "updated_at_ms": 1,
-                }
-            }))
-            .expect("agent event");
-            ledger.append_notification(UiNotification::AgentUpdated(agent));
-        } // process "dies" — no terminal events were emitted
-
-        let recovered = UiProtocolLedger::recover(LedgerConfig::durable(temp.path().into()));
-        let (events, _) = recovered
-            .ledger
-            .snapshot_with_cursor(&session_id, None)
-            .expect("snapshot");
-
-        let mut task_terminal = false;
-        let mut turn_terminal = false;
-        let mut agent_terminal = false;
-        for event in &events {
-            let UiProtocolLedgerEvent::Notification(notification) = &event.event else {
-                continue;
-            };
-            match notification {
-                UiNotification::TaskUpdated(task)
-                    if task.state == octos_core::ui_protocol::TaskRuntimeState::Cancelled
-                        && task.runtime_detail.as_deref() == Some("orphaned_by_restart") =>
-                {
-                    task_terminal = true;
-                }
-                UiNotification::TurnError(error)
-                    if error.turn_id == turn_id && error.code == "orphaned_by_restart" =>
-                {
-                    turn_terminal = true;
-                }
-                UiNotification::AgentUpdated(agent)
-                    if agent.agent.agent_id == "agent-ghost" && agent.agent.status == "failed" =>
-                {
-                    agent_terminal = true;
-                }
-                _ => {}
-            }
-        }
-        assert!(
-            task_terminal,
-            "orphaned running task must be swept terminal"
-        );
-        assert!(turn_terminal, "orphaned started turn must error terminal");
-        assert!(
-            agent_terminal,
-            "orphaned running agent must be swept terminal"
-        );
-
-        // Idempotence: a second recovery must not append more sweep events.
-        let count_after_first = events.len();
-        drop(recovered);
-        let recovered_again = UiProtocolLedger::recover(LedgerConfig::durable(temp.path().into()));
-        let (events_again, _) = recovered_again
-            .ledger
-            .snapshot_with_cursor(&session_id, None)
-            .expect("snapshot again");
-        assert_eq!(
-            events_again.len(),
-            count_after_first,
-            "second recovery must sweep nothing (rows already terminal)"
-        );
-    }
-
     /// #1666 per-project isolation: two projects (`appui.sessions_in_cwd`)
     /// can share the same WIRE session id. Registering distinct storage
     /// scopes must give them distinct in-memory rings AND on-disk dirs —
@@ -5376,92 +5230,6 @@ mod tests {
             .join(SESSION_SNAPSHOT_FILE_NAME)
     }
 
-    /// #8d — ring already trimmed (oldest > 1) + cold-start hydrate(None):
-    /// the snapshot shortcut MUST apply (no full replay) because
-    /// hydrate(None) is answered by the retained ring alone. And a corrupt
-    /// snapshot whose oldest entry is seq 0 MUST still degrade to a full
-    /// replay.
-    #[test]
-    fn snapshot_shortcut_applies_to_trimmed_ring_from_beginning() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let session_id = SessionKey("local:8d-trimmed".into());
-        let session_dir = temp
-            .path()
-            .join("ui-protocol")
-            .join(encode_session_dir_name(&session_id));
-        // ring=2, snapshot_every=2 → snapshot at seq 4 covers seq 3..4
-        // (trimmed past seq 1: oldest=3 > 1).
-        let mut config = snapshot_config(temp.path(), 2);
-        config.retained_per_session = 2;
-        {
-            let ledger = UiProtocolLedger::with_config(config.clone());
-            for i in 1..=5 {
-                ledger.append_notification(delta(&session_id, &format!("ev-{i}")));
-            }
-        }
-        let raw: Value = serde_json::from_slice(
-            &fs::read(snapshot_file_path(temp.path(), &session_id)).expect("snapshot"),
-        )
-        .expect("json");
-        assert_eq!(raw["head_seq"], 4);
-        let oldest_in_snap = raw["entries"][0]["seq"].as_u64().expect("oldest");
-        assert!(oldest_in_snap > 1, "ring must be trimmed (oldest > 1)");
-
-        // Cold-start hydrate(None): read_session_disk_snapshot with
-        // replay_after_seq=None — the shortcut must apply: the snapshot
-        // seeds the ring and the log scan skips everything ≤ snapshot
-        // head (4), replaying only the tail (seq 5). head_seq reflects
-        // snapshot+tail (5), retained ring = snapshot(3,4)+tail(5) capped
-        // to 2 → (4,5). This is the O(snapshot+tail) path, NOT a full
-        // O(all-events) replay — verified by the retained ring coming
-        // from the snapshot seed, not the full log.
-        let ledger = UiProtocolLedger::with_config(config.clone());
-        let snap = ledger
-            .read_session_disk_snapshot(&session_id, &session_dir, None, false)
-            .expect("read ok")
-            .expect("snapshot");
-        assert_eq!(snap.head_seq, 5, "snapshot head 4 + log tail 5");
-        let ring_seqs: Vec<u64> = snap.retained_entries.iter().map(|e| e.seq).collect();
-        assert_eq!(
-            ring_seqs,
-            vec![4, 5],
-            "retained ring = snapshot seed (3,4) + tail (5), capped to 2"
-        );
-
-        // seq-0 (from-beginning via the replay path) also shortcuts.
-        let ledger2 = UiProtocolLedger::with_config(config.clone());
-        let snap0 = ledger2
-            .read_session_disk_snapshot(&session_id, &session_dir, Some(0), true)
-            .expect("read ok")
-            .expect("snapshot");
-        assert_eq!(snap0.head_seq, 5, "seq-0 from-beginning also shortcuts");
-
-        // Corrupt: a snapshot whose oldest entry is seq 0 MUST degrade to
-        // a full replay (log head 5).
-        let bad = json!({
-            "version": SESSION_SNAPSHOT_VERSION,
-            "head_seq": 4,
-            "entries": [
-                {"v": 1, "seq": 0, "event": raw["entries"][0]["event"]},
-                {"v": 1, "seq": 4, "event": raw["entries"][1]["event"]},
-            ],
-        });
-        fs::write(
-            snapshot_file_path(temp.path(), &session_id),
-            serde_json::to_vec(&bad).unwrap(),
-        )
-        .expect("write corrupt snapshot");
-        let ledger3 = UiProtocolLedger::with_config(config);
-        let snap_bad = ledger3
-            .read_session_disk_snapshot(&session_id, &session_dir, None, false)
-            .expect("read ok")
-            .expect("snapshot");
-        assert_eq!(
-            snap_bad.head_seq, 5,
-            "corrupt seq-0 snapshot must degrade to full replay"
-        );
-    }
-
     /// 8d-r1 ①/② — session/open {after:{seq:0}} on a TRIMMED snapshot
     /// (oldest>1) with JSONL still holding seq 1: the snapshot shortcut
     /// must NOT apply (session/open has no from_beginning exemption) →
@@ -5585,56 +5353,6 @@ mod tests {
         assert_eq!(snap.head_seq, 5);
     }
 
-    /// Scenario 1 (equivalence): snapshot+tail recovery must produce a
-    /// projection field-for-field identical to a full replay of the same
-    /// ledger — and the snapshot file must exist with the right head.
-    #[test]
-    fn snapshot_plus_tail_equivalent_to_full_replay() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let session_id = SessionKey("local:snap-equiv".into());
-        {
-            let ledger = UiProtocolLedger::with_config(snapshot_config(temp.path(), 4));
-            for i in 1..=11 {
-                ledger.append_notification(delta(&session_id, &format!("ev-{i}")));
-            }
-        }
-        let snap_path = snapshot_file_path(temp.path(), &session_id);
-        assert!(snap_path.exists(), "snapshot must be written at seq 4 & 8");
-        let raw: Value =
-            serde_json::from_slice(&fs::read(&snap_path).expect("read snapshot")).unwrap();
-        assert_eq!(raw["version"], SESSION_SNAPSHOT_VERSION as u64);
-        assert_eq!(raw["head_seq"], 8, "latest snapshot head after 11 events");
-
-        // Snapshot+tail path (lazy recover then hydrate).
-        let outcome = UiProtocolLedger::recover(snapshot_config(temp.path(), 4));
-        let (snap_events, snap_head) = outcome
-            .ledger
-            .snapshot_with_cursor(&session_id, None)
-            .expect("snapshot+tail hydrate");
-        // Full-replay reference: snapshotting disabled.
-        let mut full_config = snapshot_config(temp.path(), 4);
-        full_config.snapshot_every_events = 0;
-        let reference = UiProtocolLedger::recover(full_config);
-        let (full_events, full_head) = reference
-            .ledger
-            .snapshot_with_cursor(&session_id, None)
-            .expect("full replay hydrate");
-
-        assert_eq!(snap_head, full_head);
-        let snap_dbg: Vec<String> = snap_events.iter().map(|e| format!("{e:?}")).collect();
-        let full_dbg: Vec<String> = full_events.iter().map(|e| format!("{e:?}")).collect();
-        assert_eq!(
-            snap_dbg, full_dbg,
-            "snapshot+tail projection must equal full-replay projection"
-        );
-        assert_eq!(replay_texts(&snap_events).len(), 11);
-        // Next append continues the seq space correctly.
-        let next = outcome
-            .ledger
-            .append_notification(delta(&session_id, "ev-12"));
-        assert_eq!(next.cursor.seq, 12);
-    }
-
     /// Scenario 2 (fault tolerance): a corrupt snapshot must NOT lose data
     /// — recovery logs a warning and falls back to a full replay.
     #[test]
@@ -5717,61 +5435,6 @@ mod tests {
         assert!(
             snapshot_file_path(temp.path(), &session_id).exists(),
             "snapshot appears at the next cadence boundary (seq 8/12)"
-        );
-    }
-
-    /// Outer-review 1b fix: an existing (pre-1b) ledger with NO snapshot
-    /// must earn a bootstrap snapshot on its first touch (the full-replay
-    /// path), so the SECOND recovery runs snapshot+tail — the operator's
-    /// 45MB main session never waits for the append cadence.
-    #[test]
-    fn existing_ledger_bootstraps_snapshot_on_first_touch() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let session_id = SessionKey("local:snap-bootstrap".into());
-        {
-            let mut config = snapshot_config(temp.path(), 4096);
-            config.snapshot_every_events = 0; // pre-1b writer: no snapshots
-            let ledger = UiProtocolLedger::with_config(config);
-            for i in 1..=10 {
-                ledger.append_notification(delta(&session_id, &format!("old-{i}")));
-            }
-        }
-        let snap_path = snapshot_file_path(temp.path(), &session_id);
-        assert!(!snap_path.exists(), "pre-1b ledger has no snapshot");
-
-        // First touch under the 1b writer: full replay happens AND the
-        // bootstrap snapshot is written immediately.
-        let outcome = UiProtocolLedger::recover(snapshot_config(temp.path(), 4096));
-        let (events, head) = outcome
-            .ledger
-            .snapshot_with_cursor(&session_id, None)
-            .expect("first touch hydrates");
-        assert_eq!(head.seq, 10);
-        assert_eq!(replay_texts(&events).len(), 10);
-        assert!(
-            snap_path.exists(),
-            "full replay must bootstrap-write snapshot.json on first touch"
-        );
-        let raw: Value =
-            serde_json::from_slice(&fs::read(&snap_path).expect("read snapshot")).unwrap();
-        assert_eq!(raw["version"], SESSION_SNAPSHOT_VERSION as u64);
-        assert_eq!(raw["head_seq"], 10);
-
-        // Second recovery: projection still equivalent (snapshot+tail
-        // path — the bootstrap snapshot is used, logs only contribute
-        // the empty tail).
-        drop(outcome);
-        let outcome2 = UiProtocolLedger::recover(snapshot_config(temp.path(), 4096));
-        let (events2, head2) = outcome2
-            .ledger
-            .snapshot_with_cursor(&session_id, None)
-            .expect("second recovery hydrates from snapshot+tail");
-        assert_eq!(head2.seq, 10);
-        let dbg1: Vec<String> = events.iter().map(|e| format!("{e:?}")).collect();
-        let dbg2: Vec<String> = events2.iter().map(|e| format!("{e:?}")).collect();
-        assert_eq!(
-            dbg1, dbg2,
-            "snapshot+tail projection must match full replay"
         );
     }
 

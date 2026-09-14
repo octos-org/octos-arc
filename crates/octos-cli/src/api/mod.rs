@@ -1,19 +1,13 @@
-//! REST + WebSocket API surface for octos.
+//! UI Protocol transport support surface for octos (stdio + embedded).
 //!
-//! Feature-gated behind `api`. Start with `octos serve [--port 50080]`.
-//!
-//! M9-α-5/α-6 (ADR PR #830 / audit issue #845): the chat SSE transport
-//! has been deleted — every chat client now talks to `/api/ui-protocol/ws`
-//! exclusively. The harness/admin and swarm event surfaces still use a
-//! process-wide [`EventBroadcaster`] over SSE (admin-only).
+//! Feature-gated behind `api`. The REST router, metrics and WebSocket
+//! ingress were removed in slim5-batch4 — `octos serve` now speaks the
+//! UI Protocol over stdio only.
 
 pub(crate) mod coding_tool_contract;
 mod events;
 mod handlers;
-pub mod metrics;
 pub mod profile_scope;
-mod router;
-pub(crate) mod session_ingress;
 mod ui_protocol_alpha2_bridge;
 mod ui_protocol_alpha9_bridge;
 // Relocated to crate::contracts (Phase 3 of goal-in-chat) so `octos chat
@@ -31,43 +25,7 @@ pub(crate) mod ui_protocol_progress;
 mod ui_protocol_reasoning_effort;
 pub(crate) use crate::contracts::sanitize as ui_protocol_sanitize;
 pub(crate) use crate::contracts::scope as ui_protocol_scope;
-mod ui_protocol_task_output;
 pub mod ws_slash;
-
-pub use metrics::init_metrics;
-pub(crate) use router::resolve_appui_allowed_origins;
-pub use router::{build_router, default_cors_allowlist};
-
-/// Test-only re-exports for the build_output_dir validation suite.
-/// Not part of the public API — used by
-/// `crates/octos-cli/tests/build_output_dir_validation.rs` to assert
-/// the handler-layer HTTP status mapping without spinning up the
-/// full Axum router. Codex round-2 follow-up to issue #996.
-#[doc(hidden)]
-// #995 follow-up round 3 — Integration tests in
-// `crates/octos-cli/tests/x_profile_id_strip.rs` need to drive
-// `handlers::session_messages` directly: the REST route
-// `GET /api/sessions/{id}/messages` was retired in M12 Phase D-5, so
-// there's no `build_router` path to hit the bypass shape codex flagged.
-// The function (already `pub`) and its query params type are exposed
-// here for that purpose, plus `AuthIdentity` so tests can construct
-// non-admin and admin identities directly without booting a real auth
-// middleware stack.
-//
-// Issue #999 — `session_files` and `session_workspace_contract` are
-// exposed via the same harness for the same reason: the legacy REST
-// routes `GET /api/sessions/{id}/files` and
-// `GET /api/sessions/{id}/workspace-contract` were retired, so the
-// only way to exercise the gateway-mode tenant-leak bypass shape end
-// -to-end is to call the WS handlers directly.
-#[doc(hidden)]
-pub use handlers::{
-    PaginationParams as TestSessionMessagesPaginationParams, session_files as test_session_files,
-    session_messages as test_session_messages,
-    session_workspace_contract as test_session_workspace_contract,
-};
-#[doc(hidden)]
-pub use router::AuthIdentity as TestAuthIdentity;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -161,9 +119,6 @@ pub struct UiProtocolRuntimeResources {
 }
 
 pub struct AppState {
-    /// Prometheus metrics handle.
-    pub metrics_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
-
     /// Per-profile guard for AppUI skill install/remove plus runtime reload.
     pub profile_skill_mutation_locks: Arc<ProfileSkillMutationLocks>,
 
@@ -205,13 +160,6 @@ pub struct AppState {
 
     pub ui_protocol: UiProtocolRuntimeResources,
 
-    /// Tenant store for tunnel management.
-    /// Cache of frps run_id → tenant_id from Login verification.
-    /// Startup-normalized exact origins from `appui.allowed_origins` (or its
-    /// non-empty environment override), plus loopback origins for the active
-    /// serve port. CORS and both browser WebSocket gates consume this same
-    /// list; authentication and work-secret validation remain separate.
-    pub appui_allowed_origins: Vec<String>,
     /// Opt-in for the no-password "solo" REST login (`/api/auth/solo*`).
     /// OFF by default; set by `octos serve --solo` / `OCTOS_SOLO_LOGIN=1`.
     ///
@@ -266,13 +214,6 @@ pub struct AppState {
     /// serve cwd under launchd is `~`, outside the profile root, and
     /// `/api/files` would 403 anything written there).
     pub appui_default_session_cwd: Option<PathBuf>,
-    /// Persistent session-ingress grant store for external CLI agents.
-    ///
-    /// `octos auth issue-work-secret` writes short-lived grants here and
-    /// `/v1/session_ingress/ws/{session_id}` revalidates the token on
-    /// every frame, so revocation applies to already-open sockets without
-    /// requiring a daemon restart.
-    pub work_secret_store: Arc<octos_agent::bridge::work_secret::WorkSecretGrantStore>,
 }
 
 impl AppState {
@@ -297,7 +238,7 @@ impl AppState {
     /// State for an embedded local OUP transport. No HTTP listener, account
     /// services, login routes or gateway processes are started. Callers must
     /// install a profile runtime before accepting session/open.
-    pub(crate) fn without_services(data_dir: &std::path::Path) -> Self {
+    pub(crate) fn without_services(_data_dir: &std::path::Path) -> Self {
         Self {
             ui_protocol: UiProtocolRuntimeResources::default(),
             profiles: HashMap::new(),
@@ -308,9 +249,7 @@ impl AppState {
             profile_skill_mutation_locks: Arc::new(ProfileSkillMutationLocks::new()),
             sessions: None,
             started_at: chrono::Utc::now(),
-            metrics_handle: None,
             profile_store: None,
-            appui_allowed_origins: Vec::new(),
             solo_login_enabled: false,
             dangerous_default_permissions: false,
             default_network_denied: false,
@@ -318,9 +257,6 @@ impl AppState {
             host_memory: None,
             task_query_store: None,
             appui_default_session_cwd: None,
-            work_secret_store: Arc::new(
-                octos_agent::bridge::work_secret::WorkSecretGrantStore::new(data_dir),
-            ),
             // Tests don't spawn the sweeper. Tests that exercise the
             // sweeper either drive `sweep_expired_all` directly or
             // build their own `PreviewSweeperHandle::spawn(...)`.

@@ -1,37 +1,29 @@
-//! Serve command: start the REST API server.
+//! Serve command: speak the UI Protocol JSON-RPC over stdin/stdout.
+//!
+//! slim5-batch4: serve is stdio-only. The REST router, HTTP listener,
+//! metrics exporter and browser-origin policy were removed.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Args;
-use colored::Colorize;
 use eyre::{Result, WrapErr};
 use octos_bus::SessionManager;
 
 use super::Executable;
-use crate::api::{AppState, build_router, init_metrics, resolve_appui_allowed_origins};
+use crate::api::AppState;
 use crate::config::Config;
 
-/// Start the REST API server.
+/// Start the stdio AppUI JSON-RPC server.
 ///
 /// `Serialize`/`Deserialize` back the layered startup config: the resolved
 /// struct is serialized, non-explicit fields are overlaid from
 /// `config.cli.serve`, then deserialized back (see [`crate::config_layer`]).
 #[derive(Debug, Args, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct ServeCommand {
-    /// Port to listen on. Default lives in IANA's Dynamic/Private range
-    /// (49152–65535) to avoid collisions with `http-alt` services like
-    /// Tomcat/Jenkins/ominix-api. See issue #417.
-    #[arg(short, long, default_value = "50080")]
-    pub port: u16,
-
-    /// Host address to bind to. Defaults to localhost for security.
-    /// Use 0.0.0.0 to accept connections from all interfaces.
-    #[arg(long, default_value = "127.0.0.1")]
-    pub host: String,
-
-    /// Run AppUI JSON-RPC over stdin/stdout instead of binding HTTP.
+    /// Accepted for compatibility: serve always runs the stdio AppUI
+    /// JSON-RPC transport (the HTTP listener was removed in slim5-batch4).
     #[arg(long)]
     pub stdio: bool,
 
@@ -107,47 +99,6 @@ pub struct ServeCommand {
     /// Disable automatic retry on transient errors.
     #[arg(long)]
     pub no_retry: bool,
-}
-
-/// Wire a `task_query_store` for `octos serve --stdio` (the in-process
-/// AppUI/TUI deployment); leave it `None` for HTTP/gateway serve.
-///
-/// `--stdio` runs session turns in *this* process with no gateway to proxy
-/// `task/cancel` to. The per-turn `tool_registry.supervisor()` self-registers
-/// into this store (see `ui_protocol.rs`, the `store.register(..)` guarded on
-/// `task_query_store.is_some()`, holding a `Weak<TaskSupervisor>` so it prunes
-/// at end of turn), which lets `handle_task_cancel` reach the live supervisor
-/// and actually cancel a running `spawn_only` background task. Without it the
-/// AppUI task commands fail `runtime_unavailable` ("task supervisor not wired
-/// for AppUI task commands"). HTTP/gateway serve must stay `None` so
-/// `handle_task_cancel` keeps proxying to the gateway via `resolve_api_port`.
-fn stdio_task_query_store(stdio: bool) -> Option<crate::session_actor::SessionTaskQueryStore> {
-    stdio.then(crate::session_actor::SessionTaskQueryStore::default)
-}
-
-/// Bind the HTTP listener before constructing `AppState`.
-///
-/// Port `0` asks the OS for an ephemeral port. Resolving it here ensures every
-/// downstream consumer (gateway launch configuration, browser-Origin policy,
-/// and user-facing URLs) sees the real port instead of the sentinel `0`.
-/// Stdio mode does not bind HTTP and preserves the configured value.
-async fn bind_http_listener(
-    stdio: bool,
-    host: &str,
-    requested_port: u16,
-) -> Result<(Option<tokio::net::TcpListener>, u16)> {
-    if stdio {
-        return Ok((None, requested_port));
-    }
-
-    let listener = tokio::net::TcpListener::bind((host, requested_port))
-        .await
-        .wrap_err_with(|| format!("failed to bind octos API server to {host}:{requested_port}"))?;
-    let actual_port = listener
-        .local_addr()
-        .wrap_err("failed to inspect bound octos API listener")?
-        .port();
-    Ok((Some(listener), actual_port))
 }
 
 /// Stable, machine-greppable marker embedded in the "data directory is already
@@ -338,8 +289,6 @@ impl ServeCommand {
                     None
                 }
             };
-        let metrics_handle = Some(init_metrics());
-
         // Initialize profile store and process manager for admin dashboard.
         // Registry (`<id>.json`) resolves from the SHARED `state_home`; the
         // per-profile `<id>/data` runtime tree roots under the per-instance
@@ -430,9 +379,6 @@ impl ServeCommand {
                 .with_sessions_in_cwd(config.appui.sessions_in_cwd),
         );
 
-        let (http_listener, effective_serve_port) =
-            bind_http_listener(self.stdio, &self.host, self.port).await?;
-
         // Spawn auth cleanup task if auth manager is active
 
         // Issue #1001 follow-up: in-memory signed-preview token cache.
@@ -464,24 +410,6 @@ impl ServeCommand {
                  potentially shared host"
             );
         }
-        // Resolve browser origins once, before any HTTP route is exposed.
-        // A malformed explicit origin aborts startup instead of silently
-        // weakening CORS/WS behavior. Empty env means "use config"; a
-        // non-empty env value replaces the config list for deployments.
-        let appui_allowed_origins_env = match std::env::var("OCTOS_APPUI_ALLOWED_ORIGINS") {
-            Ok(value) => Some(value),
-            Err(std::env::VarError::NotPresent) => None,
-            Err(std::env::VarError::NotUnicode(_)) => {
-                eyre::bail!("OCTOS_APPUI_ALLOWED_ORIGINS must be valid Unicode")
-            }
-        };
-        let appui_allowed_origins = resolve_appui_allowed_origins(
-            &config.appui.allowed_origins,
-            appui_allowed_origins_env.as_deref(),
-            effective_serve_port,
-        )
-        .wrap_err("invalid AppUI browser-origin configuration")?;
-
         let state = Arc::new(AppState {
             ui_protocol: crate::api::UiProtocolRuntimeResources::default(),
             profiles: profile_runtimes,
@@ -489,39 +417,23 @@ impl ServeCommand {
             profile_skill_mutation_locks: Arc::new(crate::api::ProfileSkillMutationLocks::new()),
             sessions,
             started_at: chrono::Utc::now(),
-            metrics_handle,
             profile_store: Some(profile_store.clone()),
-            appui_allowed_origins,
             host_memory: config.memory.clone(),
             solo_login_enabled: solo_login_enabled_flag,
             dangerous_default_permissions: dangerous_default_permissions_flag,
             default_network_denied: default_network_denied_flag,
             llm_compaction: self.llm_compaction,
-            // HTTP/gateway serve: session actors live in gateway
-            // processes, so `task_query_store` stays `None` and the
-            // cancel/restart handlers proxy via `resolve_api_port` (the
-            // gateway runtime sets its own store on the embedded api
-            // channel). `--stdio` runs actors in-process with no gateway,
-            // so it wires an empty store the per-turn supervisor
-            // self-registers into — letting AppUI `task/cancel` reach live
-            // `spawn_only` tasks. See `stdio_task_query_store`.
-            task_query_store: stdio_task_query_store(self.stdio),
+            // stdio-only serve: session actors run in-process with no
+            // gateway, so the per-turn supervisor self-registers into an
+            // empty store — letting AppUI `task/cancel` reach live
+            // `spawn_only` background tasks.
+            task_query_store: Some(crate::session_actor::SessionTaskQueryStore::default()),
             // Mirror the operator-configured Tier-2 default cwd so
             // `session_tool_registry` can distinguish "operator chose this
             // dir for sessions" from the boot fallback baked in by
             // `with_builtins_and_sandbox(serve_cwd)`. See
             // `api/ui_protocol.rs::session_tool_registry`.
             appui_default_session_cwd: config.appui.default_session_cwd.clone(),
-            // Issue #1001 follow-up: in-memory signed-preview token
-            // cache backs `POST /api/my/preview/sign` /
-            // `GET /api/preview-signed/...` so the SPA iframe can drop
-            // the `Authorization: Bearer ...` header that the closed
-            // `/api/preview/...` route now requires. Daemon restart
-            // invalidates every grant (see
-            // `crate::api::preview_tokens` for the design rationale).
-            work_secret_store: Arc::new(
-                octos_agent::bridge::work_secret::WorkSecretGrantStore::new(&data_dir),
-            ),
         });
 
         // mini5 soak gap #1 / #1973 fix E: drain queued master continuations
@@ -550,41 +462,7 @@ impl ServeCommand {
         // it changes nothing about how or when the model is woken.
         crate::api::ui_protocol_transport::spawn_background_activity_sink(state.clone());
 
-        if self.stdio {
-            crate::api::ui_protocol_transport::stdio_connection(state).await?;
-            return Ok(());
-        }
-
-        // (#1973 fix E — the global master-continuation drain used to be
-        // spawned HERE, after the stdio early-return; it now spawns right
-        // before that branch so stdio serves share the safety net.)
-        let app = build_router(state);
-        let listener =
-            http_listener.expect("non-stdio serve must bind its HTTP listener before AppState");
-        let addr = listener
-            .local_addr()
-            .wrap_err("failed to inspect bound octos API listener")?
-            .to_string();
-
-        tracing::info!(address = %addr, "octos API server starting");
-        tracing::info!(app = %format!("http://{}/app/", addr), "web app available");
-        use super::serve_console;
-        let _ = serve_console::print_stdout(&format!("{}", "octos API server".cyan().bold()));
-        let _ = serve_console::print_stdout(&format!("{}: http://{}", "Listening".green(), addr));
-        let _ = serve_console::print_stdout(&format!("{}: http://{}/app/", "App".green(), addr));
-        let _ = serve_console::print_stdout("");
-        let _ = serve_console::print_stdout("");
-
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-            let _ = serve_console::print_stdout("");
-            let _ = serve_console::print_stdout(&format!("{}", "Shutting down server...".yellow()));
-        })
-        .await?;
+        crate::api::ui_protocol_transport::stdio_connection(state).await?;
 
         // Force exit — background tokio tasks (profile watcher, auth cleanup,
         // admin bot) have no shutdown signal and would hang indefinitely.
@@ -595,48 +473,6 @@ impl ServeCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn stdio_serve_wires_task_query_store_for_in_process_cancel() {
-        // `--stdio` runs session actors in-process with no gateway to
-        // proxy `task/cancel` to, so the store must be present for the
-        // per-turn supervisor to self-register into — otherwise AppUI
-        // task commands fail `runtime_unavailable` and octoscode Esc/`x`
-        // cannot cancel a spawned background task (the reported bug).
-        assert!(
-            stdio_task_query_store(true).is_some(),
-            "stdio serve must wire a task_query_store"
-        );
-    }
-
-    #[test]
-    fn non_stdio_serve_leaves_task_query_store_none_for_gateway_proxy() {
-        // HTTP/gateway serve must leave it `None` so `handle_task_cancel`
-        // takes the gateway-proxy path; a non-`None` store would skip it.
-        assert!(
-            stdio_task_query_store(false).is_none(),
-            "gateway/http serve must leave task_query_store None"
-        );
-    }
-
-    #[tokio::test]
-    async fn port_zero_resolves_before_origin_configuration() {
-        let (listener, effective_port) = bind_http_listener(false, "127.0.0.1", 0)
-            .await
-            .expect("bind an ephemeral loopback listener");
-        let listener = listener.expect("HTTP serve returns a bound listener");
-
-        assert_ne!(effective_port, 0, "the OS-selected port must be concrete");
-        assert_eq!(
-            listener.local_addr().unwrap().port(),
-            effective_port,
-            "all downstream configuration must use the bound listener's port"
-        );
-        let origins = resolve_appui_allowed_origins(&[], None, effective_port).unwrap();
-        assert!(origins.contains(&format!("http://127.0.0.1:{effective_port}")));
-        assert!(origins.contains(&format!("http://localhost:{effective_port}")));
-        assert!(origins.contains(&format!("http://[::1]:{effective_port}")));
-    }
 
     /// Two `octos serve` against one data dir can't coexist (redb is
     /// single-process). The second must be refused FAST with a stable,

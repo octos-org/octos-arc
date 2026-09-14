@@ -38,7 +38,6 @@ reqwest = { workspace = true }
 url = { workspace = true }
 sha2 = { workspace = true }
 fs2 = { workspace = true }
-subtle = { workspace = true, optional = true }
 getrandom = "0.2"
 constant_time_eq = "0.3"
 # Issue #1010 — `extract_token` must percent-decode the `token=` query
@@ -64,14 +63,11 @@ keyring = { workspace = true }
 flate2 = { workspace = true }
 tar = { workspace = true }
 # Optional deps gated by feature flags (api)
-axum = { workspace = true, optional = true }
-tower-http = { workspace = true, optional = true }
 # CancellationToken shared with the rmcp streamable-HTTP service so Ctrl+C tears
 # down live SSE sessions instead of blocking graceful shutdown.
 tokio-util = { version = "0.7", optional = true }
 futures = { workspace = true, optional = true }
 metrics = { workspace = true }
-metrics-exporter-prometheus = { workspace = true, optional = true }
 redb.workspace = true
 
 [target.'cfg(unix)'.dependencies]
@@ -107,7 +103,7 @@ keyring = { workspace = true, features = ["windows-native"] }
 # chat, ACP and serve use one OUP dispatcher. Minimal library builds can opt
 # out, but never silently fall back to independent chat/ACP agent loops.
 default = ["api"]
-api = ["dep:axum", "dep:tower-http", "dep:tokio-util", "dep:futures", "dep:metrics-exporter-prometheus", "dep:subtle"]
+api = ["dep:tokio-util", "dep:futures"]
 git = ["octos-agent/git"]
 ast = ["octos-agent/ast"]
 
@@ -116,15 +112,8 @@ workspace = true
 
 [dev-dependencies]
 tokio-test = { workspace = true }
-tower = { workspace = true }
-axum = { workspace = true }
 # Wave-4 B3.4 — enable `test-utils` for octos-llm so the gateway's
 # failover-surfacing tests can call `publish_failover_for_subscribers`.
 # Production builds don't see this; only `cargo test -p octos-cli`.
-# Wave-4 B3.4 — enable `test-utils` for octos-llm so the failover-surfacing
-# tests can call `publish_failover_for_subscribers`. Test-only.
 octos-llm = { workspace = true, features = ["test-utils"] }
-wiremock = { workspace = true }
-# WS test client for the api-feature session-ingress tests (issue #296).
-tokio-tungstenite = { workspace = true }
 

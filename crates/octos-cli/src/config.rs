@@ -1992,44 +1992,6 @@ mod tests {
         );
     }
 
-    /// Run `f` with HOME pointed at an empty temp dir (so the global auth store
-    /// is empty) and the config/XDG env vars cleared, plus the Moonshot key vars
-    /// the credential tests assert against removed from the ambient process env
-    /// (so a dev machine that happens to export one can't flip the result).
-    /// Serialized on the shared env lock; all vars restored afterwards.
-    #[allow(unsafe_code)]
-    fn with_isolated_home<T>(f: impl FnOnce() -> T) -> T {
-        let _g = HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let tmp = tempfile::tempdir().unwrap();
-        let keys = [
-            "HOME",
-            "OCTOS_HOME",
-            "OCTOS_CONFIG_DIR",
-            "XDG_CONFIG_HOME",
-            "MOONSHOT_API_KEY",
-            "KIMI_API_KEY",
-            "MY_PROXY_KEY",
-            "kimi_api_key",
-        ];
-        let saved: Vec<(&str, Option<std::ffi::OsString>)> =
-            keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
-        // SAFETY: serialized by HOME_ENV_LOCK; restored below.
-        unsafe {
-            std::env::set_var("HOME", tmp.path());
-            for k in &keys[1..] {
-                std::env::remove_var(k);
-            }
-        }
-        let out = f();
-        for (k, v) in saved {
-            match v {
-                Some(v) => unsafe { std::env::set_var(k, v) },
-                None => unsafe { std::env::remove_var(k) },
-            }
-        }
-        out
-    }
-
     #[test]
     fn test_embedding_config_deserialize() {
         let json = r#"{

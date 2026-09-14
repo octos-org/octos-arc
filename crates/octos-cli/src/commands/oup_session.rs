@@ -104,7 +104,6 @@ impl OupSession {
             UI_PROTOCOL_FEATURE_USER_QUESTION_V1,
             UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1,
             UI_PROTOCOL_FEATURE_CONTEXT_SEMANTIC_CACHE_V1,
-            UI_PROTOCOL_FEATURE_AUXILIARY_REST_TO_WS_V1,
         ];
         if !questions {
             supported_features.retain(|feature| *feature != UI_PROTOCOL_FEATURE_USER_QUESTION_V1);

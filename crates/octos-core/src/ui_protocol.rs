@@ -109,9 +109,6 @@ pub const UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1: &str = "session.workspac
 /// Feature flag for UPCR-2026-022 per-session sandbox narrowing requests.
 pub const UI_PROTOCOL_FEATURE_SESSION_SANDBOX_V1: &str = "session.sandbox.v1";
 
-/// Feature flag for harness task registry/control commands.
-pub const UI_PROTOCOL_FEATURE_HARNESS_TASK_CONTROL_V1: &str = "harness.task_control.v1";
-
 /// Feature flag for UPCR-2026-009 `session/hydrate` authoritative chat-state
 /// reload RPC.
 pub const UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1: &str = "state.session_hydrate.v1";
@@ -181,37 +178,11 @@ pub const UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V1: &str = "projection.envelop
 /// background-child completions.
 pub const UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2: &str = "projection.envelope.v2";
 
-/// Feature flag for M12 Phase D-1 auxiliary REST→WS migration.
-///
-/// Negotiated by clients that route auxiliary panel traffic (sidebar
-/// session list, right-rail snapshot/files/tasks, status pill, messages
-/// history scroll, workspace contract panel, title rename, session
-/// delete, content gallery) onto the existing
-/// `/api/ui-protocol/ws` JSON-RPC connection instead of the legacy REST
-/// endpoints on `/api/sessions/*`, `/api/status`, and `/api/my/content`.
-/// See `docs/adr/m12-phase-d-auxiliary-rest-to-ws.md`.
-///
-/// REST endpoints stay live for clients that do not negotiate this
-/// feature; D-1 is additive only. Phase D-5 retires the REST routes
-/// once `octos-web` has migrated (tracked separately).
-pub const UI_PROTOCOL_FEATURE_AUXILIARY_REST_TO_WS_V1: &str = "auxiliary.rest_to_ws.v1";
-
 /// Required feature flag for UPCR-2026-021 M15 autonomy inspection/control.
 pub const UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1: &str = "coding.autonomy.v1";
 
 /// Optional M15 feature flag for backend-owned agent lifecycle controls.
 pub const UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1: &str = "coding.agent_control.v1";
-
-/// Optional M15 feature flag for recurring loop runtime controls.
-pub const UI_PROTOCOL_FEATURE_CODING_LOOP_RUNTIME_V1: &str = "coding.loop_runtime.v1";
-
-/// Optional feature flag for zero-token monitor runtime controls (#1977).
-/// A monitor is a sandboxed background probe process whose filtered stdout
-/// lines wake the master via external continuations — the model runs only
-/// when an event line appears (vs `/loop`, which burns a full master turn
-/// every tick). Gates `monitor/create|list|pause|resume|delete` and the
-/// `monitor/fired|updated|expired` notifications.
-pub const UI_PROTOCOL_FEATURE_CODING_MONITOR_RUNTIME_V1: &str = "coding.monitor_runtime.v1";
 
 /// Optional M15 feature flag for backend-owned product review workflows.
 pub const UI_PROTOCOL_FEATURE_REVIEW_START_V1: &str = "review.start.v1";
@@ -292,7 +263,6 @@ pub const UI_PROTOCOL_KNOWN_FEATURES: &[&str] = &[
     UI_PROTOCOL_FEATURE_PANE_SNAPSHOTS_V1,
     UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1,
     UI_PROTOCOL_FEATURE_SESSION_SANDBOX_V1,
-    UI_PROTOCOL_FEATURE_HARNESS_TASK_CONTROL_V1,
     UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1,
     UI_PROTOCOL_FEATURE_THREAD_GRAPH_V1,
     UI_PROTOCOL_FEATURE_TURN_STATE_GET_V1,
@@ -300,11 +270,8 @@ pub const UI_PROTOCOL_KNOWN_FEATURES: &[&str] = &[
     UI_PROTOCOL_FEATURE_FILE_ATTACHED_V1,
     UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V1,
     UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2,
-    UI_PROTOCOL_FEATURE_AUXILIARY_REST_TO_WS_V1,
     UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1,
     UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1,
-    UI_PROTOCOL_FEATURE_CODING_LOOP_RUNTIME_V1,
-    UI_PROTOCOL_FEATURE_CODING_MONITOR_RUNTIME_V1,
     UI_PROTOCOL_FEATURE_REVIEW_START_V1,
     UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1,
     UI_PROTOCOL_FEATURE_CONTEXT_SEMANTIC_CACHE_V1,
@@ -321,29 +288,13 @@ pub const UI_PROTOCOL_KNOWN_FEATURES: &[&str] = &[
 /// Used by [`UiProtocolCapabilities::for_negotiated_features`] so the
 /// negotiated `supported_methods` only advertises capability-gated methods
 /// when their gating feature is also in the negotiated `supported_features`
-/// set. Without this gate a client that did not request
-/// `harness.task_control.v1` would see `task/list` / `task/cancel` /
-/// `task/restart_from_node` in the response and then receive
-/// `method_not_supported` errors when it tried to call them.
+/// set.
 fn method_capability_gate(method: &str) -> Option<&'static str> {
     match method {
-        methods::TASK_LIST | methods::TASK_CANCEL | methods::TASK_RESTART_FROM_NODE => {
-            Some(UI_PROTOCOL_FEATURE_HARNESS_TASK_CONTROL_V1)
-        }
         methods::SESSION_HYDRATE => Some(UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1),
         methods::THREAD_GRAPH_GET => Some(UI_PROTOCOL_FEATURE_THREAD_GRAPH_V1),
         methods::TURN_STATE_GET => Some(UI_PROTOCOL_FEATURE_TURN_STATE_GET_V1),
         methods::LAUNCH_RESOLVE => Some(UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1),
-        methods::SESSION_LIST
-        | methods::SESSION_SNAPSHOT
-        | methods::SESSION_MESSAGES_PAGE
-        | methods::SESSION_STATUS_GET
-        | methods::SESSION_FILES_LIST
-        | methods::SESSION_TASKS_LIST
-        | methods::SESSION_WORKSPACE_GET
-        | methods::SESSION_TITLE_SET
-        | methods::SESSION_DELETE
-        | methods::SYSTEM_STATUS_GET => Some(UI_PROTOCOL_FEATURE_AUXILIARY_REST_TO_WS_V1),
         methods::AGENT_LIST
         | methods::AGENT_STATUS_READ
         | methods::AGENT_OUTPUT_READ
@@ -351,17 +302,6 @@ fn method_capability_gate(method: &str) -> Option<&'static str> {
         | methods::AGENT_ARTIFACT_READ
         | methods::AGENT_INTERRUPT
         | methods::AGENT_CLOSE => Some(UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1),
-        methods::LOOP_CREATE
-        | methods::LOOP_LIST
-        | methods::LOOP_DELETE
-        | methods::LOOP_PAUSE
-        | methods::LOOP_RESUME
-        | methods::LOOP_FIRE_NOW => Some(UI_PROTOCOL_FEATURE_CODING_LOOP_RUNTIME_V1),
-        methods::MONITOR_CREATE
-        | methods::MONITOR_LIST
-        | methods::MONITOR_PAUSE
-        | methods::MONITOR_RESUME
-        | methods::MONITOR_DELETE => Some(UI_PROTOCOL_FEATURE_CODING_MONITOR_RUNTIME_V1),
         methods::REVIEW_START => Some(UI_PROTOCOL_FEATURE_REVIEW_START_V1),
         methods::USER_QUESTION_RESPOND => Some(UI_PROTOCOL_FEATURE_USER_QUESTION_V1),
         _ => None,
@@ -997,12 +937,6 @@ pub mod methods {
     pub const USER_QUESTION_RESPOND: &str = "user_question/respond";
     pub const PERMISSION_PROFILE_LIST: &str = "permission/profile/list";
     pub const PERMISSION_PROFILE_SET: &str = "permission/profile/set";
-    pub const DIFF_PREVIEW_GET: &str = "diff/preview/get";
-    pub const TASK_LIST: &str = "task/list";
-    pub const TASK_CANCEL: &str = "task/cancel";
-    pub const TASK_RESTART_FROM_NODE: &str = "task/restart_from_node";
-    pub const TASK_OUTPUT_READ: &str = "task/output/read";
-
     /// UPCR-2026-009 `session/hydrate` — authoritative chat-state reload.
     pub const SESSION_HYDRATE: &str = "session/hydrate";
     /// `session/rollback` — drop the last N user turns (conversation-only
@@ -1033,21 +967,6 @@ pub mod methods {
     /// long-term direction per the M13 contract).
     pub const AGENT_INTERRUPT: &str = "agent/interrupt";
     pub const AGENT_CLOSE: &str = "agent/close";
-
-    /// UPCR-2026-021 M15 recurring loop runtime surface.
-    pub const LOOP_CREATE: &str = "loop/create";
-    pub const LOOP_LIST: &str = "loop/list";
-    pub const LOOP_DELETE: &str = "loop/delete";
-    pub const LOOP_PAUSE: &str = "loop/pause";
-    pub const LOOP_RESUME: &str = "loop/resume";
-    pub const LOOP_FIRE_NOW: &str = "loop/fire_now";
-
-    /// #1977 zero-token monitor runtime surface, mirroring `loop/*`.
-    pub const MONITOR_CREATE: &str = "monitor/create";
-    pub const MONITOR_LIST: &str = "monitor/list";
-    pub const MONITOR_PAUSE: &str = "monitor/pause";
-    pub const MONITOR_RESUME: &str = "monitor/resume";
-    pub const MONITOR_DELETE: &str = "monitor/delete";
 
     /// Product-level automated code review workflow.
     ///
@@ -1115,36 +1034,6 @@ pub mod methods {
     /// `turn/completed` notifications it supersedes.
     pub const PROJECTION_ENVELOPE: &str = "projection/envelope";
 
-    // ---- M12 Phase D-1 auxiliary REST → WS surface ----
-    // Each method below replaces a REST endpoint listed in the ADR's
-    // inventory table (docs/adr/m12-phase-d-auxiliary-rest-to-ws.md).
-    // All are capability-gated on
-    // `UI_PROTOCOL_FEATURE_AUXILIARY_REST_TO_WS_V1`.
-
-    /// Replaces `GET /api/sessions` — sidebar session list.
-    pub const SESSION_LIST: &str = "session/list";
-    /// Replaces combined `GET /api/sessions/{id}/status` + `/files` +
-    /// `/tasks` — single right-rail bootstrap fetch.
-    pub const SESSION_SNAPSHOT: &str = "session/snapshot";
-    /// Replaces `GET /api/sessions/{id}/messages` — paginated history.
-    pub const SESSION_MESSAGES_PAGE: &str = "session/messages_page";
-    /// Replaces `GET /api/sessions/{id}/status` — status-pill poller.
-    pub const SESSION_STATUS_GET: &str = "session/status.get";
-    /// Replaces `GET /api/sessions/{id}/files` — files panel listing.
-    pub const SESSION_FILES_LIST: &str = "session/files.list";
-    /// Replaces `GET /api/sessions/{id}/tasks` — background tasks panel.
-    pub const SESSION_TASKS_LIST: &str = "session/tasks.list";
-    /// Replaces `GET /api/sessions/{id}/workspace-contract` — workspace
-    /// contract panel.
-    pub const SESSION_WORKSPACE_GET: &str = "session/workspace.get";
-    /// Replaces `PATCH /api/sessions/{id}/title` — manual title setter.
-    pub const SESSION_TITLE_SET: &str = "session/title.set";
-    /// Replaces `DELETE /api/sessions/{id}` — session deletion.
-    pub const SESSION_DELETE: &str = "session/delete";
-    /// Replaces `GET /api/status` — agent/server status (distinct from
-    /// `/api/auth/status` which stays REST).
-    pub const SYSTEM_STATUS_GET: &str = "system/status.get";
-
     /// Pre-session launch probe. Given the project cwd + optional requested
     /// profile, the server decides whether to resume the folder's
     /// conversation, activate a new one, or surface a cross-profile choice.
@@ -1152,25 +1041,6 @@ pub mod methods {
     /// [`UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1`].
     pub const LAUNCH_RESOLVE: &str = "launch/resolve";
 
-    // ---- Wave4-A: queue state ----
-
-    /// Wave4-A `queue/state` — pending-queue snapshot. Client-emitted
-    /// today; the constant is defined so type-checked code paths across
-    /// the workspace can reference one source of truth.
-    pub const QUEUE_STATE: &str = "queue/state";
-
-    /// UPCR-2026-021 M15 agent lifecycle/output notifications.
-    pub const AGENT_UPDATED: &str = "agent/updated";
-    pub const AGENT_OUTPUT_DELTA: &str = "agent/output/delta";
-    pub const AGENT_ARTIFACT_UPDATED: &str = "agent/artifact/updated";
-    /// UPCR-2026-021 M15 loop runtime notifications.
-    pub const LOOP_UPDATED: &str = "loop/updated";
-    pub const LOOP_FIRED: &str = "loop/fired";
-    pub const LOOP_COMPLETED: &str = "loop/completed";
-    /// #1977 monitor runtime notifications, mirroring `loop/*`.
-    pub const MONITOR_FIRED: &str = "monitor/fired";
-    pub const MONITOR_UPDATED: &str = "monitor/updated";
-    pub const MONITOR_EXPIRED: &str = "monitor/expired";
     /// M16 `context.lifecycle.v1`: compact-context lifecycle notification.
     pub const CONTEXT_COMPACTION_COMPLETED: &str = "context/compaction_completed";
     pub const CONTEXT_COMPACTION_STARTED: &str = "context/compaction_started";
@@ -1205,11 +1075,6 @@ pub const UI_PROTOCOL_COMMAND_METHODS: &[&str] = &[
     methods::USER_QUESTION_RESPOND,
     methods::PERMISSION_PROFILE_LIST,
     methods::PERMISSION_PROFILE_SET,
-    methods::DIFF_PREVIEW_GET,
-    methods::TASK_LIST,
-    methods::TASK_CANCEL,
-    methods::TASK_RESTART_FROM_NODE,
-    methods::TASK_OUTPUT_READ,
     methods::SESSION_HYDRATE,
     methods::SESSION_ROLLBACK,
     methods::SESSION_FORK,
@@ -1222,28 +1087,7 @@ pub const UI_PROTOCOL_COMMAND_METHODS: &[&str] = &[
     methods::AGENT_ARTIFACT_READ,
     methods::AGENT_INTERRUPT,
     methods::AGENT_CLOSE,
-    methods::LOOP_CREATE,
-    methods::LOOP_LIST,
-    methods::LOOP_DELETE,
-    methods::LOOP_PAUSE,
-    methods::LOOP_RESUME,
-    methods::LOOP_FIRE_NOW,
-    methods::MONITOR_CREATE,
-    methods::MONITOR_LIST,
-    methods::MONITOR_PAUSE,
-    methods::MONITOR_RESUME,
-    methods::MONITOR_DELETE,
     methods::REVIEW_START,
-    methods::SESSION_LIST,
-    methods::SESSION_SNAPSHOT,
-    methods::SESSION_MESSAGES_PAGE,
-    methods::SESSION_STATUS_GET,
-    methods::SESSION_FILES_LIST,
-    methods::SESSION_TASKS_LIST,
-    methods::SESSION_WORKSPACE_GET,
-    methods::SESSION_TITLE_SET,
-    methods::SESSION_DELETE,
-    methods::SYSTEM_STATUS_GET,
     methods::LAUNCH_RESOLVE,
 ];
 
@@ -1272,16 +1116,6 @@ pub const UI_PROTOCOL_NOTIFICATION_METHODS: &[&str] = &[
     methods::TURN_SPAWN_COMPLETE,
     methods::FILE_ATTACHED,
     methods::PROJECTION_ENVELOPE,
-    methods::QUEUE_STATE,
-    methods::AGENT_UPDATED,
-    methods::AGENT_OUTPUT_DELTA,
-    methods::AGENT_ARTIFACT_UPDATED,
-    methods::LOOP_UPDATED,
-    methods::LOOP_FIRED,
-    methods::LOOP_COMPLETED,
-    methods::MONITOR_FIRED,
-    methods::MONITOR_UPDATED,
-    methods::MONITOR_EXPIRED,
     methods::CONTEXT_COMPACTION_COMPLETED,
     methods::CONTEXT_COMPACTION_STARTED,
     methods::CONTEXT_NORMALIZATION_REPORTED,
@@ -1299,11 +1133,6 @@ pub const UI_PROTOCOL_FIRST_SERVER_METHODS: &[&str] = &[
     methods::USER_QUESTION_RESPOND,
     methods::PERMISSION_PROFILE_LIST,
     methods::PERMISSION_PROFILE_SET,
-    methods::DIFF_PREVIEW_GET,
-    methods::TASK_LIST,
-    methods::TASK_CANCEL,
-    methods::TASK_RESTART_FROM_NODE,
-    methods::TASK_OUTPUT_READ,
     methods::SESSION_HYDRATE,
     methods::SESSION_ROLLBACK,
     methods::SESSION_FORK,
@@ -1316,28 +1145,7 @@ pub const UI_PROTOCOL_FIRST_SERVER_METHODS: &[&str] = &[
     methods::AGENT_ARTIFACT_READ,
     methods::AGENT_INTERRUPT,
     methods::AGENT_CLOSE,
-    methods::LOOP_CREATE,
-    methods::LOOP_LIST,
-    methods::LOOP_DELETE,
-    methods::LOOP_PAUSE,
-    methods::LOOP_RESUME,
-    methods::LOOP_FIRE_NOW,
-    methods::MONITOR_CREATE,
-    methods::MONITOR_LIST,
-    methods::MONITOR_PAUSE,
-    methods::MONITOR_RESUME,
-    methods::MONITOR_DELETE,
     methods::REVIEW_START,
-    methods::SESSION_LIST,
-    methods::SESSION_SNAPSHOT,
-    methods::SESSION_MESSAGES_PAGE,
-    methods::SESSION_STATUS_GET,
-    methods::SESSION_FILES_LIST,
-    methods::SESSION_TASKS_LIST,
-    methods::SESSION_WORKSPACE_GET,
-    methods::SESSION_TITLE_SET,
-    methods::SESSION_DELETE,
-    methods::SYSTEM_STATUS_GET,
     methods::LAUNCH_RESOLVE,
 ];
 
@@ -1403,16 +1211,12 @@ impl UiProtocolCapabilities {
             UI_PROTOCOL_FEATURE_PANE_SNAPSHOTS_V1,
             UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1,
             UI_PROTOCOL_FEATURE_SESSION_SANDBOX_V1,
-            UI_PROTOCOL_FEATURE_HARNESS_TASK_CONTROL_V1,
             UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1,
             UI_PROTOCOL_FEATURE_THREAD_GRAPH_V1,
             UI_PROTOCOL_FEATURE_TURN_STATE_GET_V1,
             UI_PROTOCOL_FEATURE_SPAWN_COMPLETE_V1,
-            UI_PROTOCOL_FEATURE_AUXILIARY_REST_TO_WS_V1,
             UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1,
             UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1,
-            UI_PROTOCOL_FEATURE_CODING_LOOP_RUNTIME_V1,
-            UI_PROTOCOL_FEATURE_CODING_MONITOR_RUNTIME_V1,
             UI_PROTOCOL_FEATURE_REVIEW_START_V1,
             UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1,
             UI_PROTOCOL_FEATURE_CONTEXT_SEMANTIC_CACHE_V1,
@@ -1462,15 +1266,11 @@ impl UiProtocolCapabilities {
     /// server does not advertise capabilities it cannot honour.
     ///
     /// Method-level capability gates honour the same intersection: methods
-    /// that spec § 7 marks as capability-gated (e.g. `task/list`,
-    /// `task/cancel`, `task/restart_from_node` behind
-    /// `harness.task_control.v1`) appear in `supported_methods` only when
-    /// the gating feature is in the negotiated set. The spec contract is
-    /// "servers expose it only when the feature flag is advertised", so
-    /// the advertised method set must agree with the advertised feature
-    /// set — otherwise a client that did not negotiate `harness.task_control.v1`
-    /// would still see the methods in the response and make calls the
-    /// server would then reject with `method_not_supported`.
+    /// that spec § 7 marks as capability-gated appear in
+    /// `supported_methods` only when the gating feature is in the negotiated
+    /// set. The spec contract is "servers expose it only when the feature
+    /// flag is advertised", so the advertised method set must agree with the
+    /// advertised feature set.
     pub fn for_negotiated_features<I, S>(requested: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -1554,12 +1354,7 @@ impl UiProtocolCapabilities {
 }
 
 fn is_autonomy_optional_feature(feature: &str) -> bool {
-    matches!(
-        feature,
-        UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1
-            | UI_PROTOCOL_FEATURE_CODING_LOOP_RUNTIME_V1
-            | UI_PROTOCOL_FEATURE_CODING_MONITOR_RUNTIME_V1
-    )
+    matches!(feature, UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1)
 }
 
 /// Result of comparing a server's advertised [`UiProtocolCapabilities`] against
@@ -1703,11 +1498,6 @@ pub enum UiResultKind {
     ApprovalScopesList,
     PermissionProfileList,
     PermissionProfileSet,
-    DiffPreviewGet,
-    TaskList,
-    TaskCancel,
-    TaskRestartFromNode,
-    TaskOutputRead,
     SessionHydrate,
     SessionRollback,
     SessionFork,
@@ -1727,11 +1517,6 @@ pub fn first_server_result_kind_for_method(method: &str) -> Option<UiResultKind>
         methods::APPROVAL_SCOPES_LIST => Some(UiResultKind::ApprovalScopesList),
         methods::PERMISSION_PROFILE_LIST => Some(UiResultKind::PermissionProfileList),
         methods::PERMISSION_PROFILE_SET => Some(UiResultKind::PermissionProfileSet),
-        methods::DIFF_PREVIEW_GET => Some(UiResultKind::DiffPreviewGet),
-        methods::TASK_LIST => Some(UiResultKind::TaskList),
-        methods::TASK_CANCEL => Some(UiResultKind::TaskCancel),
-        methods::TASK_RESTART_FROM_NODE => Some(UiResultKind::TaskRestartFromNode),
-        methods::TASK_OUTPUT_READ => Some(UiResultKind::TaskOutputRead),
         methods::SESSION_HYDRATE => Some(UiResultKind::SessionHydrate),
         methods::SESSION_ROLLBACK => Some(UiResultKind::SessionRollback),
         methods::SESSION_FORK => Some(UiResultKind::SessionFork),
@@ -2243,161 +2028,6 @@ pub struct ProfileLocalCreateResult {
     pub runtime_mode: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct DiffPreviewGetParams {
-    pub session_id: SessionKey,
-    pub preview_id: PreviewId,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TaskOutputReadParams {
-    pub session_id: SessionKey,
-    pub task_id: TaskId,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<OutputCursor>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub limit_bytes: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TaskListParams {
-    pub session_id: SessionKey,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub topic: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TaskCancelParams {
-    pub task_id: TaskId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<SessionKey>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TaskRestartFromNodeParams {
-    pub task_id: TaskId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub node_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<SessionKey>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TaskListResult {
-    pub session_id: SessionKey,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub topic: Option<String>,
-    #[serde(default)]
-    pub tasks: Vec<TaskListEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TaskListEntry {
-    pub id: TaskId,
-    pub tool_name: String,
-    pub tool_call_id: String,
-    pub state: TaskRuntimeState,
-    pub status: String,
-    pub lifecycle_state: String,
-    pub runtime_state: String,
-    /// #966 / M13-B — origin of this child task. One of `"model"` (the
-    /// LLM scheduled it via spawn_agent / spawn / delegate), `"supervisor"`
-    /// (a backend supervisor created it, e.g. review/start), or `"user"`
-    /// (explicit user-driven schedule, rare). Lets clients tell apart
-    /// LLM-owned children from user-initiated tasks without parsing
-    /// free-form fields.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
-    /// #966 / M13-B — role label assigned at spawn (e.g.
-    /// `"reviewer"`, `"implementer"`, `"test_worker"`, `"explorer"`).
-    /// Pairs with the M14-C role templates and lets the UX render
-    /// "Reviewer running" instead of "task-xxx running".
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub role: Option<String>,
-    /// #966 / M13-B — bounded summary capsule for the task (mirrors
-    /// `ChildResultSummary.summary` for terminal children). Short text
-    /// that clients can render inline without fetching the full
-    /// artifact list.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub summary: Option<String>,
-    /// #966 / M13-B — number of artifacts the child has emitted so
-    /// far. Lets the UX badge tasks with their artifact count without
-    /// resolving `task/artifact/list`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub artifact_count: Option<u32>,
-    /// #966 / M13-B — runtime policy stamp captured at spawn time
-    /// (model, sandbox, approval policy, …). Lets reconnect hydration
-    /// surface the same effective state the original task/updated
-    /// notifications announced.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime_policy_stamp: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_session_key: Option<SessionKey>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub child_session_key: Option<SessionKey>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub child_terminal_state: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub child_join_state: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub child_joined_at: Option<DateTime<Utc>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub child_failure_action: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime_detail: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workflow_kind: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub current_phase: Option<String>,
-    pub started_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub completed_at: Option<DateTime<Utc>>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub output_files: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_key: Option<SessionKey>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TaskCancelResult {
-    pub task_id: TaskId,
-    pub status: TaskRuntimeState,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TaskRestartFromNodeResult {
-    pub original_task_id: TaskId,
-    pub new_task_id: TaskId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub from_node: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DiffPreviewGetStatus {
-    Ready,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DiffPreviewSource {
-    PendingStore,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DiffPreviewGetResult {
-    pub status: DiffPreviewGetStatus,
-    pub source: DiffPreviewSource,
-    pub preview: DiffPreview,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiffPreview {
     pub session_id: SessionKey,
@@ -2482,48 +2112,6 @@ pub enum DiffPreviewLineKind {
     Context,
     Added,
     Removed,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TaskOutputReadSource {
-    RuntimeProjection,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TaskOutputReadLimitation {
-    pub code: String,
-    pub message: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TaskOutputReadResult {
-    pub session_id: SessionKey,
-    pub task_id: TaskId,
-    pub source: TaskOutputReadSource,
-    pub cursor: OutputCursor,
-    pub next_cursor: OutputCursor,
-    pub text: String,
-    pub bytes_read: u64,
-    pub total_bytes: u64,
-    pub truncated: bool,
-    pub complete: bool,
-    pub live_tail_supported: bool,
-    /// True when this read came from snapshot projection rather than a live
-    /// disk-routed output stream. Clients should treat the cursor returned
-    /// alongside `is_snapshot_projection: true` as advisory: a fresh read may
-    /// produce a different snapshot, since the underlying data is the latest
-    /// task ledger entry rather than a position in a monotonic byte stream.
-    /// Governed by accepted `UPCR-2026-006` (audit issue #707, M9 req 7).
-    pub is_snapshot_projection: bool,
-    pub task_status: String,
-    pub runtime_state: String,
-    pub lifecycle_state: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub runtime_detail: Option<Value>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub output_files: Vec<String>,
-    pub limitations: Vec<TaskOutputReadLimitation>,
 }
 
 // ----- UPCR-2026-009 `session/hydrate` -----
@@ -2829,46 +2417,6 @@ pub struct TurnStateGetResult {
     pub committed_seqs: Vec<u64>,
 }
 
-// ----- M12 Phase D-1 auxiliary REST → WS frames -----
-//
-// Each pair below mirrors a REST endpoint listed in the ADR's inventory
-// table (`docs/adr/m12-phase-d-auxiliary-rest-to-ws.md`). Result payloads
-// are typed as opaque [`Value`] containers so the WS dispatchers can
-// forward the existing REST handler's JSON body byte-for-byte without
-// duplicating the REST DTO shapes (`SessionInfo`, `MessageInfo`,
-// `SessionFileInfo`, `BackgroundTaskInfo`, `WorkspaceContractStatus`,
-// `StatusResponse`, `ContentEntry`) into the protocol crate. The shapes
-// are unchanged from the REST contract — only the transport flips.
-
-/// Params for `session/list`.
-///
-/// Historically an empty request (`{}`). The optional `cwd` field is an
-/// **additive** extension for per-project session storage
-/// (`appui.sessions_in_cwd`): when a client supplies it (and has negotiated
-/// [`UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1`]), a server with the flag
-/// enabled lists the sessions stored under `<cwd>/.octos` instead of the
-/// per-profile global store. It is `#[serde(default, skip_serializing_if =
-/// "Option::is_none")]` so old clients that send `{}` still deserialize
-/// (→ `cwd: None` → legacy global listing) and the wire shape of a
-/// no-cwd request is byte-identical to the historical empty object.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionListParams {
-    /// Optional project working directory. When present, honored by a
-    /// server with `appui.sessions_in_cwd` enabled to scope the listing to
-    /// that project's `<cwd>/.octos` session store. Absent → legacy
-    /// per-profile/global listing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-}
-
-/// Result for `session/list`. `sessions` is the JSON array the existing
-/// `GET /api/sessions` handler emits (one `SessionInfo` per entry, per
-/// `crates/octos-cli/src/api/handlers.rs:508`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SessionListResult {
-    pub sessions: Value,
-}
-
 /// Params for `launch/resolve` — the pre-session launch probe. Given the
 /// project `cwd` and the optionally requested profile, the server decides
 /// whether to resume the folder's conversation, activate a new one, or surface
@@ -2914,164 +2462,6 @@ pub struct LaunchResolveResult {
     /// present (and non-empty) only for [`LaunchDecisionKind::CrossProfile`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub existing_profiles: Vec<String>,
-}
-
-/// Params for `session/snapshot` — combined bootstrap fetch.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionSnapshotParams {
-    pub session_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub topic: Option<String>,
-}
-
-/// Result for `session/snapshot`. Each field is the JSON body the
-/// corresponding REST endpoint returns today (status / files / tasks).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SessionSnapshotResult {
-    pub status: Value,
-    pub files: Value,
-    pub tasks: Value,
-}
-
-/// Params for `session/messages_page` — paginated history fetch.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionMessagesPageParams {
-    pub session_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub limit: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub offset: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub since_seq: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub topic: Option<String>,
-}
-
-/// Default page size when `SessionMessagesPageParams::limit` is omitted.
-pub const SESSION_MESSAGES_PAGE_DEFAULT_LIMIT: usize = 100;
-/// Server-side clamp on `SessionMessagesPageParams::limit`. Matches the
-/// existing REST handler's `.min(500)` clamp at
-/// `crates/octos-cli/src/api/handlers.rs:685`.
-pub const SESSION_MESSAGES_PAGE_MAX_LIMIT: usize = 500;
-/// Server-side clamp on `SessionMessagesPageParams::offset`. Matches the
-/// existing REST handler's `.min(10_000)` clamp.
-pub const SESSION_MESSAGES_PAGE_MAX_OFFSET: usize = 10_000;
-
-/// Result for `session/messages_page`. `messages` mirrors the REST shape
-/// (`Vec<MessageInfo>`). `has_more` / `next_offset` are set by the
-/// dispatcher based on `messages.len() == limit`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SessionMessagesPageResult {
-    pub messages: Value,
-    pub has_more: bool,
-    pub next_offset: usize,
-}
-
-/// Params for `session/status.get` — status-pill poller.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionStatusGetParams {
-    pub session_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub topic: Option<String>,
-}
-
-/// Result for `session/status.get`. Mirrors the JSON body of
-/// `GET /api/sessions/{id}/status` (`{ active, has_deferred_files,
-/// has_bg_tasks }`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SessionStatusGetResult {
-    pub status: Value,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context_state: Option<UiContextState>,
-}
-
-/// Params for `session/files.list`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionFilesListParams {
-    pub session_id: String,
-}
-
-/// Result for `session/files.list`. `files` matches
-/// `Vec<SessionFileInfo>` as emitted by `GET /api/sessions/{id}/files`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SessionFilesListResult {
-    pub files: Value,
-}
-
-/// Params for `session/tasks.list`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionTasksListParams {
-    pub session_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub topic: Option<String>,
-}
-
-/// Result for `session/tasks.list`. `tasks` matches the JSON body of
-/// `GET /api/sessions/{id}/tasks` (a `BackgroundTaskInfo` array proxied
-/// from the gateway; empty in standalone mode).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SessionTasksListResult {
-    pub tasks: Value,
-}
-
-/// Params for `session/workspace.get`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionWorkspaceGetParams {
-    pub session_id: String,
-}
-
-/// Result for `session/workspace.get`. `contracts` matches
-/// `Vec<WorkspaceContractStatus>` as emitted by
-/// `GET /api/sessions/{id}/workspace-contract`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SessionWorkspaceGetResult {
-    pub contracts: Value,
-}
-
-/// Params for `session/title.set`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionTitleSetParams {
-    pub session_id: String,
-    pub title: String,
-}
-
-/// Result for `session/title.set`. Echoes the resolved `session_id` and
-/// title so the SPA can roundtrip the rename in a single response (the
-/// REST `PATCH /api/sessions/{id}/title` returned `204 No Content`; the
-/// WS shape lifts the title into the response body for echo-correctness).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionTitleSetResult {
-    pub session_id: String,
-    pub title: String,
-}
-
-/// Server-side clamp on `SessionTitleSetParams::title` character count.
-/// Matches the existing REST handler's character cap at
-/// `crates/octos-cli/src/api/handlers.rs:1162`.
-pub const SESSION_TITLE_SET_MAX_CHARS: usize = 200;
-
-/// Params for `session/delete`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionDeleteParams {
-    pub session_id: String,
-}
-
-/// Result for `session/delete`. Empty (the REST `DELETE` returns
-/// `204 No Content`; on WS we send an empty object for consistency with
-/// other void RPCs).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionDeleteResult {}
-
-/// Params for `system/status.get`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SystemStatusGetParams {}
-
-/// Result for `system/status.get`. `status` is the JSON body of the
-/// existing `GET /api/status` handler (`StatusResponse` —
-/// `crates/octos-cli/src/api/handlers.rs:2592`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SystemStatusGetResult {
-    pub status: Value,
 }
 
 // ----- M10 Phase 1 `turn/spawn_complete` -----
@@ -3664,28 +3054,12 @@ pub enum UiCommand {
     UserQuestionRespond(UserQuestionRespondParams),
     PermissionProfileList(PermissionProfileListParams),
     PermissionProfileSet(PermissionProfileSetParams),
-    DiffPreviewGet(DiffPreviewGetParams),
-    TaskList(TaskListParams),
-    TaskCancel(TaskCancelParams),
-    TaskRestartFromNode(TaskRestartFromNodeParams),
-    TaskOutputRead(TaskOutputReadParams),
     SessionHydrate(SessionHydrateParams),
     SessionRollback(SessionRollbackParams),
     SessionFork(SessionForkParams),
     ThreadGraphGet(ThreadGraphGetParams),
     TurnStateGet(TurnStateGetParams),
     SessionBtw(SessionBtwParams),
-    // ---- M12 Phase D-1 auxiliary REST → WS frames ----
-    SessionList(SessionListParams),
-    SessionSnapshot(SessionSnapshotParams),
-    SessionMessagesPage(SessionMessagesPageParams),
-    SessionStatusGet(SessionStatusGetParams),
-    SessionFilesList(SessionFilesListParams),
-    SessionTasksList(SessionTasksListParams),
-    SessionWorkspaceGet(SessionWorkspaceGetParams),
-    SessionTitleSet(SessionTitleSetParams),
-    SessionDelete(SessionDeleteParams),
-    SystemStatusGet(SystemStatusGetParams),
     // ---- Wave4-A: adaptive router controls ----
     // ---- launch/resolve: pre-session launch probe ----
     LaunchResolve(LaunchResolveParams),
@@ -3703,27 +3077,14 @@ impl UiCommand {
             Self::UserQuestionRespond(_) => methods::USER_QUESTION_RESPOND,
             Self::PermissionProfileList(_) => methods::PERMISSION_PROFILE_LIST,
             Self::PermissionProfileSet(_) => methods::PERMISSION_PROFILE_SET,
-            Self::DiffPreviewGet(_) => methods::DIFF_PREVIEW_GET,
-            Self::TaskList(_) => methods::TASK_LIST,
-            Self::TaskCancel(_) => methods::TASK_CANCEL,
-            Self::TaskRestartFromNode(_) => methods::TASK_RESTART_FROM_NODE,
-            Self::TaskOutputRead(_) => methods::TASK_OUTPUT_READ,
+
             Self::SessionHydrate(_) => methods::SESSION_HYDRATE,
             Self::SessionRollback(_) => methods::SESSION_ROLLBACK,
             Self::SessionFork(_) => methods::SESSION_FORK,
             Self::ThreadGraphGet(_) => methods::THREAD_GRAPH_GET,
             Self::TurnStateGet(_) => methods::TURN_STATE_GET,
             Self::SessionBtw(_) => methods::SESSION_BTW,
-            Self::SessionList(_) => methods::SESSION_LIST,
-            Self::SessionSnapshot(_) => methods::SESSION_SNAPSHOT,
-            Self::SessionMessagesPage(_) => methods::SESSION_MESSAGES_PAGE,
-            Self::SessionStatusGet(_) => methods::SESSION_STATUS_GET,
-            Self::SessionFilesList(_) => methods::SESSION_FILES_LIST,
-            Self::SessionTasksList(_) => methods::SESSION_TASKS_LIST,
-            Self::SessionWorkspaceGet(_) => methods::SESSION_WORKSPACE_GET,
-            Self::SessionTitleSet(_) => methods::SESSION_TITLE_SET,
-            Self::SessionDelete(_) => methods::SESSION_DELETE,
-            Self::SystemStatusGet(_) => methods::SYSTEM_STATUS_GET,
+
             Self::LaunchResolve(_) => methods::LAUNCH_RESOLVE,
         }
     }
@@ -3743,27 +3104,14 @@ impl UiCommand {
             Self::UserQuestionRespond(params) => serde_json::to_value(params),
             Self::PermissionProfileList(params) => serde_json::to_value(params),
             Self::PermissionProfileSet(params) => serde_json::to_value(params),
-            Self::DiffPreviewGet(params) => serde_json::to_value(params),
-            Self::TaskList(params) => serde_json::to_value(params),
-            Self::TaskCancel(params) => serde_json::to_value(params),
-            Self::TaskRestartFromNode(params) => serde_json::to_value(params),
-            Self::TaskOutputRead(params) => serde_json::to_value(params),
+
             Self::SessionHydrate(params) => serde_json::to_value(params),
             Self::SessionRollback(params) => serde_json::to_value(params),
             Self::SessionFork(params) => serde_json::to_value(params),
             Self::ThreadGraphGet(params) => serde_json::to_value(params),
             Self::TurnStateGet(params) => serde_json::to_value(params),
             Self::SessionBtw(params) => serde_json::to_value(params),
-            Self::SessionList(params) => serde_json::to_value(params),
-            Self::SessionSnapshot(params) => serde_json::to_value(params),
-            Self::SessionMessagesPage(params) => serde_json::to_value(params),
-            Self::SessionStatusGet(params) => serde_json::to_value(params),
-            Self::SessionFilesList(params) => serde_json::to_value(params),
-            Self::SessionTasksList(params) => serde_json::to_value(params),
-            Self::SessionWorkspaceGet(params) => serde_json::to_value(params),
-            Self::SessionTitleSet(params) => serde_json::to_value(params),
-            Self::SessionDelete(params) => serde_json::to_value(params),
-            Self::SystemStatusGet(params) => serde_json::to_value(params),
+
             Self::LaunchResolve(params) => serde_json::to_value(params),
         }?;
 
@@ -3803,59 +3151,16 @@ impl UiCommand {
             methods::PERMISSION_PROFILE_SET => {
                 Ok(Self::PermissionProfileSet(decode_params(method, params)?))
             }
-            methods::DIFF_PREVIEW_GET => Ok(Self::DiffPreviewGet(decode_params(method, params)?)),
-            methods::TASK_LIST => Ok(Self::TaskList(decode_params(method, params)?)),
-            methods::TASK_CANCEL => Ok(Self::TaskCancel(decode_params(method, params)?)),
-            methods::TASK_RESTART_FROM_NODE => {
-                Ok(Self::TaskRestartFromNode(decode_params(method, params)?))
-            }
-            methods::TASK_OUTPUT_READ => Ok(Self::TaskOutputRead(decode_params(method, params)?)),
             methods::SESSION_HYDRATE => Ok(Self::SessionHydrate(decode_params(method, params)?)),
             methods::SESSION_ROLLBACK => Ok(Self::SessionRollback(decode_params(method, params)?)),
             methods::SESSION_FORK => Ok(Self::SessionFork(decode_params(method, params)?)),
             methods::THREAD_GRAPH_GET => Ok(Self::ThreadGraphGet(decode_params(method, params)?)),
             methods::TURN_STATE_GET => Ok(Self::TurnStateGet(decode_params(method, params)?)),
             methods::SESSION_BTW => Ok(Self::SessionBtw(decode_params(method, params)?)),
-            methods::SESSION_LIST => Ok(Self::SessionList(decode_optional_params(method, params)?)),
             methods::LAUNCH_RESOLVE => Ok(Self::LaunchResolve(decode_params(method, params)?)),
-            methods::SESSION_SNAPSHOT => Ok(Self::SessionSnapshot(decode_params(method, params)?)),
-            methods::SESSION_MESSAGES_PAGE => {
-                Ok(Self::SessionMessagesPage(decode_params(method, params)?))
-            }
-            methods::SESSION_STATUS_GET => {
-                Ok(Self::SessionStatusGet(decode_params(method, params)?))
-            }
-            methods::SESSION_FILES_LIST => {
-                Ok(Self::SessionFilesList(decode_params(method, params)?))
-            }
-            methods::SESSION_TASKS_LIST => {
-                Ok(Self::SessionTasksList(decode_params(method, params)?))
-            }
-            methods::SESSION_WORKSPACE_GET => {
-                Ok(Self::SessionWorkspaceGet(decode_params(method, params)?))
-            }
-            methods::SESSION_TITLE_SET => Ok(Self::SessionTitleSet(decode_params(method, params)?)),
-            methods::SESSION_DELETE => Ok(Self::SessionDelete(decode_params(method, params)?)),
-            methods::SYSTEM_STATUS_GET => Ok(Self::SystemStatusGet(decode_optional_params(
-                method, params,
-            )?)),
             _ => Err(RpcError::method_not_found(method)),
         }
     }
-}
-
-/// Decode params that may be omitted entirely on the wire (i.e. the
-/// param object is `{}` or absent). Used for empty-request methods like
-/// `session/list` and `system/status.get` where the params struct has no
-/// required fields.
-fn decode_optional_params<T: DeserializeOwned + Default>(
-    method: &str,
-    params: Value,
-) -> Result<T, RpcError> {
-    if params.is_null() {
-        return Ok(T::default());
-    }
-    decode_params(method, params)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -4141,11 +3446,6 @@ pub enum UiRpcResult {
     ApprovalScopesList(ApprovalScopesListResult),
     PermissionProfileList(PermissionProfileListResult),
     PermissionProfileSet(PermissionProfileSetResult),
-    DiffPreviewGet(DiffPreviewGetResult),
-    TaskList(TaskListResult),
-    TaskCancel(TaskCancelResult),
-    TaskRestartFromNode(TaskRestartFromNodeResult),
-    TaskOutputRead(TaskOutputReadResult),
     SessionHydrate(SessionHydrateResult),
     SessionRollback(SessionRollbackResult),
     SessionFork(SessionForkResult),
@@ -4166,11 +3466,6 @@ impl UiRpcResult {
             Self::ApprovalScopesList(_) => UiResultKind::ApprovalScopesList,
             Self::PermissionProfileList(_) => UiResultKind::PermissionProfileList,
             Self::PermissionProfileSet(_) => UiResultKind::PermissionProfileSet,
-            Self::DiffPreviewGet(_) => UiResultKind::DiffPreviewGet,
-            Self::TaskList(_) => UiResultKind::TaskList,
-            Self::TaskCancel(_) => UiResultKind::TaskCancel,
-            Self::TaskRestartFromNode(_) => UiResultKind::TaskRestartFromNode,
-            Self::TaskOutputRead(_) => UiResultKind::TaskOutputRead,
             Self::SessionHydrate(_) => UiResultKind::SessionHydrate,
             Self::SessionRollback(_) => UiResultKind::SessionRollback,
             Self::SessionFork(_) => UiResultKind::SessionFork,
@@ -4191,11 +3486,6 @@ impl UiRpcResult {
             Self::ApprovalScopesList(_) => Some(methods::APPROVAL_SCOPES_LIST),
             Self::PermissionProfileList(_) => Some(methods::PERMISSION_PROFILE_LIST),
             Self::PermissionProfileSet(_) => Some(methods::PERMISSION_PROFILE_SET),
-            Self::DiffPreviewGet(_) => Some(methods::DIFF_PREVIEW_GET),
-            Self::TaskList(_) => Some(methods::TASK_LIST),
-            Self::TaskCancel(_) => Some(methods::TASK_CANCEL),
-            Self::TaskRestartFromNode(_) => Some(methods::TASK_RESTART_FROM_NODE),
-            Self::TaskOutputRead(_) => Some(methods::TASK_OUTPUT_READ),
             Self::SessionHydrate(_) => Some(methods::SESSION_HYDRATE),
             Self::SessionRollback(_) => Some(methods::SESSION_ROLLBACK),
             Self::SessionFork(_) => Some(methods::SESSION_FORK),
@@ -4216,11 +3506,6 @@ impl UiRpcResult {
             Self::ApprovalScopesList(result) => serde_json::to_value(result),
             Self::PermissionProfileList(result) => serde_json::to_value(result),
             Self::PermissionProfileSet(result) => serde_json::to_value(result),
-            Self::DiffPreviewGet(result) => serde_json::to_value(result),
-            Self::TaskList(result) => serde_json::to_value(result),
-            Self::TaskCancel(result) => serde_json::to_value(result),
-            Self::TaskRestartFromNode(result) => serde_json::to_value(result),
-            Self::TaskOutputRead(result) => serde_json::to_value(result),
             Self::SessionHydrate(result) => serde_json::to_value(result),
             Self::SessionRollback(result) => serde_json::to_value(result),
             Self::SessionFork(result) => serde_json::to_value(result),
@@ -4266,13 +3551,6 @@ impl UiRpcResult {
             methods::PERMISSION_PROFILE_SET => {
                 Ok(Self::PermissionProfileSet(decode_result(method, result)?))
             }
-            methods::DIFF_PREVIEW_GET => Ok(Self::DiffPreviewGet(decode_result(method, result)?)),
-            methods::TASK_LIST => Ok(Self::TaskList(decode_result(method, result)?)),
-            methods::TASK_CANCEL => Ok(Self::TaskCancel(decode_result(method, result)?)),
-            methods::TASK_RESTART_FROM_NODE => {
-                Ok(Self::TaskRestartFromNode(decode_result(method, result)?))
-            }
-            methods::TASK_OUTPUT_READ => Ok(Self::TaskOutputRead(decode_result(method, result)?)),
             methods::SESSION_HYDRATE => Ok(Self::SessionHydrate(decode_result(method, result)?)),
             methods::SESSION_ROLLBACK => Ok(Self::SessionRollback(decode_result(method, result)?)),
             methods::SESSION_FORK => Ok(Self::SessionFork(decode_result(method, result)?)),
@@ -5234,28 +4512,6 @@ pub struct UiAgentRecord {
     pub updated_at_ms: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AgentUpdatedEvent {
-    pub session_id: SessionKey,
-    pub agent: UiAgentRecord,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AgentOutputDeltaEvent {
-    pub session_id: SessionKey,
-    pub agent_id: String,
-    pub cursor: OutputCursor,
-    pub text: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AgentArtifactUpdatedEvent {
-    pub session_id: SessionKey,
-    pub agent_id: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub artifacts: Vec<UiAgentArtifact>,
-}
-
 /// M15 recurring loop snapshot.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UiLoopRecord {
@@ -5278,23 +4534,6 @@ pub struct UiLoopRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LoopUpdatedEvent {
-    pub session_id: SessionKey,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub loop_id: Option<String>,
-    #[serde(rename = "loop")]
-    pub loop_state: UiLoopRecord,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ok: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub deleted: Option<bool>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UiLoopFire {
     #[serde(default)]
     pub queued: bool,
@@ -5312,126 +4551,6 @@ pub struct UiLoopFire {
     pub message: Option<String>,
     #[serde(default, flatten, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, Value>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LoopFiredEvent {
-    pub session_id: SessionKey,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile_id: Option<String>,
-    pub loop_id: String,
-    #[serde(default, rename = "loop", skip_serializing_if = "Option::is_none")]
-    pub loop_state: Option<UiLoopRecord>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fire: Option<UiLoopFire>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ok: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LoopCompletedEvent {
-    pub session_id: SessionKey,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile_id: Option<String>,
-    pub loop_id: String,
-    #[serde(default, rename = "loop", skip_serializing_if = "Option::is_none")]
-    pub loop_state: Option<UiLoopRecord>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub completed_at_ms: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
-/// #1977 — one monitor's client-visible state, mirroring [`UiLoopRecord`].
-/// `argv` is the sandboxed probe command; `mode` is `"poll"` or `"stream"`;
-/// `status` is `active` / `paused` / `expired` / `deleted` with an optional
-/// `pause_reason` (e.g. `"flooded"`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct UiMonitorRecord {
-    pub monitor_id: String,
-    pub session_id: SessionKey,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile_id: Option<String>,
-    pub name: String,
-    pub argv: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub filter_regex: Option<String>,
-    pub mode: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub interval_seconds: Option<u64>,
-    pub batch_ms: u32,
-    pub max_events_per_hour: u32,
-    pub persistent: bool,
-    pub status: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pause_reason: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_fired_at_ms: Option<i64>,
-    pub fires_used: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expires_at_ms: Option<i64>,
-    pub created_at_ms: i64,
-    pub updated_at_ms: i64,
-}
-
-/// #1977 — monitor metadata changed (create / pause / resume / delete),
-/// mirroring [`LoopUpdatedEvent`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MonitorUpdatedEvent {
-    pub session_id: SessionKey,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub monitor_id: Option<String>,
-    #[serde(rename = "monitor")]
-    pub monitor_state: UiMonitorRecord,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ok: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub deleted: Option<bool>,
-}
-
-/// #1977 — a monitor's filtered event batch queued a master wake,
-/// mirroring [`LoopFiredEvent`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MonitorFiredEvent {
-    pub session_id: SessionKey,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile_id: Option<String>,
-    pub monitor_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    /// Number of filtered lines in the batch that queued this wake.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub line_count: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fired_at_ms: Option<i64>,
-}
-
-/// #1977 — a non-persistent monitor reached its timeout (or its stream
-/// process exited) and expired, mirroring [`LoopCompletedEvent`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MonitorExpiredEvent {
-    pub session_id: SessionKey,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile_id: Option<String>,
-    pub monitor_id: String,
-    #[serde(default, rename = "monitor", skip_serializing_if = "Option::is_none")]
-    pub monitor_state: Option<UiMonitorRecord>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expired_at_ms: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
 }
 
 /// M16 active model-visible context state exposed through AppUI lifecycle
@@ -5656,25 +4775,6 @@ pub struct FileAttachedEvent {
     pub mime: Option<String>,
 }
 
-/// Wave4-A — current send-queue depth observed by the client/server
-/// FIFO. `head_client_message_id` identifies the in-flight turn whose
-/// completion will release the next queued frame. `None` when the queue
-/// is empty (after the in-flight turn lands).
-///
-/// **Server emission status:** the queue itself is client-side today
-/// (`octos-web/src/runtime/ui-protocol-send.ts` per-session FIFO). The
-/// server never emits this variant — the web bridge manufactures it
-/// locally using the existing DOM event pattern so other clients can
-/// observe queue state uniformly. The variant is defined here so the
-/// type shape is identical across client implementations.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct QueueStateEvent {
-    pub session_id: SessionKey,
-    pub pending_count: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub head_client_message_id: Option<String>,
-}
-
 /// #2019 — one background event surfaced to the HUMAN.
 ///
 /// Background events (a monitor's filtered stdout line, a claimed fleet outbox
@@ -5764,34 +4864,6 @@ pub enum UiNotification {
     TurnSpawnComplete(TurnSpawnCompleteEvent),
     /// UPCR-2026-014 (M9-α-9): per-turn file attachment event.
     FileAttached(FileAttachedEvent),
-    /// Wave4-A: adaptive routing snapshot emitted on `turn/started` and
-    /// `turn/completed` so clients can render the routing pill / lane
-    /// debug view without polling.
-    /// Wave4-A: adaptive router crossed a lane (failover). The status
-    /// emitted at the next turn boundary will reflect the new lane, but
-    /// clients that want to surface the transition itself (toast, status
-    /// pill flash) subscribe to this notification.
-    /// Wave4-A: queue-state snapshot. Client-manufactured today — server
-    /// never emits this. See [`QueueStateEvent`] docs.
-    QueueState(QueueStateEvent),
-    /// UPCR-2026-021 M15: backend-owned agent lifecycle snapshot.
-    AgentUpdated(AgentUpdatedEvent),
-    /// UPCR-2026-021 M15: best-effort agent output tail delta.
-    AgentOutputDelta(AgentOutputDeltaEvent),
-    /// UPCR-2026-021 M15: agent artifact metadata changed.
-    AgentArtifactUpdated(AgentArtifactUpdatedEvent),
-    /// UPCR-2026-021 M15: recurring loop metadata changed.
-    LoopUpdated(LoopUpdatedEvent),
-    /// UPCR-2026-021 M15: loop fired and queued/attempted a continuation.
-    LoopFired(LoopFiredEvent),
-    /// UPCR-2026-021 M15: loop iteration reached a terminal result.
-    LoopCompleted(LoopCompletedEvent),
-    /// #1977: monitor metadata changed (create / pause / resume / delete).
-    MonitorUpdated(MonitorUpdatedEvent),
-    /// #1977: a monitor's filtered event batch queued a master wake.
-    MonitorFired(MonitorFiredEvent),
-    /// #1977: a non-persistent monitor expired.
-    MonitorExpired(MonitorExpiredEvent),
     /// M16: compact-context lifecycle event.
     ContextCompactionCompleted(ContextCompactionCompletedEvent),
     ContextCompactionStarted(ContextCompactionStartedEvent),
@@ -5857,16 +4929,6 @@ impl UiNotification {
             Self::ReplayLossy(_) => methods::REPLAY_LOSSY,
             Self::TurnSpawnComplete(_) => methods::TURN_SPAWN_COMPLETE,
             Self::FileAttached(_) => methods::FILE_ATTACHED,
-            Self::QueueState(_) => methods::QUEUE_STATE,
-            Self::AgentUpdated(_) => methods::AGENT_UPDATED,
-            Self::AgentOutputDelta(_) => methods::AGENT_OUTPUT_DELTA,
-            Self::AgentArtifactUpdated(_) => methods::AGENT_ARTIFACT_UPDATED,
-            Self::LoopUpdated(_) => methods::LOOP_UPDATED,
-            Self::LoopFired(_) => methods::LOOP_FIRED,
-            Self::LoopCompleted(_) => methods::LOOP_COMPLETED,
-            Self::MonitorUpdated(_) => methods::MONITOR_UPDATED,
-            Self::MonitorFired(_) => methods::MONITOR_FIRED,
-            Self::MonitorExpired(_) => methods::MONITOR_EXPIRED,
             Self::ContextCompactionCompleted(_) => methods::CONTEXT_COMPACTION_COMPLETED,
             Self::ContextCompactionStarted(_) => methods::CONTEXT_COMPACTION_STARTED,
             Self::ContextNormalizationReported(_) => methods::CONTEXT_NORMALIZATION_REPORTED,
@@ -5902,16 +4964,6 @@ impl UiNotification {
             Self::ReplayLossy(event) => &event.session_id,
             Self::TurnSpawnComplete(event) => &event.session_id,
             Self::FileAttached(event) => &event.session_id,
-            Self::QueueState(event) => &event.session_id,
-            Self::AgentUpdated(event) => &event.session_id,
-            Self::AgentOutputDelta(event) => &event.session_id,
-            Self::AgentArtifactUpdated(event) => &event.session_id,
-            Self::LoopUpdated(event) => &event.session_id,
-            Self::LoopFired(event) => &event.session_id,
-            Self::LoopCompleted(event) => &event.session_id,
-            Self::MonitorUpdated(event) => &event.session_id,
-            Self::MonitorFired(event) => &event.session_id,
-            Self::MonitorExpired(event) => &event.session_id,
             Self::ContextCompactionCompleted(event) => &event.session_id,
             Self::ContextCompactionStarted(event) => &event.session_id,
             Self::ContextNormalizationReported(event) => &event.session_id,
@@ -6034,16 +5086,6 @@ impl UiNotification {
             Self::ReplayLossy(params) => serde_json::to_value(params),
             Self::TurnSpawnComplete(params) => serde_json::to_value(params),
             Self::FileAttached(params) => serde_json::to_value(params),
-            Self::QueueState(params) => serde_json::to_value(params),
-            Self::AgentUpdated(params) => serde_json::to_value(params),
-            Self::AgentOutputDelta(params) => serde_json::to_value(params),
-            Self::AgentArtifactUpdated(params) => serde_json::to_value(params),
-            Self::LoopUpdated(params) => serde_json::to_value(params),
-            Self::LoopFired(params) => serde_json::to_value(params),
-            Self::LoopCompleted(params) => serde_json::to_value(params),
-            Self::MonitorUpdated(params) => serde_json::to_value(params),
-            Self::MonitorFired(params) => serde_json::to_value(params),
-            Self::MonitorExpired(params) => serde_json::to_value(params),
             Self::ContextCompactionCompleted(params) => serde_json::to_value(params),
             Self::ContextCompactionStarted(params) => serde_json::to_value(params),
             Self::ContextNormalizationReported(params) => serde_json::to_value(params),
@@ -6162,20 +5204,6 @@ impl UiNotification {
                 Ok(Self::TurnSpawnComplete(decode_params(method, params)?))
             }
             methods::FILE_ATTACHED => Ok(Self::FileAttached(decode_params(method, params)?)),
-            methods::QUEUE_STATE => Ok(Self::QueueState(decode_params(method, params)?)),
-            methods::AGENT_UPDATED => Ok(Self::AgentUpdated(decode_params(method, params)?)),
-            methods::AGENT_OUTPUT_DELTA => {
-                Ok(Self::AgentOutputDelta(decode_params(method, params)?))
-            }
-            methods::AGENT_ARTIFACT_UPDATED => {
-                Ok(Self::AgentArtifactUpdated(decode_params(method, params)?))
-            }
-            methods::LOOP_UPDATED => Ok(Self::LoopUpdated(decode_params(method, params)?)),
-            methods::LOOP_FIRED => Ok(Self::LoopFired(decode_params(method, params)?)),
-            methods::LOOP_COMPLETED => Ok(Self::LoopCompleted(decode_params(method, params)?)),
-            methods::MONITOR_UPDATED => Ok(Self::MonitorUpdated(decode_params(method, params)?)),
-            methods::MONITOR_FIRED => Ok(Self::MonitorFired(decode_params(method, params)?)),
-            methods::MONITOR_EXPIRED => Ok(Self::MonitorExpired(decode_params(method, params)?)),
             methods::CONTEXT_COMPACTION_STARTED => Ok(Self::ContextCompactionStarted(
                 decode_params(method, params)?,
             )),

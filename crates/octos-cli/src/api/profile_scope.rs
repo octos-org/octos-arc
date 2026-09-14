@@ -1,48 +1,9 @@
-//! Profile-scoping + authorization primitives shared by the stdio OUP
-//! transport and the local-trust HTTP surface. The OTP/user-account login
-//! machinery was removed with the multi-tenant dashboard; authorization is
-//! local-trust (all local callers are admin-equivalent).
+//! Profile-scoping helpers shared by the stdio OUP transport. The
+//! local-trust HTTP surface, OTP/user-account login machinery and the
+//! multi-tenant dashboard were removed; authorization is local-trust
+//! (all local callers are admin-equivalent).
 
 use std::collections::HashMap;
-
-use super::AppState;
-use super::router::AuthIdentity;
-
-pub const ADMIN_PROFILE_ID: &str = "admin";
-
-/// Return `true` iff the authenticated identity is allowed to act as the
-/// given profile id for `/api/my/*` endpoints.
-///
-/// Authorization rules:
-/// - Admin token can act as any profile.
-/// - A scoped user identity can act as its own profile.
-/// - A user (top-level account) can also act as any sub-account they own
-///   (ownership comes from the profile store's `parent_id`, not any user
-///   registry — the multi-tenant user system was removed).
-/// - Everyone else is denied (returns `false`).
-pub(crate) fn is_authorized_for_profile(
-    state: &AppState,
-    identity: &AuthIdentity,
-    profile_id: &str,
-) -> bool {
-    match identity {
-        AuthIdentity::Admin => true,
-
-        AuthIdentity::User { id } => {
-            if id == profile_id {
-                return true;
-            }
-            // Allow a top-level user to act as any of their sub-accounts.
-            let Some(store) = state.profile_store.as_ref() else {
-                return false;
-            };
-            match store.get(profile_id) {
-                Ok(Some(profile)) => profile.parent_id.as_deref() == Some(id.as_str()),
-                _ => false,
-            }
-        }
-    }
-}
 
 pub(crate) fn relocate_secret_to_keychain(
     env_vars: &mut HashMap<String, String>,

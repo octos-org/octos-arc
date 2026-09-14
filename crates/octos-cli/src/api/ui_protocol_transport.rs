@@ -11,13 +11,7 @@ use std::{
     time::Duration,
 };
 
-use axum::Extension;
-use axum::extract::State;
-use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
-use axum::http::{HeaderMap, Uri};
-use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
-use futures::{SinkExt, StreamExt};
 use octos_agent::{
     Agent, BackgroundResultKind, BackgroundResultPayload, PromptContextManager, PromptContextPhase,
     PromptContextReport, PromptContextRequest, ToolApprovalDecision, ToolApprovalRequest,
@@ -25,44 +19,36 @@ use octos_agent::{
 };
 use octos_core::app_ui_codec::{self, AppUiFrame, MAX_TEXT_FRAME_BYTES};
 use octos_core::ui_protocol::{
-    AgentOutputDeltaEvent, AgentUpdatedEvent, ApprovalAutoResolvedEvent, ApprovalCancelledEvent,
-    ApprovalCommandDetails, ApprovalDecidedEvent, ApprovalDecision, ApprovalId,
-    ApprovalRenderHints, ApprovalRequestedEvent, ApprovalTypedDetails, AttachmentOwnerV2,
+    ApprovalAutoResolvedEvent, ApprovalCancelledEvent, ApprovalCommandDetails,
+    ApprovalDecidedEvent, ApprovalDecision, ApprovalId, ApprovalRenderHints,
+    ApprovalRequestedEvent, ApprovalTypedDetails, AttachmentOwnerV2,
     ContextCompactionCompletedEvent, ContextCompactionStartedEvent,
     ContextNormalizationReportedEvent, EnvelopeTokenUsage, EnvelopeV2, EnvelopeV2Notification,
     FileRef, HydratedMessage, HydratedTurn, InputItem, MessageDeltaEvent, MessageMeta,
     OutputCursor, Payload, PayloadV2, ReplayLossyEvent, RpcError, RpcErrorResponse, RpcRequest,
-    RpcResponse, SESSION_HYDRATE_INCLUDE_MAX, SESSION_MESSAGES_PAGE_DEFAULT_LIMIT,
-    SESSION_MESSAGES_PAGE_MAX_LIMIT, SESSION_MESSAGES_PAGE_MAX_OFFSET, SESSION_TITLE_SET_MAX_CHARS,
-    SessionBtwParams, SessionDeleteParams, SessionFilesListParams, SessionHydrateParams,
-    SessionHydrateResult, SessionListParams, SessionMessagesPageParams, SessionOpenParams,
-    SessionOpenResult, SessionOpened, SessionRollbackParams, SessionRollbackResult,
-    SessionSnapshotParams, SessionStatusGetParams, SessionTasksListParams, SessionTitleSetParams,
-    SessionWorkspaceGetParams, SystemStatusGetParams, TaskCancelParams, TaskCancelResult,
-    TaskListEntry, TaskListParams, TaskListResult, TaskOutputDeltaEvent, TaskRestartFromNodeParams,
-    TaskRestartFromNodeResult, TaskRuntimeState as UiTaskRuntimeState, ThreadGraphEntry,
+    RpcResponse, SESSION_HYDRATE_INCLUDE_MAX, SessionBtwParams, SessionHydrateParams,
+    SessionHydrateResult, SessionOpenParams, SessionOpenResult, SessionOpened,
+    SessionRollbackParams, SessionRollbackResult, TaskOutputDeltaEvent, ThreadGraphEntry,
     ThreadGraphGetParams, ThreadGraphGetResult, TurnCompletedEvent, TurnErrorEvent,
     TurnErrorPartialResult, TurnId, TurnInterruptParams, TurnInterruptResult, TurnLifecycleState,
     TurnSessionResult, TurnStartParams, TurnStateGetParams, TurnStateGetResult, TurnTerminalError,
     TurnTerminalOutcome, UI_PROTOCOL_FEATURE_APPROVAL_TYPED_V1,
-    UI_PROTOCOL_FEATURE_AUXILIARY_REST_TO_WS_V1, UI_PROTOCOL_FEATURE_BACKGROUND_ACTIVITY_V1,
-    UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1, UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1,
-    UI_PROTOCOL_FEATURE_CODING_LOOP_RUNTIME_V1, UI_PROTOCOL_FEATURE_CODING_MONITOR_RUNTIME_V1,
-    UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1, UI_PROTOCOL_FEATURE_CONTEXT_SEMANTIC_CACHE_V1,
-    UI_PROTOCOL_FEATURE_FILE_ATTACHED_V1, UI_PROTOCOL_FEATURE_HARNESS_TASK_CONTROL_V1,
+    UI_PROTOCOL_FEATURE_BACKGROUND_ACTIVITY_V1, UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1,
+    UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1, UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1,
+    UI_PROTOCOL_FEATURE_CONTEXT_SEMANTIC_CACHE_V1, UI_PROTOCOL_FEATURE_FILE_ATTACHED_V1,
     UI_PROTOCOL_FEATURE_PANE_SNAPSHOTS_V1, UI_PROTOCOL_FEATURE_PLAN_TODOS_V1,
     UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V1, UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2,
     UI_PROTOCOL_FEATURE_REVIEW_START_V1, UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1,
     UI_PROTOCOL_FEATURE_SESSION_SANDBOX_V1, UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1,
     UI_PROTOCOL_FEATURE_SPAWN_COMPLETE_V1, UI_PROTOCOL_FEATURE_THREAD_GRAPH_V1,
     UI_PROTOCOL_FEATURE_TURN_STATE_GET_V1, UI_PROTOCOL_FEATURE_TURN_STEER_DROPPED_V1,
-    UI_PROTOCOL_FEATURE_USER_QUESTION_V1, UiAgentRecord, UiArtifactPaneItem,
-    UiArtifactPaneSnapshot, UiCommand, UiContextCompactionRecord, UiContextNormalizationReport,
-    UiContextState, UiCursor, UiFileMutationNotice, UiGitHistoryItem, UiGitPaneSnapshot,
-    UiGitStatusItem, UiNotification, UiPaneSnapshot, UiPaneSnapshotLimitation,
-    UiProtocolCapabilities, UiRpcResult, UiWorkspacePaneEntry, UiWorkspacePaneSnapshot,
-    UnsupportedCapabilityReport, UserQuestionRequestedEvent, UserQuestionRespondParams,
-    approval_cancelled_reasons, approval_kinds, hydrate_sections, thread_status,
+    UI_PROTOCOL_FEATURE_USER_QUESTION_V1, UiArtifactPaneItem, UiArtifactPaneSnapshot, UiCommand,
+    UiContextCompactionRecord, UiContextNormalizationReport, UiContextState, UiCursor,
+    UiFileMutationNotice, UiGitHistoryItem, UiGitPaneSnapshot, UiGitStatusItem, UiNotification,
+    UiPaneSnapshot, UiPaneSnapshotLimitation, UiProtocolCapabilities, UiRpcResult,
+    UiWorkspacePaneEntry, UiWorkspacePaneSnapshot, UnsupportedCapabilityReport,
+    UserQuestionRequestedEvent, UserQuestionRespondParams, approval_cancelled_reasons,
+    approval_kinds, hydrate_sections, thread_status,
 };
 
 #[cfg(test)]
@@ -78,9 +64,30 @@ use tokio::sync::{Mutex as TokioMutex, mpsc, oneshot};
 use tokio::task::AbortHandle;
 use tracing::{Instrument, debug, info, warn};
 
+/// Wire-frame envelope (was `axum::extract::ws::Message`). The stdio writer
+/// treats `Text` as the only payload-bearing variant; `Close` preserves the
+/// close-code semantics for lifecycle/auth failures, and the control variants
+/// exist so legacy frame matches stay exhaustive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WsMessage {
+    Text(String),
+    Close(Option<CloseFrame>),
+}
+
+/// Payload of [`WsMessage::Close`] (was `axum::extract::ws::CloseFrame`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CloseFrame {
+    pub code: u16,
+    pub reason: std::sync::Arc<str>,
+}
+
+impl WsMessage {
+    pub(crate) fn text(text: impl Into<String>) -> Self {
+        WsMessage::Text(text.into())
+    }
+}
+
 use super::AppState;
-use super::metrics::MetricsReporter;
-use super::router::AuthIdentity;
 use super::ui_protocol_audit::log_decision_tracing;
 use super::ui_protocol_ledger::{
     ConnectionId, LedgerConfig, LedgeredUiProtocolEvent, UiProtocolLedger, UiProtocolLedgerEvent,
@@ -92,7 +99,6 @@ use super::ui_protocol_progress::{
 };
 use super::ui_protocol_sanitize::sanitize_display_path;
 use super::ui_protocol_scope::{ApprovalScopeKind, match_key_for};
-use super::ui_protocol_task_output;
 use super::ws_slash;
 // Phase 3 (goal-in-chat): the contract stores now live outside the `api` gate
 // so `octos chat --peers` shares the identical process-global registry.
@@ -134,7 +140,6 @@ const TERMINAL_TASK_SEND_TIMEOUT: std::time::Duration = std::time::Duration::fro
 /// current turn from replay. Disk log is now the source of truth, so
 /// this is the LRU hot-cache size, not the durable retention.
 const EVENT_LEDGER_RETAINED_PER_SESSION: usize = 4096;
-const UI_FEATURES_HEADER: &str = "x-octos-ui-features";
 /// Spec §10 `unknown_turn` (M9-FIX-02 wires this into `RpcError::unknown_turn`).
 /// Until that lands in the trunk this worktree is rebased on, we keep a local
 /// constant so the wire code stays correct. TODO: link to M9-FIX-02 once merged.
@@ -301,7 +306,6 @@ const APPUI_EXTRA_METHODS: &[&str] = &[
 ];
 const APPUI_STDIO_AUTH_BOUND_UNAVAILABLE_METHODS: &[&str] =
     &[APPUI_METHOD_AUTH_ME, APPUI_METHOD_AUTH_LOGOUT];
-type WsSink = futures::stream::SplitSink<WebSocket, WsMessage>;
 type SharedActiveTurns = Arc<tokio::sync::Mutex<HashMap<SessionKey, ActiveTurn>>>;
 #[derive(Clone)]
 struct ConnectionTurn {
@@ -765,70 +769,6 @@ impl WsConnection {
             }
         }
     }
-
-    /// Dedicated writer-task loop: drains the channel into the actual sink.
-    ///
-    /// Exits on the first sink error (peer gone) or once all senders drop.
-    /// We deliberately do not hold a lock across `sink.send().await` — the
-    /// channel is the lock-free coordination point.
-    pub(crate) async fn writer_loop(mut sink: WsSink, mut rx: mpsc::Receiver<WsMessage>) {
-        let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(20));
-        ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        // First tick fires immediately; skip it so we don't ship a heartbeat
-        // before any real frame.
-        ping_interval.tick().await;
-        loop {
-            tokio::select! {
-                maybe_msg = rx.recv() => {
-                    match maybe_msg {
-                        Some(msg) => {
-                            // Mirror the stdio transport's evidence recording:
-                            // capture every server->client frame into the AppUI
-                            // evidence transcript when M15 UX capture is active.
-                            // Without this the WebSocket evidence transcript only
-                            // held client->server requests, so soak verifiers that
-                            // require backend `task/updated` / `agent/updated`
-                            // notifications could never pass over WS. The append
-                            // is a no-op unless OCTOSCODE_M15_UX_OUTPUT_DIR is set.
-                            if let WsMessage::Text(text) = &msg {
-                                if let Ok(frame) = serde_json::from_str::<Value>(text.as_str()) {
-                                    append_appui_transcript_frame("server_to_client", frame);
-                                }
-                            }
-                            if sink.send(msg).await.is_err() {
-                                break;
-                            }
-                        }
-                        None => break,
-                    }
-                }
-                _ = ping_interval.tick() => {
-                    // Send a JSON-RPC notification as the keepalive instead of
-                    // a binary `Ping`. Codex review on the mini5 intermittent
-                    // disconnect (2026-05-13): browsers auto-Pong control
-                    // frames at the WebSocket layer — they never reach
-                    // JS-land `onmessage`. The SPA bridge tracks its own
-                    // 60 s idle timeout (`ui-protocol-bridge.ts:195`) that
-                    // only refreshes on text frames observed by the JS
-                    // handler. Binary Ping kept the TCP connection alive
-                    // for proxies but left the bridge timer starving, so
-                    // it tore the socket down after every minute of idle.
-                    // A text-frame heartbeat ticks both meters at once.
-                    let payload =
-                        "{\"jsonrpc\":\"2.0\",\"method\":\"server/heartbeat\",\"params\":{}}";
-                    if sink
-                        .send(WsMessage::Text(payload.into()))
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            }
-        }
-        // Best-effort close — ignore errors; peer may already be gone.
-        let _ = sink.close().await;
-    }
 }
 
 // `UiProtocolContractStores` + `contract_stores()` moved VERBATIM to the
@@ -1218,7 +1158,6 @@ struct ConnectionUiFeatures {
     pane_snapshots: bool,
     session_workspace_cwd: bool,
     session_sandbox: bool,
-    harness_task_control: bool,
     /// UPCR-2026-009 `state.session_hydrate.v1` negotiated.
     session_hydrate: bool,
     /// UPCR-2026-010 `state.thread_graph.v1` negotiated.
@@ -1263,32 +1202,11 @@ struct ConnectionUiFeatures {
     /// When set, the connection receives the cursor-stamped v2 projection
     /// wire shape and neither legacy nor v1 projection frames.
     projection_envelope_v2: bool,
-    /// M12 Phase D-1 `auxiliary.rest_to_ws.v1` negotiated. Unlocks the
-    /// thirteen auxiliary JSON-RPC methods (`session/list`,
-    /// `session/snapshot`, `session/messages_page`, `session/status.get`,
-    /// `session/files.list`, `session/tasks.list`,
-    /// `session/workspace.get`, `session/title.set`, `session/delete`,
-    /// `system/status.get`, `content/list`, `content/delete`,
-    /// `content/bulk_delete`) on the existing WS connection.
-    /// Capability-gated per ADR
-    /// `docs/adr/m12-phase-d-auxiliary-rest-to-ws.md`. REST endpoints
-    /// remain available for clients that do not negotiate this feature.
-    /// **Strict opt-in (codex review):** the gate fires for these methods
-    /// regardless of whether `header_present` is true, so a client that
-    /// sends no feature header at all still receives
-    /// `method_not_supported` and falls back to REST. This is what makes
-    /// Phase D-1 truly additive — pre-existing clients cannot trip into
-    /// the new methods without explicit negotiation.
-    auxiliary_rest_to_ws_v1: bool,
     /// UPCR-2026-021 M15 autonomy capability root. Optional agent and loop
     /// groups are honoured only when this base capability is negotiated too.
     coding_autonomy_v1: bool,
     /// UPCR-2026-021 M15 agent lifecycle inspection/control group.
     coding_agent_control_v1: bool,
-    /// UPCR-2026-021 M15 recurring loop runtime group.
-    coding_loop_runtime_v1: bool,
-    /// #1977 zero-token monitor runtime group.
-    coding_monitor_runtime_v1: bool,
     /// UPCR-2026-019 typed backend-owned product review workflow.
     review_start_v1: bool,
     /// M16 backend-owned context generation/checkpoint/compaction lifecycle.
@@ -1319,96 +1237,12 @@ struct ConnectionUiFeatures {
 }
 
 impl ConnectionUiFeatures {
-    fn from_headers_and_query(headers: &HeaderMap, query: Option<&str>) -> Self {
-        Self {
-            typed_approvals: has_ui_feature(headers, query, UI_PROTOCOL_FEATURE_APPROVAL_TYPED_V1),
-            pane_snapshots: has_ui_feature(headers, query, UI_PROTOCOL_FEATURE_PANE_SNAPSHOTS_V1),
-            session_workspace_cwd: has_ui_feature(
-                headers,
-                query,
-                UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1,
-            ),
-            session_sandbox: has_ui_feature(headers, query, UI_PROTOCOL_FEATURE_SESSION_SANDBOX_V1),
-            harness_task_control: has_ui_feature(
-                headers,
-                query,
-                UI_PROTOCOL_FEATURE_HARNESS_TASK_CONTROL_V1,
-            ),
-            session_hydrate: has_ui_feature(headers, query, UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1),
-            thread_graph: has_ui_feature(headers, query, UI_PROTOCOL_FEATURE_THREAD_GRAPH_V1),
-            turn_state_get: has_ui_feature(headers, query, UI_PROTOCOL_FEATURE_TURN_STATE_GET_V1),
-            spawn_complete: has_ui_feature(headers, query, UI_PROTOCOL_FEATURE_SPAWN_COMPLETE_V1),
-            file_attached: has_ui_feature(headers, query, UI_PROTOCOL_FEATURE_FILE_ATTACHED_V1),
-            plan_todos: has_ui_feature(headers, query, UI_PROTOCOL_FEATURE_PLAN_TODOS_V1),
-            background_activity: has_ui_feature(
-                headers,
-                query,
-                UI_PROTOCOL_FEATURE_BACKGROUND_ACTIVITY_V1,
-            ),
-            projection_envelope: has_ui_feature(
-                headers,
-                query,
-                UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V1,
-            ),
-            projection_envelope_v2: has_ui_feature(
-                headers,
-                query,
-                UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2,
-            ),
-            auxiliary_rest_to_ws_v1: has_ui_feature(
-                headers,
-                query,
-                UI_PROTOCOL_FEATURE_AUXILIARY_REST_TO_WS_V1,
-            ),
-            coding_autonomy_v1: has_ui_feature(
-                headers,
-                query,
-                UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1,
-            ),
-            coding_agent_control_v1: has_ui_feature(
-                headers,
-                query,
-                UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1,
-            ),
-            coding_loop_runtime_v1: has_ui_feature(
-                headers,
-                query,
-                UI_PROTOCOL_FEATURE_CODING_LOOP_RUNTIME_V1,
-            ),
-            coding_monitor_runtime_v1: has_ui_feature(
-                headers,
-                query,
-                UI_PROTOCOL_FEATURE_CODING_MONITOR_RUNTIME_V1,
-            ),
-            review_start_v1: has_ui_feature(headers, query, UI_PROTOCOL_FEATURE_REVIEW_START_V1),
-            context_lifecycle_v1: has_ui_feature(
-                headers,
-                query,
-                UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1,
-            ),
-            context_semantic_cache_v1: has_ui_feature(
-                headers,
-                query,
-                UI_PROTOCOL_FEATURE_CONTEXT_SEMANTIC_CACHE_V1,
-            ),
-            user_question_v1: has_ui_feature(headers, query, UI_PROTOCOL_FEATURE_USER_QUESTION_V1),
-            turn_steer_dropped_v1: has_ui_feature(
-                headers,
-                query,
-                UI_PROTOCOL_FEATURE_TURN_STEER_DROPPED_V1,
-            ),
-            header_present: has_any_ui_feature_token(headers, query),
-            stdio_transport: false,
-        }
-    }
-
     fn stdio_defaults() -> Self {
         Self {
             typed_approvals: true,
             pane_snapshots: true,
             session_workspace_cwd: true,
             session_sandbox: true,
-            harness_task_control: true,
             session_hydrate: true,
             thread_graph: true,
             turn_state_get: true,
@@ -1432,11 +1266,8 @@ impl ConnectionUiFeatures {
             // default-only change, not a capability removal.
             projection_envelope: false,
             projection_envelope_v2: false,
-            auxiliary_rest_to_ws_v1: true,
             coding_autonomy_v1: true,
             coding_agent_control_v1: true,
-            coding_loop_runtime_v1: true,
-            coding_monitor_runtime_v1: true,
             review_start_v1: true,
             context_lifecycle_v1: true,
             // Cache diagnostics are strictly opt-in. Stdio sends a server
@@ -1466,7 +1297,6 @@ impl ConnectionUiFeatures {
             pane_snapshots: has(UI_PROTOCOL_FEATURE_PANE_SNAPSHOTS_V1),
             session_workspace_cwd: has(UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1),
             session_sandbox: has(UI_PROTOCOL_FEATURE_SESSION_SANDBOX_V1),
-            harness_task_control: has(UI_PROTOCOL_FEATURE_HARNESS_TASK_CONTROL_V1),
             session_hydrate: has(UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1),
             thread_graph: has(UI_PROTOCOL_FEATURE_THREAD_GRAPH_V1),
             turn_state_get: has(UI_PROTOCOL_FEATURE_TURN_STATE_GET_V1),
@@ -1476,11 +1306,8 @@ impl ConnectionUiFeatures {
             background_activity: has(UI_PROTOCOL_FEATURE_BACKGROUND_ACTIVITY_V1),
             projection_envelope: has(UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V1),
             projection_envelope_v2: has(UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2),
-            auxiliary_rest_to_ws_v1: has(UI_PROTOCOL_FEATURE_AUXILIARY_REST_TO_WS_V1),
             coding_autonomy_v1: has(UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1),
             coding_agent_control_v1: has(UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1),
-            coding_loop_runtime_v1: has(UI_PROTOCOL_FEATURE_CODING_LOOP_RUNTIME_V1),
-            coding_monitor_runtime_v1: has(UI_PROTOCOL_FEATURE_CODING_MONITOR_RUNTIME_V1),
             review_start_v1: has(UI_PROTOCOL_FEATURE_REVIEW_START_V1),
             context_lifecycle_v1: has(UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1),
             context_semantic_cache_v1: has(UI_PROTOCOL_FEATURE_CONTEXT_SEMANTIC_CACHE_V1),
@@ -1521,9 +1348,6 @@ impl ConnectionUiFeatures {
         if self.session_sandbox {
             requested.push(UI_PROTOCOL_FEATURE_SESSION_SANDBOX_V1);
         }
-        if self.harness_task_control {
-            requested.push(UI_PROTOCOL_FEATURE_HARNESS_TASK_CONTROL_V1);
-        }
         if self.session_hydrate {
             requested.push(UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1);
         }
@@ -1551,19 +1375,10 @@ impl ConnectionUiFeatures {
         if self.projection_envelope_v2 {
             requested.push(UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2);
         }
-        if self.auxiliary_rest_to_ws_v1 {
-            requested.push(UI_PROTOCOL_FEATURE_AUXILIARY_REST_TO_WS_V1);
-        }
         if self.coding_autonomy_v1 {
             requested.push(UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1);
             if self.coding_agent_control_v1 {
                 requested.push(UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1);
-            }
-            if self.coding_loop_runtime_v1 {
-                requested.push(UI_PROTOCOL_FEATURE_CODING_LOOP_RUNTIME_V1);
-            }
-            if self.coding_monitor_runtime_v1 {
-                requested.push(UI_PROTOCOL_FEATURE_CODING_MONITOR_RUNTIME_V1);
             }
         }
         if self.context_lifecycle_v1 {
@@ -1588,15 +1403,7 @@ impl ConnectionUiFeatures {
         !self.header_present || (self.coding_autonomy_v1 && self.coding_agent_control_v1)
     }
 
-    fn monitor_runtime_available(self) -> bool {
-        !self.header_present || (self.coding_autonomy_v1 && self.coding_monitor_runtime_v1)
-    }
-
     #[cfg_attr(not(test), allow(dead_code))]
-    fn review_start_available(self) -> bool {
-        !self.header_present || self.review_start_v1
-    }
-
     fn context_lifecycle_available(self) -> bool {
         !self.header_present || self.context_lifecycle_v1
     }
@@ -1823,49 +1630,6 @@ fn push_capability_feature(features: &mut Vec<String>, feature: &str) {
     }
 }
 
-/// True when the client sent any non-empty `X-Octos-Ui-Features` token
-/// through the header or the URL query. Used by UPCR-2026-007 to
-/// distinguish "no negotiation attempted" from "negotiation attempted with
-/// no honoured tokens".
-fn has_any_ui_feature_token(headers: &HeaderMap, query: Option<&str>) -> bool {
-    let header_has_token = headers
-        .get(UI_FEATURES_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| {
-            value
-                .split([',', ' '])
-                .any(|candidate| !candidate.trim().is_empty())
-        });
-    if header_has_token {
-        return true;
-    }
-    query
-        .unwrap_or_default()
-        .split('&')
-        .filter_map(|pair| pair.split_once('='))
-        .filter(|(key, _)| matches!(*key, "ui_feature" | "ui_features" | "x-octos-ui-features"))
-        .flat_map(|(_, value)| value.split([',', ' ']))
-        .any(|candidate| !candidate.trim().is_empty())
-}
-
-fn has_ui_feature(headers: &HeaderMap, query: Option<&str>, feature: &str) -> bool {
-    headers
-        .get(UI_FEATURES_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| {
-            value
-                .split([',', ' '])
-                .any(|candidate| candidate.trim() == feature)
-        })
-        || query
-            .unwrap_or_default()
-            .split('&')
-            .filter_map(|pair| pair.split_once('='))
-            .filter(|(key, _)| matches!(*key, "ui_feature" | "ui_features" | "x-octos-ui-features"))
-            .flat_map(|(_, value)| value.split([',', ' ']))
-            .any(|candidate| candidate.trim() == feature)
-}
-
 #[derive(Default)]
 struct TaskOutputDeltaTracker {
     active_task_id: Option<TaskId>,
@@ -2010,17 +1774,6 @@ fn prune_stale_turn_persist_cursors(map: &mut HashMap<(String, String), TurnPers
         }
     }
     map.retain(|_, entry| now.duration_since(entry.last_touched_at) < TURN_PERSIST_CURSOR_TTL);
-}
-
-/// Test-only helper: clear the prune throttle so the next call
-/// to `prune_stale_turn_persist_cursors` actually scans. Used by
-/// the TTL eviction test, which would otherwise see "too soon" if
-/// another test in the same process already primed the throttle.
-#[cfg(test)]
-fn reset_turn_persist_cursor_prune_throttle_for_test() {
-    let throttle = turn_persist_cursor_prune_throttle();
-    let mut g = throttle.lock().unwrap_or_else(|e| e.into_inner());
-    *g = None;
 }
 
 fn session_workspaces() -> Arc<SessionWorkspaceStore> {
@@ -4993,866 +4746,6 @@ fn tool_risk_registry_test_lock() -> &'static std::sync::Mutex<()> {
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
 
-/// #924 BLOCK 5 — outcome of the WS upgrade Origin gate.
-///
-/// CORS doesn't apply to WS handshakes, so without this gate a browser
-/// tab on any origin could open the socket as long as it has a valid
-/// token. Non-browser clients (TUI, gateway, scripts, server-to-server)
-/// typically omit the Origin header — allow that. Some server-to-server
-/// clients send the header with an empty value (`Origin: `); treat
-/// present-but-empty as absent and allow. A header with non-ASCII
-/// bytes (`to_str().is_err()`) still rejects — that is malformed input,
-/// not the same as omitting the header.
-///
-/// PR #929: the bare `<base_domain>` host (the canonical landing URL,
-/// e.g. `https://ocean.ominix.io/chat`) is also allowed when the request
-/// is authenticated. See `decide_ws_origin_gate` for the rationale.
-#[derive(Debug, PartialEq, Eq)]
-enum WsOriginDecision {
-    Allow,
-    RejectDisallowed { origin: String },
-    RejectMalformed,
-}
-
-fn decide_ws_origin_gate(
-    headers: &HeaderMap,
-    base_domain: Option<&str>,
-    appui_allowed_origins: &[String],
-    is_authenticated: bool,
-) -> WsOriginDecision {
-    let Some(origin) = headers.get(axum::http::header::ORIGIN) else {
-        return WsOriginDecision::Allow;
-    };
-    match origin.to_str() {
-        Ok(origin_str) if origin_str.trim().is_empty() => WsOriginDecision::Allow,
-        Ok(origin_str) => {
-            let allowed = super::router::browser_origin_allowlist(appui_allowed_origins);
-            if allowed.iter().any(|s| s == origin_str) {
-                return WsOriginDecision::Allow;
-            }
-            // Per-tenant browser origins: `https://<tenant>.<base_domain>`.
-            // Hosted multi-tenant minis route by subdomain (dspfac.<base>,
-            // alice.<base>, ...) and the static CORS allowlist only covers
-            // app./admin./api. — adding every tenant up front isn't
-            // feasible. Accept any single-label subdomain of the configured
-            // base_domain so per-tenant browsers can open the WS. Tenants
-            // are sandboxed at the auth layer; the Origin gate is the
-            // cross-site protection (rejecting `evil.com` browser tabs).
-            if let Some(base) = base_domain {
-                if let Some(host) = origin_str.strip_prefix("https://") {
-                    let expected_suffix = format!(".{base}");
-                    if let Some(tenant) = host.strip_suffix(&expected_suffix) {
-                        // Single label only: non-empty, no dots, no port.
-                        if !tenant.is_empty() && !tenant.contains('.') && !tenant.contains(':') {
-                            return WsOriginDecision::Allow;
-                        }
-                    }
-                    // PR #929 bug-fix: the bare `<base_domain>` is the
-                    // canonical landing URL (`https://ocean.ominix.io/chat`,
-                    // `https://crew.ominix.io/chat`). The pre-fix gate only
-                    // accepted `<tenant>.<base>` subdomains, so users hitting
-                    // the bare host got HTTP 403 "disallowed origin" on the
-                    // WS upgrade. Allow `https://<base>` (no subdomain, no
-                    // port) ONLY when the request is already authenticated —
-                    // unauthenticated deployments rely on the Origin gate as
-                    // their sole CSRF protection and must keep the strict
-                    // tenant-subdomain rule.
-                    if is_authenticated && host == base {
-                        return WsOriginDecision::Allow;
-                    }
-                }
-            }
-            WsOriginDecision::RejectDisallowed {
-                origin: origin_str.to_string(),
-            }
-        }
-        Err(_) => WsOriginDecision::RejectMalformed,
-    }
-}
-
-fn decide_ui_ws_origin_gate(
-    headers: &HeaderMap,
-    state: &AppState,
-    is_authenticated: bool,
-) -> WsOriginDecision {
-    decide_ws_origin_gate(
-        headers,
-        None,
-        &state.appui_allowed_origins,
-        is_authenticated,
-    )
-}
-
-fn decide_session_ingress_ws_origin_gate(
-    headers: &HeaderMap,
-    state: &AppState,
-) -> WsOriginDecision {
-    // The work secret authenticates and scopes the session independently.
-    // It does not replace the browser Origin gate.
-    decide_ws_origin_gate(headers, None, &state.appui_allowed_origins, true)
-}
-
-/// GET /api/ui-protocol/ws — JSON-RPC over WebSocket for UI Protocol v1.
-pub async fn ws_handler(
-    State(state): State<Arc<AppState>>,
-    identity: Option<Extension<AuthIdentity>>,
-    headers: HeaderMap,
-    uri: Uri,
-    ws: Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
-) -> Response {
-    // #923.3 + #924 BLOCK 5: gate the upgrade on Origin. See
-    // `decide_ws_origin_gate` for the full decision table.
-    //
-    // PR #929: pass through whether the request reached the handler with
-    // an authenticated identity so the gate can allow the bare
-    // `<base_domain>` landing host. The auth middleware runs before this
-    // handler, so `identity.is_some()` ⇔ the request carried a valid
-    // bearer / OTP session / trusted-proxy `X-Profile-Id`. In no-auth
-    // deployments (`has_auth == false` in `router.rs`) `identity` is
-    // `None` and the gate falls back to the strict tenant-subdomain rule.
-    let is_authenticated = identity.is_some();
-    match decide_ui_ws_origin_gate(&headers, &state, is_authenticated) {
-        WsOriginDecision::Allow => {}
-        WsOriginDecision::RejectDisallowed { origin } => {
-            tracing::warn!(
-                target: "octos::ui_protocol::ws",
-                origin = %origin,
-                "rejected WS upgrade from disallowed Origin"
-            );
-            return (axum::http::StatusCode::FORBIDDEN, "disallowed origin").into_response();
-        }
-        WsOriginDecision::RejectMalformed => {
-            tracing::warn!(
-                target: "octos::ui_protocol::ws",
-                "rejected WS upgrade: Origin header is not valid ASCII"
-            );
-            return (axum::http::StatusCode::FORBIDDEN, "invalid origin").into_response();
-        }
-    }
-    let connection_profile_id = identity
-        .as_ref()
-        .and_then(|Extension(identity)| authenticated_profile_id(identity))
-        .map(ToOwned::to_owned);
-    // Hosted multi-tenant standalone serve routes by subdomain
-    // (`<profile>.<base>.example.com`). Admin tokens authenticate as
-    // `AuthIdentity::Admin` so `connection_profile_id` is `None`, but the
-    // `Host` header still carries the per-tenant profile. Stash it on the
-    // connection so per-session resolution (notably plugin work_dir →
-    // file-API root) can pick the right profile data dir even for admin
-    // sessions originated from a hosted subdomain.
-    let routed_profile_id = super::handlers::routed_profile_id_from_headers(&state, &headers);
-    if let (Some(Extension(identity_inner)), Some(profile_id)) =
-        (identity.as_ref(), routed_profile_id.as_ref())
-    {
-        if !super::profile_scope::is_authorized_for_profile(&state, identity_inner, profile_id) {
-            tracing::warn!(
-                target: "octos::ui_protocol::ws",
-                identity = ?identity_inner,
-                requested_profile = %profile_id,
-                "WS upgrade denied: authenticated identity is not authorized for routed profile"
-            );
-            return (axum::http::StatusCode::FORBIDDEN, "forbidden").into_response();
-        }
-    }
-    let ws = match ws {
-        Ok(ws) => ws,
-        Err(rejection) => return rejection.into_response(),
-    };
-    let features = ConnectionUiFeatures::from_headers_and_query(&headers, uri.query());
-    // M12 Phase D-1: auxiliary REST→WS dispatchers reuse the same REST
-    // handlers in `handlers.rs` for business logic, which means they
-    // need the same axum extractor inputs the REST routes received.
-    // Snapshot the HeaderMap and AuthIdentity onto the connection so
-    // each dispatcher arm can re-build the extractor tuple without a
-    // round-trip back through the router. None of the existing dispatch
-    // arms read these; only the new aux-REST-to-WS arms do.
-    let auth_identity = identity.map(|Extension(identity)| identity);
-    ws.on_upgrade(move |socket| {
-        ui_protocol_connection(
-            socket,
-            state,
-            UiProtocolConnectionOptions {
-                connection_profile_id,
-                routed_profile_id,
-                features,
-                headers,
-                identity: auth_identity,
-                session_ingress_scope: None,
-            },
-        )
-    })
-}
-
-#[derive(Clone)]
-pub(crate) struct SessionIngressScope {
-    session_id: SessionKey,
-    token: String,
-}
-
-/// Upgrade a work-secret authenticated socket into the UI Protocol dispatcher.
-///
-/// The route that calls this function has already validated the token for
-/// `session_id`. The dispatcher revalidates on every client frame and applies
-/// a session-scope gate before executing any RPC.
-pub(crate) async fn ws_handler_for_session_ingress(
-    state: Arc<AppState>,
-    session_id: SessionKey,
-    profile_id: Option<String>,
-    token: String,
-    headers: HeaderMap,
-    uri: Uri,
-    ws: Result<WebSocketUpgrade, axum::extract::ws::rejection::WebSocketUpgradeRejection>,
-) -> Response {
-    match decide_session_ingress_ws_origin_gate(&headers, &state) {
-        WsOriginDecision::Allow => {}
-        WsOriginDecision::RejectDisallowed { origin } => {
-            tracing::warn!(
-                target: "octos::ui_protocol::session_ingress",
-                origin = %origin,
-                "rejected session ingress WS upgrade from disallowed Origin"
-            );
-            return (axum::http::StatusCode::FORBIDDEN, "disallowed origin").into_response();
-        }
-        WsOriginDecision::RejectMalformed => {
-            return (axum::http::StatusCode::FORBIDDEN, "invalid origin").into_response();
-        }
-    }
-    let ws = match ws {
-        Ok(ws) => ws,
-        Err(rejection) => return rejection.into_response(),
-    };
-    let connection_profile_id =
-        profile_id.or_else(|| session_id.profile_id().map(ToOwned::to_owned));
-    let auth_identity = connection_profile_id
-        .clone()
-        .map(|id| AuthIdentity::User { id });
-    let features = ConnectionUiFeatures::from_headers_and_query(&headers, uri.query());
-    let scope = SessionIngressScope { session_id, token };
-    ws.on_upgrade(move |socket| {
-        ui_protocol_connection(
-            socket,
-            state,
-            UiProtocolConnectionOptions {
-                connection_profile_id,
-                routed_profile_id: None,
-                features,
-                headers,
-                identity: auth_identity,
-                session_ingress_scope: Some(scope),
-            },
-        )
-    })
-}
-
-struct UiProtocolConnectionOptions {
-    connection_profile_id: Option<String>,
-    routed_profile_id: Option<String>,
-    features: ConnectionUiFeatures,
-    headers: HeaderMap,
-    identity: Option<AuthIdentity>,
-    session_ingress_scope: Option<SessionIngressScope>,
-}
-
-async fn ui_protocol_connection(
-    socket: WebSocket,
-    state: Arc<AppState>,
-    options: UiProtocolConnectionOptions,
-) {
-    let UiProtocolConnectionOptions {
-        connection_profile_id,
-        routed_profile_id,
-        mut features,
-        headers: connection_headers,
-        identity: connection_identity,
-        session_ingress_scope,
-    } = options;
-    // Count the negotiated mode once for this successfully upgraded UI
-    // Protocol connection. Later client_hello renegotiation does not create a
-    // second connection and therefore must not increment this counter again.
-    record_ui_protocol_connection_mode(features, "ws");
-    let (ws_sink, mut ws_rx) = socket.split();
-    // Decouple the network sink from request handlers via a bounded channel
-    // and a dedicated drainer task. No handler ever holds a lock across an
-    // await on the socket — that fixes the slow-client wedge.
-    let (writer_tx, writer_rx) = mpsc::channel::<WsMessage>(WS_WRITER_CHANNEL_CAPACITY);
-    let writer_handle = tokio::spawn(WsConnection::writer_loop(ws_sink, writer_rx));
-    let ws = WsConnection::new(writer_tx);
-    // Codex #1336 round-2 BLOCKER 1: seed the per-connection feature
-    // snapshot from the negotiated `features` so direct-sends apply
-    // the same capability filter the broadcast forwarder uses BEFORE
-    // any RPC traffic. `handle_client_hello_rpc` updates the snapshot
-    // again when the client re-negotiates after the handshake.
-    ws.update_live_features(features);
-    let active_turns = active_turns_registry();
-    let connection_turns: SharedConnectionTurns = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-    let live_forwarders: SharedLiveForwarders = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-    let contracts = contract_stores();
-    let ledger = event_ledger(&state).await;
-    // Force lazy init of the diff-preview store on this connection so
-    // its disk recovery + write-ahead path is wired up before any
-    // approval flow can `upsert_file_mutation`. Subsequent calls reuse
-    // the same `Arc`. Without `state.sessions` (headless smoke) this
-    // installs the ephemeral RAM-only fallback.
-    let _ = diff_preview_store(&state, contracts.as_ref()).await;
-    let connection_profile_id = connection_profile_id.as_deref();
-    let routed_profile_id = routed_profile_id.as_deref();
-    // mini5 soak gap #2: the profile a `session/open` bound this connection to.
-    // The WS connection's authenticated `connection_profile_id` is frozen at
-    // upgrade time and an admin / unscoped connection (`connection_profile_id ==
-    // None`) carries no profile, so a later `turn/start` resolved to `<unset>`
-    // and the per-connection continuation drain filtered by `None`. Mirror the
-    // stdio handler (`stdio_session_open_candidate_profile` ->
-    // `connection_profile_id_owned`): remember the profile a successful
-    // `session/open` resolved to and use it as a fallback for both the turn
-    // profile and the drain filter. For an authenticated profile-scoped
-    // connection this is a no-op (validate_authenticated_session_scope already
-    // forces the session to that profile); it only fills the gap left by
-    // None-scoped (admin) connections, which are authorized for every profile.
-    let mut session_open_profile_id: Option<String> = None;
-    // Detached `session/btw` aside tasks spawned by this connection. Aborted
-    // at teardown: an aside holds a WsConnection clone (writer sender), so an
-    // orphaned one would keep paid provider work running — and hold the stdio
-    // writer open past EOF — for up to its 30s timeout after the client left.
-    let mut btw_aside_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
-    // Last-emitted whole-job orchestration status per session (dedup so only
-    // changes hit the wire). Drives the client's composer top-border indicator.
-    // #924 BLOCK 1: wake the read loop the instant a lifecycle/RPC
-    // send marks the connection failed. Without this, an idle socket
-    // with a failed write side would sit in `ws_rx.next().await`
-    // forever — the cleanup path only ran when the next client frame
-    // arrived, leaving subscribers and ledger fan-out registered.
-    let failed_notify = ws.failed_notify();
-    let mut appui_continuation_tick = tokio::time::interval(Duration::from_secs(2));
-    appui_continuation_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
-    loop {
-        // #924 round-2 BLOCK: close the lost-notify race. `notify_waiters`
-        // is only received by `Notified` futures that exist at the time of
-        // the call, and it stashes no permit. So we:
-        //   1. Bail eagerly if the latch is already set.
-        //   2. Construct `notified()` BEFORE the second latch check — this
-        //      means any subsequent `mark_failed` either (a) is caught by
-        //      the re-check below, or (b) fires `notify_waiters` against
-        //      this future, which then resolves when the select polls it.
-        //   3. Re-check the latch after creating the future to catch the
-        //      "fired between is_failed and notified()" ordering.
-        if ws.is_failed() {
-            break;
-        }
-        let notified = failed_notify.notified();
-        tokio::pin!(notified);
-        if ws.is_failed() {
-            break;
-        }
-
-        let msg = tokio::select! {
-            biased;
-            _ = &mut notified => {
-                // Latch arm only fires when the connection is failed; no
-                // need to re-load — the Notify is private to `mark_failed`.
-                break;
-            }
-            next = ws_rx.next() => match next {
-                Some(Ok(msg)) => msg,
-                Some(Err(_)) | None => break,
-            },
-        };
-        // #922.2: stop dispatch once a lifecycle/RPC send has been
-        // marked fatal so we don't quietly accept further requests we
-        // can never reply to. The cleanup below still appends terminal
-        // events / cancels approvals via `abort_connection_turns`.
-        if ws.is_failed() {
-            break;
-        }
-        let text = match msg {
-            WsMessage::Text(text) => text,
-            WsMessage::Close(_) => break,
-            WsMessage::Ping(_) => continue,
-            _ => continue,
-        };
-        if let Some(scope) = session_ingress_scope.as_ref() {
-            if state
-                .work_secret_store
-                .validate(&scope.session_id.0, &scope.token)
-                .is_err()
-            {
-                let _ = close_ws_with_code(&ws, 1008, "session_ingress_revoked");
-                break;
-            }
-        }
-
-        let request = match parse_ws_text_frame(text.as_str()) {
-            Ok(ParsedFrame::Request(request)) => request,
-            Ok(ParsedFrame::Notification(method)) => {
-                // #922.1: known inbound notifications (no `id`) are
-                // accepted silently. Unknown notifications get a debug
-                // trace but no reply — a notification by spec has no
-                // response.
-                if !is_known_inbound_notification(&method) {
-                    tracing::debug!(
-                        target: "octos::ui_protocol::ws",
-                        method = %method,
-                        "ignoring unknown inbound notification"
-                    );
-                }
-                continue;
-            }
-            Err(error) => {
-                // Lifecycle: client violated the wire contract. We try to
-                // tell them, but proceed regardless — the read loop is
-                // independent of the write side.
-                let _ = send_rpc_error(&ws, None, error);
-                if text.len() > MAX_TEXT_FRAME_BYTES {
-                    break;
-                }
-                continue;
-            }
-        };
-        append_appui_transcript_frame(
-            "client_to_server",
-            serde_json::to_value(&request).unwrap_or_else(|_| json!({ "malformed": true })),
-        );
-        let id = request.id.clone();
-        if handle_client_hello_rpc(
-            &ws,
-            &state,
-            id.clone(),
-            &request,
-            &mut features,
-            session_ingress_scope.is_some(),
-        ) {
-            continue;
-        }
-        // SECURITY (#1594): `handle_raw_appui_rpc` dispatches raw methods BEFORE
-        // `route_rpc_command`, so they never reach the typed
-        // `validate_session_ingress_command_scope` gate below. The raw handlers
-        // resolve their profile/session targets from request params
-        // independently of the credential (`raw_profile_id` prefers
-        // `params.profile_id`; autonomy targeting broadens to the base session
-        // key), so a per-session work-secret could drive autonomy on a sibling
-        // session or mutate an arbitrary profile. A caller-supplied `session_id`
-        // check alone cannot close that gap. Since legitimate ingress clients
-        // (the work-secret bridge) use only the typed surface, deny the entire
-        // raw surface for session-ingress connections — typed methods still flow
-        // to `validate_session_ingress_command_scope` untouched.
-        if session_ingress_scope.is_some()
-            && raw_method_is_dispatched(&request.method, features.stdio_transport)
-        {
-            let _ = send_rpc_error(
-                &ws,
-                Some(id),
-                RpcError::invalid_request(
-                    "session ingress credentials may not call raw (non-session-routed) methods",
-                ),
-            );
-            continue;
-        }
-        if handle_raw_appui_rpc(
-            &ws,
-            &state,
-            &ledger,
-            &contracts,
-            &active_turns,
-            &connection_turns,
-            features,
-            connection_profile_id,
-            id.clone(),
-            &request,
-        )
-        .await
-        {
-            continue;
-        }
-        let command = match route_rpc_command(request, features) {
-            Ok(command) => command,
-            Err(error) => {
-                let _ = send_rpc_error(&ws, Some(id), error);
-                continue;
-            }
-        };
-        if let Some(scope) = session_ingress_scope.as_ref() {
-            if let Err(error) = validate_session_ingress_command_scope(&command, &scope.session_id)
-            {
-                let _ = send_rpc_error(&ws, Some(id), error);
-                continue;
-            }
-        }
-
-        match command {
-            UiCommand::ProfileLocalCreate(params) => {
-                match create_or_get_local_solo_profile(&state, params) {
-                    Ok(result) => {
-                        let _ =
-                            send_ui_rpc_result(&ws, id, UiRpcResult::ProfileLocalCreate(result));
-                    }
-                    Err(error) => {
-                        let _ = send_rpc_error(&ws, Some(id), error);
-                    }
-                }
-            }
-            UiCommand::LaunchResolve(params) => {
-                handle_launch_resolve(&ws, &state, connection_profile_id, features, id, params)
-                    .await;
-            }
-            UiCommand::SessionOpen(params) => {
-                // gap #2 (codex P2): record the profile this open RESOLVES to so
-                // a None-scoped (admin) connection's later turn/start +
-                // continuation drain can recover it, committed only on success.
-                // For a None connection `handle_session_open` ->
-                // `validate_session_scope` resolves
-                // `params.profile_id.or(session_id.profile_id())`, so mirror that
-                // exactly — do NOT carry the previous session's profile onto a
-                // profile-less open (that would mis-bind a session opened under
-                // the default/_main runtime to the prior profile). For an
-                // authenticated connection this value is unused downstream
-                // (connection_profile_id dominates the turn + drain filter); the
-                // auth gate stays in handle_session_open.
-                let resolved_open_profile = params
-                    .profile_id
-                    .clone()
-                    .or_else(|| params.session_id.profile_id().map(ToOwned::to_owned));
-                let opened = handle_session_open(
-                    &ws,
-                    &state,
-                    &ledger,
-                    &contracts.approvals,
-                    &contracts.user_questions,
-                    &live_forwarders,
-                    connection_profile_id,
-                    // Frozen at WS upgrade (and at session-ingress upgrade),
-                    // never rebound for the life of this connection.
-                    connection_profile_id,
-                    features,
-                    id,
-                    params,
-                    session_ingress_scope.is_some(),
-                )
-                .await;
-                if opened {
-                    // codex P2 (re-review): a successful open always resolves to
-                    // a concrete runtime — a profile-less default open resolves
-                    // to MAIN_PROFILE_ID, not "no profile". Record that concrete
-                    // profile so the per-connection drain filter
-                    // (`connection.or(routed).or(session_open)`) scopes to this
-                    // session's profile instead of degrading to `None` (= ALL
-                    // profiles) for an unscoped/admin connection, which would let
-                    // it drain unrelated profiles' continuations.
-                    session_open_profile_id =
-                        Some(resolved_open_profile.unwrap_or_else(|| MAIN_PROFILE_ID.to_owned()));
-                }
-            }
-            UiCommand::TurnStart(params) => {
-                handle_turn_start(
-                    &ws,
-                    &state,
-                    &ledger,
-                    &contracts,
-                    &active_turns,
-                    &connection_turns,
-                    connection_profile_id,
-                    // gap #2: fall back to the session-open profile when the
-                    // connection supplied no routing profile (admin / unscoped).
-                    routed_profile_id.or(session_open_profile_id.as_deref()),
-                    features,
-                    id,
-                    params,
-                )
-                .await;
-            }
-            UiCommand::TurnInterrupt(params) => {
-                handle_turn_interrupt(&ws, &ledger, &active_turns, &contracts, id, params).await;
-            }
-            UiCommand::ApprovalRespond(params) => {
-                handle_approval_respond(
-                    &ws,
-                    &state,
-                    &ledger,
-                    &contracts,
-                    connection_profile_id,
-                    id,
-                    params,
-                )
-                .await;
-            }
-            UiCommand::ApprovalScopesList(params) => {
-                handle_approval_scopes_list(
-                    &ws,
-                    &contracts.scopes,
-                    connection_profile_id,
-                    id,
-                    params,
-                )
-                .await;
-            }
-            UiCommand::UserQuestionRespond(params) => {
-                handle_user_question_respond(&ws, &contracts, connection_profile_id, id, params)
-                    .await;
-            }
-            UiCommand::DiffPreviewGet(params) => {
-                let store = diff_preview_store(&state, contracts.as_ref()).await;
-                handle_diff_preview_get(&ws, store.as_ref(), connection_profile_id, id, params)
-                    .await;
-            }
-            UiCommand::TaskOutputRead(params) => {
-                handle_task_output_read(&ws, &state, connection_profile_id, id, params).await;
-            }
-            UiCommand::TaskList(params) => {
-                handle_task_list(&ws, &state, connection_profile_id, id, params).await;
-            }
-            UiCommand::TaskCancel(params) => {
-                handle_task_cancel(&ws, &state, connection_profile_id, id, params).await;
-            }
-            UiCommand::TaskRestartFromNode(params) => {
-                handle_task_restart_from_node(&ws, &state, connection_profile_id, id, params).await;
-            }
-            UiCommand::SessionHydrate(params) => {
-                handle_session_hydrate(
-                    &ws,
-                    &state,
-                    &ledger,
-                    &contracts.approvals,
-                    &contracts.user_questions,
-                    &active_turns,
-                    connection_profile_id,
-                    routed_profile_id,
-                    features,
-                    id,
-                    params,
-                )
-                .await;
-            }
-            UiCommand::SessionRollback(params) => {
-                handle_session_rollback(
-                    &ws,
-                    &state,
-                    &ledger,
-                    &active_turns,
-                    connection_profile_id,
-                    routed_profile_id,
-                    id,
-                    params,
-                )
-                .await;
-            }
-            UiCommand::SessionFork(params) => {
-                handle_session_fork(
-                    &ws,
-                    &state,
-                    connection_profile_id,
-                    routed_profile_id,
-                    id,
-                    params,
-                )
-                .await;
-            }
-            UiCommand::ThreadGraphGet(params) => {
-                handle_thread_graph_get(
-                    &ws,
-                    &state,
-                    &ledger,
-                    &active_turns,
-                    connection_profile_id,
-                    routed_profile_id,
-                    id,
-                    params,
-                )
-                .await;
-            }
-            UiCommand::TurnStateGet(params) => {
-                handle_turn_state_get(
-                    &ws,
-                    &state,
-                    &ledger,
-                    &active_turns,
-                    connection_profile_id,
-                    routed_profile_id,
-                    features,
-                    id,
-                    params,
-                )
-                .await;
-            }
-            UiCommand::SessionBtw(params) => {
-                let aside = handle_session_btw(
-                    &ws,
-                    &state,
-                    &ledger,
-                    &active_turns,
-                    connection_profile_id,
-                    // gap #2: fall back to the session-open profile when the
-                    // connection supplied no routing profile (admin / unscoped)
-                    // so the aside reads and bills the SAME profile the open
-                    // resolved to.
-                    routed_profile_id.or(session_open_profile_id.as_deref()),
-                    id,
-                    params,
-                )
-                .await;
-                if let Some(task) = aside {
-                    btw_aside_tasks.retain(|task| !task.is_finished());
-                    btw_aside_tasks.push(task);
-                }
-            }
-            UiCommand::PermissionProfileList(params) => {
-                let result = permission_profile_list_result(&state, params);
-                let _ = send_ui_rpc_result(&ws, id, UiRpcResult::PermissionProfileList(result));
-            }
-            UiCommand::PermissionProfileSet(params) => {
-                let session_id = params.session_id.clone();
-                match permission_profile_set_result(&state, params) {
-                    Ok(result) => {
-                        // Evict by SESSION across every profile (codex P1 ×2
-                        // on #1639): the runtime may be cached under a
-                        // session/open `params.profile_id` this connection no
-                        // longer knows, and `invalidate_session` also bumps
-                        // the session generation so a concurrent in-flight
-                        // bootstrap can't re-cache the pre-change (possibly
-                        // dangerous) permissions after the downgrade.
-                        state.session_cache.invalidate_session(&session_id).await;
-                        let _ =
-                            send_ui_rpc_result(&ws, id, UiRpcResult::PermissionProfileSet(result));
-                    }
-                    Err(error) => {
-                        let _ = send_rpc_error(&ws, Some(id), error);
-                    }
-                }
-            }
-            // -------- M12 Phase D-1 auxiliary REST → WS dispatchers --------
-            //
-            // Each arm below delegates to the same REST handler in
-            // `crates/octos-cli/src/api/handlers.rs` (or
-            // `auth_handlers.rs`) that the REST route uses. We rebuild
-            // the axum extractor tuple from the snapshotted connection
-            // headers + identity, await the handler, and forward the
-            // JSON body as the WS RPC result. No business logic is
-            // duplicated; the REST endpoints stay unchanged.
-            UiCommand::SessionList(params) => {
-                handle_session_list(
-                    &ws,
-                    &state,
-                    &connection_headers,
-                    connection_identity.as_ref(),
-                    connection_profile_id,
-                    features,
-                    id,
-                    params,
-                )
-                .await;
-            }
-            UiCommand::SessionSnapshot(params) => {
-                handle_session_snapshot(
-                    &ws,
-                    &state,
-                    &connection_headers,
-                    connection_identity.as_ref(),
-                    id,
-                    params,
-                )
-                .await;
-            }
-            UiCommand::SessionMessagesPage(params) => {
-                handle_session_messages_page(
-                    &ws,
-                    &state,
-                    &connection_headers,
-                    connection_identity.as_ref(),
-                    id,
-                    params,
-                )
-                .await;
-            }
-            UiCommand::SessionStatusGet(params) => {
-                handle_session_status_get(
-                    &ws,
-                    &state,
-                    &connection_headers,
-                    connection_identity.as_ref(),
-                    connection_profile_id,
-                    routed_profile_id,
-                    features,
-                    id,
-                    params,
-                )
-                .await;
-            }
-            UiCommand::SessionFilesList(params) => {
-                handle_session_files_list(
-                    &ws,
-                    &state,
-                    &connection_headers,
-                    connection_identity.as_ref(),
-                    id,
-                    params,
-                )
-                .await;
-            }
-            UiCommand::SessionTasksList(params) => {
-                handle_session_tasks_list(
-                    &ws,
-                    &state,
-                    &connection_headers,
-                    connection_identity.as_ref(),
-                    id,
-                    params,
-                )
-                .await;
-            }
-            UiCommand::SessionWorkspaceGet(params) => {
-                handle_session_workspace_get(
-                    &ws,
-                    &state,
-                    &connection_headers,
-                    connection_identity.as_ref(),
-                    id,
-                    params,
-                )
-                .await;
-            }
-            UiCommand::SessionTitleSet(params) => {
-                handle_session_title_set(
-                    &ws,
-                    &state,
-                    &connection_headers,
-                    connection_identity.as_ref(),
-                    id,
-                    params,
-                )
-                .await;
-            }
-            UiCommand::SessionDelete(params) => {
-                handle_session_delete(
-                    &ws,
-                    &state,
-                    &connection_headers,
-                    connection_identity.as_ref(),
-                    id,
-                    params,
-                )
-                .await;
-            }
-            UiCommand::SystemStatusGet(params) => {
-                handle_system_status_get(&ws, &state, id, params).await;
-            }
-        }
-    }
-
-    abort_connection_turns(
-        &active_turns,
-        &connection_turns,
-        &contracts.scopes,
-        &ledger,
-        &contracts.approvals,
-        &contracts.user_questions,
-    )
-    .await;
-    abort_live_forwarders(&live_forwarders, &ledger).await;
-    abort_btw_aside_tasks(&mut btw_aside_tasks).await;
-    // Dropping `ws` lets the writer task drain & exit; await it so the socket
-    // is closed before we return.
-    drop(ws);
-    let _ = writer_handle.await;
-}
-
 /// Cap on how long stdio shutdown waits for in-flight turns to finalize.
 const STDIO_SHUTDOWN_TURN_DRAIN_MAX: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -5984,7 +4877,6 @@ where
     // See the ws loop's twin: detached asides must not outlive this stdio
     // connection (they hold the writer sender → EOF shutdown would block).
     let mut btw_aside_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
-    let connection_headers = HeaderMap::new();
     let mut connection_profile_id_owned: Option<String> = None;
     let mut appui_continuation_tick = tokio::time::interval(Duration::from_secs(2));
     appui_continuation_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -6057,7 +4949,7 @@ where
             record_stdio_dispatch_for_test();
             let id = request.id.clone();
             // stdio transport is never a session-ingress socket.
-            if handle_client_hello_rpc(&ws, &state, id.clone(), &request, &mut features, false) {
+            if handle_client_hello_rpc(&ws, &state, id.clone(), &request, &mut features) {
                 if !connection_mode_recorded {
                     record_ui_protocol_connection_mode(features, "stdio");
                     connection_mode_recorded = true;
@@ -6142,7 +5034,6 @@ where
                         features,
                         id,
                         params,
-                        false,
                     )
                     .await;
                     if opened {
@@ -6200,57 +5091,6 @@ where
                     handle_user_question_respond(
                         &ws,
                         &contracts,
-                        connection_profile_id_owned.as_deref(),
-                        id,
-                        params,
-                    )
-                    .await;
-                }
-                UiCommand::DiffPreviewGet(params) => {
-                    let store = diff_preview_store(&state, contracts.as_ref()).await;
-                    handle_diff_preview_get(
-                        &ws,
-                        store.as_ref(),
-                        connection_profile_id_owned.as_deref(),
-                        id,
-                        params,
-                    )
-                    .await;
-                }
-                UiCommand::TaskOutputRead(params) => {
-                    handle_task_output_read(
-                        &ws,
-                        &state,
-                        connection_profile_id_owned.as_deref(),
-                        id,
-                        params,
-                    )
-                    .await;
-                }
-                UiCommand::TaskList(params) => {
-                    handle_task_list(
-                        &ws,
-                        &state,
-                        connection_profile_id_owned.as_deref(),
-                        id,
-                        params,
-                    )
-                    .await;
-                }
-                UiCommand::TaskCancel(params) => {
-                    handle_task_cancel(
-                        &ws,
-                        &state,
-                        connection_profile_id_owned.as_deref(),
-                        id,
-                        params,
-                    )
-                    .await;
-                }
-                UiCommand::TaskRestartFromNode(params) => {
-                    handle_task_restart_from_node(
-                        &ws,
-                        &state,
                         connection_profile_id_owned.as_deref(),
                         id,
                         params,
@@ -6363,77 +5203,6 @@ where
                             let _ = send_rpc_error(&ws, Some(id), error);
                         }
                     }
-                }
-                UiCommand::SessionList(params) => {
-                    handle_session_list(
-                        &ws,
-                        &state,
-                        &connection_headers,
-                        None,
-                        connection_profile_id_owned.as_deref(),
-                        features,
-                        id,
-                        params,
-                    )
-                    .await;
-                }
-                UiCommand::SessionSnapshot(params) => {
-                    handle_session_snapshot(&ws, &state, &connection_headers, None, id, params)
-                        .await;
-                }
-                UiCommand::SessionMessagesPage(params) => {
-                    handle_session_messages_page(
-                        &ws,
-                        &state,
-                        &connection_headers,
-                        None,
-                        id,
-                        params,
-                    )
-                    .await;
-                }
-                UiCommand::SessionStatusGet(params) => {
-                    handle_session_status_get(
-                        &ws,
-                        &state,
-                        &connection_headers,
-                        None,
-                        connection_profile_id_owned.as_deref(),
-                        None,
-                        features,
-                        id,
-                        params,
-                    )
-                    .await;
-                }
-                UiCommand::SessionFilesList(params) => {
-                    handle_session_files_list(&ws, &state, &connection_headers, None, id, params)
-                        .await;
-                }
-                UiCommand::SessionTasksList(params) => {
-                    handle_session_tasks_list(&ws, &state, &connection_headers, None, id, params)
-                        .await;
-                }
-                UiCommand::SessionWorkspaceGet(params) => {
-                    handle_session_workspace_get(
-                        &ws,
-                        &state,
-                        &connection_headers,
-                        None,
-                        id,
-                        params,
-                    )
-                    .await;
-                }
-                UiCommand::SessionTitleSet(params) => {
-                    handle_session_title_set(&ws, &state, &connection_headers, None, id, params)
-                        .await;
-                }
-                UiCommand::SessionDelete(params) => {
-                    handle_session_delete(&ws, &state, &connection_headers, None, id, params).await;
-                }
-                UiCommand::SystemStatusGet(params) => {
-                    handle_system_status_get(&ws, &state, id, params).await;
                 }
             }
         }
@@ -6608,24 +5377,6 @@ where
     }
 }
 
-#[cfg(test)]
-async fn stdio_writer_loop_to<W>(
-    mut rx: mpsc::Receiver<WsMessage>,
-    writer: W,
-    failure_signal: ConnectionFailureSignal,
-) -> std::io::Result<()>
-where
-    W: AsyncWrite + Unpin,
-{
-    let mut stdout = BufWriter::new(writer);
-    while let Some(message) = rx.recv().await {
-        if !write_stdio_message(&mut stdout, message, &failure_signal).await? {
-            break;
-        }
-    }
-    Ok(())
-}
-
 fn stdio_writer_loop_sync_to<W>(
     rx: std::sync::mpsc::Receiver<WsMessage>,
     writer: W,
@@ -6678,7 +5429,6 @@ where
             Ok(true)
         }
         WsMessage::Close(_) => Ok(false),
-        WsMessage::Ping(_) | WsMessage::Pong(_) | WsMessage::Binary(_) => Ok(true),
     }
 }
 
@@ -9330,7 +8080,7 @@ async fn raw_profile_llm_upsert(
         &mut profile.config.env_vars,
         &profile_id,
     )
-    .map_err(|(_, msg)| RpcError::invalid_params(msg))?;
+    .map_err(|msg| RpcError::invalid_params(msg))?;
     profile.updated_at = Utc::now();
     store
         .save_with_merge(&mut profile)
@@ -10219,7 +8969,7 @@ async fn raw_profile_sub_providers_upsert(
         &mut profile.config.env_vars,
         &profile_id,
     )
-    .map_err(|(_, msg)| RpcError::invalid_params(msg))?;
+    .map_err(|msg| RpcError::invalid_params(msg))?;
     profile.updated_at = Utc::now();
     store
         .save_with_merge(&mut profile)
@@ -10513,19 +9263,6 @@ async fn handle_raw_appui_rpc(
 
     match result {
         Ok(result) => {
-            let _continuation_target =
-                appui_continuation_target_from_raw_result(request.method.as_str(), &result);
-            // M15-F5 (#44): the PRODUCTION goal/loop runtime never emitted the
-            // `session/goal/updated` / `loop/updated` / `loop/fired`
-            // server→client notifications the autonomy soak verifier requires,
-            // nor the goal/loop evidence ledgers. Derive them from the real
-            // orchestrator RPC result here and dispatch them durably so they
-            // reach the client AND get recorded in `appui-transcript.jsonl`.
-            // NO-OP in normal production (env-gated evidence write + the
-            // notifications are still correct production wire frames).
-            for notification in record_autonomy_rpc_evidence(request.method.as_str(), &result) {
-                let _ = send_notification_durable(ws, ledger, notification);
-            }
             let _ = send_rpc_result(ws, id, result);
         }
         Err(error) => {
@@ -10535,37 +9272,12 @@ async fn handle_raw_appui_rpc(
     true
 }
 
-fn appui_continuation_target_from_raw_result(
-    method: &str,
-    result: &Value,
-) -> Option<(SessionKey, String)> {
-    if method != octos_core::ui_protocol::methods::LOOP_FIRE_NOW
-        || result
-            .get("fire")
-            .and_then(|fire| fire.get("queued"))
-            .and_then(Value::as_bool)
-            != Some(true)
-    {
-        return None;
-    }
-
-    let session_id: SessionKey = serde_json::from_value(result.get("session_id")?.clone()).ok()?;
-    let profile_id = result
-        .get("profile_id")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .or_else(|| session_id.profile_id().map(ToOwned::to_owned))
-        .unwrap_or_else(|| MAIN_PROFILE_ID.to_owned());
-    Some((session_id, profile_id))
-}
-
 fn handle_client_hello_rpc(
     ws: &WsConnection,
     state: &Arc<AppState>,
     id: String,
     request: &RpcRequest<Value>,
     features: &mut ConnectionUiFeatures,
-    session_ingress: bool,
 ) -> bool {
     if request.method != APPUI_METHOD_CLIENT_HELLO {
         return false;
@@ -10598,13 +9310,7 @@ fn handle_client_hello_rpc(
     } else {
         "websocket"
     };
-    let mut capabilities = features.advertised_capabilities(state);
-    // #1594 follow-up: a session-ingress credential can only call the
-    // session-scoped surface, so don't advertise the raw/global methods it
-    // would be denied — keep advertised == callable.
-    if session_ingress {
-        filter_capabilities_for_session_ingress(&mut capabilities);
-    }
+    let capabilities = features.advertised_capabilities(state);
     let _ = send_rpc_result(
         ws,
         id,
@@ -10627,82 +9333,20 @@ fn route_rpc_command(
     if !ui_protocol_server_supported_methods().contains(&method_str) {
         return Err(RpcError::method_not_supported(method_str));
     }
-    // UPCR-2026-009 / -010 / -011 + M12 Phase D-1: when the method is
-    // gated behind a feature flag and the connection did not negotiate
-    // that flag, reject with `method_not_supported` BEFORE attempting
-    // to deserialize the params. Doing the gate first means clients
-    // that targeted a capability-gated method without negotiating the
-    // feature see a clean `method_not_supported` (and can fall back
-    // to REST) instead of `invalid_params` for an unrelated payload
-    // shape — the spec contract is "we don't know about this method
-    // at all", not "we half-know it".
-    //
-    // Two gate flavours coexist:
-    //
-    // 1. **Legacy header-present gates** (`session/hydrate`,
-    //    `thread/graph/get`, `turn/state/get`, `task/list`,
-    //    `task/cancel`, `task/restart_from_node`): pre-existing
-    //    capabilities that historically relied on
-    //    `header_present == true` to fire — clients that send NO
-    //    feature header at all see the full first-slice in
-    //    `SessionOpened.capabilities` per UPCR-2026-007 and so see
-    //    these methods as available. Changing that legacy behaviour
-    //    here is out of scope for Phase D-1.
-    //
-    // 2. **Strict opt-in gates** (M12 Phase D-1 auxiliary methods):
-    //    the rollout-flag contract is "no negotiation = no access".
-    //    A client that sends no feature header at all must NOT trip
-    //    into the new methods accidentally — otherwise the additive
-    //    Phase D-1 contract is broken for every pre-existing client.
-    //    These gates fire regardless of `header_present`.
-    //
-    // Codex review 2026-05-12: the original implementation collapsed
-    // both flavours under `if features.header_present { ... }`, which
-    // let no-header clients call `session/delete` and friends without
-    // negotiating the capability. The split below restores the
-    // strict-opt-in semantic for the new surface while preserving
-    // legacy behaviour for pre-existing gates that explicitly relied
-    // on it.
-
-    // Flavour 2: strict opt-in. Always reject when the capability is
-    // not negotiated, regardless of whether the client sent any
-    // feature header at all.
-    let strict_gated = match method_str {
-        octos_core::ui_protocol::methods::SESSION_LIST
-        | octos_core::ui_protocol::methods::SESSION_SNAPSHOT
-        | octos_core::ui_protocol::methods::SESSION_MESSAGES_PAGE
-        | octos_core::ui_protocol::methods::SESSION_STATUS_GET
-        | octos_core::ui_protocol::methods::SESSION_FILES_LIST
-        | octos_core::ui_protocol::methods::SESSION_TASKS_LIST
-        | octos_core::ui_protocol::methods::SESSION_WORKSPACE_GET
-        | octos_core::ui_protocol::methods::SESSION_TITLE_SET
-        | octos_core::ui_protocol::methods::SESSION_DELETE
-        | octos_core::ui_protocol::methods::SYSTEM_STATUS_GET => {
-            Some(features.auxiliary_rest_to_ws_v1)
-        }
-        // UPCR-2026-023: `user_question/respond` is strict opt-in. A client
-        // that did not negotiate `user_question.v1` never received a
-        // `user_question/requested`, so it has nothing to answer; reject the
-        // method outright instead of routing a forged response.
-        octos_core::ui_protocol::methods::USER_QUESTION_RESPOND => Some(features.user_question_v1),
-        _ => None,
-    };
-    if let Some(false) = strict_gated {
-        return Err(RpcError::method_not_supported(method_str));
-    }
-
-    // Flavour 1: legacy header-present gates. Fire only when the
-    // client opted into negotiation per UPCR-2026-007 but skipped a
-    // specific feature.
+    // UPCR-2026-009 / -010 / -011: when the method is gated behind a
+    // feature flag and the connection did not negotiate that flag, reject
+    // with `method_not_supported` BEFORE attempting to deserialize the
+    // params (spec contract: "we don't know about this method at all").
     if features.header_present {
         let gated = match method_str {
             octos_core::ui_protocol::methods::SESSION_HYDRATE => Some(features.session_hydrate),
             octos_core::ui_protocol::methods::THREAD_GRAPH_GET => Some(features.thread_graph),
             octos_core::ui_protocol::methods::TURN_STATE_GET => Some(features.turn_state_get),
-            octos_core::ui_protocol::methods::TASK_LIST
-            | octos_core::ui_protocol::methods::TASK_CANCEL
-            | octos_core::ui_protocol::methods::TASK_RESTART_FROM_NODE => {
-                Some(features.harness_task_control)
+            // UPCR-2026-023: `user_question/respond` is strict opt-in. A client
+            // that did not negotiate `user_question.v1` never received a
+            // `user_question/requested`, so it has nothing to answer.
+            octos_core::ui_protocol::methods::USER_QUESTION_RESPOND => {
+                Some(features.user_question_v1)
             }
             _ => None,
         };
@@ -10713,20 +9357,14 @@ fn route_rpc_command(
     UiCommand::from_rpc_request(request)
 }
 
-fn string_session_with_optional_topic(session_id: &str, topic: Option<&str>) -> SessionKey {
-    session_key_with_optional_topic(&SessionKey(session_id.to_owned()), topic)
-}
-
 /// SINGLE SOURCE OF TRUTH for which methods `handle_raw_appui_rpc` dispatches —
-/// the raw path that runs BEFORE `route_rpc_command`, so it never reaches the
-/// typed `validate_session_ingress_command_scope` gate.
+/// the raw path that runs BEFORE `route_rpc_command`.
 ///
 /// `handle_raw_appui_rpc` early-returns `false` for any method this rejects and
-/// treats its own match default as `unreachable!`, so the dispatcher and the
-/// session-ingress deny gate CANNOT drift: a new raw arm that isn't also added
-/// here is dead (its feature won't dispatch) and trips the coverage test, while
-/// adding it here without a matching arm panics the `unreachable!`. Both point
-/// back to this one function.
+/// treats its own match default as `unreachable!`, so the dispatcher and this
+/// guard CANNOT drift: a new raw arm that isn't also added here is dead (its
+/// feature won't dispatch), while adding it here without a matching arm panics
+/// the `unreachable!`.
 fn raw_method_is_dispatched(method: &str, _stdio_transport: bool) -> bool {
     if method == APPUI_METHOD_REVIEW_START || method == APPUI_METHOD_TURN_STEER {
         return true;
@@ -10766,124 +9404,10 @@ fn raw_method_is_dispatched(method: &str, _stdio_transport: bool) -> bool {
     false
 }
 
-/// Whether a session-ingress credential can actually CALL `method`. This is the
-/// inverse of the two ingress deny surfaces:
-///   - `raw_method_is_dispatched` (the whole raw surface is denied), and
-///   - the global (non-session-scoped) typed methods
-///     `validate_session_ingress_command_scope` rejects.
-///
-/// Used to filter advertised capabilities (#1594 follow-up) so the surface an
-/// ingress connection is TOLD about matches what it can invoke. The global list
-/// below must stay in lockstep with the reject arm of
-/// `validate_session_ingress_command_scope`; `session_ingress_capability_filter_matches_scope`
-/// pins the two together.
-fn session_ingress_callable_method(method: &str) -> bool {
-    if raw_method_is_dispatched(method, false) {
-        return false;
-    }
-    !matches!(
-        method,
-        APPUI_METHOD_PROFILE_LOCAL_CREATE
-            | octos_core::ui_protocol::methods::SESSION_LIST
-            | octos_core::ui_protocol::methods::SYSTEM_STATUS_GET
-            | octos_core::ui_protocol::methods::SESSION_FORK
-    )
-}
-
-/// Restrict advertised `supported_methods` to what a session-ingress credential
-/// can actually call, closing the advertised-vs-callable gap on the
-/// `client_hello` and `session/open` responses an ingress connection receives.
-fn filter_capabilities_for_session_ingress(capabilities: &mut UiProtocolCapabilities) {
-    capabilities
-        .supported_methods
-        .retain(|method| session_ingress_callable_method(method));
-}
-
-fn validate_session_ingress_command_scope(
-    command: &UiCommand,
-    allowed_session_id: &SessionKey,
-) -> Result<(), RpcError> {
-    let actual = match command {
-        UiCommand::ProfileLocalCreate(_)
-        | UiCommand::LaunchResolve(_)
-        | UiCommand::SessionList(_)
-        | UiCommand::SystemStatusGet(_)
-        | UiCommand::SessionFork(_)
- => {
-            return Err(RpcError::invalid_request(
-                "session ingress credentials may only call session-scoped methods",
-            ));
-        }
-        UiCommand::SessionOpen(params) => {
-            session_key_with_optional_topic(&params.session_id, params.topic.as_deref())
-        }
-        UiCommand::TurnStart(params) => {
-            session_key_with_optional_topic(&params.session_id, params.topic.as_deref())
-        }
-        UiCommand::TurnInterrupt(params) => params.session_id.clone(),
-        UiCommand::ApprovalRespond(params) => params.session_id.clone(),
-        UiCommand::UserQuestionRespond(params) => params.session_id.clone(),
-        UiCommand::ApprovalScopesList(params) => params.session_id.clone(),
-        UiCommand::PermissionProfileList(params) => params.session_id.clone(),
-        UiCommand::PermissionProfileSet(params) => params.session_id.clone(),
-        UiCommand::DiffPreviewGet(params) => params.session_id.clone(),
-        UiCommand::TaskList(params) => {
-            session_key_with_optional_topic(&params.session_id, params.topic.as_deref())
-        }
-        UiCommand::TaskCancel(params) => params.session_id.clone().ok_or_else(|| {
-            RpcError::invalid_params(
-                "session ingress task/cancel requires params.session_id to enforce scope",
-            )
-        })?,
-        UiCommand::TaskRestartFromNode(params) => params.session_id.clone().ok_or_else(|| {
-            RpcError::invalid_params(
-                "session ingress task/restart_from_node requires params.session_id to enforce scope",
-            )
-        })?,
-        UiCommand::TaskOutputRead(params) => params.session_id.clone(),
-        UiCommand::SessionHydrate(params) => params.session_id.clone(),
-        UiCommand::SessionRollback(params) => params.session_id.clone(),
-        UiCommand::ThreadGraphGet(params) => params.session_id.clone(),
-        UiCommand::TurnStateGet(params) => params.session_id.clone(),
-        UiCommand::SessionBtw(params) => {
-            session_key_with_optional_topic(&params.session_id, params.topic.as_deref())
-        }
-        UiCommand::SessionSnapshot(params) => {
-            string_session_with_optional_topic(&params.session_id, params.topic.as_deref())
-        }
-        UiCommand::SessionMessagesPage(params) => SessionKey(params.session_id.clone()),
-        UiCommand::SessionStatusGet(params) => {
-            string_session_with_optional_topic(&params.session_id, params.topic.as_deref())
-        }
-        UiCommand::SessionFilesList(params) => SessionKey(params.session_id.clone()),
-        UiCommand::SessionTasksList(params) => {
-            string_session_with_optional_topic(&params.session_id, params.topic.as_deref())
-        }
-        UiCommand::SessionWorkspaceGet(params) => SessionKey(params.session_id.clone()),
-        UiCommand::SessionTitleSet(params) => SessionKey(params.session_id.clone()),
-        UiCommand::SessionDelete(params) => SessionKey(params.session_id.clone()),
-    };
-
-    if actual == *allowed_session_id {
-        Ok(())
-    } else {
-        Err(RpcError::invalid_request(
-            "session ingress credential is scoped to a different session",
-        ))
-    }
-}
-
 fn ui_protocol_server_supported_methods() -> Vec<&'static str> {
     let mut methods = octos_core::ui_protocol::UI_PROTOCOL_FIRST_SERVER_METHODS.to_vec();
     methods.extend(APPUI_EXTRA_METHODS.iter().copied());
     methods
-}
-
-fn authenticated_profile_id(identity: &AuthIdentity) -> Option<&str> {
-    match identity {
-        AuthIdentity::User { id, .. } if !id.is_empty() => Some(id),
-        AuthIdentity::User { .. } | AuthIdentity::Admin => None,
-    }
 }
 
 fn validate_session_scope(
@@ -11016,7 +9540,6 @@ async fn handle_session_open(
     features: ConnectionUiFeatures,
     id: String,
     mut params: SessionOpenParams,
-    session_ingress: bool,
 ) -> bool {
     normalize_session_open_params_topic(&mut params);
     let topic_scope = params.topic.clone();
@@ -11060,7 +9583,7 @@ async fn handle_session_open(
         let _ = previous.await;
     }
 
-    let mut outcome = match open_session_result(
+    let outcome = match open_session_result(
         state,
         ledger,
         approvals,
@@ -11094,15 +9617,6 @@ async fn handle_session_open(
     // pump, starving it of every profile-carrying frame.
     let live_profile_scope = outcome.profile_scope.clone();
 
-    // #1594 follow-up: a session-ingress connection may only call the
-    // session-scoped surface, so the SessionOpened reply it receives must not
-    // advertise the raw/global methods it would be denied. Filter only this
-    // direct reply; the ledger-broadcast copy other connections observe is
-    // untouched (it reflects the session's negotiated features, not this
-    // credential's scope).
-    if session_ingress {
-        filter_capabilities_for_session_ingress(&mut outcome.result.opened.capabilities);
-    }
     let result = match serde_json::to_value(outcome.result) {
         Ok(result) => result,
         Err(error) => {
@@ -11205,19 +9719,6 @@ async fn handle_session_open(
         }
     }
 
-    // #1594 follow-up: the SessionOpened NOTIFICATION is a documented
-    // capability-discovery path (UPCR-2026-007), so an ingress connection's
-    // direct-sent copy must be filtered just like the RPC result was. This
-    // mutates only the per-connection clone in `outcome`; the shared ledger
-    // entry (already appended, broadcast to other connections) is untouched, and
-    // `send_ledger_event_durable` sends without re-appending.
-    if session_ingress {
-        if let UiProtocolLedgerEvent::Notification(UiNotification::SessionOpened(opened)) =
-            &mut outcome.opened_event.event
-        {
-            filter_capabilities_for_session_ingress(&mut opened.capabilities);
-        }
-    }
     let ledger_for_forwarder = ledger.clone();
     let opened_event_for_wire =
         context_event_for_features(outcome.opened_event.event, ws.snapshot_live_features());
@@ -11387,32 +9888,6 @@ fn ledger_event_matches_profile_scope(
         return true;
     };
     match notification {
-        UiNotification::LoopUpdated(update) => optional_profile_scope_matches(
-            update
-                .profile_id
-                .as_deref()
-                .or(update.loop_state.profile_id.as_deref()),
-            profile_id,
-        ),
-        UiNotification::LoopFired(fired) => optional_profile_scope_matches(
-            fired.profile_id.as_deref().or_else(|| {
-                fired
-                    .loop_state
-                    .as_ref()
-                    .and_then(|loop_state| loop_state.profile_id.as_deref())
-            }),
-            profile_id,
-        ),
-        UiNotification::MonitorUpdated(update) => optional_profile_scope_matches(
-            update
-                .profile_id
-                .as_deref()
-                .or(update.monitor_state.profile_id.as_deref()),
-            profile_id,
-        ),
-        UiNotification::MonitorFired(fired) => {
-            optional_profile_scope_matches(fired.profile_id.as_deref(), profile_id)
-        }
         // `session/open` is appended for BROADCAST — the emit site tags it with
         // the opening connection id specifically so OTHER connections observe
         // it — and it carries `workspace_root`, the context snapshot and pane
@@ -12012,23 +10487,6 @@ fn live_event_passes_capability_filter(
     // that can act on it.
     if !features.user_question_v1 {
         if let UiProtocolLedgerEvent::Notification(UiNotification::UserQuestionRequested(_)) = event
-        {
-            return false;
-        }
-    }
-    // #1977 blocker 6 — `monitor/*` notifications only reach connections that
-    // negotiated `coding.monitor_runtime.v1`. Without this gate an old client
-    // (no monitor capability) sharing a session stream could receive a
-    // `monitor/updated` / `monitor/fired` / `monitor/expired` produced by
-    // another connection's RPC — a capability-contract violation. Applies on
-    // both the live broadcast and reconnect replay (both call this filter),
-    // mirroring the user_question / plan_todos gating discipline above.
-    if !features.monitor_runtime_available() {
-        if let UiProtocolLedgerEvent::Notification(
-            UiNotification::MonitorUpdated(_)
-            | UiNotification::MonitorFired(_)
-            | UiNotification::MonitorExpired(_),
-        ) = event
         {
             return false;
         }
@@ -14390,233 +12848,6 @@ async fn handle_approval_scopes_list(
     }
 }
 
-async fn handle_diff_preview_get(
-    ws: &WsConnection,
-    diff_previews: &PendingDiffPreviewStore,
-    connection_profile_id: Option<&str>,
-    id: String,
-    params: octos_core::ui_protocol::DiffPreviewGetParams,
-) {
-    if let Err(error) = validate_session_scope(&params.session_id, None, connection_profile_id) {
-        send_scope_error(ws, id, error);
-        return;
-    }
-
-    match diff_previews.get(params) {
-        Ok(result) => match serde_json::to_value(result) {
-            Ok(result) => {
-                let _ = send_rpc_result(ws, id, result);
-            }
-            Err(error) => {
-                let _ = send_rpc_error(
-                    ws,
-                    Some(id),
-                    RpcError::internal_error(format!(
-                        "failed to serialize diff/preview/get result: {error}"
-                    )),
-                );
-            }
-        },
-        Err(error) => {
-            let _ = send_rpc_error(ws, Some(id), error);
-        }
-    }
-}
-
-async fn handle_task_output_read(
-    ws: &WsConnection,
-    state: &Arc<AppState>,
-    connection_profile_id: Option<&str>,
-    id: String,
-    params: octos_core::ui_protocol::TaskOutputReadParams,
-) {
-    if let Err(error) = validate_session_scope(&params.session_id, None, connection_profile_id) {
-        send_scope_error(ws, id, error);
-        return;
-    }
-
-    match ui_protocol_task_output::read_task_output(state, params).await {
-        Ok(result) => match serde_json::to_value(result) {
-            Ok(result) => {
-                let _ = send_rpc_result(ws, id, result);
-            }
-            Err(error) => {
-                let _ = send_rpc_error(
-                    ws,
-                    Some(id),
-                    RpcError::internal_error(format!(
-                        "failed to serialize task/output/read result: {error}"
-                    )),
-                );
-            }
-        },
-        Err(error) => {
-            let _ = send_rpc_error(ws, Some(id), error);
-        }
-    }
-}
-
-async fn handle_task_list(
-    ws: &WsConnection,
-    state: &Arc<AppState>,
-    connection_profile_id: Option<&str>,
-    id: String,
-    params: TaskListParams,
-) {
-    let query_session_id =
-        session_key_with_optional_topic(&params.session_id, params.topic.as_deref());
-    if let Err(error) = validate_session_scope(&query_session_id, None, connection_profile_id) {
-        send_scope_error(ws, id, error);
-        return;
-    }
-
-    match task_list_snapshot(state, &query_session_id) {
-        Ok(tasks) => {
-            let result = TaskListResult {
-                session_id: params.session_id,
-                topic: params.topic,
-                tasks,
-            };
-            send_serialized_rpc_result(ws, id, octos_core::ui_protocol::methods::TASK_LIST, result);
-        }
-        Err(error) => {
-            let _ = send_rpc_error(ws, Some(id), error);
-        }
-    }
-}
-
-async fn handle_task_cancel(
-    ws: &WsConnection,
-    state: &Arc<AppState>,
-    connection_profile_id: Option<&str>,
-    id: String,
-    params: TaskCancelParams,
-) {
-    let Some(session_id) = params.session_id.as_ref() else {
-        let _ = send_rpc_error(
-            ws,
-            Some(id),
-            RpcError::invalid_params("task/cancel requires session_id for scoped cancellation"),
-        );
-        return;
-    };
-    if let Err(error) = validate_session_scope(
-        session_id,
-        params.profile_id.as_deref(),
-        connection_profile_id,
-    ) {
-        send_scope_error(ws, id, error);
-        return;
-    }
-
-    let task_id = params.task_id.clone();
-
-    let store = match task_query_store_or_error(state) {
-        Ok(store) => store,
-        Err(error) => {
-            let _ = send_rpc_error(ws, Some(id), error);
-            return;
-        }
-    };
-    match ensure_task_in_session(state, session_id, &task_id).and_then(|()| {
-        store
-            .cancel_task(&task_id.to_string())
-            .map_err(|error| task_cancel_rpc_error(&task_id, error))
-    }) {
-        Ok(()) => {
-            let result = TaskCancelResult {
-                task_id,
-                status: UiTaskRuntimeState::Cancelled,
-            };
-            send_serialized_rpc_result(
-                ws,
-                id,
-                octos_core::ui_protocol::methods::TASK_CANCEL,
-                result,
-            );
-        }
-        Err(error) => {
-            let _ = send_rpc_error(ws, Some(id), error);
-        }
-    }
-}
-
-async fn handle_task_restart_from_node(
-    ws: &WsConnection,
-    state: &Arc<AppState>,
-    connection_profile_id: Option<&str>,
-    id: String,
-    params: TaskRestartFromNodeParams,
-) {
-    let Some(session_id) = params.session_id.as_ref() else {
-        let _ = send_rpc_error(
-            ws,
-            Some(id),
-            RpcError::invalid_params(
-                "task/restart_from_node requires session_id for scoped restart",
-            ),
-        );
-        return;
-    };
-    if let Err(error) = validate_session_scope(
-        session_id,
-        params.profile_id.as_deref(),
-        connection_profile_id,
-    ) {
-        send_scope_error(ws, id, error);
-        return;
-    }
-
-    let task_id = params.task_id.clone();
-    let from_node = params.node_id.clone();
-
-    let store = match task_query_store_or_error(state) {
-        Ok(store) => store,
-        Err(error) => {
-            let _ = send_rpc_error(ws, Some(id), error);
-            return;
-        }
-    };
-    let opts = octos_agent::RelaunchOpts {
-        from_node: from_node.clone(),
-    };
-    match ensure_task_in_session(state, session_id, &task_id).and_then(|()| {
-        store
-            .relaunch_task(&task_id.to_string(), opts)
-            .map_err(|error| task_relaunch_rpc_error(&task_id, error))
-    }) {
-        Ok(new_task_id) => {
-            let new_task_id = match new_task_id.parse::<TaskId>() {
-                Ok(task_id) => task_id,
-                Err(error) => {
-                    let _ = send_rpc_error(
-                        ws,
-                        Some(id),
-                        RpcError::internal_error(format!(
-                            "task supervisor returned an invalid relaunched task id: {error}"
-                        )),
-                    );
-                    return;
-                }
-            };
-            let result = TaskRestartFromNodeResult {
-                original_task_id: task_id,
-                new_task_id,
-                from_node,
-            };
-            send_serialized_rpc_result(
-                ws,
-                id,
-                octos_core::ui_protocol::methods::TASK_RESTART_FROM_NODE,
-                result,
-            );
-        }
-        Err(error) => {
-            let _ = send_rpc_error(ws, Some(id), error);
-        }
-    }
-}
-
 // ----- UPCR-2026-009 / -010 / -011 handlers -----
 
 /// Recover the identity of a committed row after the legacy flat/per-user
@@ -16587,302 +14818,6 @@ fn send_serialized_rpc_result<T: Serialize>(
     }
 }
 
-// ===================== M12 Phase D-1 dispatchers =====================
-//
-// Each handler below mirrors a REST endpoint listed in
-// `docs/adr/m12-phase-d-auxiliary-rest-to-ws.md`. The strategy is to
-// invoke the existing REST handler function directly with the
-// connection's snapshotted `HeaderMap` and `AuthIdentity`, then forward
-// the resulting JSON body as the WS RPC result. This keeps the
-// auxiliary surface fed by exactly one code path (the REST handler in
-// `crates/octos-cli/src/api/handlers.rs` /
-// `crates/octos-cli/src/api/auth_handlers.rs`), so Phase D-5 retirement
-// later does not have to re-validate logic.
-
-/// Per-handler limit for extracting JSON bodies from a REST `Response`.
-/// Mirrors `MAX_TEXT_FRAME_BYTES` (1 MiB) so the WS write side cannot
-/// be fed a frame the peer would reject as oversize. Truncates with an
-/// RPC error if exceeded.
-const AUX_REST_TO_WS_MAX_BODY_BYTES: usize = MAX_TEXT_FRAME_BYTES;
-
-/// What kind of resource the dispatcher was addressing when a REST 404
-/// came back. The bridge uses this to pick the right `RpcError` variant
-/// — session-scoped methods surface `UNKNOWN_SESSION` (-32100) so the
-/// client can reconcile against its session table; non-session methods
-/// (content/profile/system) surface the generic `RESOURCE_NOT_FOUND`
-/// (-32170) so a content row miss does not pollute the session error
-/// channel.
-///
-/// Codex review 2026-05-12: the original implementation mapped EVERY
-/// REST 404 to `RpcError::unknown_session(format!("{method}: not found"))`,
-/// which (a) put the method name into the `session_id` field of the
-/// error data and (b) misclassified content/profile 404s as session
-/// misses.
-#[derive(Debug, Clone)]
-enum RestResourceContext {
-    /// Session-scoped endpoint. `id` is the addressed session id.
-    Session { id: String },
-    /// Non-session resource. `resource_type` is a short tag
-    /// ("content", "profile", ...); `id` is the resource id the
-    /// client sent (empty when the request had no addressable id).
-    Resource { resource_type: String, id: String },
-}
-
-impl RestResourceContext {
-    fn session(id: impl Into<String>) -> Self {
-        Self::Session { id: id.into() }
-    }
-
-    fn resource(resource_type: impl Into<String>, id: impl Into<String>) -> Self {
-        Self::Resource {
-            resource_type: resource_type.into(),
-            id: id.into(),
-        }
-    }
-}
-
-/// Convert an axum `Response` from a REST handler into a parsed JSON
-/// [`Value`] suitable for embedding in a WS RPC result. Non-2xx
-/// responses are surfaced as typed RPC errors so the client sees the
-/// same shape it would on REST today (404/400/503 → typed RpcError
-/// variants per the ADR's `Error envelope` mapping).
-async fn rest_response_to_rpc_value(
-    response: axum::response::Response,
-    method: &str,
-    context: RestResourceContext,
-) -> Result<Value, RpcError> {
-    let status = response.status();
-    let body = axum::body::to_bytes(response.into_body(), AUX_REST_TO_WS_MAX_BODY_BYTES)
-        .await
-        .map_err(|err| {
-            RpcError::internal_error(format!("{method}: read REST body failed: {err}"))
-        })?;
-    if !status.is_success() {
-        // Map common REST statuses to the ADR's error envelope. The
-        // body is included as `data.detail` for debugging but the
-        // message is the human-readable summary.
-        let detail = String::from_utf8_lossy(body.as_ref()).into_owned();
-        let detail = if detail.is_empty() {
-            None
-        } else {
-            Some(detail)
-        };
-        return Err(rest_status_to_rpc_error(method, status, detail, &context));
-    }
-    if body.is_empty() {
-        // REST 204 No Content (and equivalents like our `delete_session`
-        // helper) becomes a `{}` result on the WS side.
-        return Ok(Value::Object(serde_json::Map::new()));
-    }
-    serde_json::from_slice::<Value>(body.as_ref())
-        .map_err(|err| RpcError::internal_error(format!("{method}: REST body was not JSON: {err}")))
-}
-
-fn rest_status_to_rpc_error(
-    method: &str,
-    status: axum::http::StatusCode,
-    detail: Option<String>,
-    context: &RestResourceContext,
-) -> RpcError {
-    let mut data = serde_json::Map::new();
-    data.insert("rest_status".into(), json!(status.as_u16()));
-    if let Some(detail) = detail {
-        // Cap detail at 2 KiB so error frames stay small even if the
-        // REST handler returns a verbose body.
-        let mut detail = detail;
-        if detail.len() > 2048 {
-            octos_core::truncate_utf8(&mut detail, 2048, "…");
-        }
-        data.insert("detail".into(), json!(detail));
-    }
-    use axum::http::StatusCode;
-    let error = match status {
-        // Codex review 2026-05-12: split session-scoped 404 from
-        // generic 404. Session-scoped methods echo `session_id` in
-        // `data` per spec §10; non-session resources go through the
-        // new `RESOURCE_NOT_FOUND` slot so the resource_type + id
-        // reach the client without abusing the `session_id` field.
-        StatusCode::NOT_FOUND => match context {
-            RestResourceContext::Session { id } => RpcError::unknown_session(id.clone()),
-            RestResourceContext::Resource { resource_type, id } => {
-                RpcError::not_found(resource_type.clone(), id.clone())
-            }
-        },
-        StatusCode::BAD_REQUEST => {
-            RpcError::invalid_params(format!("{method}: REST returned 400 bad_request"))
-        }
-        StatusCode::SERVICE_UNAVAILABLE => RpcError::runtime_not_ready(format!(
-            "{method}: REST handler not configured on this server"
-        )),
-        StatusCode::CONFLICT => {
-            RpcError::invalid_params(format!("{method}: REST returned 409 conflict"))
-        }
-        _ => RpcError::internal_error(format!(
-            "{method}: REST returned status {}",
-            status.as_u16()
-        )),
-    };
-    // Merge the existing data (rest_status + optional detail) with
-    // whatever the typed variant already wrote (e.g.
-    // `unknown_session.data.kind = "unknown_session"`,
-    // `unknown_session.data.session_id = "..."`). Existing keys win so
-    // the typed-error contract is preserved.
-    let mut merged = data;
-    if let Some(Value::Object(existing)) = error.data.clone() {
-        for (k, v) in existing {
-            merged.insert(k, v);
-        }
-    }
-    error.with_data(Value::Object(merged))
-}
-
-/// Forward a parsed JSON body to the WS RPC result channel. Used by
-/// every Phase D-1 dispatcher after extracting the REST handler body.
-fn send_aux_rpc_result(ws: &WsConnection, id: String, method: &str, body: Value) {
-    // The body shape MUST match the WS result schema documented in
-    // `octos-core/src/ui_protocol.rs`. For methods whose Result wraps
-    // the REST body under a single field (e.g. `SessionListResult.sessions`),
-    // callers are responsible for constructing that wrapper before
-    // invoking this helper; methods whose Result is a direct alias of
-    // the REST body pass it through verbatim.
-    if let Err(error) = send_rpc_result(ws, id, body) {
-        tracing::debug!(
-            target: "octos::ui_protocol::ws::aux",
-            method = %method,
-            ?error,
-            "aux REST→WS result send failed"
-        );
-    }
-}
-
-/// Build a synthetic `Path<String>` extractor from the session id in
-/// the WS params. Axum's `Path` is a tuple wrapper so we construct it
-/// directly via `Path(...)` — the REST handler treats it like an
-/// already-extracted route segment.
-fn axum_path(value: String) -> axum::extract::Path<String> {
-    axum::extract::Path(value)
-}
-
-// This WS-to-REST adapter forwards the request headers and auth identity
-// alongside the connection state and negotiated features, pushing the
-// handler past clippy's 7-arg lint; the parameters are a flat dependency
-// list, not a missing struct.
-#[allow(clippy::too_many_arguments)]
-async fn handle_session_list(
-    ws: &WsConnection,
-    state: &Arc<AppState>,
-    headers: &HeaderMap,
-    identity: Option<&AuthIdentity>,
-    connection_profile_id: Option<&str>,
-    features: ConnectionUiFeatures,
-    id: String,
-    params: SessionListParams,
-) {
-    // Per-project (`appui.sessions_in_cwd`) scoping. When the client sends a
-    // `cwd` AND the server flag is on AND the connection negotiated
-    // `session.workspace_cwd.v1`, the listing is scoped to `<cwd>/.octos`.
-    // Absent cwd / flag off → `None` → byte-identical legacy listing.
-    let cwd_sessions_root =
-        match resolve_session_list_cwd_root(state, features, connection_profile_id, &params) {
-            Ok(root) => root,
-            Err(error) => {
-                let _ = send_rpc_error(ws, Some(id), error);
-                return;
-            }
-        };
-    let identity_ext = identity.cloned().map(Extension);
-    let response = super::handlers::list_sessions(
-        State(state.clone()),
-        headers.clone(),
-        identity_ext,
-        connection_profile_id,
-        cwd_sessions_root,
-    )
-    .await;
-    let method = octos_core::ui_protocol::methods::SESSION_LIST;
-    // Collection endpoint — no addressable session id. Treat any
-    // (unexpected) 404 as a generic resource-not-found rather than
-    // an `UNKNOWN_SESSION` miss.
-    let context = RestResourceContext::resource("session", "");
-    match rest_response_to_rpc_value(response, method, context).await {
-        Ok(sessions) => {
-            send_aux_rpc_result(ws, id, method, json!({ "sessions": sessions }));
-        }
-        Err(error) => {
-            let _ = send_rpc_error(ws, Some(id), error);
-        }
-    }
-}
-
-/// Resolve an optional `session/list` `cwd` into the per-project, per-profile
-/// session-store root (`<cwd>/.octos/<profile_id>`), applying the same gates
-/// the write path uses so list and open agree on where a project's sessions
-/// live:
-///
-/// 1. **Flag** — when `appui.sessions_in_cwd` is off, the `cwd` is ignored
-///    entirely (`Ok(None)` → legacy per-profile/global listing). This keeps a
-///    flag-off server byte-identical: nothing was ever written under
-///    `<cwd>/.octos`, so scoping to it would only ever return an empty list.
-/// 2. **Capability** — a `cwd` under the flag requires the connection to have
-///    negotiated `session.workspace_cwd.v1` (mirrors `session/open`'s cwd
-///    gate). A client that sends `cwd` without it gets a typed error rather
-///    than a silently-global list.
-/// 3. **Workspace safety** — the SAME [`validate_session_workspace_allowed`]
-///    gate `session/open` runs: the cwd must canonicalize to a directory AND
-///    must not be rooted under a banned system path. Without this a client
-///    could point the listing at `/etc` (or any service-writable path) and
-///    `SessionManager::open` would CREATE `<cwd>/.octos/…` there and enumerate
-///    it. On rejection we surface the typed error (consistent with
-///    `session/open`) rather than silently degrading.
-/// 4. **Profile namespace** — the store root is
-///    `<cwd>/.octos/<profile_id>` (via [`project_sessions_root`]), matching
-///    the write path so two profiles that share a project cwd never read each
-///    other's transcripts.
-///
-/// A trimmed-empty or absent `cwd` is always `Ok(None)` (legacy listing).
-fn resolve_session_list_cwd_root(
-    state: &AppState,
-    features: ConnectionUiFeatures,
-    connection_profile_id: Option<&str>,
-    params: &SessionListParams,
-) -> Result<Option<PathBuf>, RpcError> {
-    let Some(cwd) = params
-        .cwd
-        .as_deref()
-        .map(str::trim)
-        .filter(|cwd| !cwd.is_empty())
-    else {
-        return Ok(None);
-    };
-    // Flag off → the store was never relocated; ignore the cwd (legacy).
-    if !state.session_cache.sessions_in_cwd() {
-        return Ok(None);
-    }
-    if !features.session_workspace_cwd {
-        return Err(RpcError::invalid_params(
-            "session/list cwd requires feature session.workspace_cwd.v1",
-        )
-        .with_data(json!({
-            "kind": "feature_required",
-            "feature": UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1,
-        })));
-    }
-    let workspace_root = canonical_existing_dir(cwd)?;
-    // SAME safety gate as session/open — reject banned system roots (and the
-    // missing-profile-runtime case) BEFORE opening a SessionManager that would
-    // otherwise materialize `<cwd>/.octos` at an arbitrary path.
-    validate_session_workspace_allowed(state, connection_profile_id, &workspace_root)?;
-    // Namespace by the SAME profile the write path uses so the listing reads
-    // exactly the connection's own project store.
-    let profile_id = resolve_session_profile_runtime(state, connection_profile_id)
-        .map(|runtime| runtime.profile_id.clone())
-        .unwrap_or_else(|| connection_profile_id.unwrap_or(MAIN_PROFILE_ID).to_string());
-    Ok(Some(crate::runtime::session::project_sessions_root(
-        &workspace_root,
-        &profile_id,
-    )))
-}
-
 /// `launch/resolve` — the pre-session launch probe. Resolves the launching
 /// profile (requested `--profile` → folder-sticky → global default) and reports
 /// whether the client should resume the folder's conversation, activate a new
@@ -16898,12 +14833,11 @@ async fn handle_launch_resolve(
 ) {
     match resolve_launch_result(state, connection_profile_id, features, &params) {
         Ok(result) => {
-            let body = serde_json::to_value(&result).unwrap_or_else(|_| json!({}));
-            send_aux_rpc_result(
+            send_serialized_rpc_result(
                 ws,
                 id,
                 octos_core::ui_protocol::methods::LAUNCH_RESOLVE,
-                body,
+                &result,
             );
         }
         Err(error) => {
@@ -17036,481 +14970,6 @@ fn resolve_launch_result(
     })
 }
 
-// This WS-to-REST adapter forwards the request headers and auth identity
-// alongside the connection state, routed profile scope, and negotiated
-// features — a flat dependency list, not a missing struct.
-#[allow(clippy::too_many_arguments)]
-async fn handle_session_status_get(
-    ws: &WsConnection,
-    state: &Arc<AppState>,
-    headers: &HeaderMap,
-    identity: Option<&AuthIdentity>,
-    connection_profile_id: Option<&str>,
-    routed_profile_id: Option<&str>,
-    features: ConnectionUiFeatures,
-    id: String,
-    params: SessionStatusGetParams,
-) {
-    let topic_params = axum::extract::Query(super::handlers::TopicQueryParams {
-        topic: params.topic.clone(),
-    });
-    let session_id_str = params.session_id.clone();
-    let session_key = status_params_session_key(&params);
-    let identity_ext = identity.cloned().map(Extension);
-    let response = super::handlers::session_status(
-        State(state.clone()),
-        headers.clone(),
-        identity_ext,
-        axum_path(params.session_id),
-        topic_params,
-    )
-    .await;
-    let method = octos_core::ui_protocol::methods::SESSION_STATUS_GET;
-    let context = RestResourceContext::session(session_id_str);
-    match rest_response_to_rpc_value(response, method, context).await {
-        Ok(mut status) => {
-            let (context, context_state) = if features.context_lifecycle_available() {
-                appui_context_status_snapshot_for_state(
-                    state,
-                    connection_profile_id,
-                    routed_profile_id,
-                    &session_key,
-                )
-                .await
-            } else {
-                (None, None)
-            };
-            let (context, context_state) =
-                context_snapshot_for_features(context, context_state, features);
-            if let Some(map) = status.as_object_mut() {
-                if let Some(context) = &context {
-                    map.insert("context".to_owned(), context.clone());
-                }
-                if let Some(context_state) = &context_state {
-                    map.insert("context_state".to_owned(), json!(context_state));
-                }
-            }
-            send_aux_rpc_result(
-                ws,
-                id,
-                method,
-                json!({
-                    "status": status,
-                    "context": context,
-                    "context_state": context_state,
-                }),
-            );
-        }
-        Err(error) => {
-            let _ = send_rpc_error(ws, Some(id), error);
-        }
-    }
-}
-
-fn status_params_session_key(params: &SessionStatusGetParams) -> SessionKey {
-    match params
-        .topic
-        .as_deref()
-        .map(str::trim)
-        .filter(|topic| !topic.is_empty())
-    {
-        Some(topic) => SessionKey(format!("{}#{topic}", params.session_id)),
-        None => SessionKey(params.session_id.clone()),
-    }
-}
-
-async fn handle_session_files_list(
-    ws: &WsConnection,
-    state: &Arc<AppState>,
-    headers: &HeaderMap,
-    identity: Option<&AuthIdentity>,
-    id: String,
-    params: SessionFilesListParams,
-) {
-    let identity_ext = identity.cloned().map(Extension);
-    let session_id_str = params.session_id.clone();
-    let response = super::handlers::session_files(
-        State(state.clone()),
-        headers.clone(),
-        identity_ext,
-        axum_path(params.session_id),
-    )
-    .await;
-    let method = octos_core::ui_protocol::methods::SESSION_FILES_LIST;
-    let context = RestResourceContext::session(session_id_str);
-    match rest_response_to_rpc_value(response, method, context).await {
-        Ok(files) => {
-            send_aux_rpc_result(ws, id, method, json!({ "files": files }));
-        }
-        Err(error) => {
-            let _ = send_rpc_error(ws, Some(id), error);
-        }
-    }
-}
-
-async fn handle_session_tasks_list(
-    ws: &WsConnection,
-    state: &Arc<AppState>,
-    headers: &HeaderMap,
-    identity: Option<&AuthIdentity>,
-    id: String,
-    params: SessionTasksListParams,
-) {
-    let topic_params = axum::extract::Query(super::handlers::TopicQueryParams {
-        topic: params.topic.clone(),
-    });
-    let session_id_str = params.session_id.clone();
-    let identity_ext = identity.cloned().map(Extension);
-    let response = super::handlers::session_tasks(
-        State(state.clone()),
-        headers.clone(),
-        identity_ext,
-        axum_path(params.session_id),
-        topic_params,
-    )
-    .await;
-    let method = octos_core::ui_protocol::methods::SESSION_TASKS_LIST;
-    let context = RestResourceContext::session(session_id_str);
-    match rest_response_to_rpc_value(response, method, context).await {
-        Ok(tasks) => {
-            send_aux_rpc_result(ws, id, method, json!({ "tasks": tasks }));
-        }
-        Err(error) => {
-            let _ = send_rpc_error(ws, Some(id), error);
-        }
-    }
-}
-
-async fn handle_session_workspace_get(
-    ws: &WsConnection,
-    state: &Arc<AppState>,
-    headers: &HeaderMap,
-    identity: Option<&AuthIdentity>,
-    id: String,
-    params: SessionWorkspaceGetParams,
-) {
-    let identity_ext = identity.cloned().map(Extension);
-    let session_id_str = params.session_id.clone();
-    let response = super::handlers::session_workspace_contract(
-        State(state.clone()),
-        headers.clone(),
-        identity_ext,
-        axum_path(params.session_id),
-    )
-    .await;
-    let method = octos_core::ui_protocol::methods::SESSION_WORKSPACE_GET;
-    let context = RestResourceContext::session(session_id_str);
-    match rest_response_to_rpc_value(response, method, context).await {
-        Ok(contracts) => {
-            send_aux_rpc_result(ws, id, method, json!({ "contracts": contracts }));
-        }
-        Err(error) => {
-            let _ = send_rpc_error(ws, Some(id), error);
-        }
-    }
-}
-
-async fn handle_session_snapshot(
-    ws: &WsConnection,
-    state: &Arc<AppState>,
-    headers: &HeaderMap,
-    identity: Option<&AuthIdentity>,
-    id: String,
-    params: SessionSnapshotParams,
-) {
-    // Snapshot is a single round trip that collapses the three REST
-    // bootstrap calls (status, files, tasks). Run them concurrently
-    // and surface the first error.
-    let method = octos_core::ui_protocol::methods::SESSION_SNAPSHOT;
-    let session_id_str = params.session_id.clone();
-    let topic_params = axum::extract::Query(super::handlers::TopicQueryParams {
-        topic: params.topic.clone(),
-    });
-    let identity_ext = identity.cloned().map(Extension);
-    let status_fut = super::handlers::session_status(
-        State(state.clone()),
-        headers.clone(),
-        identity.cloned().map(Extension),
-        axum_path(params.session_id.clone()),
-        axum::extract::Query(super::handlers::TopicQueryParams {
-            topic: params.topic.clone(),
-        }),
-    );
-    let files_fut = super::handlers::session_files(
-        State(state.clone()),
-        headers.clone(),
-        identity_ext,
-        axum_path(params.session_id.clone()),
-    );
-    let tasks_fut = super::handlers::session_tasks(
-        State(state.clone()),
-        headers.clone(),
-        identity.cloned().map(Extension),
-        axum_path(params.session_id),
-        topic_params,
-    );
-    let (status_resp, files_resp, tasks_resp) = tokio::join!(status_fut, files_fut, tasks_fut);
-    let status = match rest_response_to_rpc_value(
-        status_resp,
-        method,
-        RestResourceContext::session(session_id_str.clone()),
-    )
-    .await
-    {
-        Ok(v) => v,
-        Err(error) => {
-            let _ = send_rpc_error(ws, Some(id), error);
-            return;
-        }
-    };
-    let files = match rest_response_to_rpc_value(
-        files_resp,
-        method,
-        RestResourceContext::session(session_id_str.clone()),
-    )
-    .await
-    {
-        Ok(v) => v,
-        Err(error) => {
-            let _ = send_rpc_error(ws, Some(id), error);
-            return;
-        }
-    };
-    let tasks = match rest_response_to_rpc_value(
-        tasks_resp,
-        method,
-        RestResourceContext::session(session_id_str),
-    )
-    .await
-    {
-        Ok(v) => v,
-        Err(error) => {
-            let _ = send_rpc_error(ws, Some(id), error);
-            return;
-        }
-    };
-    send_aux_rpc_result(
-        ws,
-        id,
-        method,
-        json!({
-            "status": status,
-            "files": files,
-            "tasks": tasks,
-        }),
-    );
-}
-
-async fn handle_session_messages_page(
-    ws: &WsConnection,
-    state: &Arc<AppState>,
-    headers: &HeaderMap,
-    identity: Option<&AuthIdentity>,
-    id: String,
-    params: SessionMessagesPageParams,
-) {
-    let method = octos_core::ui_protocol::methods::SESSION_MESSAGES_PAGE;
-    let limit = params
-        .limit
-        .unwrap_or(SESSION_MESSAGES_PAGE_DEFAULT_LIMIT)
-        .min(SESSION_MESSAGES_PAGE_MAX_LIMIT);
-    let offset = params
-        .offset
-        .unwrap_or(0)
-        .min(SESSION_MESSAGES_PAGE_MAX_OFFSET);
-    let pagination = axum::extract::Query(super::handlers::PaginationParams {
-        limit,
-        offset,
-        source: None,
-        since_seq: params.since_seq,
-        topic: params.topic.clone(),
-    });
-    let identity_ext = identity.cloned().map(Extension);
-    let session_id_str = params.session_id.clone();
-    let response = super::handlers::session_messages(
-        State(state.clone()),
-        headers.clone(),
-        identity_ext,
-        axum_path(params.session_id),
-        pagination,
-    )
-    .await;
-    // Codex review 2026-05-12: previously, this dispatcher mapped REST
-    // 404 to an empty page and dropped REST 503 onto the generic JSON
-    // path (which then surfaced `INTERNAL_ERROR`). Both diverged from
-    // the REST contract documented at `handlers.rs:767` (gateway
-    // proxy 404) and `handlers.rs:783` (standalone fallback 503).
-    // Mirror REST faithfully now: 404 → `UNKNOWN_SESSION` with the
-    // addressed `session_id` echoed in `data` per spec §10; 503 →
-    // `runtime_not_ready` so clients can distinguish "session does
-    // not exist" from "server has no gateway wired".
-    let context = RestResourceContext::session(session_id_str);
-    match rest_response_to_rpc_value(response, method, context).await {
-        Ok(messages) => {
-            let len = messages.as_array().map(|arr| arr.len()).unwrap_or(0);
-            let has_more = len == limit;
-            let next_offset = offset.saturating_add(len);
-            send_aux_rpc_result(
-                ws,
-                id,
-                method,
-                json!({
-                    "messages": messages,
-                    "has_more": has_more,
-                    "next_offset": next_offset,
-                }),
-            );
-        }
-        Err(error) => {
-            let _ = send_rpc_error(ws, Some(id), error);
-        }
-    }
-}
-
-async fn handle_session_title_set(
-    ws: &WsConnection,
-    state: &Arc<AppState>,
-    headers: &HeaderMap,
-    identity: Option<&AuthIdentity>,
-    id: String,
-    params: SessionTitleSetParams,
-) {
-    let method = octos_core::ui_protocol::methods::SESSION_TITLE_SET;
-    let trimmed = params.title.trim();
-    if trimmed.is_empty() {
-        let _ = send_rpc_error(
-            ws,
-            Some(id),
-            RpcError::invalid_params(format!("{method}: title must not be empty")),
-        );
-        return;
-    }
-    if trimmed.chars().count() > SESSION_TITLE_SET_MAX_CHARS {
-        let _ = send_rpc_error(
-            ws,
-            Some(id),
-            RpcError::invalid_params(format!(
-                "{method}: title must be at most {SESSION_TITLE_SET_MAX_CHARS} chars"
-            )),
-        );
-        return;
-    }
-    let body = axum::Json(super::handlers::UpdateTitleRequest {
-        title: trimmed.to_string(),
-    });
-    let session_id_str = params.session_id.clone();
-    let response = super::handlers::update_session_title(
-        State(state.clone()),
-        headers.clone(),
-        identity.cloned().map(axum::Extension),
-        axum_path(params.session_id),
-        body,
-    )
-    .await;
-    let status = response.status();
-    if status.is_success() {
-        send_aux_rpc_result(
-            ws,
-            id,
-            method,
-            json!({
-                "session_id": session_id_str,
-                "title": trimmed,
-            }),
-        );
-    } else {
-        let detail = axum::body::to_bytes(response.into_body(), AUX_REST_TO_WS_MAX_BODY_BYTES)
-            .await
-            .ok()
-            .and_then(|bytes| String::from_utf8(bytes.to_vec()).ok());
-        let context = RestResourceContext::session(session_id_str);
-        let _ = send_rpc_error(
-            ws,
-            Some(id),
-            rest_status_to_rpc_error(method, status, detail, &context),
-        );
-    }
-}
-
-async fn handle_session_delete(
-    ws: &WsConnection,
-    state: &Arc<AppState>,
-    headers: &HeaderMap,
-    identity: Option<&AuthIdentity>,
-    id: String,
-    params: SessionDeleteParams,
-) {
-    let method = octos_core::ui_protocol::methods::SESSION_DELETE;
-    let session_id_str = params.session_id.clone();
-    let response = super::handlers::delete_session(
-        State(state.clone()),
-        headers.clone(),
-        identity.cloned().map(axum::Extension),
-        axum_path(params.session_id),
-    )
-    .await;
-    let status = response.status();
-    if status.is_success() {
-        send_aux_rpc_result(ws, id, method, json!({}));
-    } else {
-        let detail = axum::body::to_bytes(response.into_body(), AUX_REST_TO_WS_MAX_BODY_BYTES)
-            .await
-            .ok()
-            .and_then(|bytes| String::from_utf8(bytes.to_vec()).ok());
-        let context = RestResourceContext::session(session_id_str);
-        let _ = send_rpc_error(
-            ws,
-            Some(id),
-            rest_status_to_rpc_error(method, status, detail, &context),
-        );
-    }
-}
-
-async fn handle_system_status_get(
-    ws: &WsConnection,
-    state: &Arc<AppState>,
-    id: String,
-    _params: SystemStatusGetParams,
-) {
-    let method = octos_core::ui_protocol::methods::SYSTEM_STATUS_GET;
-    let axum::Json(status) = super::handlers::status(State(state.clone())).await;
-    match serde_json::to_value(&status) {
-        Ok(value) => send_aux_rpc_result(ws, id, method, json!({ "status": value })),
-        Err(error) => {
-            let _ = send_rpc_error(
-                ws,
-                Some(id),
-                RpcError::internal_error(format!("{method}: serialize status failed: {error}")),
-            );
-        }
-    }
-}
-
-fn task_query_store_or_error(
-    state: &Arc<AppState>,
-) -> Result<&crate::session_actor::SessionTaskQueryStore, RpcError> {
-    state.task_query_store.as_ref().ok_or_else(|| {
-        RpcError::runtime_not_ready("task supervisor not wired for AppUI task commands")
-            .with_data(json!({ "kind": "runtime_unavailable" }))
-    })
-}
-
-fn task_list_snapshot(
-    state: &Arc<AppState>,
-    session_id: &SessionKey,
-) -> Result<Vec<TaskListEntry>, RpcError> {
-    let store = task_query_store_or_error(state)?;
-    match store.query_json(&session_id.to_string()) {
-        Value::Array(tasks) => tasks
-            .into_iter()
-            .map(task_list_entry_from_value)
-            .collect::<Result<Vec<_>, _>>(),
-        _ => Err(RpcError::internal_error(
-            "task supervisor query returned a non-array task snapshot",
-        )),
-    }
-}
-
 fn session_key_with_optional_topic(session_id: &SessionKey, topic: Option<&str>) -> SessionKey {
     let Some(topic) = topic.map(str::trim).filter(|topic| !topic.is_empty()) else {
         return session_id.clone();
@@ -17518,159 +14977,6 @@ fn session_key_with_optional_topic(session_id: &SessionKey, topic: Option<&str>)
     SessionKey(format!("{}#{topic}", session_id.base_key()))
 }
 
-#[derive(serde::Deserialize)]
-struct TaskListProjection {
-    id: TaskId,
-    #[serde(default)]
-    tool_name: String,
-    #[serde(default)]
-    tool_call_id: String,
-    #[serde(default)]
-    parent_session_key: Option<SessionKey>,
-    #[serde(default)]
-    child_session_key: Option<SessionKey>,
-    #[serde(default)]
-    status: String,
-    #[serde(default)]
-    lifecycle_state: String,
-    #[serde(default)]
-    runtime_state: String,
-    // #966 / M13-B — extended projection fields. Optional so legacy
-    // snapshots from older TaskSupervisor query JSON deserialize cleanly.
-    #[serde(default)]
-    source: Option<String>,
-    #[serde(default)]
-    role: Option<String>,
-    #[serde(default)]
-    summary: Option<String>,
-    #[serde(default)]
-    artifact_count: Option<u32>,
-    #[serde(default)]
-    runtime_policy_stamp: Option<Value>,
-    #[serde(default)]
-    child_terminal_state: Option<String>,
-    #[serde(default)]
-    child_join_state: Option<String>,
-    #[serde(default)]
-    child_joined_at: Option<DateTime<Utc>>,
-    #[serde(default)]
-    child_failure_action: Option<String>,
-    #[serde(default)]
-    runtime_detail: Option<Value>,
-    #[serde(default)]
-    workflow_kind: Option<String>,
-    #[serde(default)]
-    current_phase: Option<String>,
-    started_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-    #[serde(default)]
-    completed_at: Option<DateTime<Utc>>,
-    #[serde(default)]
-    output_files: Vec<String>,
-    #[serde(default)]
-    error: Option<String>,
-    #[serde(default)]
-    session_key: Option<SessionKey>,
-}
-
-fn task_list_entry_from_value(value: Value) -> Result<TaskListEntry, RpcError> {
-    let projected: TaskListProjection = serde_json::from_value(value)
-        .map_err(|error| RpcError::internal_error(format!("invalid task snapshot: {error}")))?;
-    let state = ui_task_state_from_label(&projected.lifecycle_state)
-        .or_else(|| ui_task_state_from_label(&projected.runtime_state))
-        .or_else(|| ui_task_state_from_label(&projected.status))
-        .unwrap_or(UiTaskRuntimeState::Running);
-
-    Ok(TaskListEntry {
-        id: projected.id,
-        tool_name: projected.tool_name,
-        tool_call_id: projected.tool_call_id,
-        state,
-        status: projected.status,
-        lifecycle_state: projected.lifecycle_state,
-        runtime_state: projected.runtime_state,
-        // #966 / M13-B — extended projection fields. Backed by
-        // additional optional fields in the TaskSupervisor query
-        // JSON; when absent (legacy snapshots), these stay None and
-        // are omitted from the wire.
-        source: projected.source,
-        role: projected.role,
-        summary: projected.summary,
-        artifact_count: projected.artifact_count,
-        runtime_policy_stamp: projected.runtime_policy_stamp,
-        parent_session_key: projected.parent_session_key,
-        child_session_key: projected.child_session_key,
-        child_terminal_state: projected.child_terminal_state,
-        child_join_state: projected.child_join_state,
-        child_joined_at: projected.child_joined_at,
-        child_failure_action: projected.child_failure_action,
-        runtime_detail: projected.runtime_detail,
-        workflow_kind: projected.workflow_kind,
-        current_phase: projected.current_phase,
-        started_at: projected.started_at,
-        updated_at: projected.updated_at,
-        completed_at: projected.completed_at,
-        output_files: projected.output_files,
-        error: projected.error,
-        session_key: projected.session_key,
-    })
-}
-
-fn ui_task_state_from_label(label: &str) -> Option<UiTaskRuntimeState> {
-    match label {
-        "pending" | "queued" | "spawned" => Some(UiTaskRuntimeState::Pending),
-        "running" | "executing_tool" | "resolving_outputs" | "verifying_outputs"
-        | "delivering_outputs" | "cleaning_up" | "verifying" => Some(UiTaskRuntimeState::Running),
-        "completed" | "ready" => Some(UiTaskRuntimeState::Completed),
-        "failed" => Some(UiTaskRuntimeState::Failed),
-        "cancelled" | "canceled" => Some(UiTaskRuntimeState::Cancelled),
-        _ => None,
-    }
-}
-
-fn ensure_task_in_session(
-    state: &Arc<AppState>,
-    session_id: &SessionKey,
-    task_id: &TaskId,
-) -> Result<(), RpcError> {
-    if task_list_snapshot(state, session_id)?
-        .iter()
-        .any(|task| &task.id == task_id)
-    {
-        Ok(())
-    } else {
-        Err(RpcError::unknown_task_id(task_id))
-    }
-}
-
-fn task_cancel_rpc_error(task_id: &TaskId, error: octos_agent::TaskCancelError) -> RpcError {
-    match error {
-        octos_agent::TaskCancelError::NotFound => RpcError::unknown_task_id(task_id),
-        octos_agent::TaskCancelError::AlreadyTerminal => {
-            RpcError::invalid_params("task is already terminal")
-                .with_data(json!({ "kind": "task_already_terminal" }))
-        }
-    }
-}
-
-fn task_relaunch_rpc_error(task_id: &TaskId, error: octos_agent::TaskRelaunchError) -> RpcError {
-    match error {
-        octos_agent::TaskRelaunchError::NotFound => RpcError::unknown_task_id(task_id),
-        octos_agent::TaskRelaunchError::StillActive => {
-            RpcError::invalid_params("task is still active; cancel it before relaunching")
-                .with_data(json!({ "kind": "task_still_active" }))
-        }
-    }
-}
-
-/// #1134 — pick the LAST non-empty assistant row after `pre` from a
-/// pre-fetched session history slice.
-///
-/// Walks from the back and skips empty-content rows (assistant
-/// tool-call stubs persisted before the model's final text reply).
-/// Pulled out as a free function so the acceptance test can simulate
-/// the spawn_only / send_file ordering directly without standing up
-/// `run_standalone_turn`.
 fn appui_history_last_non_empty_assistant_after(history: &[Message], pre: usize) -> Option<String> {
     history
         .iter()
@@ -17803,97 +15109,6 @@ fn normalize_tool_context(value: Option<&str>) -> Option<String> {
         return None;
     }
     Some(value.to_string())
-}
-
-/// Child-stream coalescing window (#1799 follow-up). A fast child can fire
-/// the spawn `ChildStreamCallback` 100+ times/sec; every fire used to clone
-/// one `agent/output/delta` notification and try-enqueue it onto the bounded
-/// WS writer channel (lossy drop-on-full), so bursts bought
-/// `BackpressureDrop`s. Merging consecutive fragments for up to ~16ms
-/// (≈ one 60fps frame — indistinguishable for a live tail) cuts the enqueue
-/// rate by an order of magnitude.
-const CHILD_STREAM_COALESCE_WINDOW: Duration = Duration::from_millis(16);
-
-/// Flush a merged child-stream frame as soon as it reaches this many bytes,
-/// even inside the coalescing window, so one chatty child can neither grow
-/// an unbounded in-memory buffer nor emit a single oversized WS frame while
-/// the 16ms deadline is still pending.
-const CHILD_STREAM_COALESCE_MAX_BYTES: usize = 4096;
-
-/// One flushable merged `agent/output/delta` frame: CONSECUTIVE stream
-/// fragments of the SAME child, text concatenated, `first_offset` = the
-/// start offset of the FIRST fragment. Fragment offsets are contiguous by
-/// construction (`SpawnChildTranscriptReporter.stream_offset` increments by
-/// exactly the emitted text length), so the merged frame spans
-/// `first_offset..first_offset + text.len()` and the on-the-wire
-/// `OutputCursor` start-offset semantics are byte-identical to the
-/// unmerged frames.
-struct ChildStreamFrame {
-    agent_id: String,
-    first_offset: u64,
-    text: String,
-}
-
-/// Pure merge core of the child-stream coalescer — unit-testable without
-/// the async plumbing. Folds incoming `(agent_id, offset, text)` fragments
-/// into at most one pending frame and yields the frames that must be
-/// flushed NOW: on a task switch (fragments of different children must not
-/// merge) or when the pending buffer crosses
-/// [`CHILD_STREAM_COALESCE_MAX_BYTES`]. Time-based flushing is the pump's
-/// job ([`Self::take_pending`] on the 16ms deadline).
-#[derive(Default)]
-struct ChildStreamCoalescer {
-    pending: Option<ChildStreamFrame>,
-}
-
-impl ChildStreamCoalescer {
-    /// Fold one fragment; returns the frames (0, 1, or 2) that must be
-    /// flushed immediately, in send order.
-    fn push(&mut self, agent_id: &str, offset: u64, text: &str) -> Vec<ChildStreamFrame> {
-        let mut flush = Vec::new();
-        match self.pending.as_mut() {
-            Some(pending) if pending.agent_id == agent_id => {
-                // Consecutive fragment of the same child: concatenate, keep
-                // the FIRST fragment's start offset.
-                pending.text.push_str(text);
-            }
-            Some(_) => {
-                // Task switch: the pending frame must go out BEFORE the
-                // other child's fragment (a frame is a per-child window).
-                flush.extend(self.pending.take());
-                self.pending = Some(ChildStreamFrame {
-                    agent_id: agent_id.to_string(),
-                    first_offset: offset,
-                    text: text.to_string(),
-                });
-            }
-            None => {
-                self.pending = Some(ChildStreamFrame {
-                    agent_id: agent_id.to_string(),
-                    first_offset: offset,
-                    text: text.to_string(),
-                });
-            }
-        }
-        if self
-            .pending
-            .as_ref()
-            .is_some_and(|pending| pending.text.len() >= CHILD_STREAM_COALESCE_MAX_BYTES)
-        {
-            flush.extend(self.pending.take());
-        }
-        flush
-    }
-
-    /// Take the pending frame for a deadline flush (16ms tick, or the final
-    /// flush when the fragment channel closes).
-    fn take_pending(&mut self) -> Option<ChildStreamFrame> {
-        self.pending.take()
-    }
-
-    fn has_pending(&self) -> bool {
-        self.pending.is_some()
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -18391,7 +15606,19 @@ async fn run_standalone_turn(
         let bg_session_id = session_id.clone();
         let bg_thread_id = turn_id.0.to_string();
         let bg_turn_id = turn_id.clone();
-        let task_state_path = ui_protocol_task_output::task_state_path(&bg_data_dir, &session_id);
+        let task_state_path = {
+            let encoded_base = octos_bus::session::encode_path_component(session_id.base_key());
+            let topic = session_id
+                .topic()
+                .filter(|topic| !topic.is_empty())
+                .unwrap_or("default");
+            let encoded_topic = octos_bus::session::encode_path_component(topic);
+            bg_data_dir
+                .join("users")
+                .join(encoded_base)
+                .join("sessions")
+                .join(format!("{encoded_topic}.tasks.jsonl"))
+        };
         let task_supervisor = tool_registry.supervisor();
         // PR #1324 follow-up (L3 WS coverage gap): wire the spawn_only
         // post-spawn failure signal BEFORE `enable_persistence` so the
@@ -18653,132 +15880,6 @@ async fn run_standalone_turn(
         if let Some(generator) = session_runtime.agent.subagent_summary_generator().cloned() {
             spawn_tool = spawn_tool.with_parent_subagent_summary_generator(generator);
         }
-        // Wire the child stream-chunk callback so live `StreamChunk` deltas
-        // from a running spawn child are emitted as `agent/output/delta`
-        // directly — bypassing the per-token `on_change` persistence path
-        // (codex plan review: per-token persistence is too heavy). The
-        // callback receives `(agent_id, cursor_offset, text)` where
-        // `agent_id` is the spawn's `task_id` (the same id surfaced via
-        // `TurnSpawnCompleteEvent` and the agent dock) and `cursor_offset`
-        // (`u64`, matching `OutputCursor::offset` end to end) is the
-        // cumulative byte offset BEFORE this chunk — the START of the
-        // delta's window, the same convention as every other cursor
-        // producer (`TaskOutputDeltaTracker`, the read RPCs). Monotonic —
-        // lets clients detect gaps / reorder on reconnect. Ephemeral send:
-        // deltas are explicitly non-durable (mirrors `message/delta`).
-        //
-        // #1799 follow-up — coalescing debounce. The raw callback can fire
-        // 100+ times/sec per child; each fire used to clone one
-        // notification and try-enqueue it onto the bounded WS writer
-        // channel (lossy drop-on-full), so bursts bought
-        // `BackpressureDrop`s. The callback now only pushes the fragment
-        // onto an unbounded channel; the per-turn pump below merges
-        // CONSECUTIVE fragments of the same child and flushes a merged
-        // frame on a ~16ms deadline armed at the window's FIRST buffered
-        // fragment (throttle, not trailing-edge debounce: a steady trickle
-        // cannot postpone the flush past one window), or immediately when
-        // the merged buffer reaches `CHILD_STREAM_COALESCE_MAX_BYTES` or
-        // another child's fragment interleaves. Merged-frame cursor
-        // semantics are unchanged: `cursor.offset` = the FIRST fragment's
-        // start offset, and fragments are contiguous by construction
-        // (`SpawnChildTranscriptReporter.stream_offset` increments by
-        // exactly the text length), so a merged frame spans
-        // `offset..offset + text.len()` just like an unmerged one.
-        //
-        // Lifetime: the pump owns the receiver and exits when every sender
-        // is gone. The only senders live inside the callback `Arc`, held by
-        // this turn's registry (dropped at turn end) and by each spawned
-        // child's `SpawnChildTranscriptReporter` (dropped when that child
-        // finishes) — so post-turn background children keep streaming (the
-        // point of #1799) and the pump always terminates after the last
-        // child. The flush still goes through
-        // `send_notification_ephemeral`: the ephemeral/lossy contract
-        // (drop-on-full, never ledgered) is unchanged.
-        {
-            let ws_for_stream = ws.clone();
-            let ledger_for_stream = ledger.clone();
-            let session_id_for_stream = session_id.clone();
-            let (child_stream_tx, mut child_stream_rx) =
-                mpsc::unbounded_channel::<(String, u64, String)>();
-            tokio::spawn(async move {
-                let mut coalescer = ChildStreamCoalescer::default();
-                let mut flush_deadline: Option<tokio::time::Instant> = None;
-                let flush = |frame: ChildStreamFrame| {
-                    let event = AgentOutputDeltaEvent {
-                        session_id: session_id_for_stream.clone(),
-                        agent_id: frame.agent_id,
-                        cursor: OutputCursor {
-                            offset: frame.first_offset,
-                        },
-                        text: frame.text,
-                    };
-                    // Ephemeral: deltas must NOT be appended to the ledger
-                    // (per-token persistence is the overhead codex flagged).
-                    // The durable transcript is the reporter's
-                    // Response-arm append to the SubAgentOutputRouter file
-                    // (the StreamChunk arm deliberately does NOT write the
-                    // router file — doing both doubled every child message
-                    // in `<task_id>.out`).
-                    let _ = send_notification_ephemeral(
-                        &ws_for_stream,
-                        &ledger_for_stream,
-                        UiNotification::AgentOutputDelta(event),
-                    );
-                };
-                loop {
-                    let fragment = match flush_deadline {
-                        Some(deadline) => tokio::select! {
-                            fragment = child_stream_rx.recv() => fragment,
-                            _ = tokio::time::sleep_until(deadline) => {
-                                if let Some(frame) = coalescer.take_pending() {
-                                    flush(frame);
-                                }
-                                flush_deadline = None;
-                                continue;
-                            }
-                        },
-                        // Idle (nothing buffered): park on the channel alone
-                        // — no timer wakeups between child bursts.
-                        None => child_stream_rx.recv().await,
-                    };
-                    let Some((agent_id, offset, text)) = fragment else {
-                        // Every sender dropped (turn registry gone AND all
-                        // child reporters finished): final flush, then exit.
-                        if let Some(frame) = coalescer.take_pending() {
-                            flush(frame);
-                        }
-                        break;
-                    };
-                    let flushed = coalescer.push(&agent_id, offset, &text);
-                    let flushed_any = !flushed.is_empty();
-                    for frame in flushed {
-                        flush(frame);
-                    }
-                    if !coalescer.has_pending() {
-                        flush_deadline = None;
-                    } else if flush_deadline.is_none() || flushed_any {
-                        // The pending window's FIRST fragment landed just
-                        // now (either the buffer was empty, or a task
-                        // switch flushed the old window and this fragment
-                        // opened a new one): arm the deadline from now.
-                        flush_deadline =
-                            Some(tokio::time::Instant::now() + CHILD_STREAM_COALESCE_WINDOW);
-                    }
-                }
-            });
-            spawn_tool =
-                spawn_tool.with_child_stream_callback(move |agent_id, cursor_offset, text| {
-                    // Reporter-thread side: a non-blocking push only.
-                    // Unbounded is safe here — the pump drains continuously
-                    // and flushes at 4KB boundaries, so steady-state
-                    // occupancy is one ~16ms window of fragments.
-                    let _ = child_stream_tx.send((
-                        agent_id.to_string(),
-                        cursor_offset,
-                        text.to_string(),
-                    ));
-                });
-        }
         let child_context_parent = context_manager.clone();
         // Child (forked sub-agent) context ledgers belong to the parent's
         // project store: with `appui.sessions_in_cwd` on, `sessions_root` is
@@ -18994,11 +16095,10 @@ async fn run_standalone_turn(
     // Without this wrap the heartbeat publishes into the channel-only path
     // and the SPA's tool-status bubble never refreshes for long-running
     // spawn_only tools (bg_research, podcast_generate, mofa_slides, ...).
-    let inner_reporter: Arc<dyn octos_agent::ProgressReporter> =
-        Arc::new(MetricsReporter::new(Arc::new(
-            BoundedChannelReporter::new(progress_tx.clone(), progress_dropped.clone())
-                .with_thread_id(Some(turn_id.0.to_string())),
-        )));
+    let inner_reporter: Arc<dyn octos_agent::ProgressReporter> = Arc::new(
+        BoundedChannelReporter::new(progress_tx.clone(), progress_dropped.clone())
+            .with_thread_id(Some(turn_id.0.to_string())),
+    );
     let reporter: Arc<dyn octos_agent::ProgressReporter> = Arc::new(
         super::ui_protocol_alpha2_bridge::LedgerToolProgressReporter::new(
             inner_reporter,
@@ -21124,27 +18224,6 @@ fn forward_progress_event(
     saw_delta: &mut bool,
     event: &Value,
 ) {
-    if event.get("type").and_then(Value::as_str) == Some("agent_updated") {
-        if let (Some(session_id_value), Some(agent_value)) =
-            (event.get("session_id"), event.get("agent"))
-        {
-            if let (Ok(event_session_id), Ok(agent)) = (
-                serde_json::from_value::<SessionKey>(session_id_value.clone()),
-                serde_json::from_value::<UiAgentRecord>(agent_value.clone()),
-            ) {
-                let _ = send_notification_durable(
-                    ws,
-                    ledger,
-                    UiNotification::AgentUpdated(AgentUpdatedEvent {
-                        session_id: event_session_id,
-                        agent,
-                    }),
-                );
-            }
-        }
-        return;
-    }
-
     if let Some(delta) = task_output_delta_tracker.observe_progress_event(session_id, event) {
         // task/output/delta is durable: drops surface as
         // protocol/replay_lossy so the client can resync.
@@ -22563,429 +19642,6 @@ fn append_appui_evidence_jsonl_at(dir: &Path, name: &str, value: Value) {
     }
 }
 
-/// M15-F5 (#44): append a JSONL line to a named evidence ledger inside
-/// an EXPLICIT evidence directory. This is the pure, directory-parameterised
-/// core shared by the production evidence emitters and their unit tests; the
-/// env-gated `append_appui_evidence_jsonl` wrapper resolves
-/// `appui_evidence_dir()` and delegates here so production and test paths
-/// write byte-identical ledgers.
-fn append_evidence_jsonl_to_dir(dir: &Path, name: &str, value: &Value) {
-    if std::fs::create_dir_all(dir).is_err() {
-        return;
-    }
-    let Ok(line) = serde_json::to_string(value) else {
-        return;
-    };
-    let _ = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join(name))
-        .and_then(|mut file| {
-            use std::io::Write;
-            writeln!(file, "{line}")
-        });
-}
-
-/// M15-F5 (#44): record the resolved runtime/profile policy stamp for the
-/// PRODUCTION autonomy runtime into `runtime-policy-stamp.json`. Written once
-/// per evidence dir (idempotent overwrite). Carries NO fixture/deterministic
-/// markers so the soak verifier's non-fixture gate stays green.
-fn write_autonomy_runtime_policy_stamp(dir: &Path, session_id: &SessionKey, profile_id: &str) {
-    if std::fs::create_dir_all(dir).is_err() {
-        return;
-    }
-    let stamp = json!({
-        "scenario": "code_review_subagents",
-        "runtime": "octos-serve-production",
-        "subagent_backend": "native_specialist",
-        "profile_id": profile_id,
-        "session_id": session_id,
-        "sandbox": "workspace-write",
-        "approval_policy": "production-runtime",
-        "tool_policy_id": "coding-autonomy-v1",
-    });
-    if let Ok(text) = serde_json::to_string_pretty(&stamp) {
-        let _ = std::fs::write(dir.join("runtime-policy-stamp.json"), format!("{text}\n"));
-    }
-}
-
-/// M15-F5 (#44): map a PRODUCTION autonomy loop RPC result onto the
-/// matching evidence ledger line(s) AND the server→client notification(s)
-/// the soak verifier requires. Returns the notifications the caller must
-/// dispatch (so they reach the client AND get recorded in
-/// `appui-transcript.jsonl`); writes the loop ledger + the runtime
-/// policy stamp into `dir` as a side effect.
-///
-/// This is intentionally directory-parameterised and free of any env read so
-/// it is unit-testable; the env gate lives in the single production caller
-/// (`record_autonomy_rpc_evidence`).
-///
-/// Codex P2: notification CONSTRUCTION is unconditional — the
-/// `loop/updated` frames are genuine production
-/// wire-protocol events the client needs regardless of soak capture. Only the
-/// LEDGER writes are env-gated (here, by virtue of being reached only when
-/// `appui_evidence_dir()` resolved a dir). The notification builder is
-/// factored into `autonomy_rpc_notifications` so the production caller can
-/// dispatch the frames even when no evidence dir is set. `loop/fired` is NOT
-/// emitted from the RPC path — it is emitted once at the scheduler drain (see
-/// `scheduled_continuation_notifications`) so a manual `loop/fire_now` is not
-/// double-counted.
-fn autonomy_rpc_evidence_to_dir(dir: &Path, method: &str, result: &Value) -> Vec<UiNotification> {
-    use octos_core::ui_protocol::methods;
-    let notifications = autonomy_rpc_notifications(method, result);
-    // Codex P2: `handle_raw_appui_rpc` routes EVERY raw RPC result here when an
-    // evidence dir is active — including read-only `agent/list` /
-    // `agent/status/read` polls that carry a `session_id`. Only stamp the
-    // runtime policy for the autonomy methods that actually produced a
-    // loop evidence notification, so an ordinary poll cannot overwrite
-    // `runtime-policy-stamp.json`.
-    if !notifications.is_empty() {
-        let session_id = result
-            .get("session_id")
-            .and_then(|value| serde_json::from_value::<SessionKey>(value.clone()).ok());
-        let profile_id = result
-            .get("profile_id")
-            .and_then(Value::as_str)
-            .unwrap_or(MAIN_PROFILE_ID);
-        if let Some(session_id) = session_id.as_ref() {
-            write_autonomy_runtime_policy_stamp(dir, session_id, profile_id);
-        }
-    }
-    for notification in &notifications {
-        match (method, notification) {
-            (
-                methods::LOOP_CREATE
-                | methods::LOOP_PAUSE
-                | methods::LOOP_RESUME
-                | methods::LOOP_DELETE,
-                UiNotification::LoopUpdated(event),
-            ) => {
-                append_evidence_jsonl_to_dir(
-                    dir,
-                    "loop-ledger.jsonl",
-                    &json!({
-                        "event": "loop_iteration",
-                        "session_id": event.session_id,
-                        "loop_id": event.loop_state.loop_id,
-                        "status": event.loop_state.status,
-                        "mode": event.loop_state.mode,
-                    }),
-                );
-            }
-            _ => {}
-        }
-    }
-    notifications
-}
-
-/// M15-F5 (#44): build the production server→client notification(s) implied by
-/// a loop autonomy RPC result. Pure, env-free, ledger-free — used both by
-/// the evidence writer and (Codex P2) by the production dispatch so clients
-/// receive the protocol frames even when no soak evidence dir is set.
-fn autonomy_rpc_notifications(method: &str, result: &Value) -> Vec<UiNotification> {
-    use octos_core::ui_protocol::{LoopUpdatedEvent, MonitorUpdatedEvent, methods};
-    let mut notifications = Vec::new();
-    match method {
-        // Codex P2: `loop/create` AND the `loop/pause` `loop/resume`
-        // `loop/delete` state controls all return a `loop` snapshot — emit a
-        // `loop/updated` so a UI tracking these notifications sees the new
-        // loop state without re-polling. (`loop/fire_now` is deliberately NOT
-        // here: the single `loop/fired` for a manual fire is emitted once at
-        // the scheduler drain site, when the continuation actually fires, to
-        // avoid double-counting the fire — see
-        // `scheduled_continuation_notifications`.)
-        methods::LOOP_CREATE
-        | methods::LOOP_PAUSE
-        | methods::LOOP_RESUME
-        | methods::LOOP_DELETE => {
-            if let Ok(event) = serde_json::from_value::<LoopUpdatedEvent>(result.clone()) {
-                notifications.push(UiNotification::LoopUpdated(event));
-            }
-        }
-        // #1977 — monitor create + pause/resume/delete all return a
-        // `monitor` snapshot; emit `monitor/updated` so a tracking UI sees
-        // the new state without re-polling. `monitor/fired` and
-        // `monitor/expired` are emitted at their own runtime sites (the
-        // wake enqueue / the expiry sweep), never from an RPC result.
-        methods::MONITOR_CREATE
-        | methods::MONITOR_PAUSE
-        | methods::MONITOR_RESUME
-        | methods::MONITOR_DELETE => {
-            if let Ok(event) = serde_json::from_value::<MonitorUpdatedEvent>(result.clone()) {
-                notifications.push(UiNotification::MonitorUpdated(event));
-            }
-        }
-        _ => {}
-    }
-    notifications
-}
-
-/// M15-F5 (#44): production wrapper. Always builds the goal/loop wire
-/// notifications (Codex P2: clients need them regardless of soak capture);
-/// additionally writes the goal/loop evidence ledgers + runtime policy stamp
-/// when `appui_evidence_dir()` is `Some` (set only by the live tmux soak).
-fn record_autonomy_rpc_evidence(method: &str, result: &Value) -> Vec<UiNotification> {
-    let Some(dir) = appui_evidence_dir() else {
-        return autonomy_rpc_notifications(method, result);
-    };
-    // M15-F5 (#44): an in-turn `delegate`/`spawn` child exposes its outputs via
-    // the `agent/artifact/list` RPC (an RPC RESULT, not a pushed
-    // `agent/artifact/updated` notification), so the only place to capture
-    // those artifacts into the evidence `artifact-index.json` is the
-    // artifact-list RESULT. Merge them here. This is the legitimate data
-    // source for the index — NOT a side effect on an unrelated read — and only
-    // touches the index file (never the policy stamp).
-    if method == octos_core::ui_protocol::methods::AGENT_ARTIFACT_LIST {
-        if let Some(artifacts) = result.get("artifacts").and_then(Value::as_array) {
-            if !artifacts.is_empty() {
-                let agent_id = result.get("agent_id").cloned().unwrap_or(Value::Null);
-                merge_artifact_index(&dir, &agent_id, artifacts);
-            }
-        }
-    }
-    autonomy_rpc_evidence_to_dir(&dir, method, result)
-}
-
-/// M15-F5 (#44): pure, directory-parameterised core of `record_agent_evidence`
-/// (see that wrapper for semantics). Free of any env read so it is unit
-/// testable.
-fn agent_evidence_to_dir(dir: &Path, method: &'static str, params: &Value) {
-    use octos_core::ui_protocol::methods;
-    match method {
-        methods::AGENT_UPDATED => {
-            let Some(agent) = params.get("agent") else {
-                return;
-            };
-            let status = agent.get("status").and_then(Value::as_str).unwrap_or("");
-            let agent_id = agent.get("agent_id").and_then(Value::as_str).unwrap_or("");
-            // Codex P2: classify the live agent status into the actual
-            // lifecycle event instead of a two-bucket started/completed split.
-            // Supervised specialists emit MANY `running` heartbeat updates; the
-            // first is the real `agent_started`, the rest are `agent_ping`.
-            // Terminal statuses keep their own identity so a failed/interrupted
-            // child is NOT recorded as a completion. (`closed` mirrors
-            // `is_agent_terminal_status` and is a clean terminal → completed.)
-            let event = match status {
-                "completed" | "closed" => "agent_completed",
-                "failed" => "agent_failed",
-                "interrupted" | "cancelled" => "agent_interrupted",
-                "running" | "" => {
-                    // Process-global set of agents that have already emitted
-                    // `agent_started`, so repeat running heartbeats become
-                    // `agent_ping` rows.
-                    static STARTED_AGENTS: std::sync::Mutex<
-                        Option<std::collections::HashSet<String>>,
-                    > = std::sync::Mutex::new(None);
-                    let mut guard = STARTED_AGENTS
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let started = guard.get_or_insert_with(std::collections::HashSet::new);
-                    if agent_id.is_empty() || started.insert(agent_id.to_owned()) {
-                        "agent_started"
-                    } else {
-                        "agent_ping"
-                    }
-                }
-                _ => "agent_started",
-            };
-            append_evidence_jsonl_to_dir(
-                dir,
-                "agent-ledger.jsonl",
-                &json!({
-                    "event": event,
-                    "agent_id": agent.get("agent_id").cloned().unwrap_or(Value::Null),
-                    "status": status,
-                    "backend_kind": agent.get("backend_kind").cloned().unwrap_or(Value::Null),
-                    "session_id": params.get("session_id").cloned().unwrap_or(Value::Null),
-                }),
-            );
-            // M15-F5 (#44): in-turn `delegate`/`spawn` children do NOT declare
-            // agent artifacts (their `agent/artifact/list` is empty) and the
-            // supervised task reports `artifact_count: 0`, so neither the
-            // artifact notification nor the artifact-list nor the task event
-            // surfaces a usable artifact for `artifact-index.json`. A COMPLETED
-            // child IS the unit of produced output, so index the completed
-            // child as a task-output artifact. This keeps the index populated
-            // from REAL completed work for the verifier's `"artifacts": [`
-            // requirement, de-duped per agent.
-            if event == "agent_completed" && !agent_id.is_empty() {
-                let agent_id_value = json!(agent_id);
-                merge_artifact_index(
-                    dir,
-                    &agent_id_value,
-                    &[json!({
-                        "id": format!("{agent_id}-output"),
-                        "title": agent.get("nickname").cloned().unwrap_or_else(|| json!(agent_id)),
-                        "kind": "agent_output",
-                    })],
-                );
-            }
-        }
-        methods::AGENT_OUTPUT_DELTA => {
-            append_evidence_jsonl_to_dir(
-                dir,
-                "agent-ledger.jsonl",
-                &json!({
-                    "event": "agent_output",
-                    "agent_id": params.get("agent_id").cloned().unwrap_or(Value::Null),
-                    "session_id": params.get("session_id").cloned().unwrap_or(Value::Null),
-                }),
-            );
-        }
-        methods::AGENT_ARTIFACT_UPDATED => {
-            let agent_id = params.get("agent_id").cloned().unwrap_or(Value::Null);
-            let artifacts = params
-                .get("artifacts")
-                .and_then(Value::as_array)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
-            merge_artifact_index(dir, &agent_id, artifacts);
-        }
-        _ => {}
-    }
-}
-
-/// M15-F5 (#44), Codex P2: merge `artifacts` for `agent_id` into the evidence
-/// `artifact-index.json`, de-duped on (agent_id, artifact_id). A multi-agent
-/// review reports artifacts incrementally and concurrently, so the read →
-/// merge → write is serialized on a process-global lock and ALWAYS accumulates
-/// (never clobbers an earlier child's outputs). The verifier requires the
-/// structural `"artifacts": [` array; this keeps every child's outputs in the
-/// closure bundle.
-fn merge_artifact_index(dir: &Path, agent_id: &Value, artifacts: &[Value]) {
-    let new_artifacts: Vec<Value> = artifacts
-        .iter()
-        .map(|artifact| {
-            json!({
-                "agent_id": agent_id,
-                "artifact_id": artifact.get("id").cloned().unwrap_or(Value::Null),
-                "id": artifact.get("id").cloned().unwrap_or(Value::Null),
-                "path": artifact.get("path").cloned().unwrap_or(Value::Null),
-            })
-        })
-        .collect();
-    static ARTIFACT_INDEX_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _index_guard = ARTIFACT_INDEX_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let path = dir.join("artifact-index.json");
-    let mut merged: Vec<Value> = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-        .and_then(|value| value.get("artifacts").and_then(Value::as_array).cloned())
-        .unwrap_or_default();
-    for artifact in new_artifacts {
-        let already_present = merged.iter().any(|existing| {
-            existing.get("agent_id") == artifact.get("agent_id")
-                && existing.get("artifact_id") == artifact.get("artifact_id")
-        });
-        if !already_present {
-            merged.push(artifact);
-        }
-    }
-    if std::fs::create_dir_all(dir).is_ok() {
-        if let Ok(text) = serde_json::to_string_pretty(&json!({
-            "scenario": "code_review_subagents",
-            "artifacts": merged,
-        })) {
-            let _ = std::fs::write(path, format!("{text}\n"));
-        }
-    }
-}
-
-/// M15-F5 (#44): mirror a PRODUCTION supervised task/agent lifecycle
-/// notification into the evidence ledgers from the central durable-notification
-/// dispatch. Covers BOTH the supervised review swarm's `task/updated`
-/// (task-ledger) AND the in-turn spawn/delegate path, which routes child
-/// `agent/updated` / `agent/output/delta` / `agent/artifact/updated` through
-/// the TYPED `send_notification_durable` path (see `forward_progress_event` /
-/// `forward_terminal_agent_update_durable`) rather than the raw ephemeral
-/// helper. NO-OP unless `appui_evidence_dir()` is `Some`.
-fn record_task_evidence(notification: &UiNotification) {
-    use octos_core::ui_protocol::methods;
-    let Some(dir) = appui_evidence_dir() else {
-        return;
-    };
-    // Agent lifecycle/output/artifact notifications also reach the typed
-    // durable path (in-turn spawn). Re-serialize the typed event back into the
-    // raw params shape the agent-evidence mapper expects and delegate so the
-    // ledger format is identical to the raw-ephemeral path.
-    match notification {
-        UiNotification::AgentUpdated(event) => {
-            agent_evidence_to_dir(
-                &dir,
-                methods::AGENT_UPDATED,
-                &json!({ "session_id": event.session_id, "agent": event.agent }),
-            );
-        }
-        UiNotification::AgentOutputDelta(event) => {
-            agent_evidence_to_dir(
-                &dir,
-                methods::AGENT_OUTPUT_DELTA,
-                &json!({ "session_id": event.session_id, "agent_id": event.agent_id }),
-            );
-        }
-        UiNotification::AgentArtifactUpdated(event) => {
-            agent_evidence_to_dir(
-                &dir,
-                methods::AGENT_ARTIFACT_UPDATED,
-                &json!({
-                    "session_id": event.session_id,
-                    "agent_id": event.agent_id,
-                    "artifacts": event.artifacts,
-                }),
-            );
-        }
-        _ => task_evidence_to_dir(&dir, notification),
-    }
-}
-
-/// M15-F5 (#44): pure, directory-parameterised core of `record_task_evidence`
-/// for the `task/updated` variant (see that wrapper for semantics). Free of any
-/// env read so it is unit testable.
-fn task_evidence_to_dir(dir: &Path, notification: &UiNotification) {
-    let UiNotification::TaskUpdated(event) = notification else {
-        return;
-    };
-    let ledger_event = match event.state {
-        UiTaskRuntimeState::Completed => "task_completed",
-        UiTaskRuntimeState::Cancelled | UiTaskRuntimeState::Failed => "task_completed",
-        _ => "task_started",
-    };
-    append_evidence_jsonl_to_dir(
-        dir,
-        "task-ledger.jsonl",
-        &json!({
-            "event": ledger_event,
-            "session_id": event.session_id,
-            "task_id": event.task_id,
-            "title": event.title,
-            "state": format!("{:?}", event.state),
-        }),
-    );
-    // M15-F5 (#44): in-turn `delegate`/`spawn` children DON'T declare agent
-    // artifacts (their `agent/artifact/list` is empty) — their outputs surface
-    // as supervised-task artifacts (`artifact_count`). So when a supervised
-    // task completes with artifacts, index a task-level artifact entry. This
-    // is the only artifact signal the in-turn spawn path exposes, and it keeps
-    // `artifact-index.json` populated for the verifier's `"artifacts": [`
-    // requirement from REAL completed work.
-    if matches!(event.state, UiTaskRuntimeState::Completed)
-        && event.artifact_count.is_some_and(|count| count > 0)
-    {
-        let task_id = json!(event.task_id);
-        merge_artifact_index(
-            dir,
-            &task_id,
-            &[json!({
-                "id": event.task_id,
-                "title": event.title,
-                "kind": "task_output",
-            })],
-        );
-    }
-}
-
 fn append_appui_transcript_frame(direction: &str, frame: Value) {
     append_appui_evidence_jsonl(
         "appui-transcript.jsonl",
@@ -23261,7 +19917,7 @@ fn send_minimal_rpc_error_fallback(ws: &WsConnection, id: Option<String>) -> Res
 /// slot used), only the first try_send survives, and the close is the
 /// load-bearing signal the SPA listens for (codex BLOCK 2026-05-13).
 fn close_ws_with_code(ws: &WsConnection, code: u16, reason: &str) -> Result<(), SendError> {
-    let frame = WsMessage::Close(Some(axum::extract::ws::CloseFrame {
+    let frame = WsMessage::Close(Some(CloseFrame {
         code,
         reason: reason.into(),
     }));
@@ -23389,10 +20045,6 @@ fn send_notification_durable(
     ledger: &UiProtocolLedger,
     notification: UiNotification,
 ) -> Result<(), SendError> {
-    // M15-F5 (#44): mirror production supervised-task lifecycle updates into
-    // the `task-ledger.jsonl` evidence ledger. NO-OP unless the live tmux soak
-    // set `OCTOSCODE_M15_UX_OUTPUT_DIR`, so this is free in normal production.
-    record_task_evidence(&notification);
     let event = ledger.append_notification_from(notification, ws.connection_id);
     let cursor = event.cursor.clone();
     // Codex #1336 round-2 BLOCKER 1: apply the per-connection
@@ -23647,23 +20299,6 @@ fn ledger_event_cursor(event: &UiProtocolLedgerEvent) -> Option<UiCursor> {
             // record); kept exhaustive while the variants exist.
 
             | UiNotification::FileAttached(_)
-            // Wave4-A: queue notifications don't carry their own
-            // cursor — they're stateless lifecycle pushes.
-            | UiNotification::QueueState(_)
-            // M15 autonomy notifications do not carry durable UiCursor values.
-            // AgentOutputDelta carries an OutputCursor for the agent output
-            // stream, which is reconciled through agent/output/read.
-            | UiNotification::AgentUpdated(_)
-            | UiNotification::AgentOutputDelta(_)
-            | UiNotification::AgentArtifactUpdated(_)
-            | UiNotification::LoopUpdated(_)
-            | UiNotification::LoopFired(_)
-            | UiNotification::LoopCompleted(_)
-            // #1977 monitor notifications are stateless lifecycle pushes
-            // (no durable cursor of their own), like the loop family.
-            | UiNotification::MonitorUpdated(_)
-            | UiNotification::MonitorFired(_)
-            | UiNotification::MonitorExpired(_)
             // M16 context lifecycle notifications carry context generation
             // hashes, not replay cursors. The durable ledger cursor is on
             // the surrounding LedgeredUiProtocolEvent.
@@ -23807,11 +20442,6 @@ fn send_raw_notification_ephemeral(
         );
         return Err(SendError::BackpressureDrop);
     }
-    // M15-F5 (#44): mirror production child-agent lifecycle/output/artifact
-    // notifications into `agent-ledger.jsonl` / `artifact-index.json` evidence
-    // ledgers. NO-OP unless the live tmux soak set
-    // `OCTOSCODE_M15_UX_OUTPUT_DIR`, so this is free in normal production.
-    record_agent_evidence(method, &params);
     let notification = octos_core::ui_protocol::RpcNotification::new(method, params);
     let frame = frame_for(&notification).ok_or(SendError::BackpressureDrop)?;
     ws.send_ephemeral(frame, method)
@@ -23860,19 +20490,4 @@ fn should_short_circuit_no_speech(
     prompt_is_empty: bool,
 ) -> bool {
     had_audio_media && !had_non_audio_media && !had_audio_input && prompt_is_empty
-}
-
-/// M15-F5 (#44): mirror a PRODUCTION agent lifecycle/output notification into
-/// `agent-ledger.jsonl` and (for artifacts) `artifact-index.json`. Driven from
-/// the central raw-notification dispatch so EVERY production `agent/updated`,
-/// `agent/output/delta`, and `agent/artifact/updated` is captured. NO-OP
-/// unless `appui_evidence_dir()` is `Some`. Maps the live agent `status`
-/// onto the `agent_started` / `agent_completed` ledger markers the soak
-/// verifier requires.
-#[cfg_attr(not(test), allow(dead_code))]
-fn record_agent_evidence(method: &'static str, params: &Value) {
-    let Some(dir) = appui_evidence_dir() else {
-        return;
-    };
-    agent_evidence_to_dir(&dir, method, params);
 }
