@@ -566,3 +566,31 @@ untouched (the switch only selects the driver and skips the preflight).
 Verified locally with a dummy key: smoke--counter (1 node) and ticket-booking (2 nodes, `OCTOS_REPAIR_ROUNDS=1`)
 both complete with exit 0; TB emits 68 runner events (37 signal / 29 requirement_state / 2 runner_state) and
 its rehearsal reports the PORT CONTRACT violation of the placeholder server, as intended.
+
+## Round 32 — tiny-spec tier (Smoke ≤ 300 tokens per task target)
+
+Smoke board: three real entries ahead of ours at ¥0.0031–0.0037 for both tasks (≈250 tokens per task); ours
+≈845 tokens (prompt 509 + completion 335 incl. ≈176 reasoning) → ¥0.005 per task.
+
+Tier trigger: spec body smaller than `OCTOS_ARC_TINY_SPEC_CHARS` (default 1500; `OCTOS_ARC_TINY=0` disables) —
+input-derived, no task names. What changes for such a node:
+1. Prompt = the spec's own statements (imports, blank lines, `await`, closing braces stripped) + one output
+   sentence; no contract sections. System prompt "Reply with HTML only." (21 chars).
+2. Thinking off (the spec-size reasoning rule already yields none).
+3. Output = one index.html (inline script) written from the bare reply (code fences tolerated; FILE blocks still
+   accepted); the harness writes the manifests and a fixed static server (`TINY_SERVER_JS`: `/`→index.html,
+   `/<name>`→`<name>.html`, 404 otherwise, try/catch, PORT + spec default ports unless ARC_EXTRA_PORTS=0) —
+   generic scaffold, no task logic. Verified: `/` and `/register` 200 with charset, `/favicon.ico`, `/api/x`,
+   path traversal 404, extra port bound.
+4. The node's specs run right after; on failure the existing compact codegen tier redoes the node (then the
+   normal repair loop). Evolution nodes with an existing index.html use a variant that quotes the page.
+
+Offline token estimate (chars ÷ 3.8, the ratio measured on round-22 prompts):
+| task | prompt chars → tokens | expected completion | expected total |
+|---|---|---|---|
+| counter | 614 → ≈162 (+6 system) | ≈90–110 (≈350 chars of HTML) | ≈260–280 |
+| dice | 378 → ≈99 (+6) | ≈70–90 | ≈180–200 |
+| evolution REQ-2 (page quoted) | 995 → ≈262 (+6) | ≈100 | ≈370 |
+
+Dry-run (no model): counter and evolution traverse tiny → spec check → compact fallback → repair loop, exit 0.
+Live: 未评测 (key occupied by the Web queue; 5-minute window requested from C). Unit tests 93 OK.

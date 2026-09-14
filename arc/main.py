@@ -627,6 +627,8 @@ class DryRunDriver:
         time.sleep(0.05)
         if "<<<FILE" in prompt:
             return True, DRYRUN_FILES
+        if "index.html only" in prompt:
+            return True, "<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head><body><main>dry run</main></body></html>"
         return True, "dry run: no model call; nothing written."
 
     def end_scope(self, *args, **kwargs) -> None:
@@ -816,6 +818,63 @@ CODEGEN_SIZE_FULL = ("As short as the tests allow; one page file per route. Mech
                      "stricter rules than the requirement states; reject only the cases the tests assert are rejected; each message is the FIRST alternative of the test's regex copied verbatim, shown in one persistent `role=alert` element. "
                      "(4) Elements the test expects visible have a non-empty box (never an empty div/span). "
                      "(5) No HTML5 validation attributes (required/pattern/type=email): the server validates.")
+
+# Tiny-spec tier (OCTOS_ARC_TINY_SPEC_CHARS, default 1500; OCTOS_ARC_TINY=0 disables): the prompt is the
+# spec's own statements only, the reply is one HTML file, the server is a fixed harness scaffold (no task
+# logic), thinking is off. First-pass failure falls back to the compact codegen tier for the same node.
+TINY_SYSTEM = "Reply with HTML only."
+
+TINY_PROMPT = """\
+Playwright test the page at / must pass:
+{spec}
+Reply with the complete index.html only (inline script, no CSS, no comments).
+"""
+
+TINY_PROMPT_EVOLUTION = """\
+Current index.html:
+{page}
+Additional Playwright test it must also pass (keep existing behaviour):
+{spec}
+Reply with the complete updated index.html only (inline script, no CSS, no comments).
+"""
+
+TINY_SERVER_JS = """\
+const http = require('http'); const fs = require('fs'); const path = require('path');
+const dist = path.join(__dirname, '..', 'frontend', 'dist');
+const handler = (req, res) => {{ try {{
+  const url = req.url.split('?')[0];
+  const name = url === '/' ? 'index.html' : url.replace(/^\\//, '');
+  const candidates = [name, name + '.html'].map(n => path.join(dist, n));
+  const file = candidates.find(f => f.startsWith(dist) && fs.existsSync(f) && fs.statSync(f).isFile());
+  if (!file) {{ res.writeHead(404); return res.end('not found'); }}
+  const type = file.endsWith('.js') ? 'application/javascript' : file.endsWith('.css') ? 'text/css' : 'text/html; charset=utf-8';
+  res.writeHead(200, {{ 'Content-Type': type }}); res.end(fs.readFileSync(file));
+}} catch (e) {{ res.writeHead(500); res.end('error'); }} }};
+http.createServer(handler).listen(process.env.PORT || {port});
+if (process.env.ARC_EXTRA_PORTS !== '0') for (const p of {extra_ports}) if (String(p) !== String(process.env.PORT || {port})) http.createServer(handler).listen(p);
+process.on('uncaughtException', () => {{}}); process.on('unhandledRejection', () => {{}});
+"""
+
+
+def strip_code_fences(text: str) -> str:
+    text = text.strip()
+    m = re.search(r"```[a-zA-Z]*\n(.*?)```", text, re.DOTALL)
+    return m.group(1).strip() if m else text
+
+
+def compact_spec_lines(text: str) -> str:
+    """The spec's statements without imports, blank lines, `await` and closing
+    braces — what a page must satisfy, in the spec's own words."""
+    out = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith(("import ", "//", "/*", "*")) or line in ("});", "})", "}"):
+            continue
+        line = re.sub(r"^await\s+", "", line)
+        line = re.sub(r"^test\((['\"])(.*?)\1,\s*async\s*\(\{[^}]*\}\)\s*=>\s*\{$", r"test: \2", line)
+        out.append(line)
+    return "\n".join(out)
+
 
 UI_CONTRACT_DATA = """\
 - Concrete example values in the requirement (seed records, option labels, sample accounts, nationalities, seat classes) are FIXTURE DATA: they must exist verbatim as <option>s / seed rows. When a control's values are described but not listed, offer a broad standard set.
@@ -1183,6 +1242,37 @@ class Flow:
                 and not getattr(self, "codegen_blocked", False)
                 and getattr(self, "n_nodes", 99) <= int(os.environ.get("OCTOS_ARC_CODEGEN_MAX_NODES", "2")))
 
+    def tiny_mode(self, spec_chars: int) -> bool:
+        threshold = int(os.environ.get("OCTOS_ARC_TINY_SPEC_CHARS", "1500"))
+        return os.environ.get("OCTOS_ARC_TINY", "1") != "0" and 0 < spec_chars < threshold
+
+    def tiny_turn(self, node_id: str, specs: list[str], timeout: int) -> bool:
+        """Tiny-spec tier: harness writes the manifests and a fixed static server, the
+        model returns one index.html for the spec's statements. Returns True only when
+        the node's specs pass right away; otherwise the caller falls back to the compact tier."""
+        write_codegen_manifests(self.output_dir)
+        server = self.output_dir / "backend" / "server.js"
+        if not server.exists():
+            server.parent.mkdir(parents=True, exist_ok=True)
+            extra = [p for p in spec_base_ports(self.tests_dir) if p != self.web_port]
+            server.write_text(TINY_SERVER_JS.format(port=self.web_port, extra_ports=json.dumps(extra)), encoding="utf-8")
+        spec = compact_spec_lines(self.spec_bodies(node_id))
+        page = self.output_dir / "frontend" / "src" / "index.html"
+        if page.is_file():
+            prompt = TINY_PROMPT_EVOLUTION.format(page=page.read_text(encoding="utf-8", errors="replace").strip(), spec=spec)
+        else:
+            prompt = TINY_PROMPT.format(spec=spec)
+        ok, _ = self.codegen_turn(prompt, timeout, f"{node_id} implement (tiny)", spec_chars=len(spec),
+                                  system=TINY_SYSTEM, format_instructions="", raw_target="frontend/src/index.html")
+        if not ok or not page.is_file() or self.runner is None or not specs:
+            log(f"[flow] {node_id}: tiny tier produced no page; compact tier next")
+            return False
+        summary = self.run_specs(specs)
+        passed = (not summary.error) and summary.total and summary.passed == summary.total
+        log(f"[flow] {node_id}: tiny tier {'passed' if passed else 'failed'} its specs"
+            f" ({summary.passed}/{summary.total})" if not summary.error else f"[flow] {node_id}: tiny tier could not run specs")
+        return bool(passed)
+
     def codegen_reasoning(self, spec_chars: int) -> str | None:
         """Reasoning effort for a codegen turn, derived from the size of the spec it
         must satisfy (OCTOS_ARC_CODEGEN_REASONING_CHARS, default 5000): small specs are
@@ -1192,23 +1282,31 @@ class Flow:
         threshold = int(os.environ.get("OCTOS_ARC_CODEGEN_REASONING_CHARS", "5000"))
         return "none" if spec_chars and spec_chars < threshold else None
 
-    def codegen_turn(self, prompt: str, timeout: int, label: str, spec_chars: int = 0) -> tuple[bool, str]:
-        """Run a tool-less turn; parse and write the file blocks from the reply."""
+    def codegen_turn(self, prompt: str, timeout: int, label: str, spec_chars: int = 0,
+                     system: str = CODEGEN_SYSTEM, format_instructions: str = FORMAT_INSTRUCTIONS,
+                     raw_target: str | None = None) -> tuple[bool, str]:
+        """Run a tool-less turn; parse and write the file blocks from the reply.
+        `raw_target`: when the reply is a bare HTML document (tiny tier), write it there."""
         proxy = self.llm_proxy
         proxy.no_tools = True
-        proxy.system_override = CODEGEN_SYSTEM
+        proxy.system_override = system
         mode_override = self.codegen_reasoning(spec_chars)
         saved_base = getattr(self, "base_reasoning_mode", proxy.mode)
         if mode_override:
             self.base_reasoning_mode = mode_override
         try:
-            ok, text = self.turn(prompt + "\n" + FORMAT_INSTRUCTIONS, timeout, label, expect_verification=False,
+            ok, text = self.turn((prompt + "\n" + format_instructions) if format_instructions else prompt, timeout, label,
+                                 expect_verification=False,
                                  request_budget=int(os.environ.get("OCTOS_ARC_CODEGEN_REQUESTS", "3")))
         finally:
             proxy.no_tools = False
             proxy.system_override = None
             self.base_reasoning_mode = saved_base
         files = parse_file_blocks(text) if ok else {}
+        if ok and not files and raw_target:
+            html = strip_code_fences(text)
+            if re.search(r"<html|<!doctype", html, re.IGNORECASE):
+                files = {raw_target: html}
         if files:
             written = write_files(self.output_dir, files)
             log(f"[codegen] {label}: wrote {len(written)} file(s): {written[:8]}")
@@ -1637,7 +1735,13 @@ class Flow:
         prompt = self.corrections_text() + prompt
         codegen_prompt = None
         implement_timeout = min(self.node_timeout, self.implement_fraction * node_budget, deadline - time.time())
-        if self.codegen_mode():
+        tiny_ok = False
+        if self.codegen_mode() and self.tiny_mode(len(self.spec_bodies(node_id))):
+            tiny_ok = self.tiny_turn(node_id, specs, implement_timeout)
+            self.current_spec_chars = len(self.spec_bodies(node_id))
+        if tiny_ok:
+            ok, text = True, "tiny tier: specs pass"
+        elif self.codegen_mode():
             spec_text = self.spec_bodies(node_id)
             self.current_spec_chars = len(spec_text)
             # Small specs (by size, an input-derived measure) get the compact rule; the multi-page

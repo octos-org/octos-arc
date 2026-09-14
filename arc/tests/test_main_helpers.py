@@ -240,3 +240,44 @@ class DryRunDriverTests(unittest.TestCase):
         ok, text = d.run("Implement the node with tools.", 10)
         self.assertTrue(ok); self.assertIn("dry run", text)
         self.assertEqual(d.turns, 2)
+
+
+class TinyTierTests(unittest.TestCase):
+    def test_should_compact_spec_to_its_statements(self):
+        spec = """import { test, expect } from '@playwright/test';
+
+test('REQ-1: roll a dice', async ({ page }) => {
+  await page.goto('/');
+  const roll = page.getByRole('button', { name: 'Roll' });
+  await expect(roll).toBeVisible();
+});
+"""
+        out = m.compact_spec_lines(spec)
+        self.assertEqual(out.splitlines()[0], "test: REQ-1: roll a dice")
+        self.assertIn("page.goto('/');", out)
+        self.assertNotIn("await", out); self.assertNotIn("import", out); self.assertNotIn("});", out.splitlines())
+
+    def test_should_gate_tiny_mode_by_spec_size(self):
+        import argparse, os
+        from pathlib import Path
+        flow = m.Flow(argparse.Namespace(web_port=1), Path("."), Path("."))
+        self.assertTrue(flow.tiny_mode(600)); self.assertFalse(flow.tiny_mode(1500)); self.assertFalse(flow.tiny_mode(0))
+        os.environ["OCTOS_ARC_TINY"] = "0"
+        try:
+            self.assertFalse(flow.tiny_mode(600))
+        finally:
+            del os.environ["OCTOS_ARC_TINY"]
+
+    def test_tiny_server_should_format_and_parse(self):
+        import shutil, subprocess, tempfile
+        from pathlib import Path
+        js = m.TINY_SERVER_JS.format(port=3000, extra_ports="[3301]")
+        self.assertIn("listen(process.env.PORT || 3000)", js); self.assertIn("[3301]", js)
+        node = shutil.which("node")
+        if node:
+            p = Path(tempfile.mkdtemp()) / "server.js"; p.write_text(js)
+            self.assertEqual(subprocess.run([node, "--check", str(p)], capture_output=True).returncode, 0)
+
+    def test_should_strip_code_fences(self):
+        self.assertEqual(m.strip_code_fences("```html\n<html></html>\n```"), "<html></html>")
+        self.assertEqual(m.strip_code_fences("<html></html>"), "<html></html>")
