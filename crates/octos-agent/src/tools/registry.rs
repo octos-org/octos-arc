@@ -15,11 +15,11 @@ use crate::task_supervisor::TaskSupervisor;
 use super::CodeStructureTool;
 use super::policy::{self, ToolPolicy};
 use super::{
-    ApplyPatchTool, AskUserQuestionTool, CloseAgentTool, ConfigureToolTool, DiffEditTool,
-    EditFileTool, ExecCommandTool, GlobTool, GrepTool, ListDirTool, ReadFileTool,
-    RequestUserInputTool, ResumeAgentTool, SendInputTool, ShellTool, SpawnAgentTool, Tool,
-    ToolCatalogEntry, ToolConfigStore, ToolResult, ToolSearchTool, ToolSuggestTool, UpdatePlanTool,
-    ViewImageTool, WaitAgentTool, WriteFileTool, WriteStdinTool,
+    ApplyPatchTool, AskUserQuestionTool, CloseAgentTool, DiffEditTool, EditFileTool,
+    ExecCommandTool, GlobTool, GrepTool, ListDirTool, ReadFileTool, RequestUserInputTool,
+    ResumeAgentTool, SendInputTool, ShellTool, SpawnAgentTool, Tool, ToolCatalogEntry, ToolResult,
+    ToolSearchTool, ToolSuggestTool, UpdatePlanTool, ViewImageTool, WaitAgentTool, WriteFileTool,
+    WriteStdinTool,
 };
 use crate::sandbox::{NoSandbox, Sandbox};
 
@@ -1474,14 +1474,6 @@ impl ToolRegistry {
         for (name, new_tool) in replacements {
             self.tools.insert(name, Arc::new(new_tool));
         }
-    }
-
-    /// Re-register builtin configurable tools with a ToolConfigStore.
-    ///
-    /// Tools already registered by `with_builtins_and_sandbox()` are replaced
-    /// with config-aware instances. Also registers the `configure_tool` tool.
-    pub fn inject_tool_config(&mut self, config: Arc<ToolConfigStore>) {
-        self.register(ConfigureToolTool::new(config));
     }
 }
 

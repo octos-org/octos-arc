@@ -100,7 +100,6 @@ pub(crate) const OCTOS_KNOWN_MODEL_VISIBLE_TOOLS: &[&str] = &[
     "list_dir",
     "spawn",
     "read_task_output",
-    "configure_tool",
     // #972 / M14-B P1 — Codex-compatible image inspection and dynamic
     // tool discovery. These resolve through the same profile runtime as
     // the P0 set and respect the active filesystem scope.
@@ -443,13 +442,6 @@ const OCTOS_TOOL_SPECS: &[OctosToolSpec] = &[
         detail: Some(
             "Background task output reader; wait_agent inspects the same TaskSupervisor state.",
         ),
-    },
-    OctosToolSpec {
-        name: "configure_tool",
-        category: "configuration",
-        aliases: &[],
-        policy: "allowed",
-        detail: None,
     },
     // #972 / M14-B P1: canonical Codex dynamic tool discovery surface.
     OctosToolSpec {

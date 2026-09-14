@@ -160,7 +160,7 @@ impl ConfigWatcher {
             if let Some(defaults) = defaults {
                 profile.config = merge_profile_defaults(&profile.config, defaults);
             }
-            let mut c = crate::profiles::config_from_profile(&profile, None, None);
+            let mut c = crate::profiles::config_from_profile(&profile);
             crate::config::merge_env_plugin_policy_pub(&mut c);
             c
         };
@@ -300,13 +300,6 @@ impl ConfigWatcher {
         if old_hist != new_hist {
             hot_history = new_hist;
             has_hot = true;
-        }
-
-        // Channels are restart-required for now
-        let old_channels = old_gw.map(|g| &g.channels);
-        let new_channels = new_gw.map(|g| &g.channels);
-        if old_channels != new_channels {
-            restart_fields.push("gateway.channels".into());
         }
 
         if !restart_fields.is_empty() {

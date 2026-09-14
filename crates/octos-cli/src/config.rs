@@ -12,13 +12,9 @@ const CURRENT_CONFIG_VERSION: u32 = 1;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum DeploymentMode {
-    /// Standalone install — no tunnel, dashboard at /admin/.
+    /// Standalone install.
     #[default]
     Local,
-    /// Connected to a cloud server via frpc tunnel.
-    Tenant,
-    /// VPS relay server with tenant management and landing page.
-    Cloud,
 }
 
 /// LLM provider configuration.
@@ -191,20 +187,12 @@ pub struct Config {
     #[serde(default)]
     pub adaptive_routing: Option<AdaptiveRoutingConfig>,
 
-    /// Email sending configuration for the send_email tool.
-    #[serde(default)]
-    pub email: Option<EmailConfig>,
-
     /// Voice (ASR/TTS) configuration. When set, enables auto-transcription of
     /// voice messages and auto-TTS replies for voice conversations.
     #[serde(default)]
     pub voice: Option<VoiceConfig>,
 
-    /// Deployment mode: "local" (default), "tenant", or "cloud".
-    ///
-    /// - `local`:  Standalone install, no tunnel, dashboard at /admin/
-    /// - `tenant`: Connected to a cloud server via frpc tunnel
-    /// - `cloud`:  VPS relay server with tenant management and landing page at /
+    /// Deployment mode. Only `local` (standalone) deployments exist.
     #[serde(default)]
     pub mode: DeploymentMode,
 
@@ -246,12 +234,6 @@ pub struct Config {
     /// single-credential behavior.
     #[serde(default)]
     pub credential_pool: Option<CredentialPoolConfig>,
-
-    /// Content-classified smart routing configuration (M6.6, F-005).
-    /// Absent or `enabled: false` → every turn is classified as Strong
-    /// (preserves pre-M6.6 routing behavior).
-    #[serde(default)]
-    pub content_routing: Option<octos_llm::RoutingConfig>,
 
     /// AppUi (octos-app, octoscode, etc.) session defaults applied by
     /// `octos serve`. Operators can anchor every AppUi session that
@@ -809,44 +791,6 @@ pub fn merge_host_memory_into_profile(
             profile_refresh.enabled = host_refresh.enabled;
         }
     }
-}
-
-/// Email sending configuration for the `send_email` tool.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct EmailConfig {
-    /// Provider: "smtp" or "feishu" / "lark".
-    pub provider: String,
-
-    // -- SMTP fields --
-    #[serde(default)]
-    pub smtp_host: Option<String>,
-    #[serde(default)]
-    pub smtp_port: Option<u16>,
-    #[serde(default)]
-    pub username: Option<String>,
-    /// Environment variable holding the SMTP password (legacy).
-    #[serde(default)]
-    pub password_env: Option<String>,
-    /// SMTP password (literal value, preferred over password_env).
-    #[serde(default)]
-    pub password: Option<String>,
-    #[serde(default)]
-    pub from_address: Option<String>,
-
-    // -- Feishu/Lark fields --
-    #[serde(default)]
-    pub feishu_app_id: Option<String>,
-    /// Environment variable holding the Feishu app secret (legacy).
-    #[serde(default)]
-    pub feishu_app_secret_env: Option<String>,
-    /// Feishu app secret (literal value, preferred over feishu_app_secret_env).
-    #[serde(default)]
-    pub feishu_app_secret: Option<String>,
-    #[serde(default)]
-    pub feishu_from_address: Option<String>,
-    /// "cn" (default) or "global".
-    #[serde(default)]
-    pub feishu_region: Option<String>,
 }
 
 /// Non-secret Volcano (cloud) TTS settings. The **persisted** secret (the API
@@ -1467,10 +1411,6 @@ pub enum QueueMode {
 /// Gateway mode configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GatewayConfig {
-    /// Channels to enable.
-    #[serde(default)]
-    pub channels: Vec<ChannelEntry>,
-
     /// Maximum conversation history messages to include.
     #[serde(default = "default_max_history")]
     pub max_history: usize,
@@ -1548,11 +1488,6 @@ pub struct GatewayConfig {
 impl Default for GatewayConfig {
     fn default() -> Self {
         Self {
-            channels: vec![ChannelEntry {
-                channel_type: "cli".into(),
-                allowed_senders: vec![],
-                settings: serde_json::json!({}),
-            }],
             max_history: default_max_history(),
             system_prompt: None,
             queue_mode: QueueMode::default(),
@@ -1577,22 +1512,6 @@ fn default_max_sessions() -> usize {
 
 fn default_max_concurrent_sessions() -> usize {
     10
-}
-
-/// A channel entry in gateway config.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ChannelEntry {
-    /// Channel type: "cli", "telegram", "discord".
-    #[serde(rename = "type")]
-    pub channel_type: String,
-
-    /// Allowed sender IDs (empty = allow all).
-    #[serde(default)]
-    pub allowed_senders: Vec<String>,
-
-    /// Channel-specific settings.
-    #[serde(default)]
-    pub settings: serde_json::Value,
 }
 
 fn default_max_history() -> usize {
@@ -2065,30 +1984,6 @@ impl Config {
 
         // Check gateway config
         if let Some(ref gw) = self.gateway {
-            const VALID_CHANNELS: &[&str] = &[
-                "cli",
-                "telegram",
-                "discord",
-                "dingtalk",
-                "slack",
-                "whatsapp",
-                "email",
-                "feishu",
-                "twilio",
-                "wecom",
-                "wecom-bot",
-                "qq-bot",
-                "wechat",
-            ];
-            for ch in &gw.channels {
-                if !VALID_CHANNELS.contains(&ch.channel_type.as_str()) {
-                    warnings.push(format!(
-                        "Unknown channel type '{}'. Valid: {}",
-                        ch.channel_type,
-                        VALID_CHANNELS.join(", ")
-                    ));
-                }
-            }
             if gw.max_history == 0 || gw.max_history > 1000 {
                 warnings.push(format!(
                     "max_history {} is out of range (1-1000)",
@@ -2315,14 +2210,11 @@ mod tests {
             "provider": "anthropic",
             "model": "claude-sonnet-4-20250514",
             "gateway": {
-                "channels": [{"type": "cli"}],
                 "max_history": 30
             }
         }"#;
         let config: Config = serde_json::from_str(json).unwrap();
         let gw = config.gateway.unwrap();
-        assert_eq!(gw.channels.len(), 1);
-        assert_eq!(gw.channels[0].channel_type, "cli");
         assert_eq!(gw.max_history, 30);
         assert!(gw.system_prompt.is_none());
         // reasoning_effort is optional and defaults to None when omitted.
@@ -2332,7 +2224,6 @@ mod tests {
     #[test]
     fn test_gateway_reasoning_effort_parses() {
         let json = r#"{
-            "channels": [{"type": "cli"}],
             "reasoning_effort": "high"
         }"#;
         let gw: GatewayConfig = serde_json::from_str(json).unwrap();
@@ -2342,7 +2233,6 @@ mod tests {
     #[test]
     fn should_parse_none_when_gateway_reasoning_is_disabled() {
         let json = r#"{
-            "channels": [{"type": "cli"}],
             "reasoning_effort": "none"
         }"#;
         let gw: GatewayConfig =
@@ -2363,7 +2253,6 @@ mod tests {
     #[test]
     fn test_gateway_llm_temperature_parses() {
         let json = r#"{
-            "channels": [{"type": "cli"}],
             "llm_temperature": 0.7
         }"#;
         let gw: GatewayConfig = serde_json::from_str(json).unwrap();
@@ -2375,7 +2264,7 @@ mod tests {
         // Cloud-safety guarantee (#2172): a config without llm_temperature
         // yields None, so chat_config() keeps the built-in 0.0 default and the
         // request is unchanged. Old configs must still parse.
-        let json = r#"{"channels": [{"type": "cli"}]}"#;
+        let json = r#"{}"#;
         let gw: GatewayConfig = serde_json::from_str(json).unwrap();
         assert_eq!(gw.llm_temperature, None);
     }
@@ -2383,7 +2272,6 @@ mod tests {
     #[test]
     fn test_gateway_llm_sampling_params_parses() {
         let json = r#"{
-            "channels": [{"type": "cli"}],
             "llm_sampling_params": {"repeat_penalty": 1.1, "top_p": 0.95}
         }"#;
         let gw: GatewayConfig = serde_json::from_str(json).unwrap();
@@ -2395,14 +2283,14 @@ mod tests {
     #[test]
     fn test_gateway_llm_sampling_params_absent_is_none() {
         // Cloud-safety: absent → None → nothing flattened into the request.
-        let json = r#"{"channels": [{"type": "cli"}]}"#;
+        let json = r#"{}"#;
         let gw: GatewayConfig = serde_json::from_str(json).unwrap();
         assert_eq!(gw.llm_sampling_params, None);
     }
 
     #[test]
     fn test_gateway_max_history_default() {
-        let json = r#"{"channels": [{"type": "cli"}]}"#;
+        let json = r#"{}"#;
         let gw: GatewayConfig = serde_json::from_str(json).unwrap();
         assert_eq!(gw.max_history, 50);
     }
@@ -2538,24 +2426,6 @@ mod tests {
         };
         let warnings = config.validate();
         assert!(warnings.iter().any(|w| w.contains("not a valid URL")));
-    }
-
-    #[test]
-    fn test_validate_invalid_channel_type() {
-        let config = Config {
-            gateway: Some(GatewayConfig {
-                channels: vec![ChannelEntry {
-                    channel_type: "irc".to_string(),
-                    allowed_senders: vec![],
-                    settings: serde_json::json!({}),
-                }],
-                max_history: 50,
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let warnings = config.validate();
-        assert!(warnings.iter().any(|w| w.contains("Unknown channel type")));
     }
 
     #[test]
@@ -3149,7 +3019,6 @@ mod tests {
     fn test_validate_max_history_out_of_range() {
         let config = Config {
             gateway: Some(GatewayConfig {
-                channels: vec![],
                 max_history: 0,
                 ..Default::default()
             }),

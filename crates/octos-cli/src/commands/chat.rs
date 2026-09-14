@@ -813,7 +813,7 @@ pub(crate) fn load_serve_profile_config(
     // per-profile loop, then flatten `llm.primary` into the flat provider/model/
     // route fields the chat provider builder reads.
     let resolved = store.resolve_runtime_profile(&profile);
-    let config = crate::profiles::config_from_profile(&resolved, None, None);
+    let config = crate::profiles::config_from_profile(&resolved);
     tracing::info!(
         profile = id,
         provider = config.provider.as_deref().unwrap_or("<unset>"),

@@ -828,7 +828,6 @@ pub mod write_grant;
 
 pub mod check;
 pub mod check_background_tasks;
-pub mod tool_config;
 
 #[cfg(feature = "git")]
 pub mod git;
@@ -876,7 +875,6 @@ pub use write_grant::{
 
 pub use check::CheckTool;
 pub use check_background_tasks::CheckBackgroundTasksTool;
-pub use tool_config::{ConfigureToolTool, ToolConfigStore};
 
 #[cfg(feature = "git")]
 pub use git::GitTool;

@@ -9,7 +9,6 @@
 pub mod adaptive;
 mod call_policy;
 mod config;
-pub mod content_classifier;
 pub mod context;
 mod context_override;
 pub mod credential_pool;
@@ -61,10 +60,6 @@ pub use catalog::{ModelCapabilities, ModelCatalog, ModelCost, ModelInfo};
 pub use config::{
     CacheRetention, ChatConfig, PromptCacheContext, ReasoningEffort, ResponseFormat,
     SemanticCheckpointHint, ToolChoice,
-};
-pub use content_classifier::{
-    ClassificationDecision, ContentClassifier, HarnessRoutingDecisionPayload, ModelTier,
-    RoutingConfig,
 };
 pub use context_override::ContextWindowOverride;
 pub use credential_pool::{

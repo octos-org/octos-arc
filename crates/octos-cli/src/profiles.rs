@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use eyre::{Result, WrapErr, bail};
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::config::{ChannelEntry, CloudTtsConfig, Config, FallbackModel, GatewayConfig};
+use crate::config::{CloudTtsConfig, Config, FallbackModel, GatewayConfig};
 
 pub const MAX_SUB_ACCOUNTS_PER_PARENT: usize = 10;
 pub(crate) const HOST_ASR_LANGUAGE_ENV: &str = "OCTOS_HOST_ASR_LANGUAGE";
@@ -224,35 +224,13 @@ pub struct ProfileConfig {
         deserialize_with = "deserialize_profile_asr_language"
     )]
     pub asr_language: Option<String>,
-    /// Coding review specialist template. When omitted, `/review`
-    /// uses the server's built-in default specialists. Operators may
-    /// configure this per profile to change the native reviewer fanout
-    /// without changing code.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub review: Option<ReviewConfig>,
     /// Per-profile memory subsystem settings (e.g. the token budget for the
     /// memory block injected into the system prompt). `None` → defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<crate::config::MemoryConfig>,
-    /// Search provider contract for product-level search behavior.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub search: Option<SearchConfig>,
-    /// First-party app configuration.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub apps: Option<AppsConfig>,
-    /// Home dashboard UI configuration. The backend stores this as opaque JSON
-    /// because Home is a web-owned surface; typed validation lives in octos-web.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub home: Option<serde_json::Value>,
-    /// Channel configurations.
-    #[serde(default)]
-    pub channels: Vec<ChannelCredentials>,
     /// Gateway-specific settings.
     #[serde(default)]
     pub gateway: GatewaySettings,
-    /// Email sending configuration (SMTP or Feishu/Lark).
-    #[serde(default)]
-    pub email: Option<EmailSettings>,
     /// Smart-home bridge integration (self-hosted/LAN-reachable bridge only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub smart_home: Option<SmartHomeConfig>,
@@ -317,17 +295,6 @@ pub struct ProfileConfig {
     /// records attributions so operators can audit spend retroactively.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_budget: Option<octos_agent::CostBudgetPolicy>,
-    /// Matrix-specific profile config (e.g. swarm supervisor rooms).
-    ///
-    /// Absent → behaves exactly like pre-M7.3 Matrix deployments. Present →
-    /// enables Matrix-as-supervisor-UI via agent puppets (see
-    /// [`MatrixProfileConfig`]).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub matrix: Option<MatrixProfileConfig>,
-    /// Content-classified smart routing configuration (M6.6).
-    /// Missing config defaults to `enabled: false` (invariant #3 of issue #493).
-    #[serde(default)]
-    pub content_routing: Option<octos_llm::RoutingConfig>,
     /// Credential pool configuration (M6.5). Named pools of API keys / OAuth
     /// tokens with persistent cooldowns and rotation strategies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -458,152 +425,6 @@ impl ProfileSkillsConfig {
     }
 }
 
-/// Profile-owned review workflow configuration.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReviewConfig {
-    /// Native model-backed specialists to launch for AppUI `review/start`.
-    ///
-    /// Empty means "use the built-in default template".
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub native_specialists: Vec<ReviewSpecialistConfig>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReviewSpecialistConfig {
-    /// Stable suffix used to build the child agent id.
-    pub agent_key: String,
-    /// Human-facing agent name rendered in AppUI traces.
-    pub nickname: String,
-    /// Machine-readable review role.
-    pub role: String,
-    /// Focus text injected into the specialist prompt.
-    pub focus: String,
-}
-
-/// Search configuration persisted in the profile contract.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SearchConfig {
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub providers: HashMap<String, SearchProviderConfig>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SearchProviderConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_key_env: Option<String>,
-}
-
-/// First-party app configuration persisted in the profile contract.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AppsConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub slides: Option<SlidesAppConfig>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SlidesAppConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub template_dir: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_theme: Option<String>,
-}
-
-/// Current schema version for [`SwarmSupervisorConfig`].
-///
-/// Older configs that omit `schema_version` are accepted as v1 via
-/// [`default_swarm_supervisor_schema_version`]. Tracks
-/// [`octos_agent::SWARM_SUPERVISOR_CONFIG_SCHEMA_VERSION`] — the two MUST
-/// stay in lock-step so the agent-side ABI compat checks and the CLI-side
-/// profile loader agree on the serialized shape.
-pub const SWARM_SUPERVISOR_CONFIG_SCHEMA_VERSION: u32 =
-    octos_agent::SWARM_SUPERVISOR_CONFIG_SCHEMA_VERSION;
-
-fn default_swarm_supervisor_schema_version() -> u32 {
-    SWARM_SUPERVISOR_CONFIG_SCHEMA_VERSION
-}
-
-/// Matrix-specific profile configuration.
-///
-/// Holds optional Matrix-scoped features that extend the baseline appservice
-/// channel; absent fields leave the channel behavior unchanged.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MatrixProfileConfig {
-    /// Swarm supervisor UI contract — route harness events to per-swarm rooms
-    /// and accept supervisor replies as steering input. Absent → disabled.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub swarm_supervisor: Option<SwarmSupervisorConfig>,
-}
-
-/// Configuration for Matrix-as-supervisor-UI via agent puppets (M7.3).
-///
-/// When present, each sub-agent in a swarm is surfaced as a Matrix puppet
-/// user in a per-swarm room. The human supervisor interacts through any
-/// Matrix client (Element, etc.) and replies route back to the addressed
-/// puppet as steering input.
-///
-/// The bot account backing the appservice MUST hold Matrix admin API
-/// permissions so it can register puppet users and invite them to rooms.
-/// Deployments without admin rights MUST leave this section absent, which
-/// preserves the pre-M7.3 Matrix channel behavior exactly.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SwarmSupervisorConfig {
-    /// Durable ABI schema version for this config section.
-    ///
-    /// See [`SWARM_SUPERVISOR_CONFIG_SCHEMA_VERSION`] for the current value
-    /// and `docs/OCTOS_HARNESS_ABI_VERSIONING.md` for per-version field
-    /// guarantees. Older configs without this field default to v1.
-    #[serde(default = "default_swarm_supervisor_schema_version")]
-    pub schema_version: u32,
-    /// Matrix localpart prefix used for puppet users (e.g. `"swarm_"` →
-    /// `@swarm_s3f1:server`). Scopes puppets out of the shared user
-    /// namespace used by baseline bots.
-    #[serde(default = "default_swarm_puppet_prefix")]
-    pub puppet_prefix: String,
-    /// Matrix room alias prefix for per-swarm supervisor rooms (e.g.
-    /// `"swarm_"` → `#swarm_s3f1:server`). Aliases are idempotent — re-running
-    /// `ensure_swarm_room` returns the same room ID.
-    #[serde(default = "default_swarm_room_prefix")]
-    pub room_prefix: String,
-    /// Matrix user IDs that will be invited to every swarm room as
-    /// supervisors. Replies from these users route to the addressed puppet.
-    #[serde(default)]
-    pub supervisor_user_ids: Vec<String>,
-    /// If true, verify the bot account reports `admin: true` on the
-    /// homeserver before provisioning puppets. When disabled, the channel
-    /// best-effort uses the appservice token for user registration (the
-    /// existing Matrix appservice pattern).
-    #[serde(default)]
-    pub require_admin_api: bool,
-}
-
-impl Default for SwarmSupervisorConfig {
-    fn default() -> Self {
-        Self {
-            schema_version: SWARM_SUPERVISOR_CONFIG_SCHEMA_VERSION,
-            puppet_prefix: default_swarm_puppet_prefix(),
-            room_prefix: default_swarm_room_prefix(),
-            supervisor_user_ids: Vec::new(),
-            require_admin_api: false,
-        }
-    }
-}
-
-fn default_swarm_puppet_prefix() -> String {
-    "swarm_".to_string()
-}
-
-fn default_swarm_room_prefix() -> String {
-    "swarm_".to_string()
-}
-
 /// Credential pool configuration (M6.5).
 ///
 /// Schema-versioned per M4.6 — older profiles default to
@@ -717,19 +538,7 @@ pub struct ProfileConfigPatch {
     #[serde(default)]
     pub llm: PatchField<LlmProfileConfig>,
     #[serde(default)]
-    pub review: PatchField<ReviewConfig>,
-    #[serde(default)]
-    pub search: PatchField<SearchConfig>,
-    #[serde(default)]
-    pub apps: PatchField<AppsConfig>,
-    #[serde(default)]
-    pub home: PatchField<serde_json::Value>,
-    #[serde(default)]
-    pub channels: Option<Vec<ChannelCredentials>>,
-    #[serde(default)]
     pub gateway: Option<GatewaySettingsPatch>,
-    #[serde(default)]
-    pub email: PatchField<EmailSettings>,
     #[serde(default)]
     pub smart_home: PatchField<SmartHomeConfig>,
     #[serde(default, deserialize_with = "deserialize_profile_asr_language_patch")]
@@ -746,10 +555,6 @@ pub struct ProfileConfigPatch {
     pub adaptive_routing: PatchField<crate::config::AdaptiveRoutingConfig>,
     #[serde(default)]
     pub cost_budget: PatchField<octos_agent::CostBudgetPolicy>,
-    #[serde(default)]
-    pub matrix: PatchField<MatrixProfileConfig>,
-    #[serde(default)]
-    pub content_routing: PatchField<octos_llm::RoutingConfig>,
     #[serde(default)]
     pub credential_pool: PatchField<CredentialPoolConfig>,
     #[serde(default)]
@@ -868,89 +673,6 @@ pub struct LlmRouteConfig {
     pub api_type: Option<String>,
 }
 
-/// Email sending tool configuration for a profile.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct EmailSettings {
-    /// Provider: "smtp" or "feishu" / "lark".
-    pub provider: String,
-
-    // -- SMTP fields --
-    #[serde(default)]
-    pub smtp_host: Option<String>,
-    #[serde(default)]
-    pub smtp_port: Option<u16>,
-    #[serde(default)]
-    pub username: Option<String>,
-    /// Env var name holding the SMTP password (legacy).
-    #[serde(default)]
-    pub password_env: Option<String>,
-    /// SMTP password (literal value, preferred over password_env).
-    #[serde(default)]
-    pub password: Option<String>,
-    #[serde(default)]
-    pub from_address: Option<String>,
-
-    // -- Feishu/Lark fields --
-    #[serde(default)]
-    pub feishu_app_id: Option<String>,
-    /// Env var name holding the Feishu app secret (legacy).
-    #[serde(default)]
-    pub feishu_app_secret_env: Option<String>,
-    /// Feishu app secret (literal value, preferred over feishu_app_secret_env).
-    #[serde(default)]
-    pub feishu_app_secret: Option<String>,
-    #[serde(default)]
-    pub feishu_from_address: Option<String>,
-    /// "cn" (default) or "global".
-    #[serde(default)]
-    pub feishu_region: Option<String>,
-}
-
-impl EmailSettings {
-    /// Return env var pairs that the `send_email` plugin expects.
-    /// `env_vars` is the profile's env_vars map used to resolve `password_env`.
-    pub fn to_env_vars(&self, env_vars: &HashMap<String, String>) -> Vec<(String, String)> {
-        let mut out = Vec::new();
-        if let Some(ref h) = self.smtp_host {
-            out.push(("SMTP_HOST".into(), h.clone()));
-        }
-        if let Some(p) = self.smtp_port {
-            out.push(("SMTP_PORT".into(), p.to_string()));
-        }
-        if let Some(ref u) = self.username {
-            out.push(("SMTP_USERNAME".into(), u.clone()));
-        }
-        if let Some(ref f) = self.from_address {
-            out.push(("SMTP_FROM".into(), f.clone()));
-        }
-        // Resolve password: direct `password` field preferred, then `password_env` lookup
-        if let Some(ref pw) = self.password {
-            out.push(("SMTP_PASSWORD".into(), pw.clone()));
-        } else if let Some(ref pw_env) = self.password_env {
-            if let Some(pw_val) = env_vars.get(pw_env) {
-                out.push(("SMTP_PASSWORD".into(), pw_val.clone()));
-            }
-        }
-        if let Some(ref id) = self.feishu_app_id {
-            out.push(("LARK_APP_ID".into(), id.clone()));
-        }
-        if let Some(ref secret) = self.feishu_app_secret {
-            out.push(("LARK_APP_SECRET".into(), secret.clone()));
-        } else if let Some(ref secret_env) = self.feishu_app_secret_env {
-            if let Some(secret_val) = env_vars.get(secret_env) {
-                out.push(("LARK_APP_SECRET".into(), secret_val.clone()));
-            }
-        }
-        if let Some(ref f) = self.feishu_from_address {
-            out.push(("LARK_FROM_ADDRESS".into(), f.clone()));
-        }
-        if let Some(ref r) = self.feishu_region {
-            out.push(("LARK_REGION".into(), r.clone()));
-        }
-        out
-    }
-}
-
 /// Smart-home bridge integration for a profile.
 ///
 /// Scope: self-hosted / same-LAN bridges only (e.g. a Home Assistant bridge
@@ -1011,36 +733,8 @@ impl ProfileConfig {
             PatchField::Clear => self.llm = None,
             PatchField::Value(llm) => self.llm = Some(llm),
         }
-        match patch.review {
-            PatchField::Absent => {}
-            PatchField::Clear => self.review = None,
-            PatchField::Value(review) => self.review = Some(review),
-        }
-        match patch.search {
-            PatchField::Absent => {}
-            PatchField::Clear => self.search = None,
-            PatchField::Value(search) => self.search = Some(search),
-        }
-        match patch.apps {
-            PatchField::Absent => {}
-            PatchField::Clear => self.apps = None,
-            PatchField::Value(apps) => self.apps = Some(apps),
-        }
-        match patch.home {
-            PatchField::Absent => {}
-            PatchField::Clear => self.home = None,
-            PatchField::Value(home) => self.home = Some(home),
-        }
-        if let Some(channels) = patch.channels {
-            self.channels = channels;
-        }
         if let Some(gateway) = patch.gateway {
             gateway.apply_to(&mut self.gateway);
-        }
-        match patch.email {
-            PatchField::Absent => {}
-            PatchField::Clear => self.email = None,
-            PatchField::Value(email) => self.email = Some(email),
         }
         match patch.smart_home {
             PatchField::Absent => {}
@@ -1073,16 +767,6 @@ impl ProfileConfig {
             PatchField::Absent => {}
             PatchField::Clear => self.cost_budget = None,
             PatchField::Value(cost_budget) => self.cost_budget = Some(cost_budget),
-        }
-        match patch.matrix {
-            PatchField::Absent => {}
-            PatchField::Clear => self.matrix = None,
-            PatchField::Value(matrix) => self.matrix = Some(matrix),
-        }
-        match patch.content_routing {
-            PatchField::Absent => {}
-            PatchField::Clear => self.content_routing = None,
-            PatchField::Value(content_routing) => self.content_routing = Some(content_routing),
         }
         match patch.credential_pool {
             PatchField::Absent => {}
@@ -1211,268 +895,6 @@ impl LlmModelSelectionConfig {
             && self.top_p.is_none()
             && self.reasoning_effort.is_none()
     }
-}
-
-/// Channel-specific credentials (tagged by type).
-// The Matrix variant carries many user-mode fields; boxing a serde
-// `tag`-serialized struct variant isn't worth the (de)serialization churn.
-#[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-pub enum ChannelCredentials {
-    Telegram {
-        #[serde(default = "default_telegram_env")]
-        token_env: String,
-        #[serde(default)]
-        allowed_senders: String,
-    },
-    Discord {
-        #[serde(default = "default_discord_env")]
-        token_env: String,
-    },
-    DingTalk {
-        #[serde(default = "default_dingtalk_webhook_env")]
-        webhook_url_env: String,
-        #[serde(default = "default_dingtalk_secret_env")]
-        secret_env: String,
-        #[serde(default)]
-        allowed_senders: String,
-        #[serde(default)]
-        webhook_port: Option<u16>,
-    },
-    Slack {
-        #[serde(default = "default_slack_bot_env")]
-        bot_token_env: String,
-        #[serde(default = "default_slack_app_env")]
-        app_token_env: String,
-    },
-    #[serde(rename = "whatsapp")]
-    WhatsApp {
-        #[serde(default = "default_whatsapp_url")]
-        bridge_url: String,
-    },
-    Feishu {
-        #[serde(default = "default_feishu_id_env")]
-        app_id_env: String,
-        #[serde(default = "default_feishu_secret_env")]
-        app_secret_env: String,
-        #[serde(default)]
-        mode: String,
-        #[serde(default)]
-        region: String,
-        #[serde(default)]
-        webhook_port: Option<u16>,
-        #[serde(default)]
-        verification_token_env: String,
-        #[serde(default)]
-        encrypt_key_env: String,
-    },
-    Email {
-        #[serde(default)]
-        imap_host: String,
-        #[serde(default = "default_imap_port")]
-        imap_port: u16,
-        #[serde(default)]
-        smtp_host: String,
-        #[serde(default = "default_smtp_port")]
-        smtp_port: u16,
-        #[serde(default = "default_email_user_env")]
-        username_env: String,
-        #[serde(default = "default_email_pass_env")]
-        password_env: String,
-    },
-    Twilio {
-        #[serde(default = "default_twilio_sid_env")]
-        account_sid_env: String,
-        #[serde(default = "default_twilio_token_env")]
-        auth_token_env: String,
-        #[serde(default)]
-        from_number: String,
-        #[serde(default = "default_twilio_webhook_port")]
-        webhook_port: u16,
-    },
-    Api {
-        #[serde(default = "default_api_port")]
-        port: u16,
-        #[serde(default)]
-        auth_token: Option<String>,
-    },
-    #[serde(rename = "wecom-bot")]
-    WeComBot {
-        #[serde(default)]
-        bot_id: String,
-        #[serde(default = "default_wecom_bot_secret_env")]
-        secret_env: String,
-    },
-    Matrix {
-        #[serde(default)]
-        homeserver: String,
-        // Appservice-mode tokens. Optional so a user-mode entry (which has no
-        // appservice registration) still deserializes; emptiness is enforced
-        // downstream only for appservice mode.
-        #[serde(default)]
-        as_token: String,
-        #[serde(default)]
-        hs_token: String,
-        #[serde(default)]
-        server_name: String,
-        #[serde(default = "default_matrix_sender_localpart")]
-        sender_localpart: String,
-        #[serde(default = "default_matrix_user_prefix")]
-        user_prefix: String,
-        #[serde(default = "default_matrix_port")]
-        port: u16,
-        #[serde(default)]
-        allowed_senders: Vec<String>,
-        /// Appservice-mode: outside a true 1:1 DM, bots only reply when
-        /// explicitly addressed. Safe-by-default; set to `false` to let bots
-        /// answer every message.
-        #[serde(default = "crate::config::default_true")]
-        mention_only: bool,
-        /// Channel mode: "appservice" (default) or "user" (regular account login).
-        #[serde(default)]
-        mode: String,
-        /// User-mode: Matrix user ID, e.g. "@bot:matrix.org".
-        #[serde(default)]
-        user_id: String,
-        /// User-mode: access token (alternative to password login).
-        #[serde(default)]
-        access_token: String,
-        /// User-mode: account password (alternative to access token).
-        #[serde(default)]
-        password: String,
-        /// User-mode: device display name created at login.
-        #[serde(default)]
-        device_name: String,
-        /// User-mode: room allowlist used when group_policy is "allowlist".
-        #[serde(default)]
-        rooms: Vec<String>,
-        /// User-mode: invite auto-join policy: "off", "allowlist", or "always".
-        #[serde(default = "default_matrix_auto_join")]
-        auto_join: String,
-        /// User-mode: invite allowlist used when auto_join is "allowlist".
-        #[serde(default)]
-        auto_join_allowlist: Vec<String>,
-        /// User-mode: room/group policy: "open", "allowlist", or "disabled".
-        #[serde(default = "default_matrix_group_policy")]
-        group_policy: String,
-        /// User-mode: require an explicit bot mention or slash command in allowed rooms.
-        #[serde(default = "crate::config::default_true")]
-        require_mention: bool,
-    },
-    #[serde(rename = "qq-bot")]
-    QQBot {
-        #[serde(default)]
-        app_id: String,
-        #[serde(default = "default_qq_bot_secret_env")]
-        client_secret_env: String,
-    },
-    #[serde(rename = "wechat")]
-    WeChat {
-        #[serde(default = "default_wechat_token_env")]
-        token_env: String,
-        #[serde(default = "default_wechat_base_url")]
-        base_url: String,
-    },
-    Line {
-        #[serde(default = "default_line_secret_env")]
-        channel_secret_env: String,
-        #[serde(default = "default_line_token_env")]
-        channel_access_token_env: String,
-        #[serde(default)]
-        allowed_senders: String,
-        #[serde(default)]
-        webhook_port: Option<u16>,
-        #[serde(default)]
-        require_mention: bool,
-        #[serde(default)]
-        bot_user_id: String,
-    },
-}
-
-fn default_telegram_env() -> String {
-    "TELEGRAM_BOT_TOKEN".into()
-}
-fn default_discord_env() -> String {
-    "DISCORD_BOT_TOKEN".into()
-}
-fn default_dingtalk_webhook_env() -> String {
-    "DINGTALK_BOT_WEBHOOK".into()
-}
-fn default_dingtalk_secret_env() -> String {
-    "DINGTALK_BOT_SECRET".into()
-}
-fn default_slack_bot_env() -> String {
-    "SLACK_BOT_TOKEN".into()
-}
-fn default_slack_app_env() -> String {
-    "SLACK_APP_TOKEN".into()
-}
-fn default_whatsapp_url() -> String {
-    "ws://localhost:3001".into()
-}
-fn default_feishu_id_env() -> String {
-    "FEISHU_APP_ID".into()
-}
-fn default_feishu_secret_env() -> String {
-    "FEISHU_APP_SECRET".into()
-}
-fn default_imap_port() -> u16 {
-    993
-}
-fn default_smtp_port() -> u16 {
-    465
-}
-fn default_email_user_env() -> String {
-    "EMAIL_USERNAME".into()
-}
-fn default_email_pass_env() -> String {
-    "EMAIL_PASSWORD".into()
-}
-fn default_twilio_sid_env() -> String {
-    "TWILIO_ACCOUNT_SID".into()
-}
-fn default_twilio_token_env() -> String {
-    "TWILIO_AUTH_TOKEN".into()
-}
-fn default_twilio_webhook_port() -> u16 {
-    8090
-}
-fn default_api_port() -> u16 {
-    8091
-}
-fn default_wecom_bot_secret_env() -> String {
-    "WECOM_BOT_SECRET".into()
-}
-fn default_matrix_sender_localpart() -> String {
-    "bot".into()
-}
-fn default_matrix_user_prefix() -> String {
-    "bot_".into()
-}
-fn default_matrix_port() -> u16 {
-    8009
-}
-fn default_matrix_auto_join() -> String {
-    "off".into()
-}
-fn default_matrix_group_policy() -> String {
-    "allowlist".into()
-}
-fn default_qq_bot_secret_env() -> String {
-    "QQ_BOT_CLIENT_SECRET".into()
-}
-fn default_wechat_token_env() -> String {
-    "WECHAT_BOT_TOKEN".into()
-}
-fn default_wechat_base_url() -> String {
-    "https://ilinkai.weixin.qq.com".into()
-}
-fn default_line_secret_env() -> String {
-    "LINE_CHANNEL_SECRET".into()
-}
-fn default_line_token_env() -> String {
-    "LINE_CHANNEL_ACCESS_TOKEN".into()
 }
 
 /// Gateway-specific settings.
@@ -1806,32 +1228,6 @@ impl ProfileStore {
                     }
                 }
             }
-            for (idx, new_channel) in profile.config.channels.iter_mut().enumerate() {
-                let old_channel = existing
-                    .config
-                    .channels
-                    .iter()
-                    .find(|old_channel| channel_secret_identity_matches(new_channel, old_channel))
-                    .or_else(|| {
-                        existing.config.channels.get(idx).filter(|old_channel| {
-                            same_secret_channel_variant(new_channel, old_channel)
-                        })
-                    });
-                if let Some(old_channel) = old_channel {
-                    restore_masked_channel_secrets(new_channel, old_channel);
-                }
-            }
-            // Same contract as channels: a client that GETs a masked profile and
-            // PUTs it back must not overwrite the stored secret with `ab***xyz`.
-            if let (Some(new_email), Some(old_email)) =
-                (&mut profile.config.email, &existing.config.email)
-            {
-                restore_masked_optional_secret(&mut new_email.password, &old_email.password);
-                restore_masked_optional_secret(
-                    &mut new_email.feishu_app_secret,
-                    &old_email.feishu_app_secret,
-                );
-            }
             if let (Some(new_smart_home), Some(old_smart_home)) =
                 (&mut profile.config.smart_home, &existing.config.smart_home)
             {
@@ -2000,65 +1396,6 @@ impl ProfileStore {
             }
         }
         Ok(())
-    }
-
-    /// Create a sub-account under a parent profile.
-    ///
-    /// The sub-account inherits the parent's LLM contract at runtime.
-    /// It has its own channels, gateway settings, and data directory.
-    pub fn create_sub_account(
-        &self,
-        parent_id: &str,
-        sub_account_id: &str,
-        public_subdomain: &str,
-        sub_name: &str,
-        channels: Vec<ChannelCredentials>,
-        gateway: GatewaySettings,
-    ) -> Result<UserProfile> {
-        // Verify parent exists
-        let parent = self
-            .get(parent_id)?
-            .ok_or_else(|| eyre::eyre!("parent profile '{parent_id}' not found"))?;
-        if parent.parent_id.is_some() {
-            bail!("sub-account '{parent_id}' cannot own sub-accounts");
-        }
-
-        let existing_subs = self.list_sub_accounts(parent_id)?;
-        if existing_subs.len() >= MAX_SUB_ACCOUNTS_PER_PARENT {
-            bail!(
-                "profile '{parent_id}' already has the maximum of {MAX_SUB_ACCOUNTS_PER_PARENT} sub-accounts"
-            );
-        }
-
-        let sub_id = format!("{parent_id}--{}", sub_account_id.trim());
-        validate_profile_id(&sub_id)?;
-        self.ensure_public_subdomain_available(public_subdomain, None)?;
-
-        if self.get(&sub_id)?.is_some() {
-            bail!("sub-account '{sub_id}' already exists");
-        }
-
-        let now = Utc::now();
-        let profile = UserProfile {
-            id: sub_id,
-            name: sub_name.to_string(),
-            public_subdomain: Some(public_subdomain.trim().to_string()),
-            enabled: false,
-            data_dir: None,
-            parent_id: Some(parent_id.to_string()),
-            config: ProfileConfig {
-                llm: None,
-                // Sub-account's own settings
-                channels,
-                gateway,
-                ..Default::default()
-            },
-            created_at: now,
-            updated_at: now,
-        };
-
-        self.save(&profile)?;
-        Ok(profile)
     }
 }
 
@@ -2380,20 +1717,6 @@ pub fn resolve_effective_profile(
 
     // Inherit the LLM contract from parent.
     ec.llm = pc.llm.clone();
-    if ec.review.is_none() {
-        ec.review = pc.review.clone();
-    }
-    if ec.search.is_none() {
-        ec.search = pc.search.clone();
-    }
-    if ec.apps.is_none() {
-        ec.apps = pc.apps.clone();
-    }
-
-    // Inherit email config if sub-account doesn't have its own
-    if ec.email.is_none() {
-        ec.email = pc.email.clone();
-    }
     // #2168: inherit the parent's tool_policy when the sub-account has none.
     if ec.tool_policy.is_none() {
         ec.tool_policy = pc.tool_policy.clone();
@@ -2436,12 +1759,6 @@ pub fn mask_secrets(profile: &UserProfile) -> UserProfile {
             *value = mask_value(value);
         }
     }
-    for channel in &mut masked.config.channels {
-        mask_channel_secrets(channel);
-    }
-    if let Some(email) = &mut masked.config.email {
-        mask_email_secrets(email);
-    }
     if let Some(smart_home) = &mut masked.config.smart_home {
         mask_smart_home_secrets(smart_home);
     }
@@ -2457,24 +1774,6 @@ pub fn mask_secrets(profile: &UserProfile) -> UserProfile {
 fn mask_smart_home_secrets(smart_home: &mut SmartHomeConfig) {
     if let Some(token) = &mut smart_home.token {
         *token = mask_value(token);
-    }
-}
-
-/// Mask the literal secrets in `config.email`.
-///
-/// `password` and `feishu_app_secret` hold real credentials. Their `*_env`
-/// twins hold only env var NAMES, so those stay in the clear — masking them
-/// would hide which variable to set without protecting anything.
-///
-/// Until this existed `mask_secrets` covered `env_vars` and `channels` but not
-/// `config.email`, so `GET /api/me` handed every authenticated caller their own
-/// SMTP password and Feishu app secret in plaintext.
-fn mask_email_secrets(email: &mut EmailSettings) {
-    if let Some(password) = &mut email.password {
-        *password = mask_value(password);
-    }
-    if let Some(secret) = &mut email.feishu_app_secret {
-        *secret = mask_value(secret);
     }
 }
 
@@ -2496,143 +1795,6 @@ fn mask_value(s: &str) -> String {
         "***".into()
     } else {
         String::new()
-    }
-}
-
-fn mask_channel_secrets(channel: &mut ChannelCredentials) {
-    match channel {
-        ChannelCredentials::Api {
-            auth_token: Some(token),
-            ..
-        } => {
-            *token = mask_value(token);
-        }
-        ChannelCredentials::Matrix {
-            as_token,
-            hs_token,
-            access_token,
-            password,
-            ..
-        } => {
-            *as_token = mask_value(as_token);
-            *hs_token = mask_value(hs_token);
-            *access_token = mask_value(access_token);
-            *password = mask_value(password);
-        }
-        _ => {}
-    }
-}
-
-fn restore_masked_channel_secrets(
-    new_channel: &mut ChannelCredentials,
-    old_channel: &ChannelCredentials,
-) {
-    match (new_channel, old_channel) {
-        (
-            ChannelCredentials::Api {
-                auth_token: new_token,
-                ..
-            },
-            ChannelCredentials::Api {
-                auth_token: old_token,
-                ..
-            },
-        ) => restore_masked_optional_secret(new_token, old_token),
-        (
-            ChannelCredentials::Matrix {
-                as_token: new_as_token,
-                hs_token: new_hs_token,
-                access_token: new_access_token,
-                password: new_password,
-                ..
-            },
-            ChannelCredentials::Matrix {
-                as_token: old_as_token,
-                hs_token: old_hs_token,
-                access_token: old_access_token,
-                password: old_password,
-                ..
-            },
-        ) => {
-            restore_masked_secret(new_as_token, old_as_token);
-            restore_masked_secret(new_hs_token, old_hs_token);
-            restore_masked_secret(new_access_token, old_access_token);
-            restore_masked_secret(new_password, old_password);
-        }
-        _ => {}
-    }
-}
-
-fn same_secret_channel_variant(
-    new_channel: &ChannelCredentials,
-    old_channel: &ChannelCredentials,
-) -> bool {
-    matches!(
-        (new_channel, old_channel),
-        (
-            ChannelCredentials::Api { .. },
-            ChannelCredentials::Api { .. }
-        ) | (
-            ChannelCredentials::Matrix { .. },
-            ChannelCredentials::Matrix { .. }
-        )
-    )
-}
-
-fn channel_secret_identity_matches(
-    new_channel: &ChannelCredentials,
-    old_channel: &ChannelCredentials,
-) -> bool {
-    match (new_channel, old_channel) {
-        (
-            ChannelCredentials::Api { port: new_port, .. },
-            ChannelCredentials::Api { port: old_port, .. },
-        ) => new_port == old_port,
-        (
-            ChannelCredentials::Matrix {
-                homeserver: new_homeserver,
-                mode: new_mode,
-                user_id: new_user_id,
-                server_name: new_server_name,
-                sender_localpart: new_sender_localpart,
-                user_prefix: new_user_prefix,
-                port: new_port,
-                ..
-            },
-            ChannelCredentials::Matrix {
-                homeserver: old_homeserver,
-                mode: old_mode,
-                user_id: old_user_id,
-                server_name: old_server_name,
-                sender_localpart: old_sender_localpart,
-                user_prefix: old_user_prefix,
-                port: old_port,
-                ..
-            },
-        ) => {
-            if !new_mode.eq_ignore_ascii_case(old_mode) {
-                return false;
-            }
-            let same_homeserver = !new_homeserver.trim().is_empty()
-                && new_homeserver.trim_end_matches('/') == old_homeserver.trim_end_matches('/');
-            if new_mode.eq_ignore_ascii_case("user") {
-                same_homeserver && !new_user_id.trim().is_empty() && new_user_id == old_user_id
-            } else {
-                same_homeserver
-                    && new_port == old_port
-                    && !new_server_name.trim().is_empty()
-                    && new_server_name == old_server_name
-                    && new_sender_localpart == old_sender_localpart
-                    && new_user_prefix == old_user_prefix
-            }
-        }
-        _ => false,
-    }
-}
-
-fn restore_masked_secret(new_value: &mut String, old_value: &str) {
-    if is_display_secret_value(new_value) {
-        *new_value = old_value.to_string();
     }
 }
 
@@ -2685,11 +1847,7 @@ fn validate_profile_id(id: &str) -> Result<()> {
 ///
 /// Used by `octos gateway --profile <path>` to load configuration directly
 /// from the profile JSON (the single source of truth).
-pub(crate) fn config_from_profile(
-    profile: &UserProfile,
-    bridge_url_override: Option<&str>,
-    feishu_port_override: Option<u16>,
-) -> Config {
+pub(crate) fn config_from_profile(profile: &UserProfile) -> Config {
     let mut normalized = profile.clone();
     normalized.config.normalize_llm_contract();
     let profile = &normalized;
@@ -2698,34 +1856,6 @@ pub(crate) fn config_from_profile(
         .llm
         .as_ref()
         .and_then(|llm| llm.primary.as_ref());
-
-    let channels: Vec<ChannelEntry> = profile
-        .config
-        .channels
-        .iter()
-        .map(|ch| {
-            let mut entry = channel_to_entry(ch);
-            // Override WhatsApp bridge_url if managed
-            if let ChannelCredentials::WhatsApp { .. } = ch {
-                if let Some(url) = bridge_url_override {
-                    entry["settings"]["bridge_url"] = serde_json::json!(url);
-                }
-            }
-            // Override webhook_port if auto-assigned (Feishu webhook / LINE)
-            if matches!(
-                ch,
-                ChannelCredentials::Feishu { .. }
-                    | ChannelCredentials::Line { .. }
-                    | ChannelCredentials::DingTalk { .. }
-            ) {
-                if let Some(port) = feishu_port_override {
-                    entry["settings"]["webhook_port"] = serde_json::json!(port);
-                }
-            }
-            // Convert serde_json::Value → ChannelEntry
-            serde_json::from_value(entry).expect("channel_to_entry produces valid ChannelEntry")
-        })
-        .collect();
 
     let fallback_models: Vec<FallbackModel> = profile
         .config
@@ -2786,7 +1916,6 @@ pub(crate) fn config_from_profile(
         }),
         max_iterations: profile.config.gateway.max_iterations,
         gateway: Some(GatewayConfig {
-            channels,
             max_history: profile.config.gateway.max_history.unwrap_or(50),
             system_prompt: profile.config.gateway.system_prompt.clone(),
             max_concurrent_sessions: profile.config.gateway.max_concurrent_sessions.unwrap_or(10),
@@ -2824,24 +1953,6 @@ pub(crate) fn config_from_profile(
         approval_policy: profile.config.approval_policy.clone(),
         context_filter: vec![],
         sub_providers: profile.config.sub_providers.clone(),
-        email: profile
-            .config
-            .email
-            .as_ref()
-            .map(|e| crate::config::EmailConfig {
-                provider: e.provider.clone(),
-                smtp_host: e.smtp_host.clone(),
-                smtp_port: e.smtp_port,
-                username: e.username.clone(),
-                password_env: e.password_env.clone(),
-                password: e.password.clone(),
-                from_address: e.from_address.clone(),
-                feishu_app_id: e.feishu_app_id.clone(),
-                feishu_app_secret_env: e.feishu_app_secret_env.clone(),
-                feishu_app_secret: e.feishu_app_secret.clone(),
-                feishu_from_address: e.feishu_from_address.clone(),
-                feishu_region: e.feishu_region.clone(),
-            }),
         auth_token: None,
         adaptive_routing: profile.config.adaptive_routing.clone(),
         voice: None,
@@ -2859,7 +1970,6 @@ pub(crate) fn config_from_profile(
         // these as `None`. Gateway runtime can still read them off
         // `profile.config` directly when needed.
         credential_pool: None,
-        content_routing: profile.config.content_routing.clone(),
         // #1774: thread the profile's formatting opt-in so `octos serve`
         // sessions honor it (review: hardcoding false here left serve
         // permanently OFF while chat/gateway/acp worked).
@@ -2874,261 +1984,6 @@ pub(crate) fn config_from_profile(
         // Startup CLI-flag defaults are not sourced from profile JSON — a
         // flattened profile Config always starts with an empty `cli` block.
         cli: Default::default(),
-    }
-}
-
-/// Convert a `ChannelCredentials` to a octos `ChannelEntry` JSON value.
-fn channel_to_entry(cred: &ChannelCredentials) -> serde_json::Value {
-    match cred {
-        ChannelCredentials::Telegram {
-            token_env,
-            allowed_senders,
-        } => {
-            let senders: Vec<&str> = allowed_senders
-                .split(',')
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty())
-                .collect();
-            serde_json::json!({
-                "type": "telegram",
-                "allowed_senders": senders,
-                "settings": { "token_env": token_env }
-            })
-        }
-        ChannelCredentials::Discord { token_env } => serde_json::json!({
-            "type": "discord",
-            "settings": { "token_env": token_env }
-        }),
-        ChannelCredentials::DingTalk {
-            webhook_url_env,
-            secret_env,
-            allowed_senders,
-            webhook_port,
-        } => {
-            let senders: Vec<&str> = allowed_senders
-                .split(',')
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty())
-                .collect();
-            let mut settings = serde_json::json!({
-                "webhook_url_env": webhook_url_env,
-                "secret_env": secret_env,
-            });
-            if let Some(port) = webhook_port {
-                settings["webhook_port"] = serde_json::json!(port);
-            }
-            serde_json::json!({
-                "type": "dingtalk",
-                "allowed_senders": senders,
-                "settings": settings,
-            })
-        }
-        ChannelCredentials::Slack {
-            bot_token_env,
-            app_token_env,
-        } => serde_json::json!({
-            "type": "slack",
-            "settings": { "bot_token_env": bot_token_env, "app_token_env": app_token_env }
-        }),
-        ChannelCredentials::WhatsApp { bridge_url } => serde_json::json!({
-            "type": "whatsapp",
-            "settings": { "bridge_url": bridge_url }
-        }),
-        ChannelCredentials::Feishu {
-            app_id_env,
-            app_secret_env,
-            mode,
-            region,
-            webhook_port,
-            verification_token_env,
-            encrypt_key_env,
-        } => {
-            let mut settings = serde_json::json!({
-                "app_id_env": app_id_env,
-                "app_secret_env": app_secret_env,
-            });
-            if !mode.is_empty() {
-                settings["mode"] = serde_json::json!(mode);
-            }
-            if !region.is_empty() {
-                settings["region"] = serde_json::json!(region);
-            }
-            if let Some(port) = webhook_port {
-                settings["webhook_port"] = serde_json::json!(port);
-            }
-            if !verification_token_env.is_empty() {
-                settings["verification_token_env"] = serde_json::json!(verification_token_env);
-            }
-            if !encrypt_key_env.is_empty() {
-                settings["encrypt_key_env"] = serde_json::json!(encrypt_key_env);
-            }
-            serde_json::json!({
-                "type": "feishu",
-                "settings": settings
-            })
-        }
-        ChannelCredentials::Email {
-            imap_host,
-            imap_port,
-            smtp_host,
-            smtp_port,
-            username_env,
-            password_env,
-        } => serde_json::json!({
-            "type": "email",
-            "settings": {
-                "imap_host": imap_host,
-                "imap_port": imap_port,
-                "smtp_host": smtp_host,
-                "smtp_port": smtp_port,
-                "username_env": username_env,
-                "password_env": password_env,
-            }
-        }),
-        ChannelCredentials::Twilio {
-            account_sid_env,
-            auth_token_env,
-            from_number,
-            webhook_port,
-        } => serde_json::json!({
-            "type": "twilio",
-            "settings": {
-                "account_sid_env": account_sid_env,
-                "auth_token_env": auth_token_env,
-                "from_number": from_number,
-                "webhook_port": webhook_port,
-            }
-        }),
-        ChannelCredentials::Api { port, auth_token } => {
-            let mut settings = serde_json::json!({"port": port});
-            if let Some(token) = auth_token {
-                settings["auth_token"] = serde_json::json!(token);
-            }
-            serde_json::json!({
-                "type": "api",
-                "settings": settings
-            })
-        }
-        ChannelCredentials::WeComBot { bot_id, secret_env } => serde_json::json!({
-            "type": "wecom-bot",
-            "settings": {
-                "bot_id": bot_id,
-                "secret_env": secret_env,
-            }
-        }),
-        ChannelCredentials::Matrix {
-            homeserver,
-            as_token,
-            hs_token,
-            server_name,
-            sender_localpart,
-            user_prefix,
-            port,
-            allowed_senders,
-            mention_only,
-            mode,
-            user_id,
-            access_token,
-            password,
-            device_name,
-            rooms,
-            auto_join,
-            auto_join_allowlist,
-            group_policy,
-            require_mention,
-        } => {
-            let mut settings = serde_json::json!({ "homeserver": homeserver });
-            if mode.eq_ignore_ascii_case("user") {
-                // User-account (client) mode: log in as a regular Matrix user
-                // and long-poll `/sync`. Only emit the credentials that are set.
-                settings["mode"] = serde_json::json!("user");
-                settings["auto_join"] = serde_json::json!(auto_join);
-                settings["group_policy"] = serde_json::json!(group_policy);
-                settings["require_mention"] = serde_json::json!(require_mention);
-                if !user_id.is_empty() {
-                    settings["user_id"] = serde_json::json!(user_id);
-                }
-                if !access_token.is_empty() {
-                    settings["access_token"] = serde_json::json!(access_token);
-                }
-                if !password.is_empty() {
-                    settings["password"] = serde_json::json!(password);
-                }
-                if !device_name.is_empty() {
-                    settings["device_name"] = serde_json::json!(device_name);
-                }
-                if !rooms.is_empty() {
-                    settings["rooms"] = serde_json::json!(rooms);
-                }
-                if !auto_join_allowlist.is_empty() {
-                    settings["auto_join_allowlist"] = serde_json::json!(auto_join_allowlist);
-                }
-            } else {
-                // Appservice mode (default): homeserver-side registration.
-                settings["as_token"] = serde_json::json!(as_token);
-                settings["hs_token"] = serde_json::json!(hs_token);
-                settings["server_name"] = serde_json::json!(server_name);
-                settings["sender_localpart"] = serde_json::json!(sender_localpart);
-                settings["user_prefix"] = serde_json::json!(user_prefix);
-                settings["port"] = serde_json::json!(port);
-                settings["mention_only"] = serde_json::json!(mention_only);
-            }
-            serde_json::json!({
-                "type": "matrix",
-                "allowed_senders": allowed_senders,
-                "settings": settings,
-            })
-        }
-        ChannelCredentials::QQBot {
-            app_id,
-            client_secret_env,
-        } => serde_json::json!({
-            "type": "qq-bot",
-            "settings": {
-                "app_id": app_id,
-                "client_secret_env": client_secret_env,
-            }
-        }),
-        ChannelCredentials::WeChat {
-            token_env,
-            base_url,
-        } => serde_json::json!({
-            "type": "wechat",
-            "settings": {
-                "token_env": token_env,
-                "base_url": base_url,
-            }
-        }),
-        ChannelCredentials::Line {
-            channel_secret_env,
-            channel_access_token_env,
-            allowed_senders,
-            webhook_port,
-            require_mention,
-            bot_user_id,
-        } => {
-            let senders: Vec<&str> = allowed_senders
-                .split(',')
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty())
-                .collect();
-            let mut settings = serde_json::json!({
-                "channel_secret_env": channel_secret_env,
-                "channel_access_token_env": channel_access_token_env,
-                "require_mention": require_mention,
-            });
-            if let Some(port) = webhook_port {
-                settings["webhook_port"] = serde_json::json!(port);
-            }
-            if !bot_user_id.is_empty() {
-                settings["bot_user_id"] = serde_json::json!(bot_user_id);
-            }
-            serde_json::json!({
-                "type": "line",
-                "allowed_senders": senders,
-                "settings": settings,
-            })
-        }
     }
 }
 
@@ -3162,23 +2017,8 @@ pub fn diff_profiles(old: &UserProfile, new: &UserProfile) -> ProfileChange {
     if oc.llm != nc.llm {
         restart_fields.push("llm".into());
     }
-    if oc.review != nc.review {
-        restart_fields.push("review".into());
-    }
-    if oc.search != nc.search {
-        restart_fields.push("search".into());
-    }
-    if oc.apps != nc.apps {
-        restart_fields.push("apps".into());
-    }
-    if oc.channels != nc.channels {
-        restart_fields.push("channels".into());
-    }
     if oc.env_vars != nc.env_vars {
         restart_fields.push("env_vars".into());
-    }
-    if oc.email != nc.email {
-        restart_fields.push("email".into());
     }
     if oc.hooks != nc.hooks {
         restart_fields.push("hooks".into());
@@ -3194,12 +2034,6 @@ pub fn diff_profiles(old: &UserProfile, new: &UserProfile) -> ProfileChange {
     }
     if oc.cost_budget != nc.cost_budget {
         restart_fields.push("cost_budget".into());
-    }
-    if oc.matrix != nc.matrix {
-        restart_fields.push("matrix".into());
-    }
-    if oc.content_routing != nc.content_routing {
-        restart_fields.push("content_routing".into());
     }
     if oc.credential_pool != nc.credential_pool {
         restart_fields.push("credential_pool".into());
@@ -3225,73 +2059,6 @@ pub fn diff_profiles(old: &UserProfile, new: &UserProfile) -> ProfileChange {
     }
 
     ProfileChange::Unchanged
-}
-
-/// Check if a profile has a Feishu channel and return its webhook port configuration.
-///
-/// Returns:
-/// - `Some(Some(port))` — Feishu channel exists with explicit webhook port
-/// - `Some(None)` — Feishu channel exists but needs an auto-assigned port
-/// - `None` — no Feishu channel
-pub fn feishu_webhook_port(profile: &UserProfile) -> Option<Option<u16>> {
-    for ch in &profile.config.channels {
-        if let ChannelCredentials::Feishu {
-            mode, webhook_port, ..
-        } = ch
-        {
-            if mode == "webhook" {
-                return Some(*webhook_port);
-            }
-        }
-    }
-    None
-}
-
-/// Check if a profile has a LINE channel and return its webhook port configuration.
-///
-/// Returns:
-/// - `Some(Some(port))` — LINE channel exists with explicit webhook port
-/// - `Some(None)` — LINE channel exists but needs an auto-assigned port
-/// - `None` — no LINE channel
-pub fn line_webhook_port(profile: &UserProfile) -> Option<Option<u16>> {
-    for ch in &profile.config.channels {
-        if let ChannelCredentials::Line { webhook_port, .. } = ch {
-            return Some(*webhook_port);
-        }
-    }
-    None
-}
-
-/// Check if a profile has a DingTalk channel and return its webhook port configuration.
-///
-/// Returns:
-/// - `Some(Some(port))` — DingTalk channel exists with explicit webhook port
-/// - `Some(None)` — DingTalk channel exists but needs an auto-assigned port
-/// - `None` — no DingTalk channel
-pub fn dingtalk_webhook_port(profile: &UserProfile) -> Option<Option<u16>> {
-    for ch in &profile.config.channels {
-        if let ChannelCredentials::DingTalk { webhook_port, .. } = ch {
-            return Some(*webhook_port);
-        }
-    }
-    None
-}
-
-/// Webhook port needed by any profile channel that listens for HTTP webhooks.
-pub fn profile_webhook_port(profile: &UserProfile) -> Option<Option<u16>> {
-    feishu_webhook_port(profile)
-        .or_else(|| line_webhook_port(profile))
-        .or_else(|| dingtalk_webhook_port(profile))
-}
-
-/// Get the API channel port from a profile, if one is configured.
-pub fn api_channel_port(profile: &UserProfile) -> Option<u16> {
-    for ch in &profile.config.channels {
-        if let ChannelCredentials::Api { port, .. } = ch {
-            return Some(*port);
-        }
-    }
-    None
 }
 
 #[cfg(test)]
@@ -3602,56 +2369,6 @@ mod tests {
     }
 
     #[test]
-    fn test_profile_roundtrip() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = ProfileStore::open_unified(dir.path()).unwrap();
-
-        let profile = UserProfile {
-            // Not "test" — a reserved channel name (codex #1613 r4).
-            id: "test-bot".into(),
-            name: "Test Bot".into(),
-            enabled: true,
-            data_dir: None,
-            parent_id: None,
-            public_subdomain: None,
-            config: ProfileConfig {
-                llm: Some(llm_profile(
-                    llm_selection(
-                        "anthropic",
-                        "claude-sonnet-4-20250514",
-                        Some("ANTHROPIC_API_KEY"),
-                        None,
-                    ),
-                    vec![],
-                )),
-                channels: vec![ChannelCredentials::Telegram {
-                    token_env: "TG_TOKEN".into(),
-                    allowed_senders: String::new(),
-                }],
-                gateway: GatewaySettings {
-                    max_history: Some(50),
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
-
-        store.save(&profile).unwrap();
-        let loaded = store.get("test-bot").unwrap().unwrap();
-        assert_eq!(loaded.id, "test-bot");
-        assert_eq!(loaded.name, "Test Bot");
-        assert!(loaded.enabled);
-
-        let profiles = store.list().unwrap();
-        assert_eq!(profiles.len(), 1);
-
-        assert!(store.delete("test-bot").unwrap());
-        assert!(store.get("test-bot").unwrap().is_none());
-    }
-
-    #[test]
     fn test_save_preserves_local_owner_metadata_fields() {
         let dir = tempfile::tempdir().unwrap();
         let store = ProfileStore::open_unified(dir.path()).unwrap();
@@ -3724,7 +2441,7 @@ mod tests {
             updated_at: Utc::now(),
         };
 
-        let config = config_from_profile(&profile, None, None);
+        let config = config_from_profile(&profile);
         assert_eq!(
             config.sub_providers.len(),
             2,
@@ -3759,7 +2476,7 @@ mod tests {
             updated_at: Utc::now(),
         };
         assert!(
-            config_from_profile(&profile, None, None).format_after_edit,
+            config_from_profile(&profile).format_after_edit,
             "profile opt-in must reach the runtime config (serve path)"
         );
         // And the default stays OFF.
@@ -3767,7 +2484,7 @@ mod tests {
             config: ProfileConfig::default(),
             ..profile
         };
-        assert!(!config_from_profile(&off, None, None).format_after_edit);
+        assert!(!config_from_profile(&off).format_after_edit);
     }
 
     #[test]
@@ -3796,7 +2513,7 @@ mod tests {
             updated_at: Utc::now(),
         };
         assert_eq!(
-            config_from_profile(&profile, None, None).tool_policy,
+            config_from_profile(&profile).tool_policy,
             Some(policy),
             "a profile tool_policy must reach the runtime config (serve applies it)"
         );
@@ -3805,7 +2522,7 @@ mod tests {
             config: ProfileConfig::default(),
             ..profile
         };
-        assert_eq!(config_from_profile(&off, None, None).tool_policy, None);
+        assert_eq!(config_from_profile(&off).tool_policy, None);
     }
 
     #[test]
@@ -3834,50 +2551,6 @@ mod tests {
     }
 
     #[test]
-    fn test_config_from_profile() {
-        let profile = UserProfile {
-            id: "gen-test".into(),
-            name: "Config Gen".into(),
-            enabled: false,
-            data_dir: None,
-            parent_id: None,
-            public_subdomain: None,
-            config: ProfileConfig {
-                llm: Some(llm_profile(
-                    llm_selection("openai", "gpt-4o", None, None),
-                    vec![],
-                )),
-                channels: vec![
-                    ChannelCredentials::Telegram {
-                        token_env: "TG".into(),
-                        allowed_senders: String::new(),
-                    },
-                    ChannelCredentials::Slack {
-                        bot_token_env: "SB".into(),
-                        app_token_env: "SA".into(),
-                    },
-                ],
-                gateway: GatewaySettings {
-                    max_history: Some(100),
-                    system_prompt: Some("Hello".into()),
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
-
-        let config = config_from_profile(&profile, None, None);
-        assert_eq!(config.provider.as_deref(), Some("openai"));
-        assert_eq!(config.model.as_deref(), Some("gpt-4o"));
-        let gw = config.gateway.unwrap();
-        assert_eq!(gw.max_history, 100);
-        assert_eq!(gw.system_prompt.as_deref(), Some("Hello"));
-        assert_eq!(gw.channels.len(), 2);
-    }
-
-    #[test]
     fn test_config_from_profile_provider_passthrough() {
         let profile = UserProfile {
             id: "moonshot-test".into(),
@@ -3897,7 +2570,7 @@ mod tests {
             updated_at: Utc::now(),
         };
 
-        let config = config_from_profile(&profile, None, None);
+        let config = config_from_profile(&profile);
         assert_eq!(config.provider.as_deref(), Some("moonshot"));
         assert!(config.base_url.is_none());
         assert_eq!(config.model.as_deref(), Some("kimi-k2.5"));
@@ -4033,7 +2706,7 @@ mod tests {
             updated_at: Utc::now(),
         };
 
-        let config = config_from_profile(&profile, None, None);
+        let config = config_from_profile(&profile);
         assert_eq!(config.provider.as_deref(), Some("moonshot"));
         assert_eq!(config.model.as_deref(), Some("kimi-k2.5"));
         assert_eq!(
@@ -4075,92 +2748,6 @@ mod tests {
     }
 
     #[test]
-    fn test_profile_config_patch_applies_typed_sections_without_wiping_gateway() {
-        let mut config = ProfileConfig {
-            gateway: GatewaySettings {
-                max_history: Some(42),
-                system_prompt: Some("keep me".into()),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        config.apply_patch(ProfileConfigPatch {
-            gateway: Some(GatewaySettingsPatch {
-                max_history: PatchField::Value(100),
-                ..Default::default()
-            }),
-            search: PatchField::Value(SearchConfig {
-                providers: [(
-                    "tavily".into(),
-                    SearchProviderConfig {
-                        api_key_env: Some("TAVILY_API_KEY".into()),
-                    },
-                )]
-                .into(),
-            }),
-            apps: PatchField::Value(AppsConfig {
-                slides: Some(SlidesAppConfig {
-                    template_dir: Some("/opt/octos/slides".into()),
-                    default_theme: Some("crew".into()),
-                }),
-            }),
-            ..Default::default()
-        });
-
-        assert_eq!(config.gateway.max_history, Some(100));
-        assert_eq!(config.gateway.system_prompt.as_deref(), Some("keep me"));
-        assert_eq!(
-            config
-                .search
-                .as_ref()
-                .and_then(|search| search.providers.get("tavily"))
-                .and_then(|provider| provider.api_key_env.as_deref()),
-            Some("TAVILY_API_KEY")
-        );
-        assert_eq!(
-            config
-                .apps
-                .as_ref()
-                .and_then(|apps| apps.slides.as_ref())
-                .and_then(|slides| slides.default_theme.as_deref()),
-            Some("crew")
-        );
-    }
-
-    #[test]
-    fn test_profile_config_patch_persists_home_dashboard_json() {
-        let mut config = ProfileConfig::default();
-        let home = serde_json::json!({
-            "settings": {
-                "city": "Tokyo",
-                "clock_format": "24h",
-                "idle_seconds": 45
-            },
-            "events": [
-                { "id": "dinner", "title": "Dinner", "date": "2026-06-16", "time": "19:30" }
-            ],
-            "metro_layout": {
-                "clock": { "col": 1, "row": 1, "w": 4, "h": 2 }
-            }
-        });
-
-        config.apply_patch(ProfileConfigPatch {
-            home: PatchField::Value(home.clone()),
-            ..Default::default()
-        });
-
-        assert_eq!(config.home.as_ref(), Some(&home));
-
-        config.apply_patch(ProfileConfigPatch {
-            home: PatchField::Clear,
-            ..Default::default()
-        });
-
-        assert!(config.home.is_none());
-    }
-
-    #[test]
     fn test_profile_config_patch_updates_plugin_and_lane_policy() {
         let mut config = ProfileConfig::default();
         let mut lane_routing = octos_llm::LaneRoutingConfig::default();
@@ -4185,27 +2772,6 @@ mod tests {
         });
 
         assert!(config.lane_routing.is_none());
-    }
-
-    #[test]
-    fn test_profile_config_patch_replaces_review_contract() {
-        let mut config = ProfileConfig::default();
-
-        config.apply_patch(ProfileConfigPatch {
-            review: PatchField::Value(ReviewConfig {
-                native_specialists: vec![ReviewSpecialistConfig {
-                    agent_key: "reviewer-ux".into(),
-                    nickname: "Noether".into(),
-                    role: "ux_review".into(),
-                    focus: "TUI UX and tmux evidence".into(),
-                }],
-            }),
-            ..Default::default()
-        });
-
-        let review = config.review.as_ref().expect("review config set");
-        assert_eq!(review.native_specialists.len(), 1);
-        assert_eq!(review.native_specialists[0].agent_key, "reviewer-ux");
     }
 
     #[test]
@@ -4259,40 +2825,6 @@ mod tests {
                 .and_then(|route| route.api_key_env.as_deref()),
             Some("MOONSHOT_API_KEY")
         );
-    }
-
-    #[test]
-    fn test_config_from_profile_bridge_url_override() {
-        let profile = UserProfile {
-            id: "wa-test".into(),
-            name: "WA Test".into(),
-            enabled: true,
-            data_dir: None,
-            parent_id: None,
-            public_subdomain: None,
-            config: ProfileConfig {
-                llm: Some(llm_profile(
-                    llm_selection("anthropic", "claude-sonnet-4-20250514", None, None),
-                    vec![],
-                )),
-                channels: vec![ChannelCredentials::WhatsApp {
-                    bridge_url: "ws://localhost:3001".into(),
-                }],
-                ..Default::default()
-            },
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
-
-        // Without override: uses original bridge_url
-        let config = config_from_profile(&profile, None, None);
-        let gw = config.gateway.as_ref().unwrap();
-        assert_eq!(gw.channels[0].settings["bridge_url"], "ws://localhost:3001");
-
-        // With override: uses managed bridge URL
-        let config = config_from_profile(&profile, Some("ws://localhost:3105"), None);
-        let gw = config.gateway.as_ref().unwrap();
-        assert_eq!(gw.channels[0].settings["bridge_url"], "ws://localhost:3105");
     }
 
     #[test]
@@ -4395,82 +2927,6 @@ mod tests {
     }
 
     #[test]
-    fn test_mask_secrets() {
-        assert_eq!(mask_value(""), "");
-        assert_eq!(mask_value("short"), "***");
-        assert_eq!(mask_value("exactly12ch"), "***");
-        assert_eq!(mask_value("sk-1234567890abcdef"), "sk-1***def");
-
-        let profile = UserProfile {
-            id: "test".into(),
-            name: "Test".into(),
-            enabled: false,
-            data_dir: None,
-            parent_id: None,
-            public_subdomain: None,
-            config: ProfileConfig {
-                env_vars: [
-                    ("API_KEY".into(), "sk-1234567890abcdef".into()),
-                    ("SHORT".into(), "abc".into()),
-                ]
-                .into(),
-                channels: vec![
-                    ChannelCredentials::Api {
-                        port: 9911,
-                        auth_token: Some("api-token-secret".into()),
-                    },
-                    ChannelCredentials::Matrix {
-                        homeserver: "https://matrix.example.org".into(),
-                        as_token: "as-token-secret".into(),
-                        hs_token: "hs-token-secret".into(),
-                        server_name: "example.org".into(),
-                        sender_localpart: "octos".into(),
-                        user_prefix: "octos_".into(),
-                        port: 8009,
-                        allowed_senders: Vec::new(),
-                        mention_only: true,
-                        mode: "user".into(),
-                        user_id: "@bot:example.org".into(),
-                        access_token: "syt_access_token_secret".into(),
-                        password: "matrix-password".into(),
-                        device_name: "octos".into(),
-                        rooms: Vec::new(),
-                        auto_join: "off".into(),
-                        auto_join_allowlist: Vec::new(),
-                        group_policy: "allowlist".into(),
-                        require_mention: true,
-                    },
-                ],
-                ..Default::default()
-            },
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
-
-        let masked = mask_secrets(&profile);
-        assert_eq!(masked.config.env_vars["API_KEY"], "sk-1***def");
-        assert_eq!(masked.config.env_vars["SHORT"], "***");
-        let ChannelCredentials::Api { auth_token, .. } = &masked.config.channels[0] else {
-            panic!("expected api channel");
-        };
-        assert_eq!(auth_token.as_deref(), Some("api-***ret"));
-        let ChannelCredentials::Matrix {
-            as_token,
-            hs_token,
-            access_token,
-            password,
-            ..
-        } = &masked.config.channels[1]
-        else {
-            panic!("expected matrix channel");
-        };
-        assert_eq!(as_token, "as-t***ret");
-        assert_eq!(hs_token, "hs-t***ret");
-        assert_eq!(access_token, "syt_***ret");
-        assert_eq!(password, "matr***ord");
-    }
-
-    #[test]
     fn test_file_permissions() {
         let dir = tempfile::tempdir().unwrap();
         let store = ProfileStore::open_unified(dir.path()).unwrap();
@@ -4493,455 +2949,6 @@ mod tests {
             let meta = std::fs::metadata(store.profile_path("perms-test")).unwrap();
             assert_eq!(meta.permissions().mode() & 0o777, 0o600);
         }
-    }
-
-    #[test]
-    fn test_save_with_merge_preserves_masked_secrets() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = ProfileStore::open_unified(dir.path()).unwrap();
-
-        // Save a profile with real secrets
-        let original = UserProfile {
-            id: "merge-test".into(),
-            name: "Merge".into(),
-            enabled: false,
-            data_dir: None,
-            parent_id: None,
-            public_subdomain: None,
-            config: ProfileConfig {
-                env_vars: [
-                    ("API_KEY".into(), "sk-real-secret-key".into()),
-                    ("OTHER".into(), "value-to-keep".into()),
-                ]
-                .into(),
-                ..Default::default()
-            },
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
-        store.save(&original).unwrap();
-
-        // Simulate update with masked values and a new value
-        let mut updated = UserProfile {
-            id: "merge-test".into(),
-            name: "Merge".into(),
-            enabled: false,
-            data_dir: None,
-            parent_id: None,
-            public_subdomain: None,
-            config: ProfileConfig {
-                env_vars: [
-                    ("API_KEY".into(), "sk-r***key".into()), // masked — should keep original
-                    ("OTHER".into(), "new-value".into()),    // changed — should update
-                    ("NEW_KEY".into(), "brand-new".into()),  // new — should add
-                ]
-                .into(),
-                ..Default::default()
-            },
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
-        store.save_with_merge(&mut updated).unwrap();
-
-        let loaded = store.get("merge-test").unwrap().unwrap();
-        assert_eq!(loaded.config.env_vars["API_KEY"], "sk-real-secret-key");
-        assert_eq!(loaded.config.env_vars["OTHER"], "new-value");
-        assert_eq!(loaded.config.env_vars["NEW_KEY"], "brand-new");
-    }
-
-    /// Build a profile whose `config.email` carries both literal secrets.
-    fn email_secret_profile(id: &str) -> UserProfile {
-        UserProfile {
-            id: id.into(),
-            name: "Email Secrets".into(),
-            enabled: false,
-            data_dir: None,
-            parent_id: None,
-            public_subdomain: None,
-            config: ProfileConfig {
-                email: Some(EmailSettings {
-                    provider: "smtp".into(),
-                    smtp_host: Some("smtp.example.org".into()),
-                    smtp_port: Some(587),
-                    username: Some("bot@example.org".into()),
-                    password_env: Some("SMTP_PASSWORD".into()),
-                    password: Some("real-smtp-password".into()),
-                    from_address: Some("bot@example.org".into()),
-                    feishu_app_id: Some("cli_realappid".into()),
-                    feishu_app_secret_env: Some("FEISHU_APP_SECRET".into()),
-                    feishu_app_secret: Some("real-feishu-app-secret".into()),
-                    feishu_from_address: None,
-                    feishu_region: None,
-                }),
-                ..Default::default()
-            },
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        }
-    }
-
-    #[test]
-    fn test_mask_secrets_masks_email_password_and_feishu_secret() {
-        let masked = mask_secrets(&email_secret_profile("email-mask"));
-        let email = masked.config.email.expect("email settings survive masking");
-
-        // The literal credentials must never reach the wire.
-        assert!(is_display_secret_value(email.password.as_deref().unwrap()));
-        assert!(is_display_secret_value(
-            email.feishu_app_secret.as_deref().unwrap()
-        ));
-        assert_ne!(email.password.as_deref(), Some("real-smtp-password"));
-        assert_ne!(
-            email.feishu_app_secret.as_deref(),
-            Some("real-feishu-app-secret")
-        );
-
-        // The `*_env` twins name env vars, not secrets — they stay readable, or
-        // the settings page cannot tell you which variable to set.
-        assert_eq!(email.password_env.as_deref(), Some("SMTP_PASSWORD"));
-        assert_eq!(
-            email.feishu_app_secret_env.as_deref(),
-            Some("FEISHU_APP_SECRET")
-        );
-        assert_eq!(email.username.as_deref(), Some("bot@example.org"));
-    }
-
-    #[test]
-    fn test_save_with_merge_preserves_masked_email_secrets() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = ProfileStore::open_unified(dir.path()).unwrap();
-        store.save(&email_secret_profile("email-merge")).unwrap();
-
-        // A client GETs the masked profile and PUTs it straight back.
-        let mut round_tripped = mask_secrets(&store.get("email-merge").unwrap().unwrap());
-        store.save_with_merge(&mut round_tripped).unwrap();
-
-        let loaded = store.get("email-merge").unwrap().unwrap();
-        let email = loaded
-            .config
-            .email
-            .expect("email settings survive the merge");
-        assert_eq!(email.password.as_deref(), Some("real-smtp-password"));
-        assert_eq!(
-            email.feishu_app_secret.as_deref(),
-            Some("real-feishu-app-secret")
-        );
-    }
-
-    /// Build a profile whose `config.smart_home` carries a literal token.
-    fn smart_home_secret_profile(id: &str) -> UserProfile {
-        UserProfile {
-            id: id.into(),
-            name: "Smart Home Secrets".into(),
-            enabled: false,
-            data_dir: None,
-            parent_id: None,
-            public_subdomain: None,
-            config: ProfileConfig {
-                smart_home: Some(SmartHomeConfig {
-                    bridge_url: Some("http://192.168.1.50:8787".into()),
-                    token: Some("real-bridge-token".into()),
-                    token_env: None,
-                }),
-                ..Default::default()
-            },
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        }
-    }
-
-    #[test]
-    fn test_save_with_merge_preserves_masked_smart_home_token() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = ProfileStore::open_unified(dir.path()).unwrap();
-        store.save(&smart_home_secret_profile("sh-merge")).unwrap();
-
-        // A client GETs the masked profile and PUTs it straight back — the
-        // settings page does exactly this for every unrelated config save.
-        let mut round_tripped = mask_secrets(&store.get("sh-merge").unwrap().unwrap());
-        store.save_with_merge(&mut round_tripped).unwrap();
-
-        let loaded = store.get("sh-merge").unwrap().unwrap();
-        let smart_home = loaded
-            .config
-            .smart_home
-            .expect("smart_home settings survive the merge");
-        assert_eq!(smart_home.token.as_deref(), Some("real-bridge-token"));
-        assert_eq!(
-            smart_home.bridge_url.as_deref(),
-            Some("http://192.168.1.50:8787")
-        );
-    }
-
-    #[test]
-    fn test_save_with_merge_allows_changing_smart_home_token() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = ProfileStore::open_unified(dir.path()).unwrap();
-        store.save(&smart_home_secret_profile("sh-change")).unwrap();
-
-        // A genuinely new value is NOT a display artifact, so it must land.
-        let mut updated = smart_home_secret_profile("sh-change");
-        updated.config.smart_home.as_mut().unwrap().token = Some("rotated-bridge-token".into());
-        store.save_with_merge(&mut updated).unwrap();
-
-        let loaded = store.get("sh-change").unwrap().unwrap();
-        let smart_home = loaded.config.smart_home.unwrap();
-        assert_eq!(smart_home.token.as_deref(), Some("rotated-bridge-token"));
-    }
-
-    #[test]
-    fn test_save_with_merge_allows_changing_email_secrets() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = ProfileStore::open_unified(dir.path()).unwrap();
-        store.save(&email_secret_profile("email-change")).unwrap();
-
-        // A genuinely new value is NOT a display artifact, so it must land.
-        let mut updated = email_secret_profile("email-change");
-        let email = updated.config.email.as_mut().unwrap();
-        email.password = Some("rotated-smtp-password".into());
-        email.feishu_app_secret = Some("rotated-feishu-secret".into());
-        store.save_with_merge(&mut updated).unwrap();
-
-        let loaded = store.get("email-change").unwrap().unwrap();
-        let email = loaded.config.email.unwrap();
-        assert_eq!(email.password.as_deref(), Some("rotated-smtp-password"));
-        assert_eq!(
-            email.feishu_app_secret.as_deref(),
-            Some("rotated-feishu-secret")
-        );
-    }
-
-    #[test]
-    fn test_save_with_merge_preserves_masked_channel_secrets() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = ProfileStore::open_unified(dir.path()).unwrap();
-
-        let original = UserProfile {
-            id: "channel-merge".into(),
-            name: "Channel Merge".into(),
-            enabled: false,
-            data_dir: None,
-            parent_id: None,
-            public_subdomain: None,
-            config: ProfileConfig {
-                channels: vec![
-                    ChannelCredentials::Api {
-                        port: 9911,
-                        auth_token: Some("api-real-token".into()),
-                    },
-                    ChannelCredentials::Matrix {
-                        homeserver: "https://old.example.org".into(),
-                        as_token: "as-real-token".into(),
-                        hs_token: "hs-real-token".into(),
-                        server_name: "old.example.org".into(),
-                        sender_localpart: "octos".into(),
-                        user_prefix: "octos_".into(),
-                        port: 8009,
-                        allowed_senders: Vec::new(),
-                        mention_only: true,
-                        mode: "user".into(),
-                        user_id: "@bot:old.example.org".into(),
-                        access_token: "syt_real_access_token".into(),
-                        password: "real-password".into(),
-                        device_name: "old-device".into(),
-                        rooms: Vec::new(),
-                        auto_join: "off".into(),
-                        auto_join_allowlist: Vec::new(),
-                        group_policy: "allowlist".into(),
-                        require_mention: true,
-                    },
-                ],
-                ..Default::default()
-            },
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
-        store.save(&original).unwrap();
-
-        let mut updated = original.clone();
-        let ChannelCredentials::Api { auth_token, .. } = &mut updated.config.channels[0] else {
-            panic!("expected api channel");
-        };
-        *auth_token = Some("api-***ken".into());
-        let ChannelCredentials::Matrix {
-            homeserver,
-            as_token,
-            hs_token,
-            access_token,
-            password,
-            device_name,
-            ..
-        } = &mut updated.config.channels[1]
-        else {
-            panic!("expected matrix channel");
-        };
-        *homeserver = "https://new.example.org".into();
-        *as_token = "as-r***ken".into();
-        *hs_token = "hs-r***ken".into();
-        *access_token = "syt_***ken".into();
-        *password = "***".into();
-        *device_name = "new-device".into();
-        store.save_with_merge(&mut updated).unwrap();
-
-        let loaded = store.get("channel-merge").unwrap().unwrap();
-        let ChannelCredentials::Api { auth_token, .. } = &loaded.config.channels[0] else {
-            panic!("expected api channel");
-        };
-        assert_eq!(auth_token.as_deref(), Some("api-real-token"));
-        let ChannelCredentials::Matrix {
-            homeserver,
-            as_token,
-            hs_token,
-            access_token,
-            password,
-            device_name,
-            ..
-        } = &loaded.config.channels[1]
-        else {
-            panic!("expected matrix channel");
-        };
-        assert_eq!(homeserver, "https://new.example.org");
-        assert_eq!(as_token, "as-real-token");
-        assert_eq!(hs_token, "hs-real-token");
-        assert_eq!(access_token, "syt_real_access_token");
-        assert_eq!(password, "real-password");
-        assert_eq!(device_name, "new-device");
-    }
-
-    #[test]
-    fn test_save_with_merge_allows_clearing_channel_secret() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = ProfileStore::open_unified(dir.path()).unwrap();
-
-        let original = UserProfile {
-            id: "channel-clear".into(),
-            name: "Channel Clear".into(),
-            enabled: false,
-            data_dir: None,
-            parent_id: None,
-            public_subdomain: None,
-            config: ProfileConfig {
-                channels: vec![ChannelCredentials::Matrix {
-                    homeserver: "https://matrix.example.org".into(),
-                    as_token: String::new(),
-                    hs_token: String::new(),
-                    server_name: String::new(),
-                    sender_localpart: "octos".into(),
-                    user_prefix: "octos_".into(),
-                    port: 8009,
-                    allowed_senders: Vec::new(),
-                    mention_only: true,
-                    mode: "user".into(),
-                    user_id: "@bot:example.org".into(),
-                    access_token: "syt_old_access_token".into(),
-                    password: "old-password".into(),
-                    device_name: "octos".into(),
-                    rooms: Vec::new(),
-                    auto_join: "off".into(),
-                    auto_join_allowlist: Vec::new(),
-                    group_policy: "allowlist".into(),
-                    require_mention: true,
-                }],
-                ..Default::default()
-            },
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
-        store.save(&original).unwrap();
-
-        let mut updated = original.clone();
-        let ChannelCredentials::Matrix {
-            access_token,
-            password,
-            ..
-        } = &mut updated.config.channels[0]
-        else {
-            panic!("expected matrix channel");
-        };
-        *access_token = String::new();
-        *password = "new-password".into();
-        store.save_with_merge(&mut updated).unwrap();
-
-        let loaded = store.get("channel-clear").unwrap().unwrap();
-        let ChannelCredentials::Matrix {
-            access_token,
-            password,
-            ..
-        } = &loaded.config.channels[0]
-        else {
-            panic!("expected matrix channel");
-        };
-        assert_eq!(access_token, "");
-        assert_eq!(password, "new-password");
-    }
-
-    #[test]
-    fn test_save_with_merge_preserves_channel_secret_after_delete() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = ProfileStore::open_unified(dir.path()).unwrap();
-
-        let matrix_channel = |user_id: &str, token: &str| ChannelCredentials::Matrix {
-            homeserver: "https://matrix.example.org".into(),
-            as_token: String::new(),
-            hs_token: String::new(),
-            server_name: String::new(),
-            sender_localpart: "octos".into(),
-            user_prefix: "octos_".into(),
-            port: 8009,
-            allowed_senders: Vec::new(),
-            mention_only: true,
-            mode: "user".into(),
-            user_id: user_id.into(),
-            access_token: token.into(),
-            password: String::new(),
-            device_name: "octos".into(),
-            rooms: Vec::new(),
-            auto_join: "off".into(),
-            auto_join_allowlist: Vec::new(),
-            group_policy: "allowlist".into(),
-            require_mention: true,
-        };
-
-        let original = UserProfile {
-            id: "channel-delete".into(),
-            name: "Channel Delete".into(),
-            enabled: false,
-            data_dir: None,
-            parent_id: None,
-            public_subdomain: None,
-            config: ProfileConfig {
-                channels: vec![
-                    matrix_channel("@first:example.org", "syt_first_token"),
-                    matrix_channel("@second:example.org", "syt_second_token"),
-                ],
-                ..Default::default()
-            },
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
-        store.save(&original).unwrap();
-
-        let mut updated = original.clone();
-        updated.config.channels.remove(0);
-        let ChannelCredentials::Matrix { access_token, .. } = &mut updated.config.channels[0]
-        else {
-            panic!("expected matrix channel");
-        };
-        *access_token = "syt_***ken".into();
-        store.save_with_merge(&mut updated).unwrap();
-
-        let loaded = store.get("channel-delete").unwrap().unwrap();
-        assert_eq!(loaded.config.channels.len(), 1);
-        let ChannelCredentials::Matrix {
-            user_id,
-            access_token,
-            ..
-        } = &loaded.config.channels[0]
-        else {
-            panic!("expected matrix channel");
-        };
-        assert_eq!(user_id, "@second:example.org");
-        assert_eq!(access_token, "syt_second_token");
     }
 
     #[test]
@@ -5010,80 +3017,6 @@ mod tests {
     }
 
     #[test]
-    fn test_diff_profiles_structured_sections_require_restart() {
-        let base = UserProfile {
-            id: "diff-test".into(),
-            name: "Diff".into(),
-            enabled: false,
-            data_dir: None,
-            parent_id: None,
-            public_subdomain: None,
-            config: ProfileConfig {
-                search: Some(SearchConfig {
-                    providers: [(
-                        "tavily".into(),
-                        SearchProviderConfig {
-                            api_key_env: Some("TAVILY_PARENT".into()),
-                        },
-                    )]
-                    .into(),
-                }),
-                apps: Some(AppsConfig {
-                    slides: Some(SlidesAppConfig {
-                        template_dir: Some("/opt/octos/slides".into()),
-                        default_theme: Some("crew".into()),
-                    }),
-                }),
-                review: Some(ReviewConfig {
-                    native_specialists: vec![ReviewSpecialistConfig {
-                        agent_key: "reviewer-api".into(),
-                        nickname: "Ada Lovelace".into(),
-                        role: "api_contract_review".into(),
-                        focus: "API".into(),
-                    }],
-                }),
-                ..Default::default()
-            },
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
-
-        let mut changed = base.clone();
-        changed.config.search = Some(SearchConfig {
-            providers: [(
-                "tavily".into(),
-                SearchProviderConfig {
-                    api_key_env: Some("TAVILY_CHILD".into()),
-                },
-            )]
-            .into(),
-        });
-        changed.config.apps = Some(AppsConfig {
-            slides: Some(SlidesAppConfig {
-                template_dir: Some("/srv/slides".into()),
-                default_theme: Some("ocean".into()),
-            }),
-        });
-        changed.config.review = Some(ReviewConfig {
-            native_specialists: vec![ReviewSpecialistConfig {
-                agent_key: "reviewer-ux".into(),
-                nickname: "Noether".into(),
-                role: "ux_review".into(),
-                focus: "TUI UX".into(),
-            }],
-        });
-
-        match diff_profiles(&base, &changed) {
-            ProfileChange::RestartRequired(fields) => {
-                assert!(fields.contains(&"review".into()));
-                assert!(fields.contains(&"search".into()));
-                assert!(fields.contains(&"apps".into()));
-            }
-            other => panic!("expected RestartRequired, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn should_classify_credential_pool_as_restart_required() {
         let base = UserProfile {
             id: "m65-diff".into(),
@@ -5137,59 +3070,6 @@ mod tests {
     }
 
     #[test]
-    fn should_classify_runtime_policy_config_as_restart_required() {
-        let base = UserProfile {
-            id: "runtime-policy-diff".into(),
-            name: "Runtime Policy".into(),
-            enabled: false,
-            data_dir: None,
-            parent_id: None,
-            public_subdomain: None,
-            config: ProfileConfig::default(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
-
-        let mut lane_routing = octos_llm::LaneRoutingConfig::default();
-        lane_routing
-            .topic_lanes
-            .insert("code".into(), octos_llm::Lane::CodeCapable);
-
-        let mut changed = base.clone();
-        changed.config.admin_mode = true;
-        changed.config.sandbox.allow_network = true;
-        changed.config.adaptive_routing = Some(crate::config::AdaptiveRoutingConfig {
-            enabled: true,
-            ..Default::default()
-        });
-        changed.config.content_routing = Some(octos_llm::RoutingConfig {
-            enabled: true,
-            ..Default::default()
-        });
-        changed.config.plugins.require_signed = true;
-        changed.config.lane_routing = Some(lane_routing);
-
-        match diff_profiles(&base, &changed) {
-            ProfileChange::RestartRequired(fields) => {
-                for field in [
-                    "admin_mode",
-                    "sandbox",
-                    "adaptive_routing",
-                    "content_routing",
-                    "plugins",
-                    "lane_routing",
-                ] {
-                    assert!(
-                        fields.iter().any(|candidate| candidate == field),
-                        "expected `{field}` in restart-required fields, got {fields:?}",
-                    );
-                }
-            }
-            other => panic!("expected RestartRequired, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn should_default_credential_pool_config_schema_version() {
         let cfg = CredentialPoolConfig::default();
         assert_eq!(cfg.schema_version, 1);
@@ -5233,76 +3113,6 @@ mod tests {
             diff_profiles(&base, &changed),
             ProfileChange::Unchanged
         ));
-    }
-
-    #[test]
-    fn test_create_sub_account() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = ProfileStore::open_unified(dir.path()).unwrap();
-
-        // Create parent with LLM config
-        let parent = UserProfile {
-            id: "parent".into(),
-            name: "Parent Bot".into(),
-            enabled: true,
-            data_dir: None,
-            parent_id: None,
-            public_subdomain: None,
-            config: ProfileConfig {
-                llm: Some(llm_profile(
-                    llm_selection("openai", "gpt-4o", Some("OPENAI_API_KEY"), None),
-                    vec![],
-                )),
-                env_vars: [("OPENAI_API_KEY".into(), "sk-test-key".into())].into(),
-                ..Default::default()
-            },
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
-        store.save(&parent).unwrap();
-
-        // Create sub-account
-        let sub = store
-            .create_sub_account(
-                "parent",
-                "work-bot",
-                "work-bot",
-                "work bot",
-                vec![ChannelCredentials::Telegram {
-                    token_env: "WORK_TG_TOKEN".into(),
-                    allowed_senders: String::new(),
-                }],
-                GatewaySettings::default(),
-            )
-            .unwrap();
-
-        assert_eq!(sub.id, "parent--work-bot");
-        assert_eq!(sub.parent_id, Some("parent".into()));
-        assert!(sub.config.llm.is_none()); // Not set — inherited at runtime
-        assert_eq!(sub.config.channels.len(), 1);
-
-        // List sub-accounts
-        let subs = store.list_sub_accounts("parent").unwrap();
-        assert_eq!(subs.len(), 1);
-        assert_eq!(subs[0].id, "parent--work-bot");
-
-        // No sub-accounts for non-existent parent
-        let empty = store.list_sub_accounts("nonexistent").unwrap();
-        assert!(empty.is_empty());
-
-        // Duplicate should fail
-        assert!(
-            store
-                .create_sub_account(
-                    "parent",
-                    "work-bot",
-                    "work-bot",
-                    "work bot",
-                    vec![],
-                    GatewaySettings::default(),
-                )
-                .is_err()
-        );
     }
 
     #[test]
@@ -5392,180 +3202,6 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_effective_profile() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = ProfileStore::open_unified(dir.path()).unwrap();
-
-        // Create parent
-        let parent = UserProfile {
-            id: "parent".into(),
-            name: "Parent".into(),
-            enabled: true,
-            data_dir: None,
-            parent_id: None,
-            public_subdomain: None,
-            config: ProfileConfig {
-                llm: Some(llm_profile(
-                    llm_selection(
-                        "openai",
-                        "gpt-4o",
-                        Some("OPENAI_API_KEY"),
-                        Some("https://custom.api.com/v1"),
-                    ),
-                    vec![llm_selection(
-                        "anthropic",
-                        "claude-sonnet-4-20250514",
-                        None,
-                        None,
-                    )],
-                )),
-                env_vars: [
-                    ("OPENAI_API_KEY".into(), "sk-parent-key".into()),
-                    ("SHARED_VAR".into(), "parent-value".into()),
-                ]
-                .into(),
-                ..Default::default()
-            },
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
-        store.save(&parent).unwrap();
-
-        // Create sub-account with own channel and env var
-        let sub = UserProfile {
-            id: "parent--work".into(),
-            name: "Work".into(),
-            enabled: false,
-            data_dir: None,
-            parent_id: Some("parent".into()),
-            public_subdomain: Some("work".into()),
-            config: ProfileConfig {
-                channels: vec![ChannelCredentials::Telegram {
-                    token_env: "WORK_TG".into(),
-                    allowed_senders: String::new(),
-                }],
-                env_vars: [
-                    ("WORK_TG".into(), "work-token".into()),
-                    ("SHARED_VAR".into(), "sub-override".into()), // overrides parent
-                ]
-                .into(),
-                gateway: GatewaySettings {
-                    system_prompt: Some("You are a work assistant.".into()),
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
-        store.save(&sub).unwrap();
-
-        let effective = resolve_effective_profile(&store, &sub).unwrap();
-
-        // Inherited from parent
-        assert_eq!(effective.config.primary_provider(), Some("openai"));
-        assert_eq!(effective.config.primary_model(), Some("gpt-4o"));
-        assert_eq!(
-            effective
-                .config
-                .primary_llm()
-                .and_then(|selection| selection.route.as_ref())
-                .and_then(|route| route.base_url.as_deref()),
-            Some("https://custom.api.com/v1")
-        );
-        assert_eq!(
-            effective.config.llm.as_ref().map(|llm| llm.fallbacks.len()),
-            Some(1)
-        );
-
-        // Sub-account's own settings preserved
-        assert_eq!(effective.config.channels.len(), 1);
-        assert_eq!(
-            effective.config.gateway.system_prompt.as_deref(),
-            Some("You are a work assistant.")
-        );
-
-        // Env vars merged: parent base + sub overrides
-        assert_eq!(effective.config.env_vars["OPENAI_API_KEY"], "sk-parent-key");
-        assert_eq!(effective.config.env_vars["WORK_TG"], "work-token");
-        assert_eq!(effective.config.env_vars["SHARED_VAR"], "sub-override"); // sub wins
-
-        // Top-level profile returns as-is
-        let effective_parent = resolve_effective_profile(&store, &parent).unwrap();
-        assert_eq!(effective_parent.id, "parent");
-        assert_eq!(effective_parent.config.primary_provider(), Some("openai"));
-    }
-
-    #[test]
-    fn test_resolve_effective_profile_inherits_structured_sections() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = ProfileStore::open_unified(dir.path()).unwrap();
-
-        let parent = UserProfile {
-            id: "parent".into(),
-            name: "Parent".into(),
-            enabled: true,
-            data_dir: None,
-            parent_id: None,
-            public_subdomain: None,
-            config: ProfileConfig {
-                search: Some(SearchConfig {
-                    providers: [(
-                        "brave".into(),
-                        SearchProviderConfig {
-                            api_key_env: Some("BRAVE_API_KEY".into()),
-                        },
-                    )]
-                    .into(),
-                }),
-                apps: Some(AppsConfig {
-                    slides: Some(SlidesAppConfig {
-                        template_dir: Some("/srv/slides".into()),
-                        default_theme: Some("operator".into()),
-                    }),
-                }),
-                ..Default::default()
-            },
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
-        let child = UserProfile {
-            id: "parent--child".into(),
-            name: "Child".into(),
-            enabled: true,
-            data_dir: None,
-            parent_id: Some("parent".into()),
-            public_subdomain: Some("child".into()),
-            config: ProfileConfig::default(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
-
-        store.save(&parent).unwrap();
-        store.save(&child).unwrap();
-
-        let effective = resolve_effective_profile(&store, &child).unwrap();
-        assert_eq!(
-            effective
-                .config
-                .search
-                .as_ref()
-                .and_then(|search| search.providers.get("brave"))
-                .and_then(|provider| provider.api_key_env.as_deref()),
-            Some("BRAVE_API_KEY")
-        );
-        assert_eq!(
-            effective
-                .config
-                .apps
-                .as_ref()
-                .and_then(|apps| apps.slides.as_ref())
-                .and_then(|slides| slides.template_dir.as_deref()),
-            Some("/srv/slides")
-        );
-    }
-
-    #[test]
     fn test_diff_profiles_parent_id_change() {
         let base = UserProfile {
             id: "sub".into(),
@@ -5588,53 +3224,6 @@ mod tests {
             }
             other => panic!("expected RestartRequired, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn test_channel_serde_roundtrip() {
-        let channels = vec![
-            ChannelCredentials::Telegram {
-                token_env: "TG".into(),
-                allowed_senders: String::new(),
-            },
-            ChannelCredentials::Discord {
-                token_env: "DC".into(),
-            },
-            ChannelCredentials::DingTalk {
-                webhook_url_env: "DT_WEBHOOK".into(),
-                secret_env: "DT_SECRET".into(),
-                allowed_senders: "staff-1,staff-2".into(),
-                webhook_port: Some(8650),
-            },
-            ChannelCredentials::Slack {
-                bot_token_env: "SB".into(),
-                app_token_env: "SA".into(),
-            },
-            ChannelCredentials::WhatsApp {
-                bridge_url: "ws://localhost:3001".into(),
-            },
-            ChannelCredentials::Feishu {
-                app_id_env: "FID".into(),
-                app_secret_env: "FSE".into(),
-                mode: String::new(),
-                region: String::new(),
-                webhook_port: None,
-                verification_token_env: String::new(),
-                encrypt_key_env: String::new(),
-            },
-            ChannelCredentials::Email {
-                imap_host: "imap.test.com".into(),
-                imap_port: 993,
-                smtp_host: "smtp.test.com".into(),
-                smtp_port: 465,
-                username_env: "EU".into(),
-                password_env: "EP".into(),
-            },
-        ];
-
-        let json = serde_json::to_string(&channels).unwrap();
-        let parsed: Vec<ChannelCredentials> = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.len(), 7);
     }
 
     #[test]
@@ -5838,113 +3427,6 @@ mod tests {
     }
 
     #[test]
-    fn test_matrix_channel_credentials_roundtrip() {
-        let channel: ChannelCredentials = serde_json::from_value(serde_json::json!({
-            "type": "matrix",
-            "homeserver": "http://localhost:6167",
-            "as_token": "test-as-token",
-            "hs_token": "test-hs-token",
-            "server_name": "localhost"
-        }))
-        .unwrap();
-
-        let json = serde_json::to_value(&channel).unwrap();
-        assert_eq!(json["homeserver"], "http://localhost:6167");
-        assert_eq!(json["as_token"], "test-as-token");
-        assert_eq!(json["hs_token"], "test-hs-token");
-        assert_eq!(json["server_name"], "localhost");
-        assert_eq!(json["sender_localpart"], "bot");
-        assert_eq!(json["user_prefix"], "bot_");
-        assert_eq!(json["port"], 8009);
-    }
-
-    #[test]
-    fn test_matrix_user_mode_channel_to_entry_emits_account_settings() {
-        let channel: ChannelCredentials = serde_json::from_value(serde_json::json!({
-            "type": "matrix",
-            "mode": "user",
-            "homeserver": "https://matrix.org",
-            "access_token": "syt_token",
-            "rooms": ["!a:matrix.org", "!b:matrix.org"],
-            "auto_join": "allowlist",
-            "auto_join_allowlist": ["!a:matrix.org"],
-            "group_policy": "allowlist",
-            "require_mention": true,
-        }))
-        .unwrap();
-
-        let entry = channel_to_entry(&channel);
-        assert_eq!(entry["type"], "matrix");
-        let settings = &entry["settings"];
-        assert_eq!(settings["mode"], "user");
-        assert_eq!(settings["homeserver"], "https://matrix.org");
-        assert_eq!(settings["access_token"], "syt_token");
-        assert_eq!(settings["rooms"][0], "!a:matrix.org");
-        assert_eq!(settings["auto_join"], "allowlist");
-        assert_eq!(settings["auto_join_allowlist"][0], "!a:matrix.org");
-        assert_eq!(settings["group_policy"], "allowlist");
-        assert_eq!(settings["require_mention"], true);
-        // Appservice-only keys must not leak into a user-mode entry.
-        assert!(settings.get("as_token").is_none());
-        assert!(settings.get("hs_token").is_none());
-        assert!(settings.get("port").is_none());
-    }
-
-    #[test]
-    fn test_matrix_appservice_channel_to_entry_carries_mention_only() {
-        // The documented opt-out (`mention_only: false`) must survive the
-        // profiles → ChannelEntry conversion; otherwise a matrix channel
-        // configured through this path silently reverts to the default.
-        let channel: ChannelCredentials = serde_json::from_value(serde_json::json!({
-            "type": "matrix",
-            "homeserver": "http://localhost:6167",
-            "as_token": "as",
-            "hs_token": "hs",
-            "server_name": "localhost",
-            "mention_only": false,
-        }))
-        .unwrap();
-
-        let entry = channel_to_entry(&channel);
-        assert_eq!(entry["settings"]["mention_only"], false);
-
-        // Omitted → safe default `true`, and the entry says so explicitly.
-        let default_channel: ChannelCredentials = serde_json::from_value(serde_json::json!({
-            "type": "matrix",
-            "homeserver": "http://localhost:6167",
-            "as_token": "as",
-            "hs_token": "hs",
-            "server_name": "localhost",
-        }))
-        .unwrap();
-        assert_eq!(
-            channel_to_entry(&default_channel)["settings"]["mention_only"],
-            true
-        );
-    }
-
-    #[test]
-    fn test_matrix_user_mode_password_login_deserializes_without_appservice_tokens() {
-        // A user-mode entry omits as_token/hs_token entirely; this must still
-        // deserialize (regression guard for the now-optional appservice fields).
-        let channel: ChannelCredentials = serde_json::from_value(serde_json::json!({
-            "type": "matrix",
-            "mode": "user",
-            "homeserver": "https://matrix.org",
-            "user_id": "@bot:matrix.org",
-            "password": "secret",
-            "device_name": "octos-gw",
-        }))
-        .unwrap();
-
-        let entry = channel_to_entry(&channel);
-        let settings = &entry["settings"];
-        assert_eq!(settings["user_id"], "@bot:matrix.org");
-        assert_eq!(settings["password"], "secret");
-        assert_eq!(settings["device_name"], "octos-gw");
-    }
-
-    #[test]
     fn should_roundtrip_tts_provider_and_cloud_on_profile_config() {
         let json =
             r#"{ "tts_provider": "cloud", "tts_cloud": { "appid": "999", "voice": "BV700" } }"#;
@@ -5996,93 +3478,6 @@ mod tests {
             serde_json::to_string_pretty(config).unwrap(),
         )
         .unwrap();
-    }
-
-    #[test]
-    fn effective_config_inherits_when_profile_leaves_fields_unset() {
-        let registry_root = tempfile::tempdir().unwrap();
-        let data_root = tempfile::tempdir().unwrap();
-
-        let defaults = ProfileConfig {
-            hooks: vec![tool_hook("default-hook")],
-            env_vars: HashMap::from([
-                ("SHARED".to_string(), "from-default".to_string()),
-                ("ONLY_DEFAULT".to_string(), "d".to_string()),
-            ]),
-            memory: Some(crate::config::MemoryConfig {
-                max_inject_tokens: Some(4242),
-                refresh: None,
-            }),
-            approval_policy: Some(crate::config::ApprovalPolicyConfig::default()),
-            plugins: crate::config::PluginsConfig {
-                require_signed: true,
-            },
-            sandbox: octos_agent::SandboxConfig {
-                allow_network: true,
-                ..Default::default()
-            },
-            // Identity / channel fields on the defaults must NEVER leak into a
-            // profile that omits them.
-            api_type: Some("anthropic".to_string()),
-            admin_mode: true,
-            channels: vec![ChannelCredentials::Discord {
-                token_env: "DEFAULT_DISCORD".to_string(),
-            }],
-            ..Default::default()
-        };
-        write_profile_defaults(registry_root.path(), &defaults);
-
-        let store = ProfileStore::open(registry_root.path(), data_root.path()).unwrap();
-
-        let mut profile = inheritance_profile("alice");
-        profile.config.hooks = vec![tool_hook("profile-hook")];
-        profile
-            .config
-            .env_vars
-            .insert("SHARED".to_string(), "from-profile".to_string());
-        profile
-            .config
-            .env_vars
-            .insert("ONLY_PROFILE".to_string(), "p".to_string());
-        profile.config.api_type = Some("openai".to_string());
-        // plugins, sandbox, memory, approval_policy left at Default/None.
-
-        let eff = store.effective_config(&profile);
-
-        // hooks: defaults first, then the profile's own (order preserved).
-        assert_eq!(eff.hooks.len(), 2);
-        assert_eq!(eff.hooks[0].command, vec!["default-hook".to_string()]);
-        assert_eq!(eff.hooks[1].command, vec!["profile-hook".to_string()]);
-
-        // env_vars: merged; profile key wins on collision.
-        assert_eq!(
-            eff.env_vars.get("SHARED").map(String::as_str),
-            Some("from-profile")
-        );
-        assert_eq!(
-            eff.env_vars.get("ONLY_DEFAULT").map(String::as_str),
-            Some("d")
-        );
-        assert_eq!(
-            eff.env_vars.get("ONLY_PROFILE").map(String::as_str),
-            Some("p")
-        );
-
-        // memory + approval_policy inherited (profile left them None).
-        assert_eq!(eff.memory.as_ref().unwrap().max_inject_tokens, Some(4242));
-        assert!(eff.approval_policy.is_some());
-
-        // plugins + sandbox inherited (profile left them at Default).
-        assert!(eff.plugins.require_signed);
-        assert!(eff.sandbox.allow_network);
-
-        // Identity / channel fields NEVER inherit.
-        assert_eq!(eff.api_type.as_deref(), Some("openai"));
-        assert!(!eff.admin_mode);
-        assert!(
-            eff.channels.is_empty(),
-            "channels are identity/instance-specific and must not inherit from defaults"
-        );
     }
 
     #[test]

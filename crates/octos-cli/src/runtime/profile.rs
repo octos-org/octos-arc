@@ -15,8 +15,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use eyre::{Result, WrapErr};
 use octos_agent::plugins::LoadedSkillAction;
 use octos_agent::{
-    HookExecutor, PluginLoadOptions, PluginLoadResult, PluginLoader, SandboxConfig,
-    ToolConfigStore, ToolPolicy, ToolRegistry, create_sandbox,
+    HookExecutor, PluginLoadOptions, PluginLoadResult, PluginLoader, SandboxConfig, ToolPolicy,
+    ToolRegistry, create_sandbox,
 };
 use octos_bus::CronService;
 use octos_llm::{AdaptiveRouter, LlmProvider, QosCatalog};
@@ -28,7 +28,7 @@ use crate::commands::gateway::build_system_prompt;
 use crate::commands::gateway::profile_factory::profile_plugin_env;
 use crate::config::Config;
 use crate::cron_tool::CronTool;
-use crate::profiles::{ReviewConfig, UserProfile, config_from_profile};
+use crate::profiles::{UserProfile, config_from_profile};
 use crate::qos_catalog::{ExporterMode, build_adaptive_provider_chain};
 use crate::skills_scope::{
     build_account_skills_loader, discover_ominix_url, push_runtime_plugin_env,
@@ -387,12 +387,6 @@ pub struct ProfileRuntime {
     /// re-running plugin discovery.
     pub plugin_hooks: Vec<octos_agent::HookConfig>,
 
-    /// Profile-owned coding review fanout template. `None` means the
-    /// AppUI `/review` path should use its built-in default
-    /// specialists. Keeping this on `ProfileRuntime` lets the review
-    /// workflow resolve specialists from the same profile runtime that
-    /// owns model, memory, sandbox, and tools.
-    pub review_config: Option<ReviewConfig>,
     /// Phase 4 (docs/ROBRIX-PHASE4-APPROVAL-FLOW-ADR.md): per-profile
     /// human-approval rules, converted once at bootstrap and inherited by
     /// every per-session Agent this profile spawns.
@@ -419,10 +413,6 @@ pub struct ProfileRuntime {
     /// Resolved `memory.refresh.enabled` — gates the capture-policy text in
     /// the memory segment and the per-turn refresh provider.
     pub memory_refresh_enabled: bool,
-
-    /// Shared [`ToolConfigStore`] for the profile (per-tool
-    /// runtime overrides, e.g. `deep_crawl.page_settle_ms`).
-    pub tool_config: Arc<ToolConfigStore>,
 
     /// Profile-scope cron service (M11-F regression fix REG-2).
     ///
@@ -646,7 +636,6 @@ impl ProfileRuntime {
             &self.data_dir,
             &self.data_dir,
             &skills_loader,
-            &self.tool_config,
         )
         .await;
         for fragment in &plugin_result.prompt_fragments {
@@ -716,7 +705,6 @@ impl ProfileRuntime {
             plugin_dirs: reload.plugin_dirs.clone(),
             plugin_prompt_fragments: plugin_result.prompt_fragments.clone(),
             plugin_hooks: plugin_result.hooks.clone(),
-            review_config: self.review_config.clone(),
             human_approval_rules: self.human_approval_rules.clone(),
             system_prompt,
             prompt_parts,
@@ -725,7 +713,6 @@ impl ProfileRuntime {
             embedder: self.embedder.clone(),
             memory_inject_tokens: self.memory_inject_tokens,
             memory_refresh_enabled: self.memory_refresh_enabled,
-            tool_config: self.tool_config.clone(),
             cron_service: self.cron_service.clone(),
             runtime_lifecycle: self.runtime_lifecycle.clone(),
             hook_executor,
@@ -746,9 +733,7 @@ impl ProfileRuntime {
     /// 2. Builds the LLM provider chain via
     ///    [`chat::create_provider`] + [`build_adaptive_provider_chain`].
     /// 3. Opens [`EpisodeStore`] + [`MemoryStore`] against `data_dir`.
-    /// 4. Opens the [`ToolConfigStore`] for per-tool runtime
-    ///    overrides.
-    /// 5. Constructs the base [`ToolRegistry`] (builtins + WebSearch
+    /// 4. Constructs the base [`ToolRegistry`] (builtins + WebSearch
     ///    with profile keys + browser w/ profile-config timeout + MCP +
     ///    plugins via [`PluginLoader::load_into_with_options`] with
     ///    the profile's plugin env template).
@@ -801,7 +786,7 @@ impl ProfileRuntime {
         // Step 1: derive the per-profile Config. Apply the host plugin
         // policy on top of the profile-derived one before any downstream
         // step inspects `config.plugins.require_signed`.
-        let mut config = config_from_profile(profile, None, None);
+        let mut config = config_from_profile(profile);
         if let Some(host) = host_plugins {
             if host.require_signed {
                 config.plugins.require_signed = true;
@@ -905,14 +890,6 @@ impl ProfileRuntime {
             format!("failed to open memory store for profile '{}'", profile.id)
         })?);
 
-        // Step 5: tool config store.
-        let tool_config = Arc::new(ToolConfigStore::open(data_dir).await.wrap_err_with(|| {
-            format!(
-                "failed to open tool config store for profile '{}'",
-                profile.id
-            )
-        })?);
-
         // Step 6: resolve credentials from the profile's declared env
         // vars (keychain-aware). Used by MCP, plugin spawns, and the
         // shell tool when a profile-scoped env var is referenced.
@@ -961,7 +938,6 @@ impl ProfileRuntime {
         // before any actual tool call runs.
         let mut tools = ToolRegistry::with_builtins_and_sandbox(data_dir, sandbox);
         tools.set_output_dir_hint(data_dir.join("skill-output").to_string_lossy().into_owned());
-        tools.inject_tool_config(tool_config.clone());
 
         // Step 12: MCP servers from the profile's config (typically
         // empty for profile-only deployments; gateway / serve top-
@@ -1207,7 +1183,6 @@ impl ProfileRuntime {
             data_dir,
             data_dir,
             &skills_loader,
-            &tool_config,
         )
         .await;
         for fragment in &plugin_result.prompt_fragments {
@@ -1313,7 +1288,6 @@ impl ProfileRuntime {
             plugin_dirs,
             plugin_prompt_fragments: plugin_result.prompt_fragments.clone(),
             plugin_hooks: plugin_result.hooks.clone(),
-            review_config: profile.config.review.clone(),
             human_approval_rules: profile
                 .config
                 .approval_policy
@@ -1326,7 +1300,6 @@ impl ProfileRuntime {
             memory,
             memory_store,
             embedder,
-            tool_config,
             cron_service: Some(cron_service),
             runtime_lifecycle,
             hook_executor,
@@ -2078,7 +2051,6 @@ mod tests {
             &original.memory_store,
             &replacement.memory_store
         ));
-        assert!(Arc::ptr_eq(&original.tool_config, &replacement.tool_config));
         assert!(replacement.tool_specs.get("reload_action_tool").is_some());
         assert!(
             replacement.tool_specs.get("record_memory_use").is_some(),

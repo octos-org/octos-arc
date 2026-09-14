@@ -1312,7 +1312,6 @@ tools = ["read_file"]
         std::fs::create_dir_all(&data_dir).unwrap();
         let memory = Arc::new(EpisodeStore::open(&data_dir).await.unwrap());
         let memory_store = Arc::new(MemoryStore::open(&data_dir).await.unwrap());
-        let tool_config = Arc::new(octos_agent::ToolConfigStore::open(&data_dir).await.unwrap());
         let base_tools =
             ToolRegistry::with_builtins_and_sandbox(&data_dir, create_sandbox(&sandbox));
         Arc::new(ProfileRuntime {
@@ -1342,7 +1341,6 @@ tools = ["read_file"]
             plugin_dirs: Vec::new(),
             plugin_prompt_fragments: Vec::new(),
             plugin_hooks: Vec::new(),
-            review_config: None,
             human_approval_rules: None,
             prompt_parts: crate::commands::gateway::prompt::GatewayPromptParts {
                 pre_memory: system_prompt.clone(),
@@ -1354,7 +1352,6 @@ tools = ["read_file"]
             embedder: None,
             memory_inject_tokens: 2500,
             memory_refresh_enabled: true,
-            tool_config,
             cron_service: None,
             runtime_lifecycle: None,
             hook_executor: None,
@@ -2100,7 +2097,6 @@ tools = ["read_file"]
         std::fs::create_dir_all(&data_dir).unwrap();
         let memory = Arc::new(EpisodeStore::open(&data_dir).await.unwrap());
         let memory_store = Arc::new(MemoryStore::open(&data_dir).await.unwrap());
-        let tool_config = Arc::new(octos_agent::ToolConfigStore::open(&data_dir).await.unwrap());
         let sandbox = SandboxConfig::default();
         let base_tools =
             ToolRegistry::with_builtins_and_sandbox(&data_dir, create_sandbox(&sandbox));
@@ -2131,7 +2127,6 @@ tools = ["read_file"]
             plugin_dirs: Vec::new(),
             plugin_prompt_fragments: Vec::new(),
             plugin_hooks: Vec::new(),
-            review_config: None,
             human_approval_rules: None,
             system_prompt: "test-system-prompt".to_string(),
             prompt_parts: crate::commands::gateway::prompt::GatewayPromptParts {
@@ -2143,7 +2138,6 @@ tools = ["read_file"]
             embedder: None,
             memory_inject_tokens: 2500,
             memory_refresh_enabled: true,
-            tool_config,
             cron_service: None,
             runtime_lifecycle: None,
             hook_executor: Some(executor),

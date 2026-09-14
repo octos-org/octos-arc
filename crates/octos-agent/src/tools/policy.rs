@@ -215,11 +215,6 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
             "record_memory_use",
         ],
     },
-    ToolGroupInfo {
-        name: "group:admin",
-        description: "LLM-facing tool configuration",
-        tools: &["configure_tool"],
-    },
     // M6.7 — the canonical deny list applied to every DelegateTool child.
     // It bounds re-delegation, spawning, user messaging, and memory writes.
     // Policy evaluation is deny-wins, so adding `group:delegated` to a

@@ -182,11 +182,6 @@ async fn make_m11g_profile(profile_id: &str, data_dir: &std::path::Path) -> Arc<
             .await
             .expect("memory store"),
     );
-    let tool_config = Arc::new(
-        octos_agent::ToolConfigStore::open(data_dir)
-            .await
-            .expect("tool config store"),
-    );
     let sandbox = octos_agent::SandboxConfig::default();
     let base_tools = octos_agent::ToolRegistry::with_builtins_and_sandbox(
         data_dir,
@@ -219,7 +214,6 @@ async fn make_m11g_profile(profile_id: &str, data_dir: &std::path::Path) -> Arc<
         plugin_dirs: Vec::new(),
         plugin_prompt_fragments: Vec::new(),
         plugin_hooks: Vec::new(),
-        review_config: None,
         human_approval_rules: None,
         system_prompt: "test-system-prompt".to_string(),
         prompt_parts: octos_cli::commands::gateway::prompt::GatewayPromptParts {
@@ -232,7 +226,6 @@ async fn make_m11g_profile(profile_id: &str, data_dir: &std::path::Path) -> Arc<
         embedder: None,
         memory_inject_tokens: 2500,
         memory_refresh_enabled: false,
-        tool_config,
         cron_service: None,
         runtime_lifecycle: None,
         hook_executor: None,

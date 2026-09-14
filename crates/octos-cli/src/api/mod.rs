@@ -303,11 +303,6 @@ pub struct AppState {
     /// legacy single-credential flow. Shared with session actors so
     /// per-LLM-call `acquire`/`mark_*` operations see a consistent view.
     pub credential_pool: Option<Arc<octos_llm::PersistentCredentialPool>>,
-    /// Content classifier (M6.6, F-005). Populated when
-    /// `config.content_routing` is present and `enabled: true`. When
-    /// `None` the router falls through to the unclassified strong-only
-    /// default (invariant #3 of the M6.6 spec).
-    pub content_classifier: Option<Arc<octos_llm::ContentClassifier>>,
     /// M7.9 / W2: shared session-task supervisor lookup. Used by the
     /// `POST /api/tasks/{task_id}/cancel` and
     /// `POST /api/tasks/{task_id}/restart-from-node` endpoints to
@@ -390,7 +385,6 @@ impl AppState {
             allow_admin_shell: false,
             harness_event_sink_path: None,
             credential_pool: None,
-            content_classifier: None,
             task_query_store: None,
             appui_default_session_cwd: None,
             work_secret_store: Arc::new(

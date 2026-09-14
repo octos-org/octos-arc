@@ -281,15 +281,6 @@ mod tests {
             .write_long_term("SHARED-MEMORY-CONTEXT")
             .await
             .unwrap();
-        let config = octos_agent::ToolConfigStore::open(&shared).await.unwrap();
-        config
-            .set(
-                "read_file",
-                "fixture",
-                serde_json::json!("SHARED-TOOL-CONFIG"),
-            )
-            .await
-            .unwrap();
         let skill = shared.join("skills/ephemeral-context-fixture");
         std::fs::create_dir_all(&skill).unwrap();
         std::fs::write(
@@ -313,10 +304,6 @@ mod tests {
         assert_eq!(
             profile.memory_store.read_long_term().await.unwrap(),
             "SHARED-MEMORY-CONTEXT"
-        );
-        assert_eq!(
-            profile.tool_config.get("read_file", "fixture").await,
-            Some(serde_json::json!("SHARED-TOOL-CONFIG"))
         );
         assert_eq!(
             profile.skills_dir.as_deref(),
@@ -387,11 +374,7 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        for marker in [
-            "SHARED-MEMORY-CONTEXT",
-            "SHARED-TOOL-CONFIG",
-            "SHARED-PROFILE-SKILL-CONTEXT",
-        ] {
+        for marker in ["SHARED-MEMORY-CONTEXT", "SHARED-PROFILE-SKILL-CONTEXT"] {
             assert!(
                 prompt.contains(marker),
                 "missing actual model context: {marker}"

@@ -703,7 +703,6 @@ mod tests {
     /// - `group:memory` -> save_memory
     /// - `group:runtime` -> shell / exec_command / write_stdin
     /// - `group:sessions` -> spawn / spawn_agent / ...
-    /// - `group:admin` -> configure_tool
     /// - `group:delegated` -> delegate_task / delegate / spawn /
     ///   spawn_agent / send_input / message / save_memory (spawning plus
     ///   messaging and memory writes)

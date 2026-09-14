@@ -157,7 +157,7 @@ impl ChatCommand {
         let mut config = if let Some(file) = &self.config {
             Config::from_file(file)?
         } else if let Some(profile) = &stored_profile {
-            crate::profiles::config_from_profile(profile, None, None)
+            crate::profiles::config_from_profile(profile)
         } else {
             Config::load_with_context(&cwd, &ctx)?
         };
@@ -224,7 +224,6 @@ impl ChatCommand {
         };
         let runtime = &state.profiles[&profile_id];
         let model = runtime.primary_model_id.clone();
-        let tool_config = runtime.tool_config.clone();
         if !self.json {
             eprintln!("Model: {model}");
         }
@@ -327,15 +326,6 @@ impl ChatCommand {
             let _ = readline.add_history_entry(input);
             if EXIT_COMMANDS.contains(&input.to_lowercase().as_str()) {
                 break;
-            }
-            if input == "/config" || input.starts_with("/config ") {
-                println!(
-                    "{}",
-                    tool_config
-                        .handle_config_command(input.trim_start_matches("/config").trim())
-                        .await
-                );
-                continue;
             }
             cancelled.store(false, Ordering::Release);
             if let Err(error) = session.turn(input, effort, &cancelled, &frontend).await {

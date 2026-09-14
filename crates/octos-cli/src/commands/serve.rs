@@ -431,7 +431,7 @@ impl ServeCommand {
         // whole server.
         //
         // `ProfileRuntime::bootstrap` opens a per-profile
-        // `EpisodeStore` / `MemoryStore` / `ToolConfigStore` against
+        // `EpisodeStore` / `MemoryStore` against
         // the profile's data dir. M11-F removed the legacy
         // server-wide `Agent`, so these are now the only redb opens
         // against the profile data dir from `octos serve` — no lock
@@ -530,15 +530,6 @@ impl ServeCommand {
         // single-credential flow.
         let credential_pool_init =
             super::build_credential_pool(config.credential_pool.as_ref(), &data_dir);
-
-        // F-005: Build the content classifier at startup. Absent config
-        // or `enabled: false` → stays `None` so routing keeps the
-        // pre-M6.6 strong-only default (invariant #3 of issue #493).
-        let content_classifier_init: Option<Arc<octos_llm::ContentClassifier>> = config
-            .content_routing
-            .as_ref()
-            .filter(|cfg| cfg.enabled)
-            .map(|cfg| Arc::new(octos_llm::ContentClassifier::new(cfg.clone())));
 
         let harness_sink_init = std::env::var("OCTOS_HARNESS_EVENT_SINK").ok();
 
@@ -658,7 +649,6 @@ impl ServeCommand {
             // behaviour of broadcast-only.
             harness_event_sink_path: harness_sink_init,
             credential_pool: credential_pool_init,
-            content_classifier: content_classifier_init,
             // HTTP/gateway serve: session actors live in gateway
             // processes, so `task_query_store` stays `None` and the
             // cancel/restart handlers proxy via `resolve_api_port` (the
@@ -870,17 +860,5 @@ mod tests {
         };
 
         assert_eq!(config.mode, crate::config::DeploymentMode::Local);
-    }
-
-    #[test]
-    fn deployment_mode_preserves_explicit_cloud_mode() {
-        let config = Config {
-            mode: crate::config::DeploymentMode::Cloud,
-            tunnel_domain: None,
-            frps_server: None,
-            ..Default::default()
-        };
-
-        assert_eq!(config.mode, crate::config::DeploymentMode::Cloud);
     }
 }

@@ -4448,7 +4448,7 @@ fn profile_local_create_returns_typed_errors_for_invalid_or_nonlocal_requests() 
     );
 
     let tenant_state = AppState {
-        deployment_mode: crate::config::DeploymentMode::Tenant,
+        deployment_mode: crate::config::DeploymentMode::Local,
         profile_store: state.profile_store.clone(),
         user_store: state.user_store.clone(),
         ..AppState::empty_for_tests()
@@ -4624,35 +4624,6 @@ fn workspace_probe_flags_root_escape_under_banned_system_path() {
 /// error on tenant / cloud deployments (matching `profile/local/create`
 /// so TUI clients can handle the rejection uniformly).
 #[test]
-fn workspace_probe_rejects_tenant_deployment_with_typed_error() {
-    let dir = tempfile::tempdir().unwrap();
-    let local = local_profile_state(dir.path());
-    let tenant = AppState {
-        deployment_mode: crate::config::DeploymentMode::Tenant,
-        profile_store: local.profile_store.clone(),
-        user_store: local.user_store.clone(),
-        ..AppState::empty_for_tests()
-    };
-
-    let error = onboarding_workspace_probe_result(&tenant, dir.path().to_str().unwrap())
-        .expect_err("tenant rejection");
-    assert_eq!(error.code, rpc_error_codes::PERMISSION_DENIED);
-    assert_eq!(
-        error.data.as_ref().and_then(|data| data.get("kind")),
-        Some(&json!("profile_local_unsupported"))
-    );
-    assert_eq!(
-        error
-            .data
-            .as_ref()
-            .and_then(|data| data.get("runtime_mode")),
-        Some(&json!("multi_tenant"))
-    );
-}
-
-/// #1057 — probe rejects an empty path with a typed invalid-params
-/// error so TUI clients get a structured shape to react to.
-#[test]
 fn workspace_probe_rejects_empty_path_with_typed_error() {
     let dir = tempfile::tempdir().unwrap();
     let state = local_profile_state(dir.path());
@@ -4685,7 +4656,7 @@ fn workspace_probe_capability_is_local_solo_only() {
     );
 
     let tenant = AppState {
-        deployment_mode: crate::config::DeploymentMode::Tenant,
+        deployment_mode: crate::config::DeploymentMode::Local,
         profile_store: local.profile_store.clone(),
         user_store: local.user_store.clone(),
         ..AppState::empty_for_tests()
@@ -4805,7 +4776,7 @@ fn permission_profile_handlers_are_server_owned_and_reject_danger_outside_local(
     );
 
     let tenant = AppState {
-        deployment_mode: crate::config::DeploymentMode::Tenant,
+        deployment_mode: crate::config::DeploymentMode::Local,
         ..AppState::empty_for_tests()
     };
     let tenant_list = permission_profile_list_result(
@@ -5582,7 +5553,7 @@ fn capabilities_advertise_local_solo_profile_create_only_when_supported() {
     assert!(!no_profile_capabilities.supports_feature(APPUI_FEATURE_SKILL_ACTIONS_V1));
 
     let tenant = AppState {
-        deployment_mode: crate::config::DeploymentMode::Tenant,
+        deployment_mode: crate::config::DeploymentMode::Local,
         profile_store: local.profile_store.clone(),
         user_store: local.user_store.clone(),
         ..AppState::empty_for_tests()
@@ -24433,11 +24404,6 @@ async fn make_m11e_profile_with_llm_and_sandbox(
             .await
             .expect("memory store"),
     );
-    let tool_config = Arc::new(
-        octos_agent::ToolConfigStore::open(data_dir)
-            .await
-            .expect("tool config store"),
-    );
     let base_tools = octos_agent::ToolRegistry::with_builtins_and_sandbox(
         data_dir,
         octos_agent::create_sandbox(&sandbox),
@@ -24469,7 +24435,6 @@ async fn make_m11e_profile_with_llm_and_sandbox(
         plugin_dirs: Vec::new(),
         plugin_prompt_fragments: Vec::new(),
         plugin_hooks: Vec::new(),
-        review_config: None,
         human_approval_rules: None,
         system_prompt: "test-system-prompt".to_string(),
         prompt_parts: crate::commands::gateway::prompt::GatewayPromptParts {
@@ -24481,7 +24446,6 @@ async fn make_m11e_profile_with_llm_and_sandbox(
         embedder: None,
         memory_inject_tokens: 2500,
         memory_refresh_enabled: false,
-        tool_config,
         cron_service: None,
         runtime_lifecycle: None,
         hook_executor: None,
@@ -25953,176 +25917,6 @@ async fn appui_explicit_cwd_remains_a_transcript_store_hint() {
         "explicit cwd must remain the transcript-store hint",
     );
 }
-
-#[test]
-fn review_join_preserves_explicit_final_marker() {
-    let summary = ensure_requested_final_marker(
-        "Code Review Summary\n\nFindings\n".to_owned(),
-        "Return findings and end with M16_CODE_REVIEW_FINAL_LINE.",
-    );
-    assert!(summary.contains("M16_CODE_REVIEW_FINAL_LINE"));
-
-    let unchanged = ensure_requested_final_marker(
-        "Code Review Summary\nM16_CODE_REVIEW_FINAL_LINE\n".to_owned(),
-        "Return findings and end with M16_CODE_REVIEW_FINAL_LINE.",
-    );
-    assert_eq!(
-        unchanged.matches("M16_CODE_REVIEW_FINAL_LINE").count(),
-        1,
-        "marker must not be duplicated"
-    );
-}
-
-#[test]
-fn default_native_review_specs_use_backend_reviewer_template() {
-    let specs = default_native_code_review_specs();
-    assert_eq!(specs.len(), 3);
-    assert!(
-        specs
-            .iter()
-            .all(|spec| spec.role == octos_agent::ROLE_REVIEWER),
-        "built-in review/start specialists must resolve through the M14-C reviewer role template"
-    );
-}
-
-#[test]
-fn review_specialist_config_accepts_dynamic_native_fanout() {
-    let raw = r#"
-        [
-          {
-            "agent_key": "reviewer-api",
-            "nickname": "Ada Lovelace",
-            "role": "api_contract_review",
-            "focus": "API wire compatibility"
-          },
-          {
-            "agent_key": "reviewer-ux",
-            "nickname": "Noether",
-            "role": "ux_review",
-            "focus": "TUI UX, tmux evidence, and markdown rendering"
-          },
-          {
-            "agent_key": "reviewer-security",
-            "nickname": "Turing",
-            "role": "security_review",
-            "focus": "Sandbox and permission boundaries"
-          },
-          {
-            "agent_key": "reviewer-context",
-            "nickname": "Mencius",
-            "role": "context_manager_review",
-            "focus": "Context compaction, summaries, and artifact hygiene"
-          }
-        ]
-        "#;
-
-    let specs = parse_native_code_review_specs_json(raw).expect("dynamic specs parse");
-    assert_eq!(specs.len(), 4);
-    assert_eq!(specs[1].agent_key, "reviewer-ux");
-    assert_eq!(specs[3].role, "context_manager_review");
-}
-
-#[test]
-fn review_specialist_config_rejects_invalid_keys_and_duplicates() {
-    let invalid = r#"
-        [
-          {
-            "agent_key": "reviewer api",
-            "nickname": "Ada",
-            "role": "api_contract_review",
-            "focus": "API"
-          }
-        ]
-        "#;
-    assert!(parse_native_code_review_specs_json(invalid).is_err());
-
-    let duplicate = r#"
-        [
-          {
-            "agent_key": "reviewer-api",
-            "nickname": "Ada",
-            "role": "api_contract_review",
-            "focus": "API"
-          },
-          {
-            "agent_key": "reviewer-api",
-            "nickname": "Hypatia",
-            "role": "test_review",
-            "focus": "Tests"
-          }
-        ]
-        "#;
-    let error = parse_native_code_review_specs_json(duplicate)
-        .expect_err("duplicate keys must be rejected");
-    assert!(error.contains("duplicated"));
-}
-
-// ----------------------------------------------------------------
-// Wave4-A: router/status build + router/set_mode emission tests.
-// ----------------------------------------------------------------
-
-/// Mock provider for router-emission tests: never called, just lets
-/// `AdaptiveRouter::new` accept two slots so the lane-scoring + breaker
-/// snapshot paths fire end-to-end.
-struct Wave4AStubProvider {
-    name: &'static str,
-    model: &'static str,
-}
-
-#[async_trait::async_trait]
-impl octos_llm::LlmProvider for Wave4AStubProvider {
-    fn provider_name(&self) -> &str {
-        "test-provider"
-    }
-
-    async fn chat(
-        &self,
-        _messages: &[Message],
-        _tools: &[octos_llm::ToolSpec],
-        _config: &octos_llm::ChatConfig,
-    ) -> eyre::Result<octos_llm::ChatResponse> {
-        Err(eyre::eyre!("stub not callable in tests"))
-    }
-    fn model_id(&self) -> &str {
-        self.model
-    }
-}
-
-/// Wave4-A: handler dispatches set_mode → router. We exercise the
-/// downcalled router directly (the handler is small enough that the
-/// failure mode we care about is "calls the wrong method on the
-/// wrong router"). The full integration round-trip is covered by
-/// the core `router_set_mode_command_round_trips` test.
-#[tokio::test]
-async fn router_set_mode_handler_dispatches_to_router() {
-    let router = Arc::new(octos_llm::AdaptiveRouter::new(
-        vec![
-            Arc::new(Wave4AStubProvider {
-                name: "p1",
-                model: "m1",
-            }),
-            Arc::new(Wave4AStubProvider {
-                name: "p2",
-                model: "m2",
-            }),
-        ],
-        &[],
-        octos_llm::AdaptiveConfig::default(),
-    ));
-    assert_eq!(router.mode(), octos_llm::AdaptiveMode::Off);
-    router.set_mode(octos_llm::AdaptiveMode::Hedge);
-    assert_eq!(router.mode(), octos_llm::AdaptiveMode::Hedge);
-    router.set_mode(octos_llm::AdaptiveMode::Lane);
-    assert_eq!(router.mode(), octos_llm::AdaptiveMode::Lane);
-    router.set_mode(octos_llm::AdaptiveMode::Off);
-    assert_eq!(router.mode(), octos_llm::AdaptiveMode::Off);
-}
-
-// ──────────────────────────────────────────────────────────────────────
-// Codex round-2 MAJOR 2 regression: the runtime_error wire envelope
-// must surface `HarnessError::message()` (user-actionable) rather
-// than the raw `LlmError::Display` operator log line.
-// ──────────────────────────────────────────────────────────────────────
 
 #[test]
 fn runtime_error_envelope_surfaces_harness_message_for_quota() {
@@ -28430,21 +28224,6 @@ fn should_opt_out_of_cache_writes_when_building_btw_config() {
 }
 
 #[test]
-fn should_opt_out_of_cache_writes_when_building_review_join_config() {
-    // #2194 review: the final code-review join runs once per review with a
-    // prompt unique to that join (objective + target + specialist outputs) —
-    // never replayed, so it must not pay for cache writes.
-    let config = review_join_chat_config();
-    assert_eq!(
-        config.cache_retention,
-        octos_llm::CacheRetention::None,
-        "the review join must not request cache writes"
-    );
-    assert_eq!(config.max_tokens, Some(1800));
-    assert!(matches!(config.tool_choice, octos_llm::ToolChoice::None));
-}
-
-#[test]
 fn should_report_cache_read_tokens_in_session_usage_status() {
     let totals = UsageTotals {
         run_count: 2,
@@ -28484,194 +28263,6 @@ fn should_omit_cost_when_no_run_was_priced() {
     assert_eq!(usage["cached_input_tokens"], 0);
     assert!(usage.get("estimated_cost_micros_usd").is_none());
 }
-
-/// A cold first turn reports zero cache reads. That is the correct reading,
-/// not a broken one — and it must be reported as an explicit `0` rather than
-/// omitted, because "absent" is what an unimplemented field looks like.
-#[test]
-fn should_report_zero_cache_reads_explicitly_on_a_cold_session() {
-    let totals = UsageTotals {
-        run_count: 1,
-        input_tokens: 13_302,
-        output_tokens: 76,
-        cache_read_tokens: 0,
-        cache_write_tokens: 0,
-        estimated_cost_usd: 0.0,
-    };
-    let usage = usage_status_json(&totals);
-    assert_eq!(usage["cached_input_tokens"], 0);
-    assert!(usage.get("cached_input_tokens").is_some());
-}
-
-// ----------------------------------------------------------------------------
-// #27f (R3) — result.md single-writer ownership.
-// ----------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// #48b — serve/UI forwarder path: `fallback_switch` rows from
-// `spawn_router_failover_forwarder` (same shape as the gateway path).
-// ---------------------------------------------------------------------------
-mod obs_fallback_switch_ui_48b {
-    use super::*;
-    use std::io::BufRead as _;
-
-    fn read_events(data_dir: &std::path::Path) -> Vec<serde_json::Value> {
-        let path = data_dir.join("events.jsonl");
-        let Ok(file) = std::fs::File::open(&path) else {
-            return Vec::new();
-        };
-        std::io::BufReader::new(file)
-            .lines()
-            .map_while(Result::ok)
-            .filter_map(|l| serde_json::from_str(&l).ok())
-            .collect()
-    }
-
-    fn stub_router() -> Arc<octos_llm::AdaptiveRouter> {
-        Arc::new(octos_llm::AdaptiveRouter::new(
-            vec![Arc::new(Wave4AStubProvider {
-                name: "a",
-                model: "m1",
-            })],
-            &[],
-            octos_llm::AdaptiveConfig::default(),
-        ))
-    }
-
-    #[tokio::test]
-    async fn obs_fallback_switch_ui_forwarder_writes_own_session() {
-        let data_dir = tempfile::TempDir::new().unwrap();
-        let mut cfg = crate::api::ui_protocol_ledger::LedgerConfig::ephemeral(16);
-        cfg.data_dir = Some(data_dir.path().to_path_buf());
-        let ledger = Arc::new(UiProtocolLedger::with_config(cfg));
-        let session_id = SessionKey("tenant-a:api:ui-fwd-own".to_owned());
-        let router = stub_router();
-        let (tx, _rx) = tokio::sync::mpsc::channel(8);
-        let ws = WsConnection::new(tx);
-        let _forwarder = spawn_router_failover_forwarder_for_test(
-            ws,
-            ledger,
-            session_id.clone(),
-            Some(router.clone()),
-        );
-        octos_llm::with_router_context(
-            octos_llm::RouterContext {
-                session_id: Some(session_id.0.clone()),
-                turn_id: None,
-            },
-            async {
-                router.publish_failover_for_subscribers("a", "b", "quota", 120);
-            },
-        )
-        .await;
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        let events = read_events(data_dir.path());
-        let rows: Vec<_> = events
-            .iter()
-            .filter(|e| e.get("kind").and_then(|k| k.as_str()) == Some("fallback_switch"))
-            .collect();
-        assert_eq!(rows.len(), 1, "ui path writes one row: {events:?}");
-        assert_eq!(
-            rows[0].get("session").and_then(|s| s.as_str()),
-            Some(session_id.0.as_str())
-        );
-    }
-
-    #[tokio::test]
-    async fn obs_fallback_switch_ui_forwarder_ignores_other_session() {
-        let data_dir = tempfile::TempDir::new().unwrap();
-        let mut cfg = crate::api::ui_protocol_ledger::LedgerConfig::ephemeral(16);
-        cfg.data_dir = Some(data_dir.path().to_path_buf());
-        let ledger = Arc::new(UiProtocolLedger::with_config(cfg));
-        let session_id = SessionKey("tenant-a:api:ui-fwd-other".to_owned());
-        let router = stub_router();
-        let (tx, _rx) = tokio::sync::mpsc::channel(8);
-        let ws = WsConnection::new(tx);
-        let _forwarder =
-            spawn_router_failover_forwarder_for_test(ws, ledger, session_id, Some(router.clone()));
-        octos_llm::with_router_context(
-            octos_llm::RouterContext {
-                session_id: Some("some-other-session".to_string()),
-                turn_id: None,
-            },
-            async {
-                router.publish_failover_for_subscribers("a", "b", "quota", 120);
-            },
-        )
-        .await;
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        assert!(
-            read_events(data_dir.path()).is_empty(),
-            "other-session failover must not write rows on the ui path"
-        );
-    }
-
-    /// #48c-r1 — None originator: no `events.jsonl` row, but the client
-    /// NOTICE still passes through (the Codex P1 notice filter is
-    /// verbatim-untouched for None; only the event write is stricter).
-    #[tokio::test]
-    async fn obs_fallback_switch_ui_forwarder_ignores_none_originator() {
-        let data_dir = tempfile::TempDir::new().unwrap();
-        let mut cfg = crate::api::ui_protocol_ledger::LedgerConfig::ephemeral(16);
-        cfg.data_dir = Some(data_dir.path().to_path_buf());
-        let ledger = Arc::new(UiProtocolLedger::with_config(cfg));
-        let session_id = SessionKey("tenant-a:api:ui-fwd-none".to_owned());
-        let router = stub_router();
-        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-        let ws = WsConnection::new(tx);
-        let _forwarder = spawn_router_failover_forwarder_for_test(
-            ws,
-            ledger,
-            session_id.clone(),
-            Some(router.clone()),
-        );
-        // No RouterContext => originating_session_id is None.
-        router.publish_failover_for_subscribers("a", "b", "quota", 120);
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        assert!(
-            read_events(data_dir.path()).is_empty(),
-            "None-originator failover must not write rows on the ui path (#48c strict event gate)"
-        );
-        // The notice still passes through, verbatim pre-#48c behavior.
-        // The wire carries serialized WS text frames; decode the envelope to
-        // confirm the RouterFailover notice survived the None gate.
-        let noticed = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            loop {
-                match rx.recv().await {
-                    Some(axum::extract::ws::Message::Text(text)) => {
-                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-                            if v.get("method").and_then(|t| t.as_str()) == Some("router/failover")
-                                || v.get("type").and_then(|t| t.as_str()) == Some("router/failover")
-                            {
-                                return v;
-                            }
-                        }
-                    }
-                    Some(_) => continue,
-                    None => panic!("notification channel closed without a RouterFailover notice"),
-                }
-            }
-        })
-        .await
-        .expect("None-originator failover notice still forwarded");
-        let params = noticed.get("params").cloned().unwrap_or_default();
-        assert_eq!(
-            params.get("session_id").and_then(|s| s.as_str()),
-            Some(session_id.0.as_str()),
-            "notice targets THIS session: {noticed}"
-        );
-        assert_eq!(
-            params.get("from_provider").and_then(|s| s.as_str()),
-            Some("a")
-        );
-        assert_eq!(
-            params.get("to_provider").and_then(|s| s.as_str()),
-            Some("b")
-        );
-    }
-}
-
-/// #48b — doc pin: the obs_events header lists both new kinds.
 #[test]
 fn obs_events_doc_lists_new_kinds() {
     let src = include_str!("../obs_events.rs");
@@ -28684,6 +28275,7 @@ fn obs_events_doc_lists_new_kinds() {
 
 /// #48b — marker-prefixed terminal message produces exactly the
 /// malformed_exhausted decision (and the CLI appends ONLY that row).
+#[cfg(test)]
 mod obs_malformed_exhausted_48b {
     use super::*;
     use std::io::BufRead as _;
