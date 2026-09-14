@@ -1595,15 +1595,19 @@ class Flow:
         codegen_prompt = None
         implement_timeout = min(self.node_timeout, self.implement_fraction * node_budget, deadline - time.time())
         if self.codegen_mode():
+            spec_text = self.spec_bodies(node_id)
+            self.current_spec_chars = len(spec_text)
+            # Small specs (by size, an input-derived measure) get the compact rule; the multi-page
+            # mechanisms only apply when the spec is large enough to need sessions/navigation.
+            small = self.codegen_reasoning(self.current_spec_chars) == "none"
             compact = CODEGEN_PROMPT.format(node_id=node_id, description=str(node.get("description") or "").strip(),
-                                            spec=self.spec_bodies(node_id), port=self.web_port, ports=self.codegen_ports_clause(),
-                                            size_rule=CODEGEN_SIZE_SMALL if self.n_nodes <= 1 else CODEGEN_SIZE_FULL)
+                                            spec=spec_text, port=self.web_port, ports=self.codegen_ports_clause(),
+                                            size_rule=CODEGEN_SIZE_SMALL if small else CODEGEN_SIZE_FULL)
             if self.has_app():  # evolution: keep the existing app, return every changed file complete
                 compact = (compact.replace("Files:", "Existing app below; keep everything that works and output "
                                            "every changed file complete. Files:", 1)
                            + inline_sources(self.output_dir, 30000, exts=(".html", ".js")))
             codegen_prompt = compact
-            self.current_spec_chars = len(self.spec_bodies(node_id))
             write_codegen_manifests(self.output_dir)
             ok, text = self.codegen_turn(compact, implement_timeout, f"{node_id} implement", spec_chars=self.current_spec_chars)
         else:
