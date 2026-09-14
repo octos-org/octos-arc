@@ -21,10 +21,10 @@
 //! `?`-propagates the catalog error so a missing or broken bridge
 //! turns into a load failure rather than a silent zero-tools install.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use eyre::{Result, WrapErr, eyre};
-use octos_plugin::{LifecycleExecutor, LifecyclePhase, NoSandbox, ToolDiscovery};
+use octos_plugin::{LifecycleExecutor, LifecyclePhase, NoSandbox};
 use tracing::{info, warn};
 
 use crate::tools::{Tool, ToolRegistry};

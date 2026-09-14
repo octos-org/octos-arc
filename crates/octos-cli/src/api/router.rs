@@ -514,35 +514,3 @@ pub(crate) fn is_trusted_proxy_addr(addr: Option<std::net::IpAddr>) -> bool {
     let cidrs = trusted_proxy_cidrs();
     cidrs.iter().any(|cidr| ip_matches_cidr(addr, cidr))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::api::AppState;
-    use crate::config::DeploymentMode;
-    use axum::http::Request;
-    use chrono::Utc;
-    use std::io::Write;
-    use std::sync::Arc;
-    use tower::ServiceExt;
-
-    #[derive(Clone, Default)]
-    struct CapturedLogs(Arc<std::sync::Mutex<Vec<u8>>>);
-
-    impl Write for CapturedLogs {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl CapturedLogs {
-        fn as_string(&self) -> String {
-            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
-        }
-    }
-}

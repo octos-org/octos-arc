@@ -75,7 +75,6 @@ pub use router::AuthIdentity as TestAuthIdentity;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 use crate::profiles::ProfileStore;
 use crate::runtime::{ProfileRuntime, SessionRuntimeCache};
@@ -154,11 +153,6 @@ impl Drop for ProfileSkillMutationGuard {
             entries.remove(&self.profile_id);
         }
     }
-}
-
-struct RunIdEntry {
-    tenant_id: String,
-    expires_at: Instant,
 }
 
 /// Opaque, per-application OUP persistence resources. Connections share them;

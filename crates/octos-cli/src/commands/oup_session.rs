@@ -159,6 +159,7 @@ impl OupSession {
         })
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn hydrate(&self) -> Result<SessionHydrateResult> {
         serde_json::from_value(
             self.client
@@ -370,131 +371,13 @@ impl OupSession {
     pub(crate) async fn close(&self) -> Result<()> {
         self.client.close().await
     }
-
-    pub(crate) async fn interrupt(&self) -> Result<()> {
-        let turn_id = self.active_turn.lock().unwrap().clone();
-        let Some(turn_id) = turn_id else {
-            return Ok(());
-        };
-        self.client
-            .request(
-                methods::TURN_INTERRUPT,
-                json!({
-                    "session_id": self.session_id,
-                    "turn_id": turn_id,
-                }),
-            )
-            .await?;
-        Ok(())
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    struct RecordingModel {
-        inputs: std::sync::Mutex<Vec<Vec<octos_core::Message>>>,
-    }
-
-    #[async_trait::async_trait]
-    impl octos_llm::LlmProvider for RecordingModel {
-        async fn chat(
-            &self,
-            messages: &[octos_core::Message],
-            _tools: &[octos_llm::ToolSpec],
-            _config: &octos_llm::ChatConfig,
-        ) -> Result<octos_llm::ChatResponse> {
-            let mut inputs = self.inputs.lock().unwrap();
-            inputs.push(messages.to_vec());
-            Ok(octos_llm::ChatResponse {
-                content: Some(format!("canonical-answer-{}", inputs.len())),
-                reasoning_content: None,
-                tool_calls: vec![],
-                stop_reason: octos_llm::StopReason::EndTurn,
-                usage: octos_llm::TokenUsage::default(),
-                provider_index: None,
-            })
-        }
-        fn provider_name(&self) -> &str {
-            "local"
-        }
-        fn model_id(&self) -> &str {
-            "oup-mock"
-        }
-    }
-
     struct Frontend;
-
-    struct TerminalModel {
-        stop: octos_llm::StopReason,
-        reasoning_only: bool,
-        recover: bool,
-        calls: std::sync::atomic::AtomicUsize,
-    }
-
-    #[async_trait::async_trait]
-    impl octos_llm::LlmProvider for TerminalModel {
-        async fn chat(
-            &self,
-            _messages: &[octos_core::Message],
-            _tools: &[octos_llm::ToolSpec],
-            _config: &octos_llm::ChatConfig,
-        ) -> Result<octos_llm::ChatResponse> {
-            let attempt = self.calls.fetch_add(1, Ordering::SeqCst);
-            let recovered = self.recover && attempt > 0;
-            Ok(octos_llm::ChatResponse {
-                content: if self.reasoning_only && !recovered {
-                    None
-                } else {
-                    Some(
-                        if recovered {
-                            "Recovered final answer"
-                        } else {
-                            "First I need to inspect the image and then I will"
-                        }
-                        .into(),
-                    )
-                },
-                reasoning_content: self
-                    .reasoning_only
-                    .then(|| "Need to inspect the image.".into()),
-                tool_calls: vec![],
-                stop_reason: if recovered {
-                    octos_llm::StopReason::EndTurn
-                } else {
-                    self.stop
-                },
-                usage: octos_llm::TokenUsage {
-                    input_tokens: 12,
-                    output_tokens: 7,
-                    ..Default::default()
-                },
-                provider_index: None,
-            })
-        }
-        async fn chat_stream(
-            &self,
-            messages: &[octos_core::Message],
-            tools: &[octos_llm::ToolSpec],
-            config: &octos_llm::ChatConfig,
-        ) -> Result<octos_llm::ChatStream> {
-            use octos_llm::StreamEvent;
-            let response = self.chat(messages, tools, config).await?;
-            Ok(Box::pin(futures::stream::iter(vec![
-                StreamEvent::ReasoningDelta(response.reasoning_content.unwrap_or_default()),
-                StreamEvent::TextDelta(response.content.unwrap_or_default()),
-                StreamEvent::Usage(response.usage),
-                StreamEvent::Done(response.stop_reason),
-            ])))
-        }
-        fn provider_name(&self) -> &str {
-            "local"
-        }
-        fn model_id(&self) -> &str {
-            "terminal-integrity"
-        }
-    }
 
     struct ToolThenEmptyModel(std::sync::atomic::AtomicUsize, bool, Option<&'static str>);
 

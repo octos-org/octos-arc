@@ -1055,19 +1055,6 @@ mod tests {
         assert!(error.contains("output.mp3 is 1 bytes, minimum is 1024"));
     }
 
-    /// Smallest valid PNG (1x1 transparent pixel) — used to satisfy
-    /// MagicBytes (Png) without pulling in an encoder dependency.
-    const PNG_1X1: &[u8] = &[
-        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // PNG signature
-        0x00, 0x00, 0x00, 0x0D, b'I', b'H', b'D', b'R', // IHDR header
-        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, // width=1, height=1
-        0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89, // bit depth+color
-        0x00, 0x00, 0x00, 0x0D, b'I', b'D', b'A', b'T', // IDAT chunk
-        0x78, 0x9C, 0x62, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
-        0x00, 0x00, 0x00, b'I', b'E', b'N', b'D', // IEND chunk
-        0xAE, 0x42, 0x60, 0x82,
-    ];
-
     // -------------------------------------------------------------------
     // Wave-3b: named_outputs end-to-end through enforce_spawn_task_contract.
     // -------------------------------------------------------------------

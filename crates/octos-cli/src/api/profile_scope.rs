@@ -11,23 +11,6 @@ use super::router::AuthIdentity;
 
 pub const ADMIN_PROFILE_ID: &str = "admin";
 
-pub(crate) fn is_top_level_profile_id(state: &AppState, profile_id: &str) -> bool {
-    state
-        .profile_store
-        .as_ref()
-        .and_then(|store| store.get(profile_id).ok().flatten())
-        .map(|profile| profile.parent_id.is_none())
-        .unwrap_or(false)
-}
-
-pub(crate) fn scoped_host_allows_profile_id(
-    _state: &AppState,
-    scoped_profile_id: &str,
-    candidate_profile_id: &str,
-) -> bool {
-    scoped_profile_id == candidate_profile_id
-}
-
 fn request_host(headers: &HeaderMap) -> Option<String> {
     let raw = headers
         .get("x-forwarded-host")
@@ -42,40 +25,6 @@ fn request_host(headers: &HeaderMap) -> Option<String> {
         return None;
     }
     Some(strip_port_from_host(&raw).to_string())
-}
-
-/// The endpoint URL a scanning client should dial: original authority
-/// (host AND port — `request_host` strips the port, which would send
-/// scanners to :80/:443, codex P2) plus `X-Forwarded-Proto` when a
-/// reverse proxy supplies it, else https with a loopback http fallback.
-fn request_endpoint(headers: &HeaderMap) -> Option<String> {
-    let authority = headers
-        .get("x-forwarded-host")
-        .or_else(|| headers.get("host"))?
-        .to_str()
-        .ok()?
-        .split(',')
-        .next()?
-        .trim()
-        .to_ascii_lowercase();
-    if authority.is_empty() {
-        return None;
-    }
-    let forwarded_proto = headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .map(|s| s.trim().to_ascii_lowercase())
-        .filter(|p| p == "http" || p == "https");
-    let scheme = forwarded_proto.unwrap_or_else(|| {
-        let host_only = strip_port_from_host(&authority);
-        if host_only == "localhost" || host_only.starts_with("127.") || host_only == "::1" {
-            "http".to_string()
-        } else {
-            "https".to_string()
-        }
-    });
-    Some(format!("{scheme}://{authority}"))
 }
 
 fn strip_port_from_host(host: &str) -> &str {
@@ -111,21 +60,6 @@ fn resolve_routed_profile_id_candidate(state: &AppState, candidate: &str) -> Opt
         .and_then(|store| store.resolve_routable_profile_id(candidate).ok().flatten())
 }
 
-fn resolve_trusted_local_profile_id_candidate(state: &AppState, candidate: &str) -> Option<String> {
-    let candidate = candidate.trim();
-    if candidate.is_empty() {
-        return None;
-    }
-
-    resolve_routed_profile_id_candidate(state, candidate).or_else(|| {
-        state
-            .profile_store
-            .as_ref()
-            .and_then(|store| store.get(candidate).ok().flatten())
-            .map(|profile| profile.id)
-    })
-}
-
 fn host_scoped_profile_id(state: &AppState, headers: &HeaderMap) -> Option<String> {
     let host = request_host(headers)?;
     if is_local_request_host(&host) {
@@ -134,24 +68,6 @@ fn host_scoped_profile_id(state: &AppState, headers: &HeaderMap) -> Option<Strin
 
     let candidate = host.split('.').next()?;
     resolve_routed_profile_id_candidate(state, candidate)
-}
-
-fn trusted_auth_scope_profile_id(state: &AppState, headers: &HeaderMap) -> Option<String> {
-    if let Some(profile_id) = host_scoped_profile_id(state, headers) {
-        return Some(profile_id);
-    }
-
-    let host = request_host(headers)?;
-    if !is_local_request_host(&host) {
-        return None;
-    }
-
-    headers
-        .get("x-profile-id")
-        .and_then(|v| v.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .and_then(|candidate| resolve_trusted_local_profile_id_candidate(state, candidate))
 }
 
 /// Return `true` iff the authenticated identity is allowed to act as the

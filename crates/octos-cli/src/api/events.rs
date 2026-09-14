@@ -16,7 +16,7 @@
 //! No SSE wire path remains in the chat transport — every chat client
 //! talks to `/api/ui-protocol/ws` exclusively.
 
-use octos_agent::{ProgressEvent, ProgressReporter};
+use octos_agent::ProgressEvent;
 
 /// Producer iteration identity, opaque to clients. It does not depend on how
 /// many progress events were delivered or retained by the ledger.

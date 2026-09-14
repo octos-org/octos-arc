@@ -26,22 +26,6 @@ pub(crate) fn new_metrics_system() -> sysinfo::System {
     sysinfo::System::new()
 }
 
-/// Refresh exactly what `system_metrics` renders. Processes are refreshed
-/// only on request, without per-thread tasks, dropping dead entries.
-#[cfg(feature = "api")]
-pub(crate) fn refresh_metrics(sys: &mut sysinfo::System, include_procs: bool) {
-    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate};
-    sys.refresh_cpu_usage();
-    sys.refresh_memory();
-    if include_procs {
-        sys.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
-            ProcessRefreshKind::nothing().with_cpu().with_memory(),
-        );
-    }
-}
-
 #[cfg(test)]
 mod tests {
     /// Structural guard, feature-independent: `System` is constructed in
@@ -139,15 +123,5 @@ mod tests {
         let sys = super::new_metrics_system();
         assert!(sys.processes().is_empty());
         assert!(retained_proc_stat_fds().is_empty());
-    }
-
-    #[cfg(feature = "api")]
-    #[test]
-    fn metrics_refresh_without_procs_leaves_process_table_empty() {
-        let mut sys = super::new_metrics_system();
-        super::refresh_metrics(&mut sys, false);
-        assert!(sys.processes().is_empty());
-        assert!(!sys.cpus().is_empty());
-        assert!(sys.total_memory() > 0);
     }
 }

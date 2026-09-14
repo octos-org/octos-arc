@@ -14,7 +14,6 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::config::{CloudTtsConfig, Config, FallbackModel, GatewayConfig};
 
 pub const MAX_SUB_ACCOUNTS_PER_PARENT: usize = 10;
-pub(crate) const HOST_ASR_LANGUAGE_ENV: &str = "OCTOS_HOST_ASR_LANGUAGE";
 
 pub const SUPPORTED_ASR_LANGUAGES: &[&str] = &[
     "Chinese",
@@ -1275,7 +1274,7 @@ impl ProfileStore {
     ///   OVERWRITE the file with a default profile (r8 P2).
     // The only non-test caller (the serve bootstrap) is api-gated; the
     // policy itself stays unconditional next to the store it guards.
-    #[cfg_attr(not(feature = "api"), allow(dead_code))]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn id_reserved_for_registration(&self, id: &str, authorized: bool) -> bool {
         if !self.profile_path(id).exists() {
             return false;

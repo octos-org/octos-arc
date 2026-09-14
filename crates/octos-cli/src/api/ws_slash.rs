@@ -223,15 +223,6 @@ async fn handle_new(ctx: &SlashCommandContext, name_arg: &str) -> String {
     // [`crate::project_templates::site_preset_from_topic`] parser only
     // recognises the singular form, so we hand it the normalized
     // string.
-    let normalized_topic = if name_arg == "sites" {
-        std::borrow::Cow::Borrowed("site")
-    } else if let Some(rest) = name_arg.strip_prefix("sites ") {
-        std::borrow::Cow::Owned(format!("site {rest}"))
-    } else {
-        std::borrow::Cow::Borrowed(name_arg)
-    };
-    let topic: &str = normalized_topic.as_ref();
-
     format!("Switched to session: {name_arg}")
 }
 

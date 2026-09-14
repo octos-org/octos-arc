@@ -351,7 +351,6 @@ mod tests {
     }
 
     use crate::profiles::ProfileStore;
-    use crate::user_store::UserRole;
 
     fn make_user_profile(id: &str) -> crate::profiles::UserProfile {
         crate::profiles::UserProfile {

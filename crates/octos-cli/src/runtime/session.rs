@@ -1021,23 +1021,6 @@ fn bootstrap_session_policy(workspace_root: &Path) -> Result<()> {
         .wrap_err("failed to bootstrap session workspace policy")
 }
 
-/// Finite iteration backstop for the UNATTENDED lanes (`octos gateway`,
-/// `octos serve` session actors) when neither the CLI flag nor
-/// `gateway.max_iterations` is configured.
-///
-/// `AgentConfig::default().max_iterations` is `0` (unlimited) on purpose for
-/// the INTERACTIVE lanes (`octos chat`, `octos acp`), where a human is attached
-/// and can interrupt. An unattended channel session has no such operator: the
-/// idle/activity timeouts never fire for a loop that keeps emitting progress,
-/// `max_tokens` defaults to `None`, and loop detection is non-terminal, so this
-/// cap is the only remaining backstop for an actively-looping agent. `50`
-/// restores the ceiling these lanes had before the default became unlimited;
-/// spawned sub-agents keep their own, higher default
-/// (`DEFAULT_SPAWN_MAX_ITERATIONS` in `octos-agent/src/tools/spawn.rs`). An
-/// explicit `0` in config still means unlimited.
-pub(crate) const UNATTENDED_MAX_ITERATIONS_FALLBACK: u32 =
-    super::turn_policy::AUTONOMOUS_MAX_ITERATIONS;
-
 /// Resolve the per-session agent iteration budget from the profile's
 /// configured `gateway.max_iterations`, falling back to
 /// [`UNATTENDED_MAX_ITERATIONS_FALLBACK`] when unset. Session actors are an
@@ -1209,10 +1192,6 @@ mod tests {
         // finite backstop — neither the unlimited interactive `AgentConfig`
         // default nor the old fixed 20-call cap.
         assert_eq!(resolve_session_max_iterations(None), 50);
-        assert_eq!(
-            resolve_session_max_iterations(None),
-            UNATTENDED_MAX_ITERATIONS_FALLBACK
-        );
         assert_ne!(
             resolve_session_max_iterations(None),
             AgentConfig::default().max_iterations,

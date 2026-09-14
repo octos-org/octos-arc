@@ -946,20 +946,6 @@ fn apply_builtin_env_allowlist(plugin_name: &str, mut def: PluginToolDef) -> Plu
     def
 }
 
-/// Ensure a plugin directory has a runnable executable for manifests that
-/// declare tools. Returns `true` if a fallback executable was created.
-pub(crate) fn ensure_plugin_executable(plugin_dir: &Path) -> Result<bool> {
-    let manifest_path = plugin_dir.join("manifest.json");
-    if !manifest_path.exists() {
-        return Ok(false);
-    }
-    let content = std::fs::read_to_string(&manifest_path)
-        .map_err(|e| eyre::eyre!("no manifest.json: {e}"))?;
-    let manifest: PluginManifest =
-        serde_json::from_str(&content).map_err(|e| eyre::eyre!("invalid manifest.json: {e}"))?;
-    ensure_plugin_executable_for_manifest(plugin_dir, &manifest)
-}
-
 fn ensure_plugin_executable_for_manifest(
     plugin_dir: &Path,
     manifest: &PluginManifest,
@@ -2712,117 +2698,6 @@ path = "src/main.rs"
         };
         let untrusted = apply_builtin_env_allowlist("custom-plugin", untrusted);
         assert!(untrusted.env.is_empty());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_ensure_plugin_executable_creates_lazy_cargo_wrapper() {
-        let dir = tempfile::tempdir().unwrap();
-        let plugin_dir = dir.path().join("mofa-podcast");
-        std::fs::create_dir(&plugin_dir).unwrap();
-
-        std::fs::write(
-            plugin_dir.join("manifest.json"),
-            r#"{
-  "name": "mofa-podcast",
-  "version": "0.4.5",
-  "tools": [{"name": "podcast_generate", "description": "podcast", "input_schema": {"type": "object", "properties": {}}}]
-}"#,
-        )
-        .unwrap();
-        std::fs::write(
-            plugin_dir.join("Cargo.toml"),
-            r#"[package]
-name = "mofa-podcast"
-version = "0.4.5"
-edition = "2021"
-"#,
-        )
-        .unwrap();
-
-        let changed = ensure_plugin_executable(&plugin_dir).unwrap();
-        assert!(changed);
-        let wrapper = std::fs::read_to_string(plugin_dir.join("main")).unwrap();
-        assert!(wrapper.contains("cargo build --release"));
-        assert!(wrapper.contains("target/release/mofa-podcast"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_ensure_plugin_executable_creates_lazy_cargo_wrapper_for_mofa_publish() {
-        let dir = tempfile::tempdir().unwrap();
-        let plugin_dir = dir.path().join("mofa-publish");
-        std::fs::create_dir(&plugin_dir).unwrap();
-
-        std::fs::write(
-            plugin_dir.join("manifest.json"),
-            r#"{
-  "name": "mofa-publish",
-  "version": "0.1.0",
-  "tools": [{"name": "mofa_publish", "description": "deploy", "input_schema": {"type": "object", "properties": {}}}]
-}"#,
-        )
-        .unwrap();
-        // mofa-publish now ships as a Cargo-based Rust skill with an explicit
-        // [[bin]] name, so it gets the generic lazy-cargo wrapper.
-        std::fs::write(
-            plugin_dir.join("Cargo.toml"),
-            r#"[package]
-name = "mofa-publish-crate"
-version = "0.1.0"
-edition = "2021"
-
-[[bin]]
-name = "mofa-publish"
-path = "src/main.rs"
-"#,
-        )
-        .unwrap();
-
-        let changed = ensure_plugin_executable(&plugin_dir).unwrap();
-        assert!(changed);
-        let wrapper = std::fs::read_to_string(plugin_dir.join("main")).unwrap();
-        assert!(wrapper.contains("cargo build --release"));
-        assert!(wrapper.contains("target/release/mofa-publish"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_ensure_plugin_executable_creates_lazy_cargo_wrapper_for_mofa_site() {
-        let dir = tempfile::tempdir().unwrap();
-        let plugin_dir = dir.path().join("mofa-site");
-        std::fs::create_dir(&plugin_dir).unwrap();
-
-        std::fs::write(
-            plugin_dir.join("manifest.json"),
-            r#"{
-  "name": "mofa-site",
-  "version": "0.1.0",
-  "tools": [{"name": "mofa_site", "description": "site", "input_schema": {"type": "object", "properties": {}}}]
-}"#,
-        )
-        .unwrap();
-        // mofa-site now ships as a Cargo-based Rust skill with an explicit
-        // [[bin]] name, so it gets the generic lazy-cargo wrapper.
-        std::fs::write(
-            plugin_dir.join("Cargo.toml"),
-            r#"[package]
-name = "mofa-site-crate"
-version = "0.1.0"
-edition = "2021"
-
-[[bin]]
-name = "mofa-site"
-path = "src/main.rs"
-"#,
-        )
-        .unwrap();
-
-        let changed = ensure_plugin_executable(&plugin_dir).unwrap();
-        assert!(changed);
-        let wrapper = std::fs::read_to_string(plugin_dir.join("main")).unwrap();
-        assert!(wrapper.contains("cargo build --release"));
-        assert!(wrapper.contains("target/release/mofa-site"));
     }
 
     #[cfg(unix)]

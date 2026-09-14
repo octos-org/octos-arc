@@ -3170,7 +3170,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn response_path_for_profile_file_hides_absolute_paths() {
         let base = tempfile::tempdir().unwrap();
         let file = base.path().join("slides/demo/output/deck.pptx");
@@ -4260,6 +4259,7 @@ mod tests {
 
     use crate::profiles::{ProfileStore, UserProfile};
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn make_profile(id: &str, parent_id: Option<&str>) -> UserProfile {
         UserProfile {
             id: id.into(),
@@ -4276,6 +4276,7 @@ mod tests {
 
     /// Build a minimal `AppState` for `decide_resolved_profile_id` unit
     /// tests with a profile_store containing the listed profiles.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn state_with_profiles(profiles: &[(&str, Option<&str>)]) -> (tempfile::TempDir, AppState) {
         let dir = tempfile::tempdir().unwrap();
         let ps = ProfileStore::open_unified(dir.path()).unwrap();

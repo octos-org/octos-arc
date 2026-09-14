@@ -86,64 +86,6 @@ impl Drop for ProfileRuntimeLifecycle {
     }
 }
 
-/// Build an ISOLATED per-node pipeline provider router from the profile's
-/// `sub_providers` (e.g. the `bg_research` pipeline's `cheap`/`strong`
-/// nodes, resolved via the pipeline tool's provider router).
-///
-/// Registers ONLY the declared sub-providers — never the coding primary or its
-/// fallbacks — so a research-lane failover (`FallbackProvider` +
-/// `compatible_fallbacks`) trips its OWN circuit breakers and can never disturb
-/// the coding conversation's provider or its KV/prompt cache. Returns `None`
-/// when no sub-providers are configured, in which case pipeline nodes fall back
-/// to the shared coding provider (`self.llm` in `resolve_provider`) exactly as
-/// before. Mirrors the gateway's sub-provider registration
-/// (`gateway_runtime.rs`) but deliberately omits the primary/fallback
-/// auto-registration to keep the research lane isolated.
-fn build_sub_provider_router(config: &Config) -> Option<Arc<octos_llm::ProviderRouter>> {
-    if config.sub_providers.is_empty() {
-        return None;
-    }
-    let router = Arc::new(octos_llm::ProviderRouter::new());
-    let mut registered = 0usize;
-    for sp in &config.sub_providers {
-        // Per-sub-provider key override, matching the gateway path: an explicit
-        // `api_key_env` selects a distinct credential; otherwise inherit the
-        // profile's default for the provider.
-        let sp_config = if sp.api_key_env.is_some() {
-            let mut c = config.clone();
-            c.api_key_env = sp.api_key_env.clone();
-            c
-        } else {
-            config.clone()
-        };
-        match chat::create_provider_with_api_type(
-            &sp.provider,
-            &sp_config,
-            sp.model.clone(),
-            sp.base_url.clone(),
-            sp.api_type.as_deref(),
-        ) {
-            Ok(p) => {
-                router.register_with_full_meta(
-                    &sp.key,
-                    Arc::new(octos_llm::RetryProvider::new(p)),
-                    sp.description.clone(),
-                    sp.default_context_window,
-                    sp.max_output_tokens,
-                );
-                registered += 1;
-            }
-            Err(e) => warn!(
-                key = %sp.key,
-                provider = %sp.provider,
-                error = %e,
-                "skipping isolated pipeline sub-provider (research lane)"
-            ),
-        }
-    }
-    if registered > 0 { Some(router) } else { None }
-}
-
 /// All long-lived state that belongs to a single profile within the
 /// current host process.
 ///

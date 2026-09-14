@@ -4,7 +4,6 @@ use super::*;
 // directly, so name them here.
 use crate::api::coding_tool_contract;
 use crate::approvals_audit::{ApprovalsAuditConfig, ApprovalsAuditLog};
-use crate::user_store::UserRole;
 use octos_core::ui_protocol::{
     ApprovalDecision, ApprovalId, ApprovalRespondParams, ApprovalRespondStatus, DiffPreview,
     DiffPreviewFile, DiffPreviewFileStatus, DiffPreviewGetParams, DiffPreviewGetStatus,
@@ -2871,199 +2870,6 @@ fn appui_evidence_jsonl_append_keeps_concurrent_rows_parseable() {
         serde_json::from_str::<Value>(line)
             .unwrap_or_else(|error| panic!("line {index} is malformed JSONL: {error}: {line}"));
     }
-}
-
-fn dispatch_probe_request(method: &str) -> RpcRequest<Value> {
-    let session_id = SessionKey("local:dispatch-parity".into());
-    let turn_id = TurnId::new();
-    let approval_id = ApprovalId::new();
-    let preview_id = PreviewId::new();
-    let task_id = TaskId::new();
-    let params = match method {
-        APPUI_METHOD_CLIENT_HELLO => json!({
-            "transport": "stdio",
-            "supported_features": [],
-        }),
-        APPUI_METHOD_CONFIG_CAPABILITIES_LIST
-        | APPUI_METHOD_SESSION_STATUS_READ
-        | APPUI_METHOD_PROFILE_LLM_LIST
-        | APPUI_METHOD_PROFILE_LLM_SELECT
-        | APPUI_METHOD_MCP_STATUS_LIST
-        | APPUI_METHOD_TOOL_STATUS_LIST
-        | APPUI_METHOD_AUTH_STATUS
-        | APPUI_METHOD_AUTH_SEND_CODE
-        | APPUI_METHOD_AUTH_VERIFY
-        | APPUI_METHOD_AUTH_ME
-        | APPUI_METHOD_AUTH_LOGOUT
-        | APPUI_METHOD_PROFILE_LLM_CATALOG
-        | APPUI_METHOD_PROFILE_LLM_UPSERT
-        | APPUI_METHOD_PROFILE_LLM_DELETE
-        | APPUI_METHOD_PROFILE_LLM_TEST
-        | APPUI_METHOD_PROFILE_LLM_FETCH_MODELS
-        | APPUI_METHOD_PROFILE_SKILLS_INSTALL
-        | APPUI_METHOD_PROFILE_SKILLS_REMOVE
-        | APPUI_METHOD_REVIEW_START => json!({}),
-        APPUI_METHOD_PROFILE_SKILLS_LIST | APPUI_METHOD_PROFILE_SKILLS_REGISTRY_SEARCH => {
-            json!({ "profile_id": 42 })
-        }
-        APPUI_METHOD_SKILL_ACTION_LIST => {
-            json!({ "session_id": session_id, "profile_id": "dispatch-parity" })
-        }
-        APPUI_METHOD_SKILL_ACTION_INVOKE => {
-            json!({
-                "session_id": session_id,
-                "profile_id": "dispatch-parity",
-                "action_id": "missing-action"
-            })
-        }
-        APPUI_METHOD_SKILL_ACTION_JOB_LIST => {
-            json!({ "session_id": session_id, "profile_id": "dispatch-parity" })
-        }
-        APPUI_METHOD_SKILL_ACTION_JOB_READ => {
-            json!({
-                "session_id": session_id,
-                "profile_id": "dispatch-parity",
-                "job_id": "missing-job"
-            })
-        }
-        APPUI_METHOD_ONBOARDING_WORKSPACE_PROBE => json!({ "path": "." }),
-        methods::AGENT_LIST
-        | methods::AGENT_STATUS_READ
-        | methods::AGENT_OUTPUT_READ
-        | methods::AGENT_ARTIFACT_LIST
-        | methods::AGENT_ARTIFACT_READ
-        | methods::TASK_ARTIFACT_LIST
-        | methods::TASK_ARTIFACT_READ
-        | methods::AGENT_INTERRUPT
-        | methods::AGENT_CLOSE
-        | methods::LOOP_CREATE
-        | methods::LOOP_LIST
-        | methods::LOOP_DELETE
-        | methods::LOOP_PAUSE
-        | methods::LOOP_RESUME
-        | methods::LOOP_FIRE_NOW
-        | methods::MONITOR_CREATE
-        | methods::MONITOR_LIST
-        | methods::MONITOR_PAUSE
-        | methods::MONITOR_RESUME
-        | methods::MONITOR_DELETE => json!({}),
-        methods::PROFILE_LOCAL_CREATE => json!({
-            "name": "Dispatch Parity",
-            "username": "dispatch-parity",
-            "email": "dispatch-parity@example.com",
-        }),
-        methods::SESSION_OPEN => json!({ "session_id": session_id }),
-        methods::TURN_START => json!({
-            "session_id": session_id,
-            "turn_id": turn_id,
-            "input": [{ "kind": "text", "text": "hello" }],
-        }),
-        methods::TURN_INTERRUPT => json!({
-            "session_id": session_id,
-            "turn_id": turn_id,
-        }),
-        methods::APPROVAL_RESPOND => json!({
-            "session_id": session_id,
-            "approval_id": approval_id,
-            "decision": "approve",
-        }),
-        methods::APPROVAL_SCOPES_LIST => json!({ "session_id": session_id }),
-        methods::USER_QUESTION_RESPOND => json!({
-            "session_id": session_id,
-            "question_id": QuestionId::new(),
-            "answers": [{ "selected_labels": ["axum"] }],
-        }),
-        methods::PERMISSION_PROFILE_LIST => json!({ "session_id": session_id }),
-        methods::PERMISSION_PROFILE_SET => json!({
-            "session_id": session_id,
-            "update": {
-                "mode": "workspace_write",
-                "network": "deny",
-            },
-        }),
-        methods::DIFF_PREVIEW_GET => json!({
-            "session_id": session_id,
-            "preview_id": preview_id,
-        }),
-        methods::TASK_OUTPUT_READ => json!({
-            "session_id": session_id,
-            "task_id": task_id,
-        }),
-        methods::TASK_LIST => json!({ "session_id": session_id }),
-        methods::TASK_CANCEL => json!({
-            "session_id": session_id,
-            "task_id": task_id,
-        }),
-        methods::TASK_RESTART_FROM_NODE => json!({
-            "session_id": session_id,
-            "task_id": task_id,
-            "node_id": "design",
-        }),
-        methods::SESSION_HYDRATE => json!({ "session_id": session_id }),
-        methods::SESSION_ROLLBACK => json!({ "session_id": session_id, "num_turns": 1 }),
-        methods::THREAD_GRAPH_GET => json!({ "session_id": session_id }),
-        methods::TURN_STATE_GET => json!({
-            "session_id": session_id,
-            "turn_id": turn_id,
-        }),
-        methods::SESSION_BTW => json!({
-            "session_id": session_id,
-            "question": "what are you working on?",
-        }),
-        methods::SESSION_LIST | methods::SYSTEM_STATUS_GET | methods::CRON_LIST => {
-            json!({})
-        }
-        methods::SESSION_SNAPSHOT
-        | methods::SESSION_MESSAGES_PAGE
-        | methods::SESSION_STATUS_GET
-        | methods::SESSION_FILES_LIST
-        | methods::SESSION_TASKS_LIST
-        | methods::SESSION_WORKSPACE_GET
-        | methods::SESSION_DELETE => json!({ "session_id": session_id.to_string() }),
-        methods::SESSION_TITLE_SET => json!({
-            "session_id": session_id.to_string(),
-            "title": "Dispatch parity",
-        }),
-        methods::SESSION_FORK => json!({
-            "session_id": session_id,
-            "new_chat_id": "probe-fork-child",
-        }),
-        methods::CRON_TOGGLE => json!({ "job_id": "probe-job", "enabled": false }),
-        methods::ROUTER_SET_MODE => json!({
-            "session_id": session_id,
-            "mode": "off",
-        }),
-        methods::ROUTER_GET_METRICS => json!({ "session_id": session_id }),
-        methods::LAUNCH_RESOLVE => json!({ "cwd": "/tmp/probe-launch-resolve" }),
-        APPUI_METHOD_SESSION_COMPACT => json!({ "session_id": session_id }),
-        APPUI_METHOD_SESSION_COMPACT_MODE_SET => {
-            json!({ "session_id": session_id, "mode": "heuristic" })
-        }
-        APPUI_METHOD_PROFILE_SUB_PROVIDERS_LIST => json!({ "profile_id": "dev" }),
-        APPUI_METHOD_PROFILE_SUB_PROVIDERS_UPSERT => json!({
-            "profile_id": "dev",
-            "sub_provider": { "key": "cheap", "provider": "gemini", "model": "gemini-2.5-flash" },
-        }),
-        APPUI_METHOD_PROFILE_SUB_PROVIDERS_REMOVE => {
-            json!({ "profile_id": "dev", "key": "cheap" })
-        }
-        APPUI_METHOD_SNAPSHOT_LIST => json!({ "session_id": session_id }),
-        APPUI_METHOD_SNAPSHOT_RESTORE => {
-            json!({ "session_id": session_id, "snapshot_id": "deadbeef" })
-        }
-        APPUI_METHOD_PEER_PREPARE => json!({
-            "brief": "probe peer brief",
-            "session_id": session_id,
-        }),
-        APPUI_METHOD_PEER_GATHER => json!({ "session_id": session_id }),
-        APPUI_METHOD_TURN_STEER => json!({
-            "session_id": session_id,
-            "input": [{ "kind": "text", "text": "steer probe" }],
-        }),
-        other => panic!("missing AppUI dispatch probe params for {other}"),
-    };
-
-    RpcRequest::new(format!("probe-{method}"), method, params)
 }
 
 fn test_message(role: MessageRole, content: impl Into<String>) -> Message {
@@ -6030,68 +5836,6 @@ async fn launch_resolve_uses_stored_profiles_without_a_loaded_runtime() {
     assert_eq!(resume.resolved_profile.as_deref(), Some("ghost"));
 }
 
-async fn assert_advertised_stdio_methods_have_dispatch_path(state: Arc<AppState>) {
-    let features = ConnectionUiFeatures::stdio_defaults();
-    let capabilities = features.advertised_capabilities(&state);
-    let ledger = Arc::new(UiProtocolLedger::new(64));
-    let contracts = Arc::new(UiProtocolContractStores::default());
-    let active_turns: SharedActiveTurns = Arc::new(TokioMutex::new(HashMap::new()));
-    let connection_turns: SharedConnectionTurns = Arc::new(TokioMutex::new(HashMap::new()));
-    let (ws, _rx) = ws_connection_for_test(256);
-
-    for method in &capabilities.supported_methods {
-        assert!(
-            ui_protocol_server_supported_methods().contains(&method.as_str()),
-            "{method} is advertised over stdio but is missing from the server method inventory"
-        );
-        let request = dispatch_probe_request(method);
-
-        if method.as_str() == APPUI_METHOD_CLIENT_HELLO {
-            let mut negotiated = features;
-            assert!(
-                handle_client_hello_rpc(
-                    &ws,
-                    &state,
-                    request.id.clone(),
-                    &request,
-                    &mut negotiated,
-                    false
-                ),
-                "{method} is advertised over stdio but client_hello dispatch did not handle it"
-            );
-            continue;
-        }
-
-        if handle_raw_appui_rpc(
-            &ws,
-            &state,
-            &ledger,
-            &contracts,
-            &active_turns,
-            &connection_turns,
-            features,
-            None,
-            request.id.clone(),
-            &request,
-        )
-        .await
-        {
-            continue;
-        }
-
-        let command = route_rpc_command(request, features).unwrap_or_else(|error| {
-                panic!(
-                    "{method} is advertised over stdio but has no route_rpc_command dispatch path: {error:?}"
-                )
-            });
-        assert_eq!(
-            command.method(),
-            method,
-            "{method} routed to the wrong UiCommand variant"
-        );
-    }
-}
-
 #[tokio::test]
 async fn raw_session_status_read_missing_profile_returns_profile_unresolved() {
     let dir = tempfile::tempdir().unwrap();
@@ -6684,43 +6428,6 @@ async fn stdio_auth_bound_methods_return_typed_auth_unavailable() {
     let frame = recv_rpc_json(&mut rx).await;
     assert_eq!(frame["id"], json!("auth-logout-unauth"));
     assert_eq!(frame["error"]["data"]["kind"], json!("auth_unavailable"));
-}
-
-fn panel_user_profile(id: &str) -> crate::profiles::UserProfile {
-    crate::profiles::UserProfile {
-        id: id.into(),
-        name: id.into(),
-        enabled: true,
-        data_dir: None,
-        parent_id: None,
-        public_subdomain: None,
-        config: crate::profiles::ProfileConfig::default(),
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
-    }
-}
-
-fn panel_cron_job(id: &str, enabled: bool) -> octos_bus::CronJob {
-    octos_bus::CronJob {
-        id: id.into(),
-        name: format!("job {id}"),
-        enabled,
-        schedule: octos_bus::CronSchedule::Every {
-            every_ms: 1_800_000,
-        },
-        payload: octos_bus::CronPayload {
-            message: "check the queue".into(),
-            deliver: false,
-            channel: Some("system".into()),
-            chat_id: None,
-            mode: octos_bus::CronMode::Agent,
-        },
-        state: Default::default(),
-        origin: octos_bus::CronOrigin::default(),
-        created_at_ms: 1,
-        delete_after_run: false,
-        timezone: None,
-    }
 }
 
 #[cfg(unix)]
@@ -14540,13 +14247,6 @@ fn review_start_capability_is_strictly_negotiated_when_header_present() {
     assert!(capabilities.supports_method(methods::REVIEW_START));
 }
 
-#[derive(Default)]
-struct RecordingOrchestrator {
-    calls: std::sync::Mutex<Vec<String>>,
-}
-
-impl RecordingOrchestrator {}
-
 #[test]
 fn aux_rest_to_ws_v1_route_rpc_rejects_methods_when_feature_not_negotiated() {
     // A client that sent ANY feature header but NOT
@@ -18090,55 +17790,6 @@ async fn task_update_fast_path_when_channel_has_capacity() {
 // runtime profile (ZERO under `_main`), idempotent under repeated
 // terminal marks, recovery prompt body unchanged for failure-with-ack.
 // ====================================================================
-
-/// Build a production-shaped spawn_only `BackgroundTask` for the matrix.
-fn unified_terminal_test_task(
-    id: &str,
-    session: &SessionKey,
-    tool_call_id: &str,
-    status: octos_agent::TaskStatus,
-    error: Option<&str>,
-) -> octos_agent::BackgroundTask {
-    let now = chrono::Utc::now();
-    let runtime_state = match status {
-        octos_agent::TaskStatus::Completed => octos_agent::TaskRuntimeState::Completed,
-        octos_agent::TaskStatus::Failed => octos_agent::TaskRuntimeState::Failed,
-        octos_agent::TaskStatus::Cancelled => octos_agent::TaskRuntimeState::Cancelled,
-        _ => octos_agent::TaskRuntimeState::ExecutingTool,
-    };
-    octos_agent::BackgroundTask {
-        id: id.into(),
-        tool_name: "mofa_slides".into(),
-        tool_call_id: tool_call_id.into(),
-        parent_session_key: Some(session.to_string()),
-        child_session_key: None,
-        child_terminal_state: None,
-        child_join_state: None,
-        child_joined_at: None,
-        child_failure_action: None,
-        task_ledger_path: None,
-        status,
-        runtime_state,
-        runtime_detail: None,
-        started_at: now,
-        updated_at: now,
-        completed_at: Some(now),
-        output_files: vec![],
-        error: error.map(str::to_owned),
-        final_output: None,
-        failed_by_observer: false,
-        session_key: Some(session.to_string()),
-        tool_input: Some(serde_json::json!({"topic": "rust"})),
-        originating_client_message_id: Some("cmid-unified".into()),
-        source: None,
-        role: None,
-        summary: None,
-        artifact_count: None,
-        runtime_policy_stamp: None,
-        projection_metadata: None,
-        workspace_root: None,
-    }
-}
 
 // ====================================================================
 // PR G — UPCR-2026-009 / -010 / -011 / -012 handler tests
@@ -24867,29 +24518,6 @@ impl octos_llm::LlmProvider for AppuiContinuationLlm {
     }
 }
 
-async fn wait_for_appui_continuation(provider: &AppuiContinuationLlm) {
-    for _ in 0..50 {
-        if provider.call_count.load(Ordering::Relaxed) > 0 {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-}
-
-async fn cached_session_messages(
-    state: &Arc<AppState>,
-    profile_runtime: &Arc<crate::runtime::ProfileRuntime>,
-    session_id: &SessionKey,
-) -> Vec<Message> {
-    let runtime = state
-        .session_cache
-        .get_or_init(profile_runtime, session_id.clone(), None)
-        .await
-        .expect("session runtime");
-    let mut sessions = runtime.sessions.lock().await;
-    sessions.get_or_create(session_id).await.messages.clone()
-}
-
 #[test]
 fn terminal_integrity_truncated_voice_strips_but_does_not_execute_directives() {
     let mut content = "A partial answer [[EXIT]]".to_owned();
@@ -27007,10 +26635,6 @@ async fn send_minimal_rpc_error_fallback_huge_id_closes_1011_and_fails_no_loop()
 // peer/prepare (#1800)
 // ---------------------------------------------------------------------------
 
-fn peer_consumption_done() -> Value {
-    json!({"content":"Actual final answer", "message_id":"persisted-final", "final_assistant_committed_seq":9})
-}
-
 // ----------------------------------------------------------------------------
 // #20a — smart worktree fencing: when `peer_handoff` leaves `worktree`
 // UNSPECIFIED, the host auto-fences on a collision predicate hit (① >1 active
@@ -27019,32 +26643,6 @@ fn peer_consumption_done() -> Value {
 // model-visible warning in `model_note` — and an explicit `true` fences
 // WITHOUT touching the predicate (zero-cost short-circuit).
 // ----------------------------------------------------------------------------
-
-/// #20a — make `workspace` a real git repo with one commit so the auto-fence
-/// path's `git clone` (stage_peer) can materialize a fenced worktree. Tests
-/// that trigger the collision predicate (and thus a fence) need this; the
-/// no-collision tests deliberately keep a non-git workspace so predicate ②
-/// reads "unknown" and stays silent.
-fn init_git_workspace(workspace: &std::path::Path) {
-    let run = |args: &[&str]| {
-        assert!(
-            Command::new("git")
-                .arg("-C")
-                .arg(workspace)
-                .args(args)
-                .status()
-                .unwrap_or_else(|_| panic!("git {args:?}"))
-                .success(),
-            "git {args:?} failed"
-        );
-    };
-    run(&["init"]);
-    run(&["config", "user.name", "octos-test"]);
-    run(&["config", "user.email", "octos-test@example.invalid"]);
-    std::fs::write(workspace.join("seed.txt"), "seed\n").expect("seed file");
-    run(&["add", "."]);
-    run(&["commit", "-m", "init"]);
-}
 
 // ----------------------------------------------------------------------------
 // #20c — concurrent dual-goal fixtures: the JOINT #20a + #20b behaviour with
@@ -27061,55 +26659,6 @@ fn init_git_workspace(workspace: &std::path::Path) {
 // `sub_provider` lane configured in the master's profile).
 // ----------------------------------------------------------------------------
 
-/// A minimal profile config carrying ONE model lane (`key`) whose credential
-/// resolves offline through `env_vars` — enough to exercise lane selection +
-/// provider construction without a network call.
-fn config_with_lane(key: &str) -> crate::config::Config {
-    let mut config = crate::config::Config::default();
-    config.env_vars.insert(
-        "PEER_LANE_TEST_KEY".to_owned(),
-        "sk-peer-lane-test".to_owned(),
-    );
-    config.sub_providers = vec![crate::config::SubProviderConfig {
-        key: key.to_owned(),
-        provider: "openai".to_owned(),
-        model: Some("gpt-4o-mini".to_owned()),
-        api_key_env: Some("PEER_LANE_TEST_KEY".to_owned()),
-        base_url: None,
-        description: None,
-        default_context_window: None,
-        max_output_tokens: None,
-        api_type: None,
-    }];
-    config
-}
-
-/// A profile config carrying the `zai` GLM-5.2 model lane (#19-S2) in the
-/// RECOMMENDED `sub_providers` shape: `provider: "zai"`, `model: "glm-5.2"`,
-/// explicit `api_key_env: "ZAI_API_KEY"` (whose credential is seeded offline
-/// through `env_vars`), and NO `base_url` / `api_type` — the zai registry
-/// entry supplies both defaults (`https://api.z.ai/api/anthropic`, Anthropic
-/// Messages protocol) and returns the provider directly without an `api_type`
-/// dispatch.
-fn config_with_zai_lane() -> crate::config::Config {
-    let mut config = crate::config::Config::default();
-    config
-        .env_vars
-        .insert("ZAI_API_KEY".to_owned(), "sk-zai-lane-test".to_owned());
-    config.sub_providers = vec![crate::config::SubProviderConfig {
-        key: "zai".to_owned(),
-        provider: "zai".to_owned(),
-        model: Some("glm-5.2".to_owned()),
-        api_key_env: Some("ZAI_API_KEY".to_owned()),
-        base_url: None,
-        description: Some("zai GLM-5.2 lane for goal peers".to_owned()),
-        default_context_window: None,
-        max_output_tokens: None,
-        api_type: None,
-    }];
-    config
-}
-
 // ---------------------------------------------------------------------------
 // #peer-respond — master answers a BLOCKED peer (human-in-the-loop).
 // The process-global pending STORE is the authority for "awaiting input" — not
@@ -27118,65 +26667,6 @@ fn config_with_zai_lane() -> crate::config::Config {
 // a live LLM. Each test uses a UNIQUE peer slug so the process-global peer-wire
 // registry never collides across parallel tests.
 // ---------------------------------------------------------------------------
-
-fn approval_event(session: &octos_core::SessionKey, id: &ApprovalId) -> ApprovalRequestedEvent {
-    ApprovalRequestedEvent::generic(
-        session.clone(),
-        id.clone(),
-        TurnId::new(),
-        "shell".to_owned(),
-        "Run rm -rf build?".to_owned(),
-        "rm -rf build".to_owned(),
-    )
-}
-
-fn question_event(
-    session: &octos_core::SessionKey,
-    id: &QuestionId,
-    questions: Vec<octos_core::ui_protocol::UserQuestion>,
-) -> UserQuestionRequestedEvent {
-    UserQuestionRequestedEvent {
-        session_id: session.clone(),
-        topic: session.topic().map(ToOwned::to_owned),
-        question_id: id.clone(),
-        turn_id: TurnId::new(),
-        title: "Pick".to_owned(),
-        body: "Pick a store".to_owned(),
-        questions,
-    }
-}
-
-fn one_free_text_question() -> Vec<octos_core::ui_protocol::UserQuestion> {
-    vec![octos_core::ui_protocol::UserQuestion {
-        header: "DB".to_owned(),
-        question: "Which database?".to_owned(),
-        options: Vec::new(),
-        multi_select: false,
-        allow_free_text: true,
-    }]
-}
-
-/// A strict CHOICE question (options, NO free text) — a string answer MUST map
-/// to a label or the store rejects it (`free_text_not_allowed`).
-fn choice_question(question: &str, options: &[&str]) -> octos_core::ui_protocol::UserQuestion {
-    octos_core::ui_protocol::UserQuestion {
-        header: question.to_owned(),
-        question: question.to_owned(),
-        options: options
-            .iter()
-            .map(|l| octos_core::ui_protocol::UserQuestionOption {
-                label: (*l).to_owned(),
-                description: String::new(),
-            })
-            .collect(),
-        multi_select: false,
-        allow_free_text: false,
-    }
-}
-
-fn no_decided_sink() -> impl Fn(&ApprovalDecidedEvent, Option<&str>) {
-    |_event: &ApprovalDecidedEvent, _tool: Option<&str>| {}
-}
 
 /// (P1-5) The shared `audit_approval_decided` helper writes a durable audit
 /// entry (the peer_respond production sink calls this alongside the emit).
@@ -27224,32 +26714,6 @@ fn audit_approval_decided_writes_durable_entry() {
     assert_eq!(lines[0]["approval_id"], json!(approval_id.0.to_string()));
     assert_eq!(lines[0]["decided_by"], json!("master:session"));
     assert_eq!(lines[0]["decision"], json!("approve"));
-}
-
-/// Layer-2 helper: perform ONE blocking real chat call against the zai lane
-/// provider and return the reply text plus the billed token usage. Kept
-/// separate so the probe body reads as the three acceptance layers.
-fn run_zai_real_call(
-    provider: &Arc<dyn octos_llm::LlmProvider>,
-) -> (String, octos_llm::TokenUsage) {
-    use octos_core::Message;
-    use octos_llm::ChatConfig;
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime for the real zai call");
-    rt.block_on(async {
-        let messages = vec![Message::user("Reply with exactly: OCTOS_S3_ZAI_OK")];
-        let config = ChatConfig {
-            max_tokens: Some(32),
-            ..Default::default()
-        };
-        let resp = provider
-            .chat(&messages, &[], &config)
-            .await
-            .expect("real zai GLM-5.2 call must succeed");
-        (resp.content.unwrap_or_default(), resp.usage)
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -27367,10 +26831,6 @@ fn should_flush_old_window_and_oversized_new_fragment_in_order_when_task_switche
 
 // --- turn/steer: mid-turn prompt injection (codex parity) ---
 
-fn steer_request(id: &str, params: Value) -> RpcRequest<Value> {
-    RpcRequest::new(id.to_string(), APPUI_METHOD_TURN_STEER, params)
-}
-
 /// Await the RPC response frame carrying `id`, skipping interleaved
 /// notification frames (turn/started, projection envelopes, ...).
 async fn recv_rpc_response_with_id(
@@ -27470,6 +26930,7 @@ async fn turn_start_still_rejects_when_turn_already_running() {
 /// for the go-signal, then returns a FINAL answer; the pending steer must
 /// force a second round whose request carries the steer as a plain
 /// `role: user` message after the recorded first answer.
+#[allow(dead_code)]
 struct GatedSteerLlm {
     call_count: std::sync::atomic::AtomicUsize,
     entered: tokio::sync::Notify,
@@ -27782,40 +27243,6 @@ fn event_ledger_recovery_runs_exactly_once_across_concurrent_initializers() {
         synthesized, 1,
         "one recovery → one synthesized orphan terminal, never N interleaved sets"
     );
-}
-
-/// Call-counting scripted verifier provider for the sentinel tests.
-struct ScriptedSentinelVerifier {
-    calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    reply: &'static str,
-    usage: octos_llm::TokenUsage,
-}
-
-#[async_trait::async_trait]
-impl octos_llm::LlmProvider for ScriptedSentinelVerifier {
-    fn provider_name(&self) -> &str {
-        "test-provider"
-    }
-
-    async fn chat(
-        &self,
-        _messages: &[octos_core::Message],
-        _tools: &[octos_llm::ToolSpec],
-        _config: &octos_llm::ChatConfig,
-    ) -> eyre::Result<octos_llm::ChatResponse> {
-        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Ok(octos_llm::ChatResponse {
-            content: Some(self.reply.to_string()),
-            reasoning_content: None,
-            tool_calls: Vec::new(),
-            stop_reason: octos_llm::StopReason::EndTurn,
-            usage: self.usage.clone(),
-            provider_index: Some(0),
-        })
-    }
-    fn model_id(&self) -> &str {
-        "scripted-sentinel-verifier"
-    }
 }
 
 // ---- task-return-unconsumed-steer-inputs: accepted-but-undrained steers are

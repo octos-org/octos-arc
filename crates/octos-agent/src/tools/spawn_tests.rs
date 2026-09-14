@@ -1649,10 +1649,6 @@ async fn child_session_lifecycle_dispatch_defaults_to_not_joined_without_sender(
 // Minimal mock provider for testing
 struct MockProvider;
 
-struct ShellThenEndProvider {
-    calls: std::sync::atomic::AtomicUsize,
-}
-
 #[async_trait]
 impl LlmProvider for MockProvider {
     async fn chat(
@@ -1671,52 +1667,6 @@ impl LlmProvider for MockProvider {
                 output_tokens: 0,
                 ..Default::default()
             },
-            provider_index: None,
-        })
-    }
-
-    fn model_id(&self) -> &str {
-        "mock"
-    }
-
-    fn provider_name(&self) -> &str {
-        "mock"
-    }
-}
-
-#[async_trait]
-impl LlmProvider for ShellThenEndProvider {
-    async fn chat(
-        &self,
-        _messages: &[octos_core::Message],
-        _tools: &[octos_llm::ToolSpec],
-        _config: &octos_llm::ChatConfig,
-    ) -> Result<octos_llm::ChatResponse> {
-        let call = self.calls.fetch_add(1, Ordering::SeqCst);
-        if call == 0 {
-            return Ok(octos_llm::ChatResponse {
-                content: None,
-                reasoning_content: None,
-                tool_calls: vec![octos_core::ToolCall {
-                    id: "call_shell".into(),
-                    name: "shell".into(),
-                    arguments: serde_json::json!({
-                        "command": "printf ready",
-                    }),
-                    metadata: None,
-                }],
-                stop_reason: octos_llm::StopReason::ToolUse,
-                usage: octos_llm::TokenUsage::default(),
-                provider_index: None,
-            });
-        }
-
-        Ok(octos_llm::ChatResponse {
-            content: Some("done".into()),
-            reasoning_content: None,
-            tool_calls: vec![],
-            stop_reason: octos_llm::StopReason::EndTurn,
-            usage: octos_llm::TokenUsage::default(),
             provider_index: None,
         })
     }

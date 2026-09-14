@@ -1,12 +1,12 @@
 //! UI Protocol v1 WebSocket transport.
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     process::Command,
     sync::{
         Arc, Mutex as StdMutex, OnceLock,
-        atomic::{AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -37,18 +37,15 @@ use octos_core::ui_protocol::{
     SESSION_MESSAGES_PAGE_MAX_OFFSET, SESSION_TITLE_SET_MAX_CHARS, SessionBtwParams,
     SessionDeleteParams, SessionFilesListParams, SessionHydrateParams, SessionHydrateResult,
     SessionListParams, SessionMessagesPageParams, SessionOpenParams, SessionOpenResult,
-    SessionOpened, SessionOrchestrationEvent, SessionRollbackParams, SessionRollbackResult,
-    SessionSnapshotParams, SessionStatusGetParams, SessionTasksListParams, SessionTitleSetParams,
-    SessionWorkspaceGetParams, SkillActionJobUpdatedEvent, SystemStatusGetParams,
-    TaskArtifactListParams, TaskArtifactReadParams, TaskArtifactReadResult, TaskArtifactRecord,
-    TaskCancelParams, TaskCancelResult, TaskListEntry, TaskListParams, TaskListResult,
-    TaskOutputDeltaEvent, TaskRestartFromNodeParams, TaskRestartFromNodeResult,
-    TaskRuntimeState as UiTaskRuntimeState, TaskUpdatedEvent, ThreadGraphEntry,
-    ThreadGraphGetParams, ThreadGraphGetResult, ToolCompletedEvent, ToolProgressEvent,
-    ToolStartedEvent, TurnCompletedEvent, TurnErrorEvent, TurnErrorPartialResult, TurnId,
-    TurnInterruptParams, TurnInterruptResult, TurnLifecycleState, TurnSessionResult,
-    TurnStartParams, TurnStateGetParams, TurnStateGetResult, TurnTerminalError,
-    TurnTerminalOutcome, UI_PROTOCOL_FEATURE_APPROVAL_TYPED_V1,
+    SessionOpened, SessionRollbackParams, SessionRollbackResult, SessionSnapshotParams,
+    SessionStatusGetParams, SessionTasksListParams, SessionTitleSetParams,
+    SessionWorkspaceGetParams, SkillActionJobUpdatedEvent, SystemStatusGetParams, TaskCancelParams,
+    TaskCancelResult, TaskListEntry, TaskListParams, TaskListResult, TaskOutputDeltaEvent,
+    TaskRestartFromNodeParams, TaskRestartFromNodeResult, TaskRuntimeState as UiTaskRuntimeState,
+    ThreadGraphEntry, ThreadGraphGetParams, ThreadGraphGetResult, TurnCompletedEvent,
+    TurnErrorEvent, TurnErrorPartialResult, TurnId, TurnInterruptParams, TurnInterruptResult,
+    TurnLifecycleState, TurnSessionResult, TurnStartParams, TurnStateGetParams, TurnStateGetResult,
+    TurnTerminalError, TurnTerminalOutcome, UI_PROTOCOL_FEATURE_APPROVAL_TYPED_V1,
     UI_PROTOCOL_FEATURE_AUXILIARY_REST_TO_WS_V1, UI_PROTOCOL_FEATURE_BACKGROUND_ACTIVITY_V1,
     UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1, UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1,
     UI_PROTOCOL_FEATURE_CODING_LOOP_RUNTIME_V1, UI_PROTOCOL_FEATURE_CODING_MONITOR_RUNTIME_V1,
@@ -67,9 +64,11 @@ use octos_core::ui_protocol::{
     UiPaneSnapshot, UiPaneSnapshotLimitation, UiProgressEvent, UiProgressMetadata,
     UiProtocolCapabilities, UiRpcResult, UiWorkspacePaneEntry, UiWorkspacePaneSnapshot,
     UnsupportedCapabilityReport, UserQuestionRequestedEvent, UserQuestionRespondParams,
-    VoiceAudioChunkEvent, approval_cancelled_reasons, approval_kinds, hydrate_sections,
-    progress_kinds, thread_status,
+    approval_cancelled_reasons, approval_kinds, hydrate_sections, thread_status,
 };
+
+#[cfg(test)]
+use octos_core::ui_protocol::{ToolCompletedEvent, ToolProgressEvent, ToolStartedEvent};
 use octos_core::{
     AgentId, InboundMessage, MAIN_PROFILE_ID, Message, MessageRole, SessionKey, TaskId,
 };
@@ -935,36 +934,6 @@ impl SessionWorkspaceStore {
         self.snapshot(profile_id, session_id)
             .and_then(|binding| binding.runtime_hint)
     }
-
-    /// Insert `root` under `session_id` ONLY when no entry exists yet, holding
-    /// the lock across the check + insert. Returns whether this call inserted
-    /// (`true`) or found an established entry it left untouched (`false`). PR 4b
-    /// Fix 2: the fleet-keeper re-seed's never-overwrite guard was a separate
-    /// `get()` then `set()` (two lock acquisitions) that a concurrent
-    /// `session/open` `set` (the authoritative live-client cwd) could race
-    /// between, letting a headless seed clobber the real workspace. `set_if_absent`
-    /// collapses that to one atomic step so the seed can only ever fill a gap.
-    fn set_if_absent(
-        &self,
-        profile_id: &str,
-        session_id: SessionKey,
-        root: PathBuf,
-        runtime_hint: Option<PathBuf>,
-    ) -> bool {
-        use std::collections::hash_map::Entry;
-        match self
-            .entries
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .entry((profile_id.to_owned(), session_id))
-        {
-            Entry::Occupied(_) => false,
-            Entry::Vacant(slot) => {
-                slot.insert(SessionWorkspaceBinding { root, runtime_hint });
-                true
-            }
-        }
-    }
 }
 
 /// Resolve the profile component of an in-memory session-workspace key.
@@ -1150,8 +1119,6 @@ impl SessionContextStatusStore {
 enum InterruptOrigin {
     /// `turn/interrupt` from the connected client.
     Client,
-    /// `peer_close` retired the peer while this turn was still running.
-    PeerClose,
 }
 
 impl InterruptOrigin {
@@ -1159,10 +1126,6 @@ impl InterruptOrigin {
     fn message(self) -> &'static str {
         match self {
             Self::Client => "turn interrupted by client",
-            Self::PeerClose => {
-                "turn interrupted by peer_close — the peer was retired while this \
-                 turn was still running, so its in-flight work was discarded"
-            }
         }
     }
 }
@@ -1700,26 +1663,15 @@ impl ConnectionUiFeatures {
         UiProtocolCapabilities::for_negotiated_features(requested)
     }
 
-    fn coding_autonomy_available(self) -> bool {
-        !self.header_present || self.coding_autonomy_v1
-    }
-
     fn agent_control_available(self) -> bool {
         !self.header_present || (self.coding_autonomy_v1 && self.coding_agent_control_v1)
-    }
-
-    fn task_artifacts_available(self) -> bool {
-        !self.header_present || self.harness_task_artifacts
-    }
-
-    fn loop_runtime_available(self) -> bool {
-        !self.header_present || (self.coding_autonomy_v1 && self.coding_loop_runtime_v1)
     }
 
     fn monitor_runtime_available(self) -> bool {
         !self.header_present || (self.coding_autonomy_v1 && self.coding_monitor_runtime_v1)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn review_start_available(self) -> bool {
         !self.header_present || self.review_start_v1
     }
@@ -4031,17 +3983,6 @@ fn replace_voice_user_message_content(messages: &mut [Message], transcript: Opti
     }
 }
 
-/// The legacy `turn/start` path only has nothing to process when silent audio
-/// is the request's sole input.
-fn should_short_circuit_no_speech(
-    had_audio_media: bool,
-    had_non_audio_media: bool,
-    had_audio_input: bool,
-    prompt_is_empty: bool,
-) -> bool {
-    had_audio_media && !had_non_audio_media && !had_audio_input && prompt_is_empty
-}
-
 /// User-visible content of a voice turn: the typed prompt (if any) combined
 /// with the ASR transcript, exactly as the LLM prompt is assembled — but
 /// WITHOUT the `[语音模式:…]` scaffolding that gets appended to the prompt
@@ -4624,7 +4565,7 @@ fn forward_task_progress_to_channel(
     tx: &tokio::sync::mpsc::Sender<String>,
     progress_dropped: &Arc<AtomicU64>,
     task: &octos_agent::BackgroundTask,
-    runtime_profile_id: Option<&str>,
+    _runtime_profile_id: Option<&str>,
 ) {
     let event = background_task_to_progress_json(task);
     let Ok(json) = serde_json::to_string(&event) else {
@@ -5007,13 +4948,6 @@ struct SessionUserQuestionRequester {
     ws: WsConnection,
     ledger: Arc<UiProtocolLedger>,
     contracts: Arc<UiProtocolContractStores>,
-    /// #peer-awaiting-wake — held so a peer parking on a question can resolve
-    /// its `peers/<slug>/originator` (via `state.profiles`) and WAKE the master.
-    /// (The approval requester already holds `state`; this mirrors it.)
-    state: Arc<AppState>,
-    /// #1842(b) — `peers/` under the RESOLVED runtime profile, for the
-    /// closed-peer park gate. See [`UiProtocolApprovalRequester::peers_root`].
-    peers_root: PathBuf,
     session_id: SessionKey,
     turn_id: TurnId,
 }
@@ -5582,8 +5516,6 @@ async fn ui_protocol_connection(
     let mut btw_aside_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     // Last-emitted whole-job orchestration status per session (dedup so only
     // changes hit the wire). Drives the client's composer top-border indicator.
-    let mut last_orchestration: HashMap<SessionKey, SessionOrchestrationEvent> = HashMap::new();
-
     // #924 BLOCK 1: wake the read loop the instant a lifecycle/RPC
     // send marks the connection failed. Without this, an idle socket
     // with a failed write side would sit in `ws_rx.next().await`
@@ -6306,7 +6238,6 @@ where
     let mut btw_aside_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     let connection_headers = HeaderMap::new();
     let mut connection_profile_id_owned: Option<String> = None;
-    let mut last_orchestration: HashMap<SessionKey, SessionOrchestrationEvent> = HashMap::new();
     let mut appui_continuation_tick = tokio::time::interval(Duration::from_secs(2));
     appui_continuation_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let failed_notify = ws.failed_notify();
@@ -7604,214 +7535,6 @@ struct RawProfileSubProvidersRemoveParams {
     #[serde(default)]
     profile_id: Option<String>,
     key: String,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct RawAutonomyListParams {
-    #[serde(default)]
-    session_id: Option<SessionKey>,
-    #[serde(default)]
-    profile_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RawAutonomySessionParams {
-    session_id: SessionKey,
-    #[serde(default)]
-    profile_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RawAgentParams {
-    agent_id: String,
-    #[serde(default)]
-    session_id: Option<SessionKey>,
-    #[serde(default)]
-    profile_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RawAgentOutputParams {
-    agent_id: String,
-    #[serde(default)]
-    session_id: Option<SessionKey>,
-    #[serde(default)]
-    profile_id: Option<String>,
-    #[serde(default)]
-    cursor: Option<Value>,
-    #[serde(default)]
-    limit: Option<usize>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RawAgentArtifactReadParams {
-    agent_id: String,
-    #[serde(default)]
-    artifact_id: Option<String>,
-    #[serde(default)]
-    path: Option<String>,
-    #[serde(default)]
-    session_id: Option<SessionKey>,
-    #[serde(default)]
-    profile_id: Option<String>,
-}
-
-/// Param shape for the `task/artifact/list` alias. Accepts either
-/// `agent_id` (legacy `agent/artifact/*` shape) or `task_id` (the
-/// UPCR-2026-019 / M13 spec-conforming shape). Spec-conforming clients
-/// reach the artifact surface via `task/list`, which exposes `task_id`,
-/// so the alias must accept that synonym. Codex P1 follow-up to #1094.
-#[derive(Debug, Deserialize)]
-struct RawTaskAgentParams {
-    #[serde(default)]
-    agent_id: Option<String>,
-    #[serde(default)]
-    task_id: Option<String>,
-    #[serde(default)]
-    session_id: Option<SessionKey>,
-    #[serde(default)]
-    profile_id: Option<String>,
-}
-
-impl RawTaskAgentParams {
-    fn resolve_agent_id(&self, method: &str) -> Result<String, RpcError> {
-        // Prefer the legacy `agent_id` when both are set so existing clients
-        // keep their semantics; accept `task_id` as a synonym otherwise.
-        // Codex P1 re-review on #1121: the `task_id` path MUST require an
-        // explicit `session_id` so the session/parent-child ownership
-        // check still runs. Without it, `ensure_agent_control_scope`
-        // silently downgrades to profile-only matching, and a
-        // same-profile connection that knows another task's UUID could
-        // read its artifacts. The legacy `agent_id` shape keeps the
-        // optional-session behavior for backwards compat.
-        match (self.agent_id.as_deref(), self.task_id.as_deref()) {
-            (Some(agent_id), _) => Ok(agent_id.to_owned()),
-            (None, Some(task_id)) => {
-                if self.session_id.is_none() {
-                    return Err(RpcError::invalid_params(format!(
-                        "{method} params: `task_id` requires `session_id` so artifact access can be scoped to the session that owns the task"
-                    )));
-                }
-                Ok(task_id.to_owned())
-            }
-            (None, None) => Err(RpcError::invalid_params(format!(
-                "{method} params: missing field `agent_id` or `task_id`"
-            ))),
-        }
-    }
-}
-
-/// Param shape for the `task/artifact/read` alias. Mirrors
-/// `RawAgentArtifactReadParams` but accepts either `agent_id` or
-/// `task_id` like `RawTaskAgentParams`. Codex P1 follow-up to #1094.
-#[derive(Debug, Deserialize)]
-struct RawTaskArtifactReadParams {
-    #[serde(default)]
-    agent_id: Option<String>,
-    #[serde(default)]
-    task_id: Option<String>,
-    #[serde(default)]
-    artifact_id: Option<String>,
-    #[serde(default)]
-    path: Option<String>,
-    #[serde(default)]
-    session_id: Option<SessionKey>,
-    #[serde(default)]
-    profile_id: Option<String>,
-}
-
-impl RawTaskArtifactReadParams {
-    fn resolve_agent_id(&self, method: &str) -> Result<String, RpcError> {
-        // Codex P1 re-review on #1121: see `RawTaskAgentParams::resolve_agent_id`
-        // — the `task_id` path requires `session_id` so the
-        // session/parent-child ownership check still runs.
-        match (self.agent_id.as_deref(), self.task_id.as_deref()) {
-            (Some(agent_id), _) => Ok(agent_id.to_owned()),
-            (None, Some(task_id)) => {
-                if self.session_id.is_none() {
-                    return Err(RpcError::invalid_params(format!(
-                        "{method} params: `task_id` requires `session_id` so artifact access can be scoped to the session that owns the task"
-                    )));
-                }
-                Ok(task_id.to_owned())
-            }
-            (None, None) => Err(RpcError::invalid_params(format!(
-                "{method} params: missing field `agent_id` or `task_id`"
-            ))),
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct RawLoopCreateParams {
-    session_id: SessionKey,
-    #[serde(default)]
-    profile_id: Option<String>,
-    #[serde(default)]
-    prompt: Option<String>,
-    #[serde(default, alias = "command", alias = "input")]
-    command: Option<String>,
-    #[serde(default)]
-    interval_seconds: Option<u64>,
-    #[serde(default)]
-    mode: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RawLoopIdParams {
-    loop_id: String,
-    #[serde(default)]
-    session_id: Option<SessionKey>,
-    #[serde(default)]
-    profile_id: Option<String>,
-}
-
-/// #1977 `monitor/create` params. `argv` is the sandboxed probe command;
-/// `mode` selects poll (default, with `interval_seconds`) or stream.
-#[derive(Debug, Deserialize)]
-struct RawMonitorCreateParams {
-    session_id: SessionKey,
-    #[serde(default)]
-    profile_id: Option<String>,
-    name: String,
-    argv: Vec<String>,
-    #[serde(default)]
-    filter_regex: Option<String>,
-    #[serde(default)]
-    mode: Option<String>,
-    #[serde(default)]
-    interval_seconds: Option<u64>,
-    #[serde(default)]
-    batch_ms: Option<u32>,
-    #[serde(default)]
-    timeout_secs: Option<u64>,
-    #[serde(default)]
-    persistent: Option<bool>,
-    #[serde(default)]
-    max_events_per_hour: Option<u32>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RawMonitorIdParams {
-    monitor_id: String,
-    #[serde(default)]
-    session_id: Option<SessionKey>,
-    #[serde(default)]
-    profile_id: Option<String>,
-}
-
-/// `turn/steer` params: `{session_id, expected_turn_id?, input}` —
-/// mirrors codex `TurnSteerParams { thread_id, expected_turn_id, input }`
-/// with octos's optional-precondition twist: an ABSENT `expected_turn_id`
-/// steers whatever turn is live (a mismatch when present is rejected, codex
-/// `ExpectedTurnMismatch`).
-#[derive(Debug, Clone, Deserialize)]
-struct RawTurnSteerParams {
-    session_id: SessionKey,
-    #[serde(default)]
-    expected_turn_id: Option<TurnId>,
-    #[serde(default)]
-    input: Vec<InputItem>,
 }
 
 fn parse_raw_params<T>(request: &RpcRequest<Value>) -> Result<T, RpcError>
@@ -9622,7 +9345,7 @@ async fn raw_session_status_result(
     if profile.is_none() && !profile_is_known(state, &profile_id) {
         return Err(profile_unresolved_error(&profile_id));
     }
-    let mut policy =
+    let policy =
         runtime_policy_stamp_for_profile(state, &profile_id, Some(&session_id), profile.as_ref());
     let (context, context_state) = if features.context_lifecycle_available() {
         appui_context_status_snapshot_for_state(
@@ -12409,17 +12132,6 @@ async fn raw_snapshot_restore(
     }))
 }
 
-/// The `exclude_session` the BOOT sweep passes to the shared evaluation.
-///
-/// Every other caller is a session whose turn is terminating right now and so
-/// must not count against idle/settled. At boot NOTHING is terminating, so
-/// nothing may be excluded. A session key is always `<profile>:<channel>:<id>`,
-/// so the empty key can never name a real session and removing it from the
-/// live-turn set is a guaranteed no-op — which is exactly the intent.
-fn boot_sweep_exclude_session() -> SessionKey {
-    SessionKey(String::new())
-}
-
 /// Serializes profile `sub_providers` read-modify-write across concurrent
 /// upsert/remove RPCs so two clients adding different lanes don't clobber each
 /// other (a bare get→mutate→save is last-writer-wins because `save_with_merge`
@@ -12600,8 +12312,8 @@ async fn handle_raw_appui_rpc(
     state: &Arc<AppState>,
     ledger: &Arc<UiProtocolLedger>,
     contracts: &Arc<UiProtocolContractStores>,
-    active_turns: &SharedActiveTurns,
-    connection_turns: &SharedConnectionTurns,
+    _active_turns: &SharedActiveTurns,
+    _connection_turns: &SharedConnectionTurns,
     features: ConnectionUiFeatures,
     connection_profile_id: Option<&str>,
     id: String,
@@ -12827,7 +12539,7 @@ async fn handle_raw_appui_rpc(
 
     match result {
         Ok(result) => {
-            let continuation_target =
+            let _continuation_target =
                 appui_continuation_target_from_raw_result(request.method.as_str(), &result);
             // M15-F5 (#44): the PRODUCTION goal/loop runtime never emitted the
             // `session/goal/updated` / `loop/updated` / `loop/fired`
@@ -13045,7 +12757,7 @@ fn string_session_with_optional_topic(session_id: &str, topic: Option<&str>) -> 
 /// here is dead (its feature won't dispatch) and trips the coverage test, while
 /// adding it here without a matching arm panics the `unreachable!`. Both point
 /// back to this one function.
-fn raw_method_is_dispatched(method: &str, stdio_transport: bool) -> bool {
+fn raw_method_is_dispatched(method: &str, _stdio_transport: bool) -> bool {
     if method == APPUI_METHOD_REVIEW_START || method == APPUI_METHOD_TURN_STEER {
         return true;
     }
@@ -15553,19 +15265,6 @@ fn profile_runtime_unavailable_message(state: &AppState, profile_id: &str) -> St
     format!("Profile '{profile_id}' runtime is unavailable.")
 }
 
-/// Invalidate and rebuild an on-demand AppUI runtime after the self-service
-/// profile endpoint changes runtime configuration. The REST settings surface
-/// predates `profile/llm/upsert`; without this bridge it persisted a new
-/// model/key while every following skill action kept using a stale runtime (or
-/// had no runtime at all) until the server restarted.
-pub(crate) async fn refresh_profile_runtime_after_profile_update(
-    state: &AppState,
-    profile_id: &str,
-    config_revision: Option<String>,
-) {
-    let _ = commit_profile_llm_runtime_transition(state, profile_id, config_revision).await;
-}
-
 /// Resolve the canonical `SessionManager` handle for read operations
 /// (hydrate, state, etc.). Closes #919.1: turn persistence writes to
 /// the profile's `SessionRuntime.sessions`, so reads under profile
@@ -16326,26 +16025,6 @@ async fn handle_turn_start_with_accept(
     true
 }
 
-/// Outcome of the `turn/steer` registry decision (computed under the
-/// active-turns registry lock — see [`handle_turn_steer`]).
-enum TurnSteerDecision {
-    /// Input pushed into the ACTIVE turn's pending buffer. `interrupting`
-    /// records that the turn was already winding down at acceptance
-    /// (task-turn-interrupt-steer-correlation-logs) — such input is likely
-    /// to be returned as `turn/steer_dropped` rather than drained.
-    Steered { turn_id: TurnId, interrupting: bool },
-    /// `expected_turn_id` was present and does not name the active turn
-    /// (codex `ExpectedTurnMismatch`). Carries the actual active id for the
-    /// error message.
-    Mismatch(TurnId),
-    /// A live turn exists but registered no steer buffer (code review / M9
-    /// fixture turns) — codex `ActiveTurnNotSteerable`.
-    NotSteerable,
-    /// No live turn — fall back to the ordinary `turn/start` path (codex
-    /// `NoActiveTurn` → `spawn_task(RegularTask)`).
-    NoActiveTurn,
-}
-
 /// Snapshot of sessions that currently have an in-flight (non-terminal) turn in
 /// the process-global active-turns registry. One lock acquisition; used to feed
 /// the whole-job orchestration status without re-locking per session.
@@ -16360,101 +16039,6 @@ async fn active_turn_sessions(
         }
     }
     sessions
-}
-
-/// Compute + emit `session/orchestration` updates for the whole-job indicator.
-///
-/// The "active orchestration" set is the union of: sessions with an in-flight
-/// turn, sessions with a non-terminal sub-agent, and sessions with a queued
-/// master continuation. For each such session we emit a status carrying
-/// `active:true` + counts + a coarse phase; a session that drops out of the set
-/// gets one final `active:false`. Emissions are deduped per connection via
-/// `last` (only changes go on the wire). The client keeps its job indicator
-/// live across the sub-agent-complete → master-re-entry gap because such a
-/// session stays in the set (pending continuation) even with no running turn.
-async fn emit_session_orchestration_updates(
-    ws: &WsConnection,
-    ledger: &Arc<UiProtocolLedger>,
-    active_turns: &SharedActiveTurns,
-    live_forwarders: &SharedLiveForwarders,
-    last: &mut std::collections::HashMap<SessionKey, SessionOrchestrationEvent>,
-) {
-    // Scope to THIS connection's open/subscribed sessions so we don't (a) emit
-    // another profile's session status to a connection that never opened it
-    // (cross-profile leak) or (b) have every connection re-emit for every active
-    // session (the redundant N× the per-connection design otherwise produces).
-    // A session enters `live_forwarders` only via a scope-validated
-    // `session/open`, so this is the connection's authorized session set.
-    let subscribed: std::collections::HashSet<SessionKey> =
-        live_forwarders.lock().await.keys().cloned().collect();
-    if subscribed.is_empty() {
-        // Still drain `last` to idle so a connection that closed its sessions
-        // doesn't leave a stale active indicator on its own dedup map.
-        last.clear();
-        return;
-    }
-    let turn_sessions = active_turn_sessions(active_turns).await;
-    let mut candidates: Vec<SessionKey> = turn_sessions.iter().cloned().collect();
-    candidates.retain(|session_id| subscribed.contains(session_id));
-
-    let mut current: std::collections::HashMap<SessionKey, SessionOrchestrationEvent> =
-        std::collections::HashMap::new();
-    for session_id in &candidates {
-        let (running_agents, pending_continuations) = (0u32, 0u32);
-        let turn_active = turn_sessions.contains(session_id);
-        // A candidate is here because at least one of these holds; if a stale
-        // continuation cleared between set-build and count, skip it.
-        if !turn_active && running_agents == 0 && pending_continuations == 0 {
-            continue;
-        }
-        let phase = if turn_active && running_agents > 0 {
-            "orchestrating"
-        } else if turn_active {
-            "working"
-        } else if pending_continuations > 0 {
-            "re-entering"
-        } else {
-            "orchestrating"
-        };
-        current.insert(
-            session_id.clone(),
-            SessionOrchestrationEvent {
-                session_id: session_id.clone(),
-                active: true,
-                running_agents,
-                pending_continuations,
-                phase: Some(phase.to_owned()),
-            },
-        );
-    }
-
-    // Sessions that just went idle: emit one terminal active:false.
-    for (session_id, previous) in last.iter() {
-        if previous.active && !current.contains_key(session_id) {
-            let _ = send_notification_durable(
-                ws,
-                ledger,
-                UiNotification::SessionOrchestration(SessionOrchestrationEvent {
-                    session_id: session_id.clone(),
-                    active: false,
-                    running_agents: 0,
-                    pending_continuations: 0,
-                    phase: None,
-                }),
-            );
-        }
-    }
-    // New / changed active sessions.
-    for (session_id, event) in &current {
-        if last.get(session_id) != Some(event) {
-            let _ = send_notification_durable(
-                ws,
-                ledger,
-                UiNotification::SessionOrchestration(event.clone()),
-            );
-        }
-    }
-    *last = current;
 }
 
 /// #2019 — bound on the human-sink queue. Producers (`try_send`) never block:
@@ -16487,7 +16071,7 @@ const BACKGROUND_ACTIVITY_QUEUE_CAPACITY: usize = 512;
 ///
 /// Nothing here is routed back into model context.
 pub(crate) fn spawn_background_activity_sink(state: Arc<AppState>) {
-    let (tx, mut rx) = mpsc::channel::<octos_core::ui_protocol::BackgroundActivityEvent>(
+    let (_tx, mut rx) = mpsc::channel::<octos_core::ui_protocol::BackgroundActivityEvent>(
         BACKGROUND_ACTIVITY_QUEUE_CAPACITY,
     );
     tokio::spawn(async move {
@@ -16505,13 +16089,6 @@ pub(crate) fn spawn_background_activity_sink(state: Arc<AppState>) {
         }
     });
 }
-
-/// Cadence for the server-level (connection-independent) master-continuation
-/// drain. Deliberately slower than the per-connection `appui_continuation_tick`
-/// (2s) so a live ws/stdio client almost always wins the race and renders the
-/// re-entry turn on its own connection; this loop is the safety net that drains
-/// queued continuations when NO client is connected.
-const GLOBAL_MASTER_CONTINUATION_DRAIN_INTERVAL_SECS: u64 = 5;
 
 async fn handle_turn_interrupt(
     ws: &WsConnection,
@@ -16649,30 +16226,6 @@ async fn decide_interrupt(
     let interrupt_tx_arc = active.interrupt_tx.clone();
     drop(registry);
     capture_turn_interrupt(state_arc, interrupt_tx_arc, InterruptOrigin::Client).await
-}
-
-/// #1842(a) — interrupt WHATEVER turn is currently in flight for `session_id`,
-/// with no `turn_id` to match against. The cross-session seam `peer_close` uses:
-/// the master retiring a peer knows the peer's trusted wire session but not the
-/// id of the turn it happens to be running.
-///
-/// Deliberately the SAME [`capture_turn_interrupt`] routine `turn/interrupt`
-/// runs — one state-lock dance, not a second divergent copy — so a peer-close
-/// abort and a client interrupt are indistinguishable to the turn task and the
-/// exactly-one-terminal-event invariant holds for both.
-async fn interrupt_active_turn_for_session(
-    active_turns: &SharedActiveTurns,
-    session_id: &SessionKey,
-    origin: InterruptOrigin,
-) -> InterruptOutcome {
-    let registry = active_turns.lock().await;
-    let Some(active) = registry.get(session_id) else {
-        return InterruptOutcome::Unknown;
-    };
-    let state_arc = active.state.clone();
-    let interrupt_tx_arc = active.interrupt_tx.clone();
-    drop(registry);
-    capture_turn_interrupt(state_arc, interrupt_tx_arc, origin).await
 }
 
 /// The interrupt CAPTURE routine shared by `turn/interrupt` and the #1842(a)
@@ -20149,204 +19702,6 @@ fn task_query_store_or_error(
     })
 }
 
-fn task_artifact_profile_id(
-    session_id: &SessionKey,
-    requested_profile_id: Option<&str>,
-    connection_profile_id: Option<&str>,
-) -> Result<String, RpcError> {
-    Ok(
-        validate_session_scope(session_id, requested_profile_id, connection_profile_id)?
-            .or_else(|| session_id.profile_id().map(ToOwned::to_owned))
-            .or_else(|| connection_profile_id.map(ToOwned::to_owned))
-            .unwrap_or_else(|| MAIN_PROFILE_ID.to_owned()),
-    )
-}
-
-fn task_entry_for_session(
-    state: &Arc<AppState>,
-    session_id: &SessionKey,
-    task_id: &TaskId,
-) -> Result<TaskListEntry, RpcError> {
-    task_list_snapshot(state, session_id)?
-        .into_iter()
-        .find(|task| &task.id == task_id)
-        .ok_or_else(|| RpcError::unknown_task_id(task_id))
-}
-
-fn task_artifact_record_from_value(value: &Value) -> TaskArtifactRecord {
-    let mut extra = BTreeMap::new();
-    if let Some(object) = value.as_object() {
-        for (key, value) in object {
-            if !matches!(
-                key.as_str(),
-                "id" | "artifact_id" | "title" | "kind" | "status" | "path" | "content"
-            ) {
-                extra.insert(key.clone(), value.clone());
-            }
-        }
-    }
-    let id = value
-        .get("id")
-        .or_else(|| value.get("artifact_id"))
-        .and_then(Value::as_str)
-        .unwrap_or("artifact")
-        .to_owned();
-    let title = value
-        .get("title")
-        .and_then(Value::as_str)
-        .unwrap_or(&id)
-        .to_owned();
-    TaskArtifactRecord {
-        id,
-        title,
-        kind: value
-            .get("kind")
-            .and_then(Value::as_str)
-            .unwrap_or("file")
-            .to_owned(),
-        status: value
-            .get("status")
-            .and_then(Value::as_str)
-            .unwrap_or("ready")
-            .to_owned(),
-        path: value
-            .get("path")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned),
-        content: value
-            .get("content")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned),
-        extra,
-    }
-}
-
-fn task_artifact_record_for_selector(params: &TaskArtifactReadParams) -> TaskArtifactRecord {
-    let id = params
-        .artifact_id
-        .clone()
-        .or_else(|| params.path.clone())
-        .unwrap_or_else(|| "artifact".to_owned());
-    TaskArtifactRecord {
-        title: id.clone(),
-        id,
-        kind: "file".to_owned(),
-        status: "ready".to_owned(),
-        path: params.path.clone(),
-        content: None,
-        extra: BTreeMap::new(),
-    }
-}
-
-fn task_output_artifact_records(task: &TaskListEntry) -> Vec<TaskArtifactRecord> {
-    task.output_files
-        .iter()
-        .enumerate()
-        .map(|(index, path)| {
-            let title = Path::new(path)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .filter(|name| !name.is_empty())
-                .unwrap_or(path)
-                .to_owned();
-            TaskArtifactRecord {
-                id: format!("output-{:02}", index + 1),
-                title,
-                kind: task_artifact_kind_for_path(path),
-                status: "ready".to_owned(),
-                path: Some(path.clone()),
-                content: None,
-                extra: BTreeMap::new(),
-            }
-        })
-        .collect()
-}
-
-fn task_artifact_kind_for_path(path: &str) -> String {
-    match Path::new(path)
-        .extension()
-        .and_then(|extension| extension.to_str())
-    {
-        Some("md" | "markdown") => "markdown",
-        Some("json") => "json",
-        Some("txt" | "log") => "text",
-        Some("png" | "jpg" | "jpeg" | "gif" | "webp") => "image",
-        _ => "file",
-    }
-    .to_owned()
-}
-
-fn select_task_artifact(
-    artifacts: &[TaskArtifactRecord],
-    artifact_id: Option<&str>,
-    path: Option<&str>,
-) -> Result<TaskArtifactRecord, RpcError> {
-    artifacts
-        .iter()
-        .find(|artifact| {
-            artifact_id.is_some_and(|id| id == artifact.id)
-                || path.is_some_and(|path| artifact.path.as_deref() == Some(path))
-        })
-        .cloned()
-        .ok_or_else(|| {
-            let selector = artifact_id.or(path).unwrap_or("artifact");
-            RpcError::not_found("task_artifact", selector)
-                .with_data(json!({ "kind": "task_artifact_not_found", "artifact_id": selector }))
-        })
-}
-
-fn read_task_artifact_text(path: &str, data_dir: Option<&Path>) -> Option<String> {
-    let resolved = data_dir
-        .and_then(|data_dir| {
-            octos_bus::file_handle::resolve_scoped_file_handle(data_dir, path)
-                .or_else(|| octos_bus::file_handle::resolve_legacy_file_request(data_dir, path))
-        })
-        .or_else(|| Path::new(path).is_absolute().then(|| PathBuf::from(path)))?;
-    std::fs::read(resolved)
-        .ok()
-        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-}
-
-fn slice_task_artifact_content(
-    content: Option<String>,
-    cursor: Option<OutputCursor>,
-    limit_bytes: Option<u64>,
-) -> (
-    Option<String>,
-    Option<OutputCursor>,
-    Option<OutputCursor>,
-    bool,
-) {
-    let Some(content) = content else {
-        return (None, None, None, false);
-    };
-    let len = content.len();
-    let mut start = cursor
-        .map(|cursor| cursor.offset as usize)
-        .unwrap_or(0)
-        .min(len);
-    while start > 0 && !content.is_char_boundary(start) {
-        start -= 1;
-    }
-    let limit = limit_bytes
-        .and_then(|limit| usize::try_from(limit).ok())
-        .filter(|limit| *limit > 0)
-        .unwrap_or(64 * 1024);
-    let mut end = start.saturating_add(limit).min(len);
-    while end > start && !content.is_char_boundary(end) {
-        end -= 1;
-    }
-    let text = content[start..end].to_owned();
-    (
-        Some(text),
-        Some(OutputCursor {
-            offset: start as u64,
-        }),
-        Some(OutputCursor { offset: end as u64 }),
-        end < len,
-    )
-}
-
 fn task_list_snapshot(
     state: &Arc<AppState>,
     session_id: &SessionKey,
@@ -20718,590 +20073,6 @@ fn task_relaunch_rpc_error(task_id: &TaskId, error: octos_agent::TaskRelaunchErr
     }
 }
 
-enum M9FixtureOutcome {
-    Completed,
-    Errored { code: &'static str, message: String },
-    Interrupted,
-}
-
-async fn m9_fixture_delay_or_interrupt(
-    interrupt_rx: &mut mpsc::Receiver<()>,
-    duration: std::time::Duration,
-) -> bool {
-    tokio::select! {
-        _ = interrupt_rx.recv() => true,
-        _ = tokio::time::sleep(duration) => false,
-    }
-}
-
-fn m9_fixture_has_pending_interrupt(interrupt_rx: &mut mpsc::Receiver<()>) -> bool {
-    interrupt_rx.try_recv().is_ok()
-}
-
-struct M14CodexP0SoakSpawnTool;
-
-#[async_trait::async_trait]
-impl octos_agent::tools::Tool for M14CodexP0SoakSpawnTool {
-    fn name(&self) -> &str {
-        "spawn"
-    }
-
-    fn description(&self) -> &str {
-        "Deterministic native spawn delegate for the #969 Codex P0 tool parity soak."
-    }
-
-    fn tags(&self) -> &[&str] {
-        &["gateway", "code"]
-    }
-
-    fn input_schema(&self) -> Value {
-        json!({"type": "object", "additionalProperties": true})
-    }
-
-    async fn execute(&self, args: &Value) -> eyre::Result<octos_agent::ToolResult> {
-        self.execute_with_context(&octos_agent::tools::ToolContext::zero(), args)
-            .await
-    }
-
-    async fn execute_with_context(
-        &self,
-        ctx: &octos_agent::tools::ToolContext,
-        args: &Value,
-    ) -> eyre::Result<octos_agent::ToolResult> {
-        let Some(supervisor) = ctx.task_supervisor.as_ref() else {
-            return Ok(octos_agent::ToolResult {
-                output: "spawn delegate requires a task supervisor".to_owned(),
-                success: false,
-                ..Default::default()
-            });
-        };
-        let tool_call_id = format!("m14-codex-p0-spawn-{}", Utc::now().timestamp_millis());
-        let task_id = supervisor.register_with_input(
-            "spawn",
-            &tool_call_id,
-            ctx.parent_session_key.as_deref(),
-            Some(args.clone()),
-        );
-        supervisor.mark_running(&task_id);
-
-        if let Some(path) = args
-            .get("context")
-            .and_then(|context| context.get("artifact_path"))
-            .and_then(Value::as_str)
-            .filter(|path| !path.trim().is_empty())
-        {
-            let artifact_path = PathBuf::from(path);
-            if let Some(parent) = artifact_path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let _ = std::fs::write(
-                &artifact_path,
-                format!(
-                    "# #969 Codex P0 Soak Reviewer\n\nTask `{task_id}` accepted by deterministic native spawn delegate.\n"
-                ),
-            );
-        }
-
-        append_appui_evidence_jsonl(
-            "task-ledger.jsonl",
-            json!({
-                "event": "agent_started",
-                "issue": 969,
-                "agent_id": task_id,
-                "tool_call_id": tool_call_id,
-                "backend_kind": "m14_codex_p0_soak_spawn",
-            }),
-        );
-
-        Ok(octos_agent::ToolResult {
-            output: json!({
-                "task_id": task_id,
-                "status": "running",
-                "backend": "m14_codex_p0_soak_spawn",
-                "task": args.get("task"),
-            })
-            .to_string(),
-            success: true,
-            structured_metadata: Some(json!({
-                "codex_soak": "m14_codex_p0_tool_parity",
-                "native_tool": "spawn",
-                "agent_id": task_id,
-            })),
-            ..Default::default()
-        })
-    }
-}
-
-fn m14_codex_tool_preview(output: &str) -> String {
-    let mut preview: String = output.chars().take(512).collect();
-    if output.chars().count() > 512 {
-        preview.push_str("...");
-    }
-    preview
-}
-
-struct M14CodexToolCallEnv<'a> {
-    ws: &'a WsConnection,
-    ledger: &'a UiProtocolLedger,
-    registry: &'a octos_agent::ToolRegistry,
-    ctx: &'a octos_agent::tools::ToolContext,
-    session_id: &'a SessionKey,
-    turn_id: &'a TurnId,
-}
-
-async fn m14_codex_tool_call(
-    env: &M14CodexToolCallEnv<'_>,
-    index: usize,
-    tool_name: &str,
-    args: Value,
-    expected_success: bool,
-) -> Result<octos_agent::ToolResult, String> {
-    let tool_call_id = format!("m14-codex-p0-{index}-{tool_name}-{}", env.turn_id.0);
-    let topic = env.session_id.topic().map(ToOwned::to_owned);
-    let _ = send_notification_durable(
-        env.ws,
-        env.ledger,
-        UiNotification::ToolStarted(ToolStartedEvent {
-            session_id: env.session_id.clone(),
-            topic: topic.clone(),
-            turn_id: env.turn_id.clone(),
-            tool_call_id: tool_call_id.clone(),
-            tool_name: tool_name.to_owned(),
-            arguments: Some(args.clone()),
-        }),
-    );
-    let result = env
-        .registry
-        .execute_with_context(env.ctx, tool_name, &args)
-        .await
-        .map_err(|error| format!("{tool_name} execution failed: {error}"))?;
-    let metadata = result.structured_metadata.clone();
-    let output_preview = m14_codex_tool_preview(&result.output);
-    let success = result.success;
-    let _ = send_notification_durable(
-        env.ws,
-        env.ledger,
-        UiNotification::ToolCompleted(ToolCompletedEvent {
-            session_id: env.session_id.clone(),
-            topic,
-            turn_id: env.turn_id.clone(),
-            tool_call_id: tool_call_id.clone(),
-            tool_name: tool_name.to_owned(),
-            success: Some(success),
-            output_preview: Some(output_preview.clone()),
-            duration_ms: Some(1),
-        }),
-    );
-    append_appui_evidence_jsonl(
-        "task-ledger.jsonl",
-        json!({
-            "event": "tool_completed",
-            "issue": 969,
-            "session_id": env.session_id,
-            "turn_id": env.turn_id,
-            "tool_call_id": tool_call_id,
-            "tool_name": tool_name,
-            "success": success,
-            "expected_success": expected_success,
-            "output_preview": output_preview,
-            "metadata": metadata,
-        }),
-    );
-    if success != expected_success {
-        return Err(format!(
-            "{tool_name} success mismatch: expected {expected_success}, got {success}"
-        ));
-    }
-    Ok(result)
-}
-
-fn m14_codex_parse_json_output(tool_name: &str, output: &str) -> Result<Value, String> {
-    serde_json::from_str(output)
-        .map_err(|error| format!("{tool_name} output was not JSON: {error}; output={output}"))
-}
-
-async fn run_m14_codex_p0_tool_parity_fixture_turn(
-    ws: &WsConnection,
-    ledger: &UiProtocolLedger,
-    _state: &AppState,
-    session_id: &SessionKey,
-    turn_id: &TurnId,
-    interrupt_rx: &mut mpsc::Receiver<()>,
-) -> M9FixtureOutcome {
-    append_appui_server_log("#969 Codex P0 tool parity soak started");
-    let workspace_profile_id = workspace_profile_scope(None, session_id);
-    let workspace = session_workspaces()
-        .get(&workspace_profile_id, session_id)
-        .or_else(|| appui_evidence_dir().map(|dir| dir.join("workspace")))
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    if let Err(error) = std::fs::create_dir_all(&workspace) {
-        return M9FixtureOutcome::Errored {
-            code: "codex_p0_workspace_failed",
-            message: format!("failed to create #969 soak workspace: {error}"),
-        };
-    }
-    let evidence_dir = appui_evidence_dir().unwrap_or_else(|| workspace.join(".octos-969"));
-    let artifact_dir = evidence_dir.join("agent-artifacts");
-    if let Err(error) = std::fs::create_dir_all(&artifact_dir) {
-        return M9FixtureOutcome::Errored {
-            code: "codex_p0_artifact_dir_failed",
-            message: format!("failed to create #969 soak artifact directory: {error}"),
-        };
-    }
-
-    let mut registry = octos_agent::ToolRegistry::with_builtins(&workspace);
-    registry.register(M14CodexP0SoakSpawnTool);
-    let supervisor = registry.supervisor();
-    let mut ctx = octos_agent::tools::ToolContext::zero();
-    ctx.task_supervisor = Some(supervisor.clone());
-    ctx.parent_session_key = Some(session_id.to_string());
-    let call_env = M14CodexToolCallEnv {
-        ws,
-        ledger,
-        registry: &registry,
-        ctx: &ctx,
-        session_id,
-        turn_id,
-    };
-    let tool_names = model_visible_tool_names(Some(&registry));
-    let tool_name_refs: Vec<&str> = tool_names.iter().map(String::as_str).collect();
-
-    write_appui_evidence_json(
-        "tool-registry-snapshot.json",
-        json!({
-            "scenario": "m14_codex_p0_tool_parity",
-            "issue": 969,
-            "workspace": workspace.to_string_lossy(),
-            "tools": tool_names.clone(),
-        }),
-    );
-    write_appui_evidence_json(
-        "tool-contract.json",
-        super::coding_tool_contract::tool_status_list_payload(
-            super::coding_tool_contract::ToolStatusListContext {
-                profile_id: session_id.profile_id(),
-                session_id: &session_id.to_string(),
-                policy: super::coding_tool_contract::ToolPolicyView::default(),
-                available_model_tools: &tool_name_refs,
-                disabled_model_tools: &[],
-                deferred_model_tools: &[],
-                include_coding_tool_contract: true,
-            },
-        ),
-    );
-    let _ = std::fs::write(
-        evidence_dir.join("tui-capture.txt"),
-        "#969 Codex P0 tool parity soak ran through AppUI WS and stdio fixtures.\n",
-    );
-
-    let mut step = 0;
-    macro_rules! next_step {
-        () => {{
-            step += 1;
-            step
-        }};
-    }
-
-    let run = async {
-        let _ = m14_codex_tool_call(
-            &call_env,
-            next_step!(),
-            "update_plan",
-            json!({
-                "explanation": "#969 P0 parity soak",
-                "plan": [
-                    {"step": "exercise canonical tools", "status": "in_progress"},
-                    {"step": "record evidence", "status": "pending"}
-                ]
-            }),
-            true,
-        )
-        .await?;
-
-        let _ = m14_codex_tool_call(
-            &call_env,
-            next_step!(),
-            "request_user_input",
-            json!({
-                "questions": [{
-                    "header": "Parity",
-                    "id": "continue_soak",
-                    "question": "Continue the #969 Codex P0 parity soak?",
-                    "options": [
-                        {"label": "Continue (Recommended)", "description": "Record the host prompt request."},
-                        {"label": "Stop", "description": "Exercise the alternate option shape."}
-                    ]
-                }]
-            }),
-            true,
-        )
-        .await?;
-        append_appui_evidence_jsonl(
-            "approval-events.jsonl",
-            json!({
-                "event": "user_input_requested",
-                "issue": 969,
-                "tool_name": "request_user_input",
-                "status": "requested",
-            }),
-        );
-
-        let exec = m14_codex_tool_call(
-            &call_env,
-            next_step!(),
-            "exec_command",
-            json!({
-                "cmd": "read line; printf 'stdin:%s\\n' \"$line\"",
-                "yield_time_ms": 50,
-                "max_output_tokens": 2000
-            }),
-            true,
-        )
-        .await?;
-        let exec_json = m14_codex_parse_json_output("exec_command", &exec.output)?;
-        let exec_session_id = exec_json
-            .get("session_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| format!("exec_command did not return session_id: {}", exec.output))?;
-
-        let _ = m14_codex_tool_call(
-            &call_env,
-            next_step!(),
-            "write_stdin",
-            json!({
-                "session_id": exec_session_id,
-                "chars": "m14-codex-p0\\n",
-                "yield_time_ms": 150,
-                "max_output_tokens": 2000
-            }),
-            true,
-        )
-        .await?;
-
-        let patch_path = "codex-p0-apply-patch.txt";
-        let _ = m14_codex_tool_call(
-            &call_env,
-            next_step!(),
-            "apply_patch",
-            json!({
-                "patch": format!(
-                    "*** Begin Patch\n*** Add File: {patch_path}\n+#969 apply_patch exercised through AppUI parity soak.\n*** End Patch\n"
-                )
-            }),
-            true,
-        )
-        .await?;
-
-        let denied = m14_codex_tool_call(
-            &call_env,
-            next_step!(),
-            "exec_command",
-            json!({
-                "cmd": "rm -rf /",
-                "timeout_secs": 1
-            }),
-            false,
-        )
-        .await?;
-        append_appui_evidence_jsonl(
-            "approval-events.jsonl",
-            json!({
-                "event": "policy_denied",
-                "issue": 969,
-                "tool_name": "exec_command",
-                "output": denied.output,
-                "metadata": denied.structured_metadata,
-            }),
-        );
-
-        let reviewer_artifact = artifact_dir.join("codex-p0-reviewer-report.md");
-        let spawned = m14_codex_tool_call(
-            &call_env,
-            next_step!(),
-            "spawn_agent",
-            json!({
-                "agent_type": "explorer",
-                "message": "Inspect #969 Codex P0 tool parity soak evidence.",
-                "context": {"artifact_path": reviewer_artifact},
-            }),
-            true,
-        )
-        .await?;
-        let spawned_json = m14_codex_parse_json_output("spawn_agent", &spawned.output)?;
-        let agent_id = spawned_json
-            .get("agent_id")
-            .and_then(Value::as_str)
-            .or_else(|| spawned_json.get("task_id").and_then(Value::as_str))
-            .ok_or_else(|| format!("spawn_agent did not return agent_id: {}", spawned.output))?
-            .to_owned();
-
-        let _ = m14_codex_tool_call(
-            &call_env,
-            next_step!(),
-            "send_input",
-            json!({
-                "target": agent_id.clone(),
-                "message": "Record reviewer input for #969 soak."
-            }),
-            true,
-        )
-        .await?;
-
-        let _ = m14_codex_tool_call(
-            &call_env,
-            next_step!(),
-            "wait_agent",
-            json!({
-                "targets": [agent_id.clone()],
-                "timeout_ms": 50
-            }),
-            true,
-        )
-        .await?;
-
-        let _ = m14_codex_tool_call(
-            &call_env,
-            next_step!(),
-            "close_agent",
-            json!({
-                "target": agent_id.clone()
-            }),
-            true,
-        )
-        .await?;
-
-        let resumed = m14_codex_tool_call(
-            &call_env,
-            next_step!(),
-            "resume_agent",
-            json!({
-                "target": agent_id.clone()
-            }),
-            true,
-        )
-        .await?;
-        let resumed_json = m14_codex_parse_json_output("resume_agent", &resumed.output)?;
-        let resumed_agent_id = resumed_json
-            .get("resumed_agent_id")
-            .and_then(Value::as_str)
-            .unwrap_or(&agent_id)
-            .to_owned();
-        let _ = m14_codex_tool_call(
-            &call_env,
-            next_step!(),
-            "close_agent",
-            json!({
-                "target": resumed_agent_id
-            }),
-            true,
-        )
-        .await?;
-
-        write_appui_evidence_json(
-            "runtime-policy-stamp.json",
-            json!({
-                "scenario": "m14_codex_p0_tool_parity",
-                "issue": 969,
-                "tool_contract_id": super::coding_tool_contract::CODING_TOOL_CONTRACT_ID,
-                "tool_contract_version": super::coding_tool_contract::CODING_TOOL_CONTRACT_VERSION,
-                "model_toolset": super::coding_tool_contract::CODING_MODEL_TOOLSET,
-                "dynamic_tool_discovery": super::coding_tool_contract::CODING_DYNAMIC_TOOL_DISCOVERY,
-                "workspace_root": workspace.to_string_lossy(),
-                "session_id": session_id,
-                "turn_id": turn_id,
-                "p0_tools_exercised": super::coding_tool_contract::CODING_P0_REQUIRED_TOOL_NAMES,
-            }),
-        );
-
-        Ok::<(), String>(())
-    };
-
-    tokio::select! {
-        _ = interrupt_rx.recv() => M9FixtureOutcome::Interrupted,
-        result = run => match result {
-            Ok(()) => {
-                append_appui_server_log("#969 Codex P0 tool parity soak completed");
-                M9FixtureOutcome::Completed
-            }
-            Err(message) => M9FixtureOutcome::Errored {
-                code: "codex_p0_tool_parity_failed",
-                message,
-            },
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct M15LiveSubagentSpec {
-    agent_id: &'static str,
-    title: &'static str,
-    role: &'static str,
-    delay_seconds: &'static str,
-    finding: &'static str,
-    artifact_id: &'static str,
-    artifact_file: &'static str,
-}
-
-#[derive(Debug)]
-struct M15LiveSubagentResult {
-    agent_id: String,
-    title: String,
-    status: String,
-    artifact_id: String,
-    artifact_path: PathBuf,
-    ping_count: u64,
-}
-
-struct WsSupervisorEventSink {
-    ws: WsConnection,
-    ledger: Arc<UiProtocolLedger>,
-}
-
-/// Parse a supervisor `agent/updated` payload and return it ONLY when the
-/// carried agent status is terminal (`completed` / `failed` / `interrupted` /
-/// `cancelled` / `closed`). Non-terminal or unparseable payloads return `None`
-/// and stay on the ephemeral path.
-fn terminal_agent_updated_event(params: &Value) -> Option<AgentUpdatedEvent> {
-    let event: AgentUpdatedEvent = serde_json::from_value(params.clone()).ok()?;
-    matches!(
-        event.agent.status.as_str(),
-        "completed" | "failed" | "interrupted" | "cancelled" | "closed"
-    )
-    .then_some(event)
-}
-
-fn m15_live_subagent_specs() -> [M15LiveSubagentSpec; 3] {
-    [
-        M15LiveSubagentSpec {
-            agent_id: "reviewer-api",
-            title: "Ada Lovelace - API contract reviewer",
-            role: "contract_review",
-            delay_seconds: "0.35",
-            finding: "AppUI agent lifecycle events are present and backed by runtime state.",
-            artifact_id: "reviewer-api-notes",
-            artifact_file: "reviewer-api-report.md",
-        },
-        M15LiveSubagentSpec {
-            agent_id: "reviewer-tests",
-            title: "Hypatia - Soak test reviewer",
-            role: "test_review",
-            delay_seconds: "0.50",
-            finding: "The tmux UX soak must prove agent list/status/output/artifact control against octos serve --stdio.",
-            artifact_id: "reviewer-tests-notes",
-            artifact_file: "reviewer-tests-report.md",
-        },
-        M15LiveSubagentSpec {
-            agent_id: "reviewer-security",
-            title: "Socrates - Policy reviewer",
-            role: "policy_review",
-            delay_seconds: "0.42",
-            finding: "CLI subagents run under argv-only process construction with no shell interpolation.",
-            artifact_id: "reviewer-security-notes",
-            artifact_file: "reviewer-security-report.md",
-        },
-    ]
-}
-
 fn prepare_voice_directives(
     content: &mut String,
     messages: &mut [Message],
@@ -21357,6 +20128,7 @@ fn appui_history_last_non_empty_assistant_after(history: &[Message], pre: usize)
 /// AFTER the model's final reply: `.last()` selects the background
 /// row and the LLM's reschedule hint never reaches the loop
 /// scheduler.
+#[cfg_attr(not(test), allow(dead_code))]
 fn appui_loop_assistant_reply_for_self_paced(
     captured_response_content: Option<&str>,
     history_fallback: Option<String>,
@@ -21590,12 +20362,12 @@ async fn run_standalone_turn(
     // reviewer-notes sidecar and emit the steer_consumed receipt. Every
     // other turn (interactive, loop, goal) must NOT swallow a steer
     // (round-2's coincidental consume was exactly that leak).
-    is_steer_continuation_turn: bool,
+    _is_steer_continuation_turn: bool,
     // OLP-CTRL #8c ② — when this is a steer continuation turn, the exact
     // steer LINE it must consume (enqueue_ts, text) from the sidecar, so
     // consumption is per-line (exactly-once), never a whole-file clear
     // that would drop sibling steers enqueued but not yet run.
-    steer_line_to_consume: Option<(String, String)>,
+    _steer_line_to_consume: Option<(String, String)>,
 ) {
     let session_id = params.session_id.clone();
     let turn_id = params.turn_id.clone();
@@ -22961,8 +21733,6 @@ async fn run_standalone_turn(
                 ws: ws.clone(),
                 ledger: ledger.clone(),
                 contracts: contracts.clone(),
-                state: state.clone(),
-                peers_root: session_runtime.profile.data_dir.join("peers"),
                 session_id: session_id.clone(),
                 turn_id: turn_id.clone(),
             }) as Arc<dyn octos_agent::UserQuestionRequester>
@@ -24104,7 +22874,7 @@ async fn run_standalone_turn(
                 break;
             }
             Some("error") => {
-                let message = event
+                let _message = event
                     .get("message")
                     .and_then(Value::as_str)
                     .unwrap_or("turn failed")
@@ -24117,7 +22887,7 @@ async fn run_standalone_turn(
                 // file/attached envelope emitted after the terminal). Surface
                 // the classified variant as the terminal code + the friendly
                 // spoken text as the message. Text turns: unchanged.
-                let voice_failure = voice_failure_rx.as_mut().and_then(|rx| rx.try_recv().ok());
+                let _voice_failure = voice_failure_rx.as_mut().and_then(|rx| rx.try_recv().ok());
                 let (code, wire_msg): (&str, String) = (
                     event
                         .get("code")
@@ -24129,7 +22899,7 @@ async fn run_standalone_turn(
                         .unwrap_or("turn failed")
                         .to_string(),
                 );
-                let turn_outcome = if code.contains("rate_limit")
+                let _turn_outcome = if code.contains("rate_limit")
                     || code.contains("rate_limited")
                     || wire_msg.contains("rate_limit")
                     || wire_msg.contains("rate_limited")
@@ -24264,6 +23034,7 @@ async fn run_standalone_turn(
         drop(tx);
         if let Some(handle) = voice_handle.take() {
             voice_streamed_count = handle.await.unwrap_or(voice_streamed_count);
+            let _ = voice_streamed_count;
         }
     }
 
@@ -24531,7 +23302,7 @@ async fn run_standalone_turn(
     // agent task; receive it here (`None` for text turns / replies with no
     // marker). `final_response_content` is now the clean spoken reply (marker
     // already gone), so it doubles as the HTML author's "spoken_reply" context.
-    let visual_directive = visual_directive_rx.await.ok().flatten();
+    let _visual_directive = visual_directive_rx.await.ok().flatten();
 
     // Voice exit intent (UPCR-2026-025): the agent task signalled whether the
     // user asked to leave (the `[[EXIT]]` marker was lifted + stripped there).
@@ -24582,7 +23353,7 @@ async fn run_standalone_turn(
     // the `<<loop-next-in: ...>>` hint always wins. Fall back to the
     // session-history scan ONLY if the oneshot didn't fire (interrupt
     // / agent error path).
-    if let (Some(loop_id), Some(pre)) = (
+    if let (Some(_loop_id), Some(pre)) = (
         loop_id_for_self_paced.as_ref(),
         pre_assistant_count_for_post_turn,
     ) {
@@ -24602,8 +23373,8 @@ async fn run_standalone_turn(
             final_response_content.as_deref(),
             history_fallback,
         );
-        if let Some(reply) = assistant_reply {
-            let profile_for_reschedule = session_id
+        if let Some(_reply) = assistant_reply {
+            let _profile_for_reschedule = session_id
                 .profile_id()
                 .map(ToOwned::to_owned)
                 .or_else(|| routed_profile_id.clone())
@@ -25092,45 +23863,6 @@ fn emit_envelope_for_legacy_notification(
             _ => return,
         };
     let _ = ledger.emit_envelope(session_id, thread_id, payload, client_message_id);
-}
-
-async fn try_emit_completed_terminal_with_forced_backpressure(
-    turn_state: &TokioMutex<TurnState>,
-    ws: &WsConnection,
-    ledger: &UiProtocolLedger,
-    session_id: &SessionKey,
-    turn_id: &TurnId,
-) {
-    let Some(TerminalTransition { ack, .. }) = transition_to_terminal_settling_steers(
-        turn_state,
-        TerminalReason::Completed,
-        None,
-        SteerReturnSink::Live { ws, ledger },
-        session_id,
-        turn_id,
-    )
-    .await
-    else {
-        return;
-    };
-
-    let _ = send_notification_lifecycle_forced_backpressure_fixture(
-        ws,
-        ledger,
-        UiNotification::TurnCompleted(TurnCompletedEvent {
-            session_id: session_id.clone(),
-            topic: None,
-            turn_id: turn_id.clone(),
-            cursor: None,
-            tokens_in: None,
-            tokens_out: None,
-            session_result: None,
-        }),
-    );
-
-    if let Some(ack) = ack {
-        let _ = ack.send(());
-    }
 }
 
 fn progress_assistant_iteration(event: &Value) -> Option<u32> {
@@ -25667,6 +24399,7 @@ fn final_assistant_segment_id(response: &octos_agent::ConversationResponse, turn
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn final_assistant_message_for_response(
     response: &octos_agent::ConversationResponse,
 ) -> Option<Message> {
@@ -25840,6 +24573,7 @@ fn is_final_assistant_carrier_under_trimmed_equality(
 ///   and `apply_self_paced_response` stamps the default delay,
 ///   keeping a bare-spawn-only self-paced loop scheduled. (Codex
 ///   round-1 P2.)
+#[cfg_attr(not(test), allow(dead_code))]
 fn captured_final_reply_for_synth_ack_skip(
     synth_ack_content: String,
     last_persisted_preamble_assistant: Option<&str>,
@@ -26627,18 +25361,6 @@ fn append_appui_evidence_jsonl_at(dir: &Path, name: &str, value: Value) {
     }
 }
 
-fn write_appui_evidence_json(name: &str, value: Value) {
-    let Some(dir) = appui_evidence_dir() else {
-        return;
-    };
-    if std::fs::create_dir_all(&dir).is_err() {
-        return;
-    }
-    if let Ok(text) = serde_json::to_string_pretty(&value) {
-        let _ = std::fs::write(dir.join(name), format!("{text}\n"));
-    }
-}
-
 /// M15-F5 (#44): append a JSONL line to a named evidence ledger inside
 /// an EXPLICIT evidence directory. This is the pure, directory-parameterised
 /// core shared by the production evidence emitters and their unit tests; the
@@ -26820,20 +25542,6 @@ fn record_autonomy_rpc_evidence(method: &str, result: &Value) -> Vec<UiNotificat
         }
     }
     autonomy_rpc_evidence_to_dir(&dir, method, result)
-}
-
-/// M15-F5 (#44): mirror a PRODUCTION agent lifecycle/output notification into
-/// `agent-ledger.jsonl` and (for artifacts) `artifact-index.json`. Driven from
-/// the central raw-notification dispatch so EVERY production `agent/updated`,
-/// `agent/output/delta`, and `agent/artifact/updated` is captured. NO-OP
-/// unless `appui_evidence_dir()` is `Some`. Maps the live agent `status`
-/// onto the `agent_started` / `agent_completed` ledger markers the soak
-/// verifier requires.
-fn record_agent_evidence(method: &'static str, params: &Value) {
-    let Some(dir) = appui_evidence_dir() else {
-        return;
-    };
-    agent_evidence_to_dir(&dir, method, params);
 }
 
 /// M15-F5 (#44): pure, directory-parameterised core of `record_agent_evidence`
@@ -27087,84 +25795,6 @@ fn append_appui_transcript_frame(direction: &str, frame: Value) {
     );
 }
 
-fn append_appui_server_log(message: impl AsRef<str>) {
-    let Some(dir) = appui_evidence_dir() else {
-        return;
-    };
-    if std::fs::create_dir_all(&dir).is_err() {
-        return;
-    }
-    let line = format!("{} {}\n", Utc::now().to_rfc3339(), message.as_ref());
-    let _ = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join("server.log"))
-        .and_then(|mut file| {
-            use std::io::Write;
-            file.write_all(line.as_bytes())
-        });
-}
-
-/// CONTRACT: this helper bypasses the typed `UiNotification` ledger
-/// path and the envelope dual-emit. It exists ONLY for AppUI
-/// supervisor-event methods that are NOT in the M9-γ envelope-superseded
-/// set (e.g. `agent/updated`, `agent/output_delta`,
-/// `agent/artifact_updated`, and the other `WsSupervisorEventSink`
-/// surfaces).
-///
-/// Codex #1336 round-3 BLOCKER 1 (defense in depth): the helper now
-/// REFUSES to dispatch a `method` that is envelope-superseded under the
-/// M9-γ cutover gate — even on legacy connections — to make the
-/// envelope-only contract enforceable by construction. Future callers
-/// who reach for a legacy `message/delta` / `tool/started` / `…` send
-/// via the raw helper fail closed with a debug log instead of leaking
-/// a frame past `direct_send_passes_capability_filter`. Use
-/// [`send_notification_ephemeral`] (typed `UiNotification`) +
-/// [`emit_envelope_for_legacy_notification`] for those methods.
-fn send_raw_notification_ephemeral(
-    ws: &WsConnection,
-    method: &'static str,
-    params: Value,
-) -> Result<(), SendError> {
-    use octos_core::ui_protocol::methods as ui_methods;
-    // Envelope-superseded legacy methods are off-limits to the raw
-    // helper — they MUST flow through the typed `UiNotification` path
-    // so `send_notification_ephemeral` / `send_notification_durable` /
-    // `send_notification_lifecycle` can apply the per-connection
-    // capability filter AND `emit_envelope_for_legacy_notification`
-    // can publish the canonical envelope dual-emit.
-    if matches!(
-        method,
-        ui_methods::MESSAGE_DELTA
-            | ui_methods::MESSAGE_REASONING_DELTA
-            | ui_methods::TOOL_STARTED
-            | ui_methods::TOOL_PROGRESS
-            | ui_methods::TOOL_COMPLETED
-            | ui_methods::FILE_ATTACHED
-            | ui_methods::TURN_COMPLETED
-    ) {
-        tracing::error!(
-            target: "octos::ui_protocol::ws",
-            method = %method,
-            "send_raw_notification_ephemeral refused: envelope-superseded method must use \
-             send_notification_ephemeral + emit_envelope_for_legacy_notification"
-        );
-        debug_assert!(
-            false,
-            "send_raw_notification_ephemeral called with envelope-superseded method {method}"
-        );
-        return Err(SendError::BackpressureDrop);
-    }
-    // M15-F5 (#44): mirror production child-agent lifecycle/output/artifact
-    // notifications into `agent-ledger.jsonl` / `artifact-index.json` evidence
-    // ledgers. NO-OP unless the live tmux soak set
-    // `OCTOSCODE_M15_UX_OUTPUT_DIR`, so this is free in normal production.
-    record_agent_evidence(method, &params);
-    let notification = octos_core::ui_protocol::RpcNotification::new(method, params);
-    let frame = frame_for(&notification).ok_or(SendError::BackpressureDrop)?;
-    ws.send_ephemeral(frame, method)
-}
-
 /// task-return-unconsumed-steer-inputs: where a `turn/steer_dropped` return
 /// goes. The live connection sends durably AND ledgers; a closed connection
 /// (see `abort_connection_turns`) can only ledger — the reconnecting client
@@ -27340,36 +25970,6 @@ fn emit_router_status_durable(
             "router/status durable enqueue failed; non-fatal for turn"
         );
     }
-}
-
-/// Wave4-A: spawn a background task that forwards `FailoverEvent` from
-/// the AdaptiveRouter's broadcast channel onto the connection as
-/// `router/failover` notifications.
-///
-/// Codex P1: the AdaptiveRouter is *profile*-scoped, so a single
-/// broadcast fans out to every concurrent session on the profile. The
-/// forwarder MUST filter on
-/// `event.originating_session_id == this session_id` — otherwise
-/// concurrent sessions on the same profile re-attribute each other's
-/// failovers under their own id (wrong for the audit-log replay and
-/// the user-facing toast).
-///
-/// Codex P1 (lifecycle): the forwarder is detached but the caller
-/// stores the `JoinHandle` and awaits it on turn end via
-/// [`stop_failover_forwarder`]. A hard-close send error breaks the
-/// loop, so the forwarder cannot keep forwarding to a stale writer.
-///
-/// Returns the `JoinHandle` so the caller can stop *and await* the
-/// forwarder when the turn ends. Returns `None` when no router is
-/// attached.
-#[cfg(test)]
-pub(crate) fn spawn_router_failover_forwarder_for_test(
-    ws: WsConnection,
-    ledger: Arc<UiProtocolLedger>,
-    session_id: SessionKey,
-    router: Option<Arc<octos_llm::AdaptiveRouter>>,
-) -> Option<tokio::task::JoinHandle<()>> {
-    spawn_router_failover_forwarder(ws, ledger, session_id, router)
 }
 
 fn spawn_router_failover_forwarder(
@@ -27739,38 +26339,6 @@ fn send_notification_lifecycle(
         }
         Err(other) => Err(other),
     }
-}
-
-fn send_notification_lifecycle_forced_backpressure_fixture(
-    ws: &WsConnection,
-    ledger: &UiProtocolLedger,
-    notification: UiNotification,
-) -> Result<(), SendError> {
-    let event = ledger.append_notification_from(notification, ws.connection_id);
-    let method = ledger_event_method(&event.event).to_string();
-    let _frame = frame_from_ledger(event.event)
-        .ok_or_else(|| SendError::LifecycleFailure(format!("serialize {method}")))?;
-    metrics::counter!("ws.send.error.lifecycle").increment(1);
-    ws.metrics.dropped_count.fetch_add(1, Ordering::Relaxed);
-    tracing::warn!(
-        target: "octos::ui_protocol::ws",
-        method = %method,
-        reason = "forced_backpressure",
-        "forced turn/completed writer channel full fixture; aborting connection"
-    );
-    eprintln!("forced turn/completed writer channel full fixture; aborting connection: {method}");
-    ws.mark_failed();
-    let reason = "writer channel full for lifecycle frame turn/completed";
-    tracing::warn!(
-        target: "octos::ui_protocol::ws",
-        method = %method,
-        reason = %reason,
-        "lifecycle notification not delivered; entry remains in ledger as delivery_failed"
-    );
-    eprintln!(
-        "lifecycle notification not delivered; entry remains in ledger as delivery_failed: {reason}"
-    );
-    Err(SendError::LifecycleFailure(reason.into()))
 }
 
 fn send_notification_durable(
@@ -28153,3 +26721,126 @@ fn flush_replay_lossy(
 #[cfg(test)]
 #[path = "ui_protocol_tests.rs"]
 mod tests;
+
+// ── Test-support helpers (callers live in `ui_protocol_tests.rs`) ──
+
+/// CONTRACT: this helper bypasses the typed `UiNotification` ledger
+/// path and the envelope dual-emit. It exists ONLY for AppUI
+/// supervisor-event methods that are NOT in the M9-γ envelope-superseded
+/// set (e.g. `agent/updated`, `agent/output_delta`,
+/// `agent/artifact_updated`, and the other `WsSupervisorEventSink`
+/// surfaces).
+///
+/// Codex #1336 round-3 BLOCKER 1 (defense in depth): the helper now
+/// REFUSES to dispatch a `method` that is envelope-superseded under the
+/// M9-γ cutover gate — even on legacy connections — to make the
+/// envelope-only contract enforceable by construction. Future callers
+/// who reach for a legacy `message/delta` / `tool/started` / `…` send
+/// via the raw helper fail closed with a debug log instead of leaking
+/// a frame past `direct_send_passes_capability_filter`. Use
+/// [`send_notification_ephemeral`] (typed `UiNotification`) +
+/// [`emit_envelope_for_legacy_notification`] for those methods.
+#[cfg_attr(not(test), allow(dead_code))]
+fn send_raw_notification_ephemeral(
+    ws: &WsConnection,
+    method: &'static str,
+    params: Value,
+) -> Result<(), SendError> {
+    use octos_core::ui_protocol::methods as ui_methods;
+    // Envelope-superseded legacy methods are off-limits to the raw
+    // helper — they MUST flow through the typed `UiNotification` path
+    // so `send_notification_ephemeral` / `send_notification_durable` /
+    // `send_notification_lifecycle` can apply the per-connection
+    // capability filter AND `emit_envelope_for_legacy_notification`
+    // can publish the canonical envelope dual-emit.
+    if matches!(
+        method,
+        ui_methods::MESSAGE_DELTA
+            | ui_methods::MESSAGE_REASONING_DELTA
+            | ui_methods::TOOL_STARTED
+            | ui_methods::TOOL_PROGRESS
+            | ui_methods::TOOL_COMPLETED
+            | ui_methods::FILE_ATTACHED
+            | ui_methods::TURN_COMPLETED
+    ) {
+        tracing::error!(
+            target: "octos::ui_protocol::ws",
+            method = %method,
+            "send_raw_notification_ephemeral refused: envelope-superseded method must use \
+             send_notification_ephemeral + emit_envelope_for_legacy_notification"
+        );
+        debug_assert!(
+            false,
+            "send_raw_notification_ephemeral called with envelope-superseded method {method}"
+        );
+        return Err(SendError::BackpressureDrop);
+    }
+    // M15-F5 (#44): mirror production child-agent lifecycle/output/artifact
+    // notifications into `agent-ledger.jsonl` / `artifact-index.json` evidence
+    // ledgers. NO-OP unless the live tmux soak set
+    // `OCTOSCODE_M15_UX_OUTPUT_DIR`, so this is free in normal production.
+    record_agent_evidence(method, &params);
+    let notification = octos_core::ui_protocol::RpcNotification::new(method, params);
+    let frame = frame_for(&notification).ok_or(SendError::BackpressureDrop)?;
+    ws.send_ephemeral(frame, method)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn send_notification_lifecycle_forced_backpressure_fixture(
+    ws: &WsConnection,
+    ledger: &UiProtocolLedger,
+    notification: UiNotification,
+) -> Result<(), SendError> {
+    let event = ledger.append_notification_from(notification, ws.connection_id);
+    let method = ledger_event_method(&event.event).to_string();
+    let _frame = frame_from_ledger(event.event)
+        .ok_or_else(|| SendError::LifecycleFailure(format!("serialize {method}")))?;
+    metrics::counter!("ws.send.error.lifecycle").increment(1);
+    ws.metrics.dropped_count.fetch_add(1, Ordering::Relaxed);
+    tracing::warn!(
+        target: "octos::ui_protocol::ws",
+        method = %method,
+        reason = "forced_backpressure",
+        "forced turn/completed writer channel full fixture; aborting connection"
+    );
+    eprintln!("forced turn/completed writer channel full fixture; aborting connection: {method}");
+    ws.mark_failed();
+    let reason = "writer channel full for lifecycle frame turn/completed";
+    tracing::warn!(
+        target: "octos::ui_protocol::ws",
+        method = %method,
+        reason = %reason,
+        "lifecycle notification not delivered; entry remains in ledger as delivery_failed"
+    );
+    eprintln!(
+        "lifecycle notification not delivered; entry remains in ledger as delivery_failed: {reason}"
+    );
+    Err(SendError::LifecycleFailure(reason.into()))
+}
+
+/// The legacy `turn/start` path only has nothing to process when silent audio
+/// is the request's sole input.
+#[cfg_attr(not(test), allow(dead_code))]
+fn should_short_circuit_no_speech(
+    had_audio_media: bool,
+    had_non_audio_media: bool,
+    had_audio_input: bool,
+    prompt_is_empty: bool,
+) -> bool {
+    had_audio_media && !had_non_audio_media && !had_audio_input && prompt_is_empty
+}
+
+/// M15-F5 (#44): mirror a PRODUCTION agent lifecycle/output notification into
+/// `agent-ledger.jsonl` and (for artifacts) `artifact-index.json`. Driven from
+/// the central raw-notification dispatch so EVERY production `agent/updated`,
+/// `agent/output/delta`, and `agent/artifact/updated` is captured. NO-OP
+/// unless `appui_evidence_dir()` is `Some`. Maps the live agent `status`
+/// onto the `agent_started` / `agent_completed` ledger markers the soak
+/// verifier requires.
+#[cfg_attr(not(test), allow(dead_code))]
+fn record_agent_evidence(method: &'static str, params: &Value) {
+    let Some(dir) = appui_evidence_dir() else {
+        return;
+    };
+    agent_evidence_to_dir(&dir, method, params);
+}

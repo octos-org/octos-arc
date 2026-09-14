@@ -173,7 +173,7 @@ impl ChatCommand {
                 .get_or_insert_with(Default::default)
                 .reasoning_effort = Some(effort.into());
         }
-        let mut tool_profile = match resolve_profile(&self.profile) {
+        let tool_profile = match resolve_profile(&self.profile) {
             Ok((profile, _)) => profile,
             Err(_) if stored_profile.is_some() => resolve_profile(&None)?.0,
             Err(error) => return Err(error),

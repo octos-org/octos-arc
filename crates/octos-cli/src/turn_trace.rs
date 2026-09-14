@@ -34,19 +34,6 @@ pub(crate) fn log_interrupt_ack(session_id: &SessionKey, turn_id: &TurnId, ack: 
     info!(session = %session_id.0, turn = %turn_id.0, %ack, "turn/interrupt acknowledged");
 }
 
-/// `turn/steer` accepted into the turn's pending-input buffer.
-/// `interrupting = true` means the turn was already winding down when the
-/// input was accepted — it will most likely be returned as
-/// `turn/steer_dropped` rather than drained.
-pub(crate) fn log_steer_accepted(session_id: &SessionKey, turn_id: &TurnId, interrupting: bool) {
-    info!(
-        session = %session_id.0,
-        turn = %turn_id.0,
-        interrupting,
-        "turn/steer accepted into the active turn's pending-input buffer"
-    );
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,27 +114,6 @@ mod tests {
     }
 
     #[test]
-    fn steer_accepted_log_marks_interrupting_turns() {
-        let (session, turn) = ids();
-        let logs = capture(|| {
-            log_steer_accepted(&session, &turn, false);
-            log_steer_accepted(&session, &turn, true);
-        });
-        let lines: Vec<&str> = logs.lines().collect();
-        assert_eq!(lines.len(), 2, "{logs}");
-        assert!(
-            lines[0].contains("interrupting=false")
-                && lines[0].contains("session=")
-                && lines[0].contains("turn=")
-        );
-        assert!(
-            lines[1].contains("interrupting=true")
-                && lines[1].contains("session=")
-                && lines[1].contains("turn=")
-        );
-    }
-
-    #[test]
     fn correlation_logs_never_contain_user_text() {
         let (session, turn) = ids();
         let steer_text = "SECRET-MARKER-please-rm-rf-nothing";
@@ -157,7 +123,6 @@ mod tests {
             log_interrupt_received(&session, &turn);
             log_interrupt_outcome(&session, &turn, "captured");
             log_interrupt_ack(&session, &turn, "interrupted");
-            log_steer_accepted(&session, &turn, true);
         });
         assert!(!logs.contains(steer_text), "{logs}");
         assert!(!logs.contains("SECRET-MARKER"));

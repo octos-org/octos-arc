@@ -3,10 +3,7 @@
 //! WS transport's message pipeline still consumes the splitter/filter for
 //! text streams, and `context_manager` mirrors the marker semantics.
 
-use std::path::Path;
-
 use octos_core::{Message, MessageRole};
-use serde::Serialize;
 
 // ── Voice-turn rich output (in-band `[[VISUAL:kind|brief]]` marker) ────────
 //
@@ -36,16 +33,6 @@ impl VisualKind {
             "image" => Some(Self::Image),
             "infographic" => Some(Self::Infographic),
             _ => None,
-        }
-    }
-
-    /// Wire token for the `visual/generating` event (`kind` field).
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Html => "html",
-            Self::Illustrated => "illustrated",
-            Self::Image => "image",
-            Self::Infographic => "infographic",
         }
     }
 }
@@ -471,45 +458,5 @@ impl VisibleDeltaFilter {
         } else {
             String::new()
         }
-    }
-}
-
-/// Maps a `kind` to a mofa tool name + input args. `Html` is not a skill →
-/// `None`.
-fn image_skill_call(
-    d: &VisualDirective,
-    out_dir: &Path,
-) -> Option<(&'static str, serde_json::Value)> {
-    let out = out_dir.to_string_lossy().to_string();
-    // A UNIQUE output filename per dispatch (#1477 follow-up): the mofa skill
-    // caches by output path (`is_cached`: returns the existing file when it is
-    // >10KB, skipping generation). A fixed name like `image.png` therefore made
-    // every turn after the first in a session return the PREVIOUS turn's image
-    // (and skip generation entirely, so reference frames were never applied).
-    let uniq = uuid::Uuid::now_v7();
-    match d.kind {
-        VisualKind::Infographic => Some((
-            "mofa_infographic",
-            serde_json::json!({
-                "sections": [{ "prompt": d.brief }],
-                "out": format!("{out}/infographic-{uniq}.png"),
-            }),
-        )),
-        // `mofa_image` (not `mofa_cards`): a plain "generate an image" request
-        // wants a single picture, and — unlike `mofa_cards`, which emits no
-        // `files_to_send` (octos #1041, see `workspace_policy` test) so the
-        // backend would get empty rels and deliver nothing — `mofa_image`
-        // reports its produced PNG via `files_to_send`, the same proven path
-        // the Illustrated stage-1 call relies on.
-        VisualKind::Image => Some((
-            "mofa_image",
-            serde_json::json!({
-                "prompt": d.brief,
-                "out": format!("{out}/image-{uniq}.png"),
-            }),
-        )),
-        // Html (focused LLM call) and Illustrated (two-stage: run_illustration_image
-        // then author_html) are not direct file-delivering skills.
-        VisualKind::Html | VisualKind::Illustrated => None,
     }
 }

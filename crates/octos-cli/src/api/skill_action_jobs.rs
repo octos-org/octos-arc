@@ -173,11 +173,13 @@ pub(crate) fn with_skill_action_result(task: &BackgroundTask, result: Value) -> 
 /// other restore. `profile_id` is threaded in for exactly that.
 pub(crate) fn load_skill_action_jobs(
     data_dir: &Path,
-    profile_id: &str,
+    _profile_id: &str,
     session_id: &SessionKey,
 ) -> std::io::Result<Vec<SkillActionJobRecord>> {
     let supervisor = TaskSupervisor::new();
-    &supervisor.enable_persistence(task_state_path(data_dir, session_id));
+    // Best-effort: the call above reconciles persisted rows, but failure here
+    // must not block loading; the supervisor logs internally.
+    let _ = supervisor.enable_persistence(task_state_path(data_dir, session_id));
 
     Ok(project_skill_action_jobs(
         supervisor.get_tasks_for_session(&session_id.0),

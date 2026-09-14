@@ -791,7 +791,7 @@ pub(crate) fn resolve_profile(
 ///
 /// [`ProfileStore::get`](crate::profiles::ProfileStore::get) is a lock-free JSON
 /// read, so this is safe to call while a `serve` process holds the same data dir.
-#[cfg(any(feature = "api", test))]
+#[cfg(test)]
 pub(crate) fn load_serve_profile_config(
     profile_arg: Option<&str>,
     data_dir: &std::path::Path,
@@ -825,6 +825,7 @@ pub(crate) fn load_serve_profile_config(
 
 /// Find the matching provider-specific tool policy for the active model.
 /// Checks model ID first (e.g. "claude-sonnet-4-20250514"), then provider name (e.g. "gemini").
+#[cfg(test)]
 pub(crate) fn resolve_provider_policy(
     config: &Config,
     provider_name: &str,

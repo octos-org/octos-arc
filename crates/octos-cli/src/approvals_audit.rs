@@ -285,7 +285,7 @@ fn serialize_record(
 /// tests and, via the `test-util` feature, to downstream crates' tests (octos-cli
 /// exercises it through the `api::ui_protocol_audit` alias). Not compiled into
 /// production builds unless a consumer opts into `test-util`.
-#[cfg(any(test, feature = "test-util"))]
+#[cfg(test)]
 pub fn read_audit_lines(path: &Path) -> Vec<serde_json::Value> {
     std::fs::read_to_string(path)
         .unwrap_or_default()
