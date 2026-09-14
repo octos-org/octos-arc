@@ -358,7 +358,7 @@ impl SessionRuntime {
         // `bg_research` instance — which baked in the profile default sandbox.
         // Re-register it from the profile's pipeline factory with the
         // SESSION-effective `sandbox` so a read-only (or otherwise overridden)
-        // session's pipeline command validators run under the session sandbox
+        // session's pipeline commands run under the session sandbox
         // instead of regaining the profile default's writes/network. The
         // spawn_only marker persists across `register_arc` (it is registry
         // metadata carried by the snapshot), and re-marking is idempotent.
@@ -2183,7 +2183,6 @@ tools = ["read_file"]
             &[],
             SystemTime::now(),
             None,
-            Arc::new(octos_agent::sandbox::NoSandbox),
         )
         .await;
 

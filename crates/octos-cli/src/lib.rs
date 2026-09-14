@@ -1,9 +1,9 @@
 //! octos-cli library surface.
 //!
 //! The crate primarily exposes a binary (`octos`) but a few modules are also
-//! surfaced here so integration tests can drive real code paths (for example
-//! the MCP server dispatch in [`commands::mcp_serve`]). Keep the public API
-//! narrow — only items that integration tests or sibling crates consume.
+//! surfaced here so integration tests can drive real code paths. Keep the
+//! public API narrow — only items that integration tests or sibling crates
+//! consume.
 
 #[cfg(feature = "api")]
 // keeps resolving unchanged.

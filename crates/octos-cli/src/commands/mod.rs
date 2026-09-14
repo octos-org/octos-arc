@@ -104,7 +104,6 @@ pub enum Command {
 ///
 /// * `acp` speaks ACP JSON-RPC on stdout (one stray log line → a `-32700`
 ///   parse error at strict clients like Zed);
-/// * `mcp-serve --transport stdio` speaks MCP JSON-RPC on stdout;
 /// * `profile` emits payloads meant for `$(...)` capture / piping;
 /// * `chat` streams assistant text (or one `--json` result) on stdout.
 ///

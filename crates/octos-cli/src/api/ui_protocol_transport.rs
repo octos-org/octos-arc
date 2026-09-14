@@ -11223,7 +11223,7 @@ fn validate_session_workspace_path_safety(workspace_root: &Path) -> Result<(), R
 /// "Root escape" here means "the resolved canonical workspace would land
 /// the agent under a banned OS path (`/etc`, `/usr`, `/proc`, ...)", i.e.
 /// the same safety gate `session/open` enforces. We don't add the
-/// `bin`/`sbin`/`var` set used by some validators because the probe is the
+/// `bin`/`sbin`/`var` set used by some probes because the probe is the
 /// onboarding gate and we want the same answer the runtime would give.
 fn workspace_root_escape_under_system_path(path: &Path) -> Option<&'static str> {
     let mut components = path.components();
@@ -15849,9 +15849,8 @@ async fn run_standalone_turn(
         .with_provider_policy(tool_registry.provider_policy().cloned())
         // #1607 (codex-review follow-up): inherit the session's effective
         // sandbox (the same `SandboxConfig` the parent `tool_registry` was
-        // built from) so the spawn/agent_mcp child completion path confines
-        // workspace-declared `Command` validators rather than running them on
-        // the host.
+        // built from) so child command execution stays confined instead of
+        // running on the host.
         .with_sandbox(session_runtime.sandbox.clone())
         .with_agent_config(agent_config.clone())
         .with_task_supervisor(

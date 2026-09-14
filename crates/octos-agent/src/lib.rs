@@ -11,7 +11,6 @@ pub mod abi_schema;
 mod agent;
 pub mod agents;
 pub mod approval;
-pub mod arc_task;
 pub mod behaviour;
 pub mod compaction;
 pub mod compaction_tiered;
@@ -25,7 +24,6 @@ pub mod hooks;
 pub mod loop_detect;
 pub mod mcp;
 pub mod mcp_auth;
-pub mod mcp_server;
 pub mod memory_segment;
 pub mod permissions;
 pub mod policy;
@@ -50,7 +48,6 @@ pub mod summarizer;
 pub mod task_supervisor;
 pub mod tools;
 pub mod turn;
-pub mod validators;
 pub mod workspace_contract;
 pub mod workspace_policy;
 /// #48b — stable prefix marking that a turn terminated because the
@@ -111,9 +108,9 @@ pub use file_state_cache::{
 pub use harness_errors::{HarnessError, HarnessErrorEvent, OCTOS_LOOP_ERROR_TOTAL, RecoveryHint};
 pub use harness_events::{
     HARNESS_EVENT_SCHEMA_V1, HarnessCostAttributionEvent, HarnessEvent, HarnessEventError,
-    HarnessEventPayload, HarnessEventSink, HarnessFailureEvent, HarnessMcpServerCallEvent,
-    HarnessPhaseEvent, HarnessProgressEvent, HarnessRetryEvent, HarnessSubAgentDispatchEvent,
-    HarnessSubagentProgressEvent, HarnessValidatorResultEvent, MAX_HARNESS_EVENT_LINE_BYTES,
+    HarnessEventPayload, HarnessEventSink, HarnessFailureEvent, HarnessPhaseEvent,
+    HarnessProgressEvent, HarnessRetryEvent, HarnessSubAgentDispatchEvent,
+    HarnessSubagentProgressEvent, MAX_HARNESS_EVENT_LINE_BYTES,
 };
 pub use hooks::{
     HookConfig, HookContext, HookDeniedError, HookEvent, HookExecutor, HookPayload,
@@ -167,26 +164,20 @@ pub use task_supervisor::{
 pub use tools::{
     AskUserQuestionTool, BackgroundResultKind, BackgroundResultPayload, CheckBackgroundTasksTool,
     ConcurrencyClass, DEFAULT_DISPATCH_TIMEOUT_SECS, DEFAULT_HTTP_CONNECT_TIMEOUT_SECS,
-    DEFAULT_HTTP_READ_TIMEOUT_SECS, DELEGATED_DENY_GROUP, DELEGATION_METRIC, DelegateTool,
-    DelegationEvent, DelegationOutcome, DepthBudget, DiffEditTool, DispatchContextContract,
-    DispatchOutcome, DispatchRequest, DispatchResponse, EditFileTool, GlobTool, GrepTool,
-    HttpMcpAgent, ListDirTool, MAX_DEPTH, McpAgentBackend, McpAgentBackendConfig, MemoryNoteTool,
-    PolicyDecision, ReadFileTool, ReadTaskOutputTool, RecallMemoryTool, RecordMemoryUseTool,
-    SaveMemoryTool, SendFileTool, SharedBackend, ShellTool, SpawnTool, StdioMcpAgent, Tool,
-    ToolApprovalDecision, ToolApprovalRequest, ToolApprovalRequester, ToolPolicy, ToolRegistry,
-    ToolResult, TurnAttachmentContext, UserQuestionOutcome, UserQuestionRequest,
-    UserQuestionRequester, WriteFileTool, build_backend_from_config, build_delegated_child_policy,
-    build_dispatch_event_payload, dispatch_with_metrics, record_dispatch,
+    DEFAULT_HTTP_READ_TIMEOUT_SECS, DiffEditTool, DispatchContextContract, DispatchOutcome,
+    DispatchRequest, DispatchResponse, EditFileTool, GlobTool, GrepTool, HttpMcpAgent, ListDirTool,
+    McpAgentBackend, McpAgentBackendConfig, MemoryNoteTool, PolicyDecision, ReadFileTool,
+    ReadTaskOutputTool, RecallMemoryTool, RecordMemoryUseTool, SaveMemoryTool, SendFileTool,
+    SharedBackend, ShellTool, SpawnTool, StdioMcpAgent, Tool, ToolApprovalDecision,
+    ToolApprovalRequest, ToolApprovalRequester, ToolPolicy, ToolRegistry, ToolResult,
+    TurnAttachmentContext, UserQuestionOutcome, UserQuestionRequest, UserQuestionRequester,
+    WriteFileTool, build_backend_from_config, build_dispatch_event_payload, dispatch_with_metrics,
+    record_dispatch,
 };
 pub use turn::{Turn, TurnKind, turns_to_messages};
-pub use validators::{
-    VALIDATOR_RESULT_SCHEMA_VERSION, ValidatorInvocation, ValidatorLedger, ValidatorOutcome,
-    ValidatorPhase, ValidatorRunner, ValidatorStatus, kill_child_process, run_workspace_validators,
-};
 pub use workspace_policy::{
-    CompactionPolicy, CompactionSummarizerKind, ValidationPolicy, Validator, ValidatorPhaseKind,
-    ValidatorSpec, WORKSPACE_POLICY_FILE, WorkspaceArtifactsPolicy, WorkspacePolicy,
-    WorkspacePolicyKind, WorkspaceSnapshotTrigger, WorkspaceSpawnTaskPolicy,
+    CompactionPolicy, CompactionSummarizerKind, WORKSPACE_POLICY_FILE, WorkspaceArtifactsPolicy,
+    WorkspacePolicy, WorkspacePolicyKind, WorkspaceSnapshotTrigger, WorkspaceSpawnTaskPolicy,
     WorkspaceTrackingPolicy, WorkspaceVersionControlPolicy, WorkspaceVersionControlProvider,
     read_workspace_policy, workspace_policy_path, write_workspace_policy,
 };

@@ -328,7 +328,7 @@ pub struct DispatchContextContract {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child_session_key: Option<String>,
     /// #1021 / M17-C — which kind of backend is consuming this dispatch
-    /// (`"native"`, `"cli"`, or `"mcp"`). Lets validators and AppUI
+    /// (`"native"`, `"cli"`, or `"mcp"`). Lets the AppUI
     /// evidence ledgers tell apart context modes per specialist kind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_kind: Option<String>,

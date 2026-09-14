@@ -105,7 +105,6 @@ pub const MUTATING_TOOLS: &[&str] = &[
     "spawn",
     "spawn_agent",
     "delegate",
-    "delegate_task",
 ];
 
 /// Whether `name` is a built-in tool that can mutate workspace files.
@@ -1258,7 +1257,6 @@ mod tests {
             "spawn",
             "spawn_agent",
             "delegate",
-            "delegate_task",
         ] {
             assert!(is_mutating_tool(tool), "{tool} must be mutating");
         }

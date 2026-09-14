@@ -1069,22 +1069,15 @@ pub struct SpawnTool {
     /// (e.g. legacy tests not exercising the gate).
     dispatch_policy: Option<crate::dispatch_policy::DispatchPolicy>,
     /// #1607 (codex-review follow-up): the session's sandbox config, carried
-    /// so the spawn/agent_mcp child completion path can confine `Command`
-    /// validators declared by an untrusted workspace `workspace_policy.toml`
-    /// to the same backend as the parent's shell/exec tools. Before this
-    /// field, the two validator registries in `execute_with_context`'s
-    /// `agent_mcp` branch were built with `ToolRegistry::with_builtins`
-    /// (hardcoded `NoSandbox`), so `run_declared_validators` /
-    /// `run_declared_validators` executed a workspace-authored `Command`
-    /// validator directly on the host even when the session was sandboxed —
-    /// a second construction site for the exact escape #1607 closed on the
-    /// `build_validator_runner` chokepoint. Defaults to
+    /// so child registries are built with the same backend the parent
+    /// `ToolRegistry` uses, keeping child command execution confined to the
+    /// session's sandbox instead of the hardcoded `NoSandbox` that
+    /// `ToolRegistry::with_builtins` stores. Defaults to
     /// `SandboxConfig::default()`; the real session wiring threads the same
     /// config the parent `ToolRegistry` was built with via
     /// [`Self::with_sandbox`]. A no-op backend (`NoSandbox`, or a helper that
-    /// is unavailable) has nothing to escape, so `ValidatorRunner` runs the
-    /// argv directly there — behaviour is unchanged on hosts without a real
-    /// backend.
+    /// is unavailable) runs argv directly — behaviour is unchanged on hosts
+    /// without a real backend.
     sandbox: SandboxConfig,
     /// Optional host-owned root for spawned-worker deliverables. When absent,
     /// retain the legacy `<working_dir>/.octos/spawn-deliverables` location.
@@ -1286,12 +1279,11 @@ impl SpawnTool {
     }
 
     /// #1607 (codex-review follow-up): inherit the session's sandbox config so
-    /// the spawn/agent_mcp child completion path confines workspace-declared
-    /// `Command` validators to the same backend as the parent's shell/exec
-    /// tools. Real session wiring passes the exact `SandboxConfig` the parent
-    /// `ToolRegistry` was built with; callers that don't set it keep the
-    /// host-independent `SandboxConfig::default()` (which resolves to a no-op
-    /// backend when no helper is present, so validators run the argv directly).
+    /// child registries run command execution on the same backend as the
+    /// parent's shell/exec tools. Real session wiring passes the exact
+    /// `SandboxConfig` the parent `ToolRegistry` was built with; callers that
+    /// don't set it keep the host-independent `SandboxConfig::default()`
+    /// (which resolves to a no-op backend when no helper is present).
     pub fn with_sandbox(mut self, sandbox: SandboxConfig) -> Self {
         self.sandbox = sandbox;
         self
@@ -2275,13 +2267,13 @@ fn deliverable_artifact_glob(deliverable: Option<&str>) -> Option<String> {
 /// policy's declared glob and resolves matches on disk, so a deliverable
 /// written by ANY means (a `shell` heredoc, `write_file`, a plugin) is
 /// surfaced, not just files reported through a tracked write tool. The
-/// seeded policy is `Session` kind with no validators or git auto-init — we
-/// only want the artifact-glob resolution.
+/// seeded policy is `Session` kind with no git auto-init — we only want the
+/// artifact-glob resolution.
 fn seed_deliverable_contract(output_dir: &Path, artifact_glob: &str) -> Result<()> {
     use crate::workspace_policy::{
-        ValidationPolicy, WorkspaceArtifactsPolicy, WorkspacePolicy, WorkspacePolicyKind,
-        WorkspacePolicyWorkspace, WorkspaceSnapshotTrigger, WorkspaceTrackingPolicy,
-        WorkspaceVersionControlPolicy, WorkspaceVersionControlProvider, write_workspace_policy,
+        WorkspaceArtifactsPolicy, WorkspacePolicy, WorkspacePolicyKind, WorkspacePolicyWorkspace,
+        WorkspaceSnapshotTrigger, WorkspaceTrackingPolicy, WorkspaceVersionControlPolicy,
+        WorkspaceVersionControlProvider, write_workspace_policy,
     };
     use std::collections::BTreeMap;
 
@@ -2304,7 +2296,6 @@ fn seed_deliverable_contract(output_dir: &Path, artifact_glob: &str) -> Result<(
             fail_on_error: false,
         },
         tracking: WorkspaceTrackingPolicy { ignore: Vec::new() },
-        validation: ValidationPolicy::default(),
         artifacts: WorkspaceArtifactsPolicy {
             entries: BTreeMap::from([(
                 PRIMARY_CONTRACT_ARTIFACT.to_string(),
@@ -2952,85 +2943,22 @@ impl Tool for SpawnTool {
             // `commit` above consumed it successfully, or Drop refunds.
             drop(reservation);
 
-            // Review A F-004: for the agent_mcp dispatch path the child
-            // session runs inside the remote backend and never touches the
-            // parent's ValidatorRunner. Before, the parent trusted the
-            // remote `SUCCESS` label — if the remote skipped its own
-            // contract-gate, the parent happily forwarded a non-validated
-            // artifact. Running the declared completion-phase validators
-            // here, against the parent's workspace root, restores the
-            // invariant: any required validator failure demotes the
-            // response to a typed failure before it leaves the tool.
-            let mut mcp_success = success;
-            let mut mcp_output_override: Option<String> = None;
-            if mcp_success {
-                if let Ok(Some(policy)) =
-                    crate::workspace_policy::read_workspace_policy(&self.working_dir)
-                {
-                    if !policy.validation.validators.is_empty() {
-                        // #1607 (codex-review follow-up): build this
-                        // session-scope validator registry with the session's
-                        // sandbox so a workspace-authored `Command` validator
-                        // runs confined, not directly on the host. `with_builtins`
-                        // hardcodes `NoSandbox`, so `tools.sandbox()` inside
-                        // `build_validator_runner` would be a no-op here even
-                        // when the parent session is sandboxed. A no-op backend
-                        // (no helper present) still runs the argv directly, so
-                        // hosts without a real sandbox are unaffected.
-                        let validator_sandbox: std::sync::Arc<dyn crate::sandbox::Sandbox> =
-                            std::sync::Arc::from(create_sandbox(&self.sandbox));
-                        let mut registry_for_validators = ToolRegistry::with_builtins_and_sandbox(
-                            &self.working_dir,
-                            create_sandbox(&self.sandbox),
-                        );
-                        // Honour the parent's provider tool policy in the validator
-                        // registry too, so a workspace `ToolCall` validator can't
-                        // invoke a tool the policy denies (#1607 codex round 2).
-                        if let Some(policy) = self.provider_policy.clone() {
-                            registry_for_validators.set_provider_policy(policy);
-                        }
-                        if let Err(reason) = crate::workspace_contract::run_declared_validators(
-                            &registry_for_validators,
-                            &self.working_dir,
-                            &policy.validation.validators,
-                            "spawn-agent-mcp",
-                            crate::validators::ValidatorPhase::Completion,
-                            None,
-                            validator_sandbox,
-                        )
-                        .await
-                        {
-                            mcp_success = false;
-                            mcp_output_override = Some(format!(
-                                "Status: FAILED\nremote_agent_mcp: completion validator rejected child artifact: {reason}"
-                            ));
-                        }
-                    }
-                }
-            }
-
             let files_to_send = response.files_to_send.clone();
 
             return Ok(ToolResult {
-                output: mcp_output_override.unwrap_or_else(|| {
-                    if mcp_success {
-                        format!("Status: SUCCESS\n\n{}", response.output)
-                    } else {
-                        format!(
-                            "Status: FAILED\n{}",
-                            response
-                                .error
-                                .clone()
-                                .unwrap_or_else(|| response.output.clone())
-                        )
-                    }
-                }),
-                success: mcp_success,
-                files_to_send: if mcp_success {
-                    files_to_send
+                output: if success {
+                    format!("Status: SUCCESS\n\n{}", response.output)
                 } else {
-                    Vec::new()
+                    format!(
+                        "Status: FAILED\n{}",
+                        response
+                            .error
+                            .clone()
+                            .unwrap_or_else(|| response.output.clone())
+                    )
                 },
+                success,
+                files_to_send: if success { files_to_send } else { Vec::new() },
                 ..Default::default()
             });
         }
@@ -3133,7 +3061,7 @@ impl Tool for SpawnTool {
 
         // Review A F-004: snapshot the parent workspace policy once so both the
         // sync and async spawn branches propagate the same typed
-        // compaction / validator contracts to child sessions. Without this,
+        // compaction contracts to child sessions. Without this,
         // the child Agent silently runs without preflight compaction even
         // when the parent's workspace_policy.toml declares one.
         let parent_workspace_policy =
@@ -3144,7 +3072,7 @@ impl Tool for SpawnTool {
                         working_dir = %self.working_dir.display(),
                         error = %error,
                         "spawn: failed to read parent workspace policy; \
-                         child will run without propagated compaction/validator contracts"
+                         child will run without propagated compaction contracts"
                     );
                     None
                 }
@@ -3155,14 +3083,10 @@ impl Tool for SpawnTool {
             //
             // #1607 (codex-review follow-up): build the child registry with the
             // SESSION sandbox, not the hardcoded `NoSandbox` that
-            // `with_builtins` stores. The child's `child_tools_handle` feeds
-            // `run_declared_validators` below,
-            // and `build_validator_runner` confines `ValidatorSpec::Command`
-            // validators to `tools.sandbox()`. A `NoSandbox` registry there
-            // would let an untrusted `workspace_policy.toml` command validator
-            // execute directly on the host from a sandboxed session. On hosts
-            // without a real backend `create_sandbox` yields `NoSandbox` and
-            // the validator runs the argv directly (unchanged).
+            // `with_builtins` stores, so child command execution stays
+            // confined to the same backend as the parent session. On hosts
+            // without a real backend `create_sandbox` yields `NoSandbox`
+            // (unchanged).
             let mut tools = ToolRegistry::with_builtins_and_sandbox(
                 &child_working_dir,
                 create_sandbox(&self.sandbox),
@@ -3249,9 +3173,6 @@ impl Tool for SpawnTool {
             if let Some(scope) = child_session_scope.as_ref() {
                 worker = worker.with_session_scope(scope.clone());
             }
-            // Keep an Arc handle to the child's tool registry so we can run
-            // declared validators against it after `run_task` returns.
-            let child_tools_handle = worker.tool_registry().clone();
             // Apply the worker config plus the spawn's iteration budget: the
             // caller's `max_iterations` (clamped) or the generous spawn default
             // (`DEFAULT_SPAWN_MAX_ITERATIONS`) — a sub-agent does more than an
@@ -3353,47 +3274,12 @@ impl Tool for SpawnTool {
             // session-actor recovery contract.
             let result = run_task_with_m8_9_recovery(&worker, &subtask, &task_desc).await;
             let tool_result = match result {
-                Ok(r) => {
-                    // Review A F-004: run declared completion-phase validators
-                    // against the child's artifacts before surfacing success.
-                    // Matches `enforce_spawn_task_contract`'s gating for
-                    // spawn-only tools and closes the "vacuous pass" hole in
-                    // `contract_failure_summary` (which only reads the ledger).
-                    let mut output = r.output;
-                    let mut success = r.success;
-                    if success {
-                        if let Some(ref policy) = parent_workspace_policy {
-                            if !policy.validation.validators.is_empty() {
-                                match crate::workspace_contract::run_declared_validators(
-                                    child_tools_handle.as_ref(),
-                                    &child_working_dir,
-                                    &policy.validation.validators,
-                                    "spawn",
-                                    crate::validators::ValidatorPhase::Completion,
-                                    None,
-                                    std::sync::Arc::from(create_sandbox(&self.sandbox)),
-                                )
-                                .await
-                                {
-                                    Ok(_) => {}
-                                    Err(reason) => {
-                                        success = false;
-                                        output = format!(
-                                            "Subagent failed: contract validator rejected child artifact: {reason}"
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    ToolResult {
-                        output,
-                        success,
-                        tokens_used: Some(r.token_usage),
-                        ..Default::default()
-                    }
-                }
+                Ok(r) => ToolResult {
+                    output: r.output,
+                    success: r.success,
+                    tokens_used: Some(r.token_usage),
+                    ..Default::default()
+                },
                 Err(e) => ToolResult {
                     output: format!("Subagent failed: {e}"),
                     success: false,
@@ -3520,9 +3406,8 @@ impl Tool for SpawnTool {
             let provider_policy = self.provider_policy.clone();
             // #1607 (codex-review follow-up): capture the session sandbox so the
             // detached background child registry can be built with it (see the
-            // `with_builtins_and_sandbox` call inside the closure). Without this
-            // the background child's validator registry stored `NoSandbox`, so a
-            // workspace-declared command validator could escape to the host.
+            // `with_builtins_and_sandbox` call inside the closure), keeping
+            // child command execution on the session's backend.
             let child_sandbox = self.sandbox.clone();
             let additional_instructions = input.additional_instructions;
             // Spawn iteration budget (caller's clamped value or the generous
@@ -3553,7 +3438,7 @@ impl Tool for SpawnTool {
             let hook_context_template = self.hook_context_template.clone();
             // Review A F-004: carry the parent workspace policy into the
             // background child task so the detached child inherits the same
-            // compaction + validator contracts the sync spawn path honours.
+            // compaction contract the sync spawn path honours.
             let child_workspace_policy = parent_workspace_policy.clone();
             // M8.10 follow-up (#649): snapshot the originating turn's
             // thread_id (= user message's client_message_id) at spawn
@@ -3723,11 +3608,10 @@ impl Tool for SpawnTool {
 
                 // #1607 (codex-review follow-up): build the detached child
                 // registry with the SESSION sandbox rather than the hardcoded
-                // `NoSandbox` `with_builtins` stores. Its `child_tools_handle`
-                // feeds `run_declared_validators`
-                // below, and `build_validator_runner` confines command
-                // validators to `tools.sandbox()`. On hosts without a real
-                // backend `create_sandbox` yields `NoSandbox` (unchanged).
+                // `NoSandbox` `with_builtins` stores, so child command
+                // execution stays confined to the session's backend. On hosts
+                // without a real backend `create_sandbox` yields `NoSandbox`
+                // (unchanged).
                 let mut tools = ToolRegistry::with_builtins_and_sandbox(
                     &working_dir,
                     create_sandbox(&child_sandbox),
@@ -3812,9 +3696,6 @@ impl Tool for SpawnTool {
                 if let Some(scope) = child_session_scope.as_ref() {
                     worker = worker.with_session_scope(scope.clone());
                 }
-                // Keep an Arc to the child's tool registry for the
-                // post-`run_task` validator invocation below.
-                let child_tools_handle = worker.tool_registry().clone();
                 let mut effective_config = worker_config.clone().unwrap_or_default();
                 effective_config.suppress_auto_send_files = true;
                 effective_config.max_iterations = bg_max_iters;
@@ -3915,47 +3796,15 @@ impl Tool for SpawnTool {
                     Err(error) => Err(error),
                 };
 
-                // Review A F-004: actively run declared completion-phase
-                // validators before the existing ledger-read checks. The
-                // pre-fix path relied on `resolve_background_terminal_files`
-                // + ledger inspection, which trivially passed when the child
-                // never ran validators (the ledger was empty). Running the
-                // validators here guarantees the required rail is exercised
-                // before any downstream gate consults the ledger.
-                let mut contract_failure: Option<String> = None;
-                if let (Ok(task_result), Some(policy)) =
-                    (result.as_ref(), child_workspace_policy.as_ref())
-                {
-                    if task_result.success && !policy.validation.validators.is_empty() {
-                        if let Err(reason) = crate::workspace_contract::run_declared_validators(
-                            child_tools_handle.as_ref(),
-                            &working_dir,
-                            &policy.validation.validators,
-                            "spawn",
-                            crate::validators::ValidatorPhase::Completion,
-                            None,
-                            std::sync::Arc::from(create_sandbox(&child_sandbox)),
-                        )
-                        .await
-                        {
-                            contract_failure = Some(reason);
-                        }
-                    }
-                }
-
-                if contract_failure.is_none() {
-                    contract_failure = match &result {
-                        Ok(task_result) if task_result.success => {
-                            resolve_background_terminal_files(
-                                &task_result.files_to_send,
-                                &task_result.files_modified,
-                                workflow_metadata.as_ref(),
-                            )
-                            .err()
-                        }
-                        _ => None,
-                    };
-                }
+                let mut contract_failure = match &result {
+                    Ok(task_result) if task_result.success => resolve_background_terminal_files(
+                        &task_result.files_to_send,
+                        &task_result.files_modified,
+                        workflow_metadata.as_ref(),
+                    )
+                    .err(),
+                    _ => None,
+                };
                 let mut terminal_files = match (&result, contract_failure.as_ref()) {
                     (Ok(task_result), None) if task_result.success => {
                         resolve_background_terminal_files(

@@ -75,9 +75,7 @@ use crate::tools::{
     ToolApprovalRequest, ToolApprovalRequester, ToolContext, USER_QUESTION_CTX,
     UserQuestionRequester,
 };
-use crate::workspace_contract::{
-    SpawnTaskContractResult, enforce_spawn_task_contract_with_args_and_output,
-};
+use crate::workspace_contract::{SpawnTaskContractResult, enforce_spawn_task_contract};
 
 /// Per-tool-call result returned from the in-process dispatcher. Kept as a
 /// tuple so the aggregation path can reuse today's `futures::join_all` style
@@ -126,7 +124,6 @@ fn should_auto_send_tool_files(
 /// Names verified against the registered `Tool::name()` impls:
 /// - `shell` (`tools/shell.rs`), `bash` alias
 /// - `spawn` (`tools/spawn.rs`), `spawn_agent` alias
-/// - `delegate_task` (`tools/delegate.rs`)
 /// - `check` (`tools/check.rs`): a cold `cargo check` legitimately compiles
 ///   the dependency graph; the tool enforces its own 120s child timeout,
 ///   which must fire BEFORE the batch ceiling (the interactive default is
@@ -140,14 +137,7 @@ fn should_auto_send_tool_files(
 /// would detach the still-running tool task and leak the pending question
 /// (UPCR-2026-023). They remain fully timeout-exempt at the registry dispatch
 /// boundary too, via `Tool::blocks_on_human_input`.
-const LONG_RUNNING_TOOLS: &[&str] = &[
-    "shell",
-    "bash",
-    "spawn",
-    "spawn_agent",
-    "delegate_task",
-    "check",
-];
+const LONG_RUNNING_TOOLS: &[&str] = &["shell", "bash", "spawn", "spawn_agent", "check"];
 
 /// Headroom between a tool's registry-level execution budget and the agent
 /// batch deadline. This lets the inner registry timeout return its typed
@@ -1253,36 +1243,13 @@ impl Agent {
                                 success = true,
                                 "spawn_only background tool completed"
                             );
-                            // Forward the tool's `named_outputs` map (parsed
-                            // from its stdout envelope by the plugin
-                            // wrapper) so validators can resolve
-                            // `${output.<key>}` references against
-                            // tool-emitted values (e.g. `mofa_publish`
-                            // emitting `deploy_url`).
-                            let named_outputs_value = r.named_outputs.as_ref().map(|map| {
-                                serde_json::Value::Object(
-                                    map.iter()
-                                        .map(|(k, v)| {
-                                            (k.clone(), serde_json::Value::String(v.clone()))
-                                        })
-                                        .collect(),
-                                )
-                            });
-                            match enforce_spawn_task_contract_with_args_and_output(
+                            match enforce_spawn_task_contract(
                                 &bg_tools,
                                 &bg_name,
                                 &bg_tc_id,
                                 &r.files_to_send,
                                 bg_started_at,
                                 Some((&bg_supervisor, &task_id)),
-                                Some(&bg_args),
-                                named_outputs_value.as_ref(),
-                                // #1607: the Agent's own registry is built
-                                // sandboxed (session_actor
-                                // `create_registry_for_workspace` ->
-                                // `rebind_cwd(create_sandbox(&sandbox_config))`),
-                                // so its stored sandbox IS the session backend.
-                                bg_tools.sandbox(),
                             )
                             .await
                             {
@@ -3222,7 +3189,7 @@ mod tests {
     #[test]
     fn long_running_tools_are_recognised() {
         // The genuinely-long-running set keeps the 1800s ceiling.
-        for name in ["shell", "bash", "spawn", "spawn_agent", "delegate_task"] {
+        for name in ["shell", "bash", "spawn", "spawn_agent"] {
             assert!(
                 is_long_running_tool(name),
                 "{name} should be classified long-running"

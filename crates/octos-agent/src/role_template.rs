@@ -701,10 +701,7 @@ mod tests {
     /// - `group:fs` -> write_file / apply_patch / edit_file / diff_edit
     /// - `group:memory` -> save_memory
     /// - `group:runtime` -> shell / exec_command / write_stdin
-    /// - `group:sessions` -> spawn / spawn_agent / ...
-    /// - `group:delegated` -> delegate_task / delegate / spawn /
-    ///   spawn_agent / send_input / message / save_memory (spawning plus
-    ///   messaging and memory writes)
+    /// - `group:sessions` -> spawn / spawn_agent / send_input / ...
     ///
     /// Read-only roles (`reviewer`, `explorer`) MUST advertise none
     /// of these; `test_worker` is allowed `group:runtime` because
@@ -719,7 +716,6 @@ mod tests {
             "group:sessions",
             "group:admin",
             "group:media",
-            "group:delegated",
         ];
         // Reviewer + explorer are documented as fully read-only.
         for name in [ROLE_REVIEWER, ROLE_EXPLORER] {
@@ -1104,7 +1100,6 @@ mod tests {
             "write_stdin",
             "spawn",
             "spawn_agent",
-            "delegate_task",
         ] {
             assert!(
                 !policy.is_allowed(mutator),

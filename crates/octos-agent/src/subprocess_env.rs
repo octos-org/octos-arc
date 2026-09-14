@@ -171,7 +171,7 @@ mod tests {
         register_secret_env_names([odd]);
 
         // After registration it is treated as a secret: stripped from the
-        // default (empty-allowlist) environment, so shell/hooks/validators
+        // default (empty-allowlist) environment, so shell/hooks/verify actions
         // can't echo it...
         assert!(!should_forward_env_name(odd, &EnvAllowlist::empty()));
         // (case-insensitive)

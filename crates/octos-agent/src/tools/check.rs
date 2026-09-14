@@ -650,7 +650,7 @@ impl Tool for CheckTool {
         // Without this the group kill targets a group the child was never
         // placed in (ESRCH no-op) and grandchildren keep compiling — and
         // holding the cargo build lock — after the tool reported "timed
-        // out". Same convention as bash/exec_command/validators.
+        // out". Same convention as bash/exec_command.
         #[cfg(unix)]
         cmd.process_group(0);
         sanitize_command_env(&mut cmd, &EnvAllowlist::empty());

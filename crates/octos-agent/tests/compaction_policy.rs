@@ -147,7 +147,6 @@ fn policy_with_compaction(compaction: CompactionPolicy) -> WorkspacePolicy {
             fail_on_error: false,
         },
         tracking: WorkspaceTrackingPolicy { ignore: vec![] },
-        validation: Default::default(),
         artifacts: WorkspaceArtifactsPolicy {
             entries: BTreeMap::from([
                 ("primary".into(), "output/deck.pptx".into()),

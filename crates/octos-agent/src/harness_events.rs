@@ -23,7 +23,6 @@ use crate::abi_schema::{
 };
 use crate::harness_errors::HarnessErrorEvent;
 use crate::task_supervisor::TaskSupervisor;
-use crate::validators::VALIDATOR_RESULT_SCHEMA_VERSION;
 
 pub const HARNESS_EVENT_SCHEMA_V1: &str = "octos.harness.event.v1";
 pub const OCTOS_EVENT_SINK_ENV: &str = "OCTOS_EVENT_SINK";
@@ -44,10 +43,6 @@ const MAX_TASK_ID_BYTES: usize = 128;
 pub const MAX_WORKFLOW_BYTES: usize = 128;
 const MAX_PHASE_BYTES: usize = 64;
 const MAX_MESSAGE_BYTES: usize = 2 * 1024;
-
-fn default_validator_result_schema_version() -> u32 {
-    VALIDATOR_RESULT_SCHEMA_VERSION
-}
 
 fn default_sub_agent_dispatch_schema_version() -> u32 {
     SUB_AGENT_DISPATCH_SCHEMA_VERSION
@@ -314,10 +309,6 @@ pub enum HarnessEventPayload {
         #[serde(flatten)]
         data: HarnessPhaseEvent,
     },
-    ValidatorResult {
-        #[serde(flatten)]
-        data: HarnessValidatorResultEvent,
-    },
     Retry {
         #[serde(flatten)]
         data: HarnessRetryEvent,
@@ -325,15 +316,6 @@ pub enum HarnessEventPayload {
     Failure {
         #[serde(flatten)]
         data: HarnessFailureEvent,
-    },
-    /// Outer orchestrator invoked a session-level MCP tool exposed by `octos mcp-serve`.
-    ///
-    /// Emitted once per `tools/call` dispatch (stdio or http). The `outcome`
-    /// field is one of `ready`, `failed`, `queued`, `running`, or `verifying`,
-    /// matching [`TaskLifecycleState`](crate::task_supervisor::TaskLifecycleState).
-    McpServerCall {
-        #[serde(flatten)]
-        data: HarnessMcpServerCallEvent,
     },
     SubAgentDispatch {
         #[serde(flatten)]
@@ -393,24 +375,6 @@ pub struct HarnessPhaseEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct HarnessValidatorResultEvent {
-    #[serde(default = "default_validator_result_schema_version")]
-    pub schema_version: u32,
-    pub session_id: String,
-    pub task_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workflow: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub phase: Option<String>,
-    pub validator: String,
-    pub passed: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-    #[serde(flatten)]
-    pub extra: HashMap<String, Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HarnessRetryEvent {
     pub session_id: String,
     pub task_id: String,
@@ -437,30 +401,6 @@ pub struct HarnessFailureEvent {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retryable: Option<bool>,
-    #[serde(flatten)]
-    pub extra: HashMap<String, Value>,
-}
-
-/// One MCP-server-mode `tools/call` dispatch — emitted by `octos mcp-serve` so
-/// outer orchestrators appear in the same harness audit log as local tool calls.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct HarnessMcpServerCallEvent {
-    pub session_id: String,
-    pub task_id: String,
-    /// The MCP tool name (currently always `run_octos_session`).
-    pub tool: String,
-    /// Opaque identifier for the caller. For stdio this is the parent process
-    /// label; for HTTP it is the bearer-token fingerprint (never the raw token).
-    pub caller_id: String,
-    /// Transport that received this call: `stdio` or `http`.
-    pub transport: String,
-    /// Coarse lifecycle outcome: `ready`, `failed`, `queued`, `running`, or
-    /// `verifying`. Matches [`TaskLifecycleState`](crate::task_supervisor::TaskLifecycleState).
-    pub outcome: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub contract: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
     #[serde(flatten)]
     pub extra: HashMap<String, Value>,
 }
@@ -650,35 +590,6 @@ impl HarnessEvent {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn mcp_server_call(
-        session_id: impl Into<String>,
-        task_id: impl Into<String>,
-        tool: impl Into<String>,
-        caller_id: impl Into<String>,
-        transport: impl Into<String>,
-        outcome: impl Into<String>,
-        contract: Option<impl Into<String>>,
-        error: Option<impl Into<String>>,
-    ) -> Self {
-        Self {
-            schema: HARNESS_EVENT_SCHEMA_V1.to_string(),
-            payload: HarnessEventPayload::McpServerCall {
-                data: HarnessMcpServerCallEvent {
-                    session_id: session_id.into(),
-                    task_id: task_id.into(),
-                    tool: tool.into(),
-                    caller_id: caller_id.into(),
-                    transport: transport.into(),
-                    outcome: outcome.into(),
-                    contract: contract.map(Into::into),
-                    error: error.map(Into::into),
-                    extra: HashMap::new(),
-                },
-            },
-        }
-    }
-
     /// Build a `SubagentProgress` event (M8.7). Emitted every tick while a
     /// spawn_only sub-agent is running so operators can see a live
     /// natural-language summary of current activity.
@@ -745,19 +656,6 @@ impl HarnessEvent {
                 validate_phase(&data.phase)?;
                 validate_optional_message(data.message.as_deref())?;
             }
-            HarnessEventPayload::ValidatorResult { data } => {
-                if data.schema_version > VALIDATOR_RESULT_SCHEMA_VERSION {
-                    return Err(HarnessEventError(format!(
-                        "unsupported validator result schema_version {} (max supported: {})",
-                        data.schema_version, VALIDATOR_RESULT_SCHEMA_VERSION
-                    )));
-                }
-                validate_common_ids(&data.session_id, &data.task_id)?;
-                validate_optional_name("workflow", data.workflow.as_deref(), MAX_WORKFLOW_BYTES)?;
-                validate_optional_name("phase", data.phase.as_deref(), MAX_PHASE_BYTES)?;
-                validate_bounded("validator", &data.validator, MAX_MESSAGE_BYTES)?;
-                validate_optional_message(data.message.as_deref())?;
-            }
             HarnessEventPayload::Retry { data } => {
                 validate_common_ids(&data.session_id, &data.task_id)?;
                 validate_optional_name("workflow", data.workflow.as_deref(), MAX_WORKFLOW_BYTES)?;
@@ -769,17 +667,6 @@ impl HarnessEvent {
                 validate_optional_name("workflow", data.workflow.as_deref(), MAX_WORKFLOW_BYTES)?;
                 validate_optional_name("phase", data.phase.as_deref(), MAX_PHASE_BYTES)?;
                 validate_bounded("failure message", &data.message, MAX_MESSAGE_BYTES)?;
-            }
-            HarnessEventPayload::McpServerCall { data } => {
-                validate_common_ids(&data.session_id, &data.task_id)?;
-                validate_bounded("tool", &data.tool, MAX_WORKFLOW_BYTES)?;
-                validate_bounded("caller_id", &data.caller_id, MAX_WORKFLOW_BYTES)?;
-                validate_bounded("transport", &data.transport, MAX_PHASE_BYTES)?;
-                validate_bounded("outcome", &data.outcome, MAX_PHASE_BYTES)?;
-                validate_optional_name("contract", data.contract.as_deref(), MAX_WORKFLOW_BYTES)?;
-                if let Some(error) = data.error.as_deref() {
-                    validate_bounded("error", error, MAX_MESSAGE_BYTES)?;
-                }
             }
             HarnessEventPayload::SubAgentDispatch { data } => {
                 if data.schema_version > SUB_AGENT_DISPATCH_SCHEMA_VERSION {
@@ -901,24 +788,6 @@ impl HarnessEvent {
                     "progress_message": message,
                 })
             }
-            HarnessEventPayload::ValidatorResult { data } => {
-                let workflow = data.workflow.as_deref().or(fallback_workflow_kind);
-                let current_phase = data.phase.as_deref().or(fallback_current_phase);
-                serde_json::json!({
-                    "schema": self.schema,
-                    "schema_version": data.schema_version,
-                    "kind": "validator_result",
-                    "session_id": data.session_id,
-                    "task_id": data.task_id,
-                    "workflow": workflow,
-                    "workflow_kind": workflow,
-                    "phase": data.phase,
-                    "current_phase": current_phase,
-                    "validator": data.validator,
-                    "passed": data.passed,
-                    "message": data.message,
-                })
-            }
             HarnessEventPayload::Retry { data } => {
                 let workflow = data.workflow.as_deref().or(fallback_workflow_kind);
                 let current_phase = data.phase.as_deref().or(fallback_current_phase);
@@ -951,21 +820,6 @@ impl HarnessEvent {
                     "retryable": data.retryable,
                 })
             }
-            HarnessEventPayload::McpServerCall { data } => serde_json::json!({
-                "schema": self.schema,
-                "kind": "mcp_server_call",
-                "session_id": data.session_id,
-                "task_id": data.task_id,
-                "tool": data.tool,
-                "caller_id": data.caller_id,
-                "transport": data.transport,
-                "outcome": data.outcome,
-                "contract": data.contract,
-                "workflow": fallback_workflow_kind,
-                "workflow_kind": fallback_workflow_kind,
-                "current_phase": fallback_current_phase,
-                "error": data.error,
-            }),
             HarnessEventPayload::SubAgentDispatch { data } => {
                 let workflow = data.workflow.as_deref().or(fallback_workflow_kind);
                 let current_phase = data.phase.as_deref().or(fallback_current_phase);
@@ -1046,10 +900,8 @@ impl HarnessEvent {
         match &self.payload {
             HarnessEventPayload::Progress { data } => &data.session_id,
             HarnessEventPayload::Phase { data } => &data.session_id,
-            HarnessEventPayload::ValidatorResult { data } => &data.session_id,
             HarnessEventPayload::Retry { data } => &data.session_id,
             HarnessEventPayload::Failure { data } => &data.session_id,
-            HarnessEventPayload::McpServerCall { data } => &data.session_id,
             HarnessEventPayload::SubAgentDispatch { data } => &data.session_id,
             HarnessEventPayload::CostAttribution { data } => &data.session_id,
             HarnessEventPayload::SubagentProgress { data } => &data.session_id,
@@ -1061,10 +913,8 @@ impl HarnessEvent {
         match &self.payload {
             HarnessEventPayload::Progress { data } => &data.task_id,
             HarnessEventPayload::Phase { data } => &data.task_id,
-            HarnessEventPayload::ValidatorResult { data } => &data.task_id,
             HarnessEventPayload::Retry { data } => &data.task_id,
             HarnessEventPayload::Failure { data } => &data.task_id,
-            HarnessEventPayload::McpServerCall { data } => &data.task_id,
             HarnessEventPayload::SubAgentDispatch { data } => &data.task_id,
             HarnessEventPayload::CostAttribution { data } => &data.task_id,
             HarnessEventPayload::SubagentProgress { data } => &data.task_id,
@@ -1076,10 +926,8 @@ impl HarnessEvent {
         match &self.payload {
             HarnessEventPayload::Progress { data } => data.workflow.as_deref(),
             HarnessEventPayload::Phase { data } => data.workflow.as_deref(),
-            HarnessEventPayload::ValidatorResult { data } => data.workflow.as_deref(),
             HarnessEventPayload::Retry { data } => data.workflow.as_deref(),
             HarnessEventPayload::Failure { data } => data.workflow.as_deref(),
-            HarnessEventPayload::McpServerCall { .. } => None,
             HarnessEventPayload::SubAgentDispatch { data } => data.workflow.as_deref(),
             HarnessEventPayload::CostAttribution { data } => data.workflow.as_deref(),
             HarnessEventPayload::SubagentProgress { .. } => None,
@@ -1091,10 +939,8 @@ impl HarnessEvent {
         match &self.payload {
             HarnessEventPayload::Progress { data } => Some(data.phase.as_str()),
             HarnessEventPayload::Phase { data } => Some(data.phase.as_str()),
-            HarnessEventPayload::ValidatorResult { data } => data.phase.as_deref(),
             HarnessEventPayload::Retry { data } => data.phase.as_deref(),
             HarnessEventPayload::Failure { data } => data.phase.as_deref(),
-            HarnessEventPayload::McpServerCall { .. } => None,
             HarnessEventPayload::SubAgentDispatch { data } => data.phase.as_deref(),
             HarnessEventPayload::CostAttribution { data } => data.phase.as_deref(),
             HarnessEventPayload::SubagentProgress { .. } => None,
@@ -1758,73 +1604,6 @@ mod tests {
             "phase": "fetch"
         });
         assert!(HarnessEvent::from_json_line(&future.to_string()).is_err());
-    }
-
-    #[test]
-    fn validator_result_event_defaults_and_reports_schema_version() {
-        let raw = serde_json::json!({
-            "schema": "octos.harness.event.v1",
-            "kind": "validator_result",
-            "session_id": "session-1",
-            "task_id": "task-1",
-            "workflow": "coding",
-            "phase": "verify",
-            "validator": "cargo-test",
-            "passed": true,
-            "message": "ok"
-        });
-
-        let parsed = HarnessEvent::from_json_line(&raw.to_string()).unwrap();
-        let detail = parsed.runtime_detail_value(None, None);
-        assert_eq!(detail["schema_version"], VALIDATOR_RESULT_SCHEMA_VERSION);
-        assert_eq!(detail["validator"], "cargo-test");
-        assert_eq!(detail["passed"], true);
-    }
-
-    #[test]
-    fn mcp_server_call_event_round_trips() {
-        let event = HarnessEvent::mcp_server_call(
-            "mcp:http",
-            "task-42",
-            "run_octos_session",
-            "http-bearer",
-            "http",
-            "ready",
-            Some("slides_delivery"),
-            Option::<String>::None,
-        );
-        assert!(event.validate().is_ok());
-        let json = serde_json::to_string(&event).unwrap();
-        assert!(json.contains(r#""kind":"mcp_server_call""#));
-        let parsed = HarnessEvent::from_json_line(&json).unwrap();
-        match &parsed.payload {
-            HarnessEventPayload::McpServerCall { data } => {
-                assert_eq!(data.tool, "run_octos_session");
-                assert_eq!(data.transport, "http");
-                assert_eq!(data.outcome, "ready");
-                assert_eq!(data.contract.as_deref(), Some("slides_delivery"));
-            }
-            _ => panic!("expected McpServerCall variant"),
-        }
-        let detail = parsed.runtime_detail_value(None, None);
-        assert_eq!(detail["kind"], "mcp_server_call");
-        assert_eq!(detail["transport"], "http");
-        assert_eq!(detail["outcome"], "ready");
-    }
-
-    #[test]
-    fn mcp_server_call_event_rejects_empty_tool() {
-        let event = HarnessEvent::mcp_server_call(
-            "mcp:stdio",
-            "task-1",
-            "",
-            "parent-process",
-            "stdio",
-            "ready",
-            Option::<String>::None,
-            Option::<String>::None,
-        );
-        assert!(event.validate().is_err());
     }
 
     #[test]

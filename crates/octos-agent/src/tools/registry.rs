@@ -193,14 +193,11 @@ pub struct ToolRegistry {
     tool_timeout_secs: u64,
     /// #1607: the session sandbox handed to the shell/exec/bash tools at
     /// construction. Stored (not just handed off and dropped) so the
-    /// Agent-internal project-root validator path
-    /// (`workspace_contract::build_validator_runner`) can thread the same
-    /// sandbox into its `ValidatorRunner` and confine
-    /// `ValidatorSpec::Command` validators declared by an untrusted
-    /// workspace policy. Defaults to `Arc::new(NoSandbox)` (a no-op sandbox
-    /// whose `is_noop()==true`), so on the plain `with_builtins`/`Default`
-    /// path — and on any host without a real backend — command validators
-    /// run the argv directly and behavior is unchanged.
+    /// session's confinement backend is reachable for every tool executed
+    /// through the registry. Defaults to `Arc::new(NoSandbox)` (a no-op
+    /// sandbox whose `is_noop()==true`), so on the plain
+    /// `with_builtins`/`Default` path — and on any host without a real
+    /// backend — commands run the argv directly and behavior is unchanged.
     sandbox: Arc<dyn Sandbox>,
 }
 
@@ -246,14 +243,11 @@ impl ToolRegistry {
         }
     }
 
-    /// #1607: the session sandbox stored on this registry. Threaded into the
-    /// Agent-internal project-root validator runner
-    /// (`workspace_contract::build_validator_runner`) so
-    /// `ValidatorSpec::Command` validators declared by an untrusted workspace
-    /// policy are confined to the same sandbox as the shell/exec tools instead
-    /// of running unsandboxed on the host. A no-op sandbox
-    /// (`NoSandbox`, or a backend whose helper is unavailable) has nothing to
-    /// escape, so `ValidatorRunner` runs the argv directly there.
+    /// #1607: the session sandbox stored on this registry, so command
+    /// execution through the registry's tools is confined to the same backend
+    /// as the shell/exec tools instead of running unsandboxed on the host.
+    /// A no-op sandbox (`NoSandbox`, or a backend whose helper is unavailable)
+    /// has nothing to escape, so argv runs directly there.
     pub fn sandbox(&self) -> Arc<dyn Sandbox> {
         self.sandbox.clone()
     }
@@ -835,10 +829,9 @@ impl ToolRegistry {
     /// internal-hidden markers — it answers only "would the provider policy
     /// let the model call this tool".
     ///
-    /// Used by [`crate::validators::MapToolDispatcher::from_registry`] to keep
-    /// project-root `ToolCall` validators from reaching a tool the provider
-    /// policy denies. With no provider policy set every tool is permitted (the
-    /// default), so this is a no-op on the common path.
+    /// Answers "would the provider policy deny this tool" for callers that
+    /// dispatch tools on the model's behalf. With no provider policy set every
+    /// tool is permitted (the default), so this is a no-op on the common path.
     pub fn provider_policy_permits(&self, name: &str) -> bool {
         self.provider_policy.as_ref().is_none_or(|policy| {
             matches!(
@@ -1124,10 +1117,9 @@ impl ToolRegistry {
         let mut registry = Self::new();
         registry.workspace_root = Some(cwd.to_path_buf());
         let sandbox: Arc<dyn Sandbox> = Arc::from(sandbox);
-        // #1607: store the session sandbox so the Agent-internal project-root
-        // validator path can confine command validators to it (see
-        // `Self::sandbox`). Kept in lockstep with the shell/exec/bash tools
-        // registered just below.
+        // #1607: store the session sandbox so command execution through the
+        // registry is confined to it (see `Self::sandbox`). Kept in lockstep
+        // with the shell/exec/bash tools registered just below.
         registry.sandbox = sandbox.clone();
         registry.register(
             ShellTool::new(cwd)
@@ -1332,9 +1324,9 @@ impl ToolRegistry {
         registry.workspace_root = Some(cwd.to_path_buf());
         let sandbox: Arc<dyn Sandbox> = Arc::from(sandbox);
         // #1607: store the sandbox for the rebound cwd (overwriting the
-        // parent's, carried by `snapshot_excluding`) so the project-root
-        // validator path confines command validators to the same sandbox as
-        // the shell/exec/bash tools re-registered just below.
+        // parent's, carried by `snapshot_excluding`) so command execution
+        // through the re-registered shell/exec/bash tools stays confined to
+        // the same sandbox.
         registry.sandbox = sandbox.clone();
         // Re-register cwd-bound tools with the new workspace
         registry.register(
@@ -1877,9 +1869,9 @@ mod registry_dispatch_tests {
     #[test]
     fn should_expose_a_noop_sandbox_when_registry_built_without_a_real_backend() {
         // #1607 (P1): `with_builtins` (and `Default`) install `NoSandbox`, so
-        // the getter the project-root validator path calls must return a no-op
-        // sandbox — `ValidatorRunner` then runs command validators' argv
-        // directly, keeping host behavior unchanged where no backend exists.
+        // the sandbox getter must return a no-op sandbox — commands then run
+        // their argv directly, keeping host behavior unchanged where no
+        // backend exists.
         let reg = make_registry();
         assert!(
             reg.sandbox().is_noop(),

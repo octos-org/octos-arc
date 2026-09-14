@@ -27,8 +27,6 @@ pub struct WorkspacePolicy {
     pub version_control: WorkspaceVersionControlPolicy,
     pub tracking: WorkspaceTrackingPolicy,
     #[serde(default)]
-    pub validation: ValidationPolicy,
-    #[serde(default)]
     pub artifacts: WorkspaceArtifactsPolicy,
     #[serde(default)]
     pub spawn_tasks: BTreeMap<String, WorkspaceSpawnTaskPolicy>,
@@ -108,388 +106,6 @@ pub enum CompactionSummarizerKind {
     LlmIterative,
 }
 
-/// Tiered validation checks run at different points in the turn lifecycle.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct ValidationPolicy {
-    /// Tier 1: cheap checks run every turn (< 100ms). e.g. file_exists, build exit code.
-    #[serde(default)]
-    pub on_turn_end: Vec<String>,
-    /// Tier 2: medium checks run when source files change (1-5s). e.g. preview render.
-    #[serde(default)]
-    pub on_source_change: Vec<String>,
-    /// Tier 3: expensive checks run on completion/publish only (10-30s). e.g. Playwright.
-    #[serde(default)]
-    pub on_completion: Vec<String>,
-    /// Typed declarative validators (M4.3). Runs via `ValidatorRunner`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub validators: Vec<Validator>,
-}
-
-/// Typed declarative validator spec.
-///
-/// Each validator is identified by a stable `id`, produces a typed
-/// [`crate::validators::ValidatorOutcome`], and may be `required` (a failure
-/// blocks terminal success) or optional (a failure produces a warning only).
-///
-/// Wave-3a introduced an explicit [`Required::Soft`] tier — surfaced via the
-/// `soft_fail` companion field — so partial-artifact contracts can warn and
-/// continue without demoting the spawn task. The historic boolean
-/// `required` field is preserved verbatim for serde + ABI back-compat; the
-/// runtime collapses both fields into a single [`Required`] gate value via
-/// [`Validator::tier`].
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Validator {
-    /// Stable identifier, unique within the validator list.
-    pub id: String,
-    /// Required validators block terminal success when they fail. Soft-fail
-    /// validators (see [`Self::soft_fail`]) ignore this flag.
-    #[serde(default = "default_required_bool")]
-    pub required: bool,
-    /// When `true`, a failed outcome surfaces as a warning + ledger entry
-    /// but does NOT demote the spawn task — even if `required` is also
-    /// `true`. Defaults to `false` so existing policies preserve the
-    /// hard-fail semantics they have today. Use this to declare partial-
-    /// artifact contracts (e.g. "the primary report is hard-required, the
-    /// sub-artifacts are soft").
-    #[serde(default, skip_serializing_if = "is_default_false")]
-    pub soft_fail: bool,
-    /// Optional per-validator timeout in milliseconds. Applies to command and
-    /// tool validators. File-existence validators ignore the timeout.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timeout_ms: Option<u64>,
-    /// Which lifecycle phase this validator runs in. Defaults to completion.
-    #[serde(default, skip_serializing_if = "is_default_phase")]
-    pub phase: ValidatorPhaseKind,
-    #[serde(flatten)]
-    pub spec: ValidatorSpec,
-}
-
-impl Validator {
-    /// Collapse `required` + `soft_fail` into the operator-visible
-    /// gate-strength tier. The mapping is:
-    ///
-    /// | `required` | `soft_fail` | `tier()`         |
-    /// | ---------- | ----------- | ---------------- |
-    /// | `true`     | `false`     | [`Required::Hard`] |
-    /// | `true`     | `true`      | [`Required::Soft`] |
-    /// | `false`    | `false`     | [`Required::None`] |
-    /// | `false`    | `true`      | [`Required::Soft`] |
-    ///
-    /// `soft_fail = true` always overrides the hard semantics so the
-    /// validator never demotes its spawn task.
-    pub fn tier(&self) -> Required {
-        if self.soft_fail {
-            Required::Soft
-        } else if self.required {
-            Required::Hard
-        } else {
-            Required::None
-        }
-    }
-}
-
-/// Operator-facing strength label for a validator's gate over terminal
-/// success. Surfaced through [`Validator::tier`] and the persisted ledger
-/// outcome record so dashboards can split hard, soft, and informational
-/// failures.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Required {
-    /// A failure of this validator demotes the spawn task to `Failed`.
-    /// Equivalent to the historic `required: true`.
-    #[default]
-    Hard,
-    /// A failure surfaces a warning + persists to the ledger but does NOT
-    /// demote the spawn task. Use for sub-artifacts and partial-artifact
-    /// contracts where the primary deliverable is hard-required but
-    /// auxiliary outputs are nice-to-have.
-    Soft,
-    /// A failure is fully optional — same gate behaviour as `Soft`, but
-    /// operator-visible as "this validator is informational only".
-    /// Equivalent to the historic `required: false` with `soft_fail = false`.
-    None,
-}
-
-impl Required {
-    /// Does a non-`Pass` outcome from this validator block terminal success?
-    pub fn is_hard(self) -> bool {
-        matches!(self, Self::Hard)
-    }
-
-    /// Should a non-`Pass` outcome surface as a warning (without demoting
-    /// the spawn task)? True for both `Soft` and `None` — operators are free
-    /// to filter on the explicit tier via the persisted outcome record.
-    pub fn is_warning_only(self) -> bool {
-        matches!(self, Self::Soft | Self::None)
-    }
-
-    /// Stable label for metrics + ledger records.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Hard => "hard",
-            Self::Soft => "soft",
-            Self::None => "none",
-        }
-    }
-}
-
-fn default_required_bool() -> bool {
-    true
-}
-
-fn is_default_false(value: &bool) -> bool {
-    !*value
-}
-
-fn is_default_phase(phase: &ValidatorPhaseKind) -> bool {
-    *phase == ValidatorPhaseKind::default()
-}
-
-/// Where a file-list-driven validator (`MagicBytes`) sources its candidate
-/// file paths.
-///
-/// Defaults to [`ValidatorFileSource::Glob`] so existing TOML contracts keep
-/// their historic behaviour: the validator resolves the `glob` field against
-/// the workspace root. Opting into [`ValidatorFileSource::SpawnOnlyFiles`]
-/// tells the validator to use the originating spawn_only tool's
-/// `files_to_send` list verbatim (the plugin protocol's authoritative list
-/// of files the skill just produced), optionally filtered by an extension
-/// suffix.
-///
-/// Issue octos #1034: topic-suffixed plugin output directories break
-/// globbing because the per-topic directory name is unpredictable.
-/// `files_to_send` carries the exact path the plugin wrote and is the
-/// canonical source of truth.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ValidatorFileSource {
-    /// Resolve files by glob (the legacy behaviour). The validator's `glob`
-    /// field is matched against the workspace root.
-    #[default]
-    Glob,
-    /// Use the originating spawn_only tool's `files_to_send` list, optionally
-    /// filtered by a file extension supplied alongside (e.g. `extension =
-    /// "mp3"`). The `glob` field is IGNORED in this mode. When the file list
-    /// is empty (non-spawn-only contexts) the validator surfaces a `Fail`
-    /// outcome so misconfigured policies are caught early.
-    SpawnOnlyFiles,
-}
-
-impl ValidatorFileSource {
-    /// Predicate used by `skip_serializing_if` so a default value does not
-    /// pollute TOML output for contracts that did not opt in.
-    pub fn is_default(&self) -> bool {
-        matches!(self, Self::Glob)
-    }
-}
-
-/// Lifecycle phase a validator runs in.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ValidatorPhaseKind {
-    /// Runs on every turn end (cheap checks).
-    TurnEnd,
-    /// Runs on completion / publish (expensive checks).
-    #[default]
-    Completion,
-}
-
-/// The typed body of a [`Validator`].
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ValidatorSpec {
-    /// Run a subprocess command. Dispatched via the shell-safety layer and
-    /// existing `BLOCKED_ENV_VARS` sanitization. No direct `Command::new("sh")`
-    /// bypass.
-    Command {
-        cmd: String,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        args: Vec<String>,
-    },
-    /// Invoke a registered agent tool. Outcome status follows the tool's
-    /// `ToolResult.success`.
-    ToolCall {
-        tool: String,
-        #[serde(default)]
-        args: serde_json::Value,
-    },
-    /// Assert that a file exists (and optionally meets a minimum byte count).
-    FileExists {
-        path: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        min_bytes: Option<u64>,
-    },
-    /// HTTP probe — call URL (with `${args.<path>}` template interpolation
-    /// against the spawn task's input args), assert the response is the
-    /// expected status code, optionally assert a substring is present in the
-    /// response body. Default timeout 5s (overridden by
-    /// [`Validator::timeout_ms`]).
-    HttpProbe {
-        url_template: String,
-        #[serde(default = "default_http_probe_status")]
-        expected_status: u16,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        expected_contains: Option<String>,
-    },
-    /// Specialization of `HttpProbe` for the common case of asserting
-    /// ominix-api has registered a custom voice. Calls
-    /// `GET ${OMINIX_API_URL:-http://127.0.0.1:8081}/v1/voices` and
-    /// asserts the response's `voices[].name` array contains the
-    /// interpolated `name_arg` value. Surfaces the available list in the
-    /// failure message so the LLM can react in one round.
-    OminixVoiceExists {
-        /// Argument key in the spawn task's input args (e.g. `name`) that
-        /// holds the voice name to look up.
-        name_arg: String,
-    },
-    /// Assert each file matching `glob` has the magic-byte prefix for the
-    /// declared `format`. Catches "tool wrote 0 bytes" or "tool wrote an
-    /// HTML error page in place of an MP3".
-    ///
-    /// The format field is named `format` rather than `kind` to avoid
-    /// colliding with serde's `kind` discriminator tag.
-    ///
-    /// When `source = "spawn_only_files"` (octos #1034) the validator skips
-    /// the glob entirely and consumes the originating spawn_only tool's
-    /// `files_to_send` list, optionally narrowed by `extension`.
-    MagicBytes {
-        #[serde(default)]
-        glob: String,
-        format: MagicByteKind,
-        #[serde(default, skip_serializing_if = "ValidatorFileSource::is_default")]
-        source: ValidatorFileSource,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        extension: Option<String>,
-    },
-    /// Polling HTTP probe — repeatedly GET a templated URL (with
-    /// `${args.<key>}` interpolation against the spawn task's input args)
-    /// until the expected status code (+ optional body substring) is
-    /// observed or the deadline expires.
-    ///
-    /// Closes the silent-failure path where a spawn task kicks off an
-    /// asynchronous external operation (training a voice, deploying a site)
-    /// whose completion the harness must verify without baking polling logic
-    /// into every skill. Emits [`crate::validators::ValidatorStatus::Pass`]
-    /// on the first success; [`Fail`] (with the last response summary in
-    /// the message) when the deadline expires; [`Timeout`] only if a single
-    /// probe within the deadline window itself times out at the HTTP level.
-    HttpProbeUntil {
-        url_template: String,
-        #[serde(default = "default_http_probe_status")]
-        expected_status: u16,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        expected_contains: Option<String>,
-        /// Interval between probe attempts in milliseconds.
-        #[serde(default = "default_http_probe_until_interval_ms")]
-        poll_interval_ms: u64,
-        /// Hard wall-clock deadline in milliseconds. Once reached the
-        /// validator emits a [`Fail`] outcome surfacing the most recent
-        /// response so the LLM/operator can debug in one round.
-        #[serde(default = "default_http_probe_until_deadline_ms")]
-        deadline_ms: u64,
-    },
-    /// Assert a single file's SHA-256 digest equals `sha256`. Accepts either
-    /// an explicit hex digest OR a `${args.<key>}` template so the spawn task
-    /// can supply the expected hash through its input args (e.g. a manifest
-    /// `sha256` field captured at install time). Lifts the inline
-    /// `manage_skills::download_binary` checksum check onto the canonical
-    /// validator path so it shows up in the contract diagnostics ledger.
-    Sha256Match { glob: String, sha256: String },
-}
-
-/// File-format signature used by [`ValidatorSpec::MagicBytes`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MagicByteKind {
-    Mp3,
-    Wav,
-    Png,
-    Jpeg,
-    Pdf,
-    Mp4,
-    WebM,
-    /// OOXML / OpenDocument-style ZIP container (PPTX, DOCX, XLSX, ODT, ...).
-    /// Matches the three ZIP signatures: local-file-header (`PK\x03\x04`),
-    /// end-of-central-directory (`PK\x05\x06`), and spanned-archive
-    /// (`PK\x07\x08`).
-    Pptx,
-}
-
-impl MagicByteKind {
-    /// Return the alternative magic-byte prefixes for this file format.
-    /// A file matches if any prefix is present at the start of the byte
-    /// stream.
-    pub fn prefixes(self) -> &'static [&'static [u8]] {
-        match self {
-            // MP3 with ID3v2 tag, or a raw MPEG frame sync (0xFF Fx/Ex/Dx).
-            Self::Mp3 => &[
-                b"ID3",
-                &[0xFF, 0xFB],
-                &[0xFF, 0xFA],
-                &[0xFF, 0xF3],
-                &[0xFF, 0xF2],
-                &[0xFF, 0xE3],
-                &[0xFF, 0xE2],
-            ],
-            Self::Wav => &[b"RIFF"],
-            Self::Png => &[&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]],
-            Self::Jpeg => &[&[0xFF, 0xD8, 0xFF]],
-            Self::Pdf => &[b"%PDF-"],
-            // MP4: 4-byte size prefix followed by 'ftyp'. Most MP4s also
-            // start with 'ftyp' offset by 4 bytes, but checking the brand
-            // directly is simpler — see `magic_bytes_match`.
-            Self::Mp4 => &[b"ftyp"],
-            Self::WebM => &[&[0x1A, 0x45, 0xDF, 0xA3]],
-            // PPTX (and any OOXML/zip container): all three ZIP signatures
-            // are accepted so a minimally-built archive is not rejected as
-            // structurally invalid.
-            Self::Pptx => &[
-                &[0x50, 0x4B, 0x03, 0x04],
-                &[0x50, 0x4B, 0x05, 0x06],
-                &[0x50, 0x4B, 0x07, 0x08],
-            ],
-        }
-    }
-
-    /// Does `data` start with one of the prefixes for this format?
-    ///
-    /// For MP4, the `ftyp` marker lives at offset 4 (after the box-size
-    /// prefix), so the check is byte-position aware. For other formats the
-    /// prefix is at the beginning.
-    pub fn matches(self, data: &[u8]) -> bool {
-        if self == Self::Mp4 {
-            // MP4: bytes 4..8 must be 'ftyp'.
-            return data.len() >= 8 && &data[4..8] == b"ftyp";
-        }
-        let prefixes = self.prefixes();
-        prefixes.iter().any(|p| data.starts_with(p))
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Mp3 => "mp3",
-            Self::Wav => "wav",
-            Self::Png => "png",
-            Self::Jpeg => "jpeg",
-            Self::Pdf => "pdf",
-            Self::Mp4 => "mp4",
-            Self::WebM => "webm",
-            Self::Pptx => "pptx",
-        }
-    }
-}
-
-fn default_http_probe_status() -> u16 {
-    200
-}
-
-fn default_http_probe_until_interval_ms() -> u64 {
-    2_000
-}
-
-fn default_http_probe_until_deadline_ms() -> u64 {
-    30_000
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspacePolicyWorkspace {
     pub kind: WorkspacePolicyKind,
@@ -564,52 +180,7 @@ pub struct WorkspaceSpawnTaskPolicy {
     pub on_deliver: Vec<String>,
     #[serde(default)]
     pub on_failure: Vec<String>,
-    /// Per-spawn-task typed validators run at the completion gate, in
-    /// addition to the workspace-wide `[validation].validators`. Each entry
-    /// is auto-tagged as required+completion phase; pass an explicit
-    /// `Validator` struct (with `id`, `required`, etc.) for finer control.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub on_completion: Vec<SpawnTaskValidatorSpec>,
 }
-
-/// TOML-friendly wrapper for the per-spawn-task `on_completion` validator
-/// list. Accepts either:
-///
-/// * A bare `ValidatorSpec` table (no `id`/`required`/`phase`) — auto-tagged
-///   as required + completion phase + a synthetic `id` derived from the
-///   spawn task name and validator index.
-/// * A full `Validator` table with `id`, `required`, `timeout_ms`, etc.
-///
-/// Both forms surface to the runner as a [`Validator`].
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum SpawnTaskValidatorSpec {
-    /// Full Validator struct with `id`, `required`, etc.
-    Full(Validator),
-    /// Bare spec table — id, required, and phase are auto-filled by
-    /// [`SpawnTaskValidatorSpec::into_validator`].
-    Bare(ValidatorSpec),
-}
-
-impl SpawnTaskValidatorSpec {
-    /// Lower this entry into a fully-formed `Validator` using `task_name`
-    /// and `index` to synthesize a stable id when only a bare spec was
-    /// provided.
-    pub fn into_validator(self, task_name: &str, index: usize) -> Validator {
-        match self {
-            Self::Full(validator) => validator,
-            Self::Bare(spec) => Validator {
-                id: format!("{task_name}.on_completion[{index}]"),
-                required: true,
-                soft_fail: false,
-                timeout_ms: None,
-                phase: ValidatorPhaseKind::Completion,
-                spec,
-            },
-        }
-    }
-}
-
 impl WorkspaceSpawnTaskPolicy {
     pub fn artifact_sources(&self) -> Vec<&str> {
         if self.artifacts.is_empty() {
@@ -644,7 +215,6 @@ impl WorkspacePolicy {
             tracking: WorkspaceTrackingPolicy {
                 ignore: vec!["tmp/**".into(), ".DS_Store".into()],
             },
-            validation: ValidationPolicy::default(),
             artifacts: WorkspaceArtifactsPolicy::default(),
             spawn_tasks: BTreeMap::new(),
             compaction: None,
@@ -852,7 +422,6 @@ mod tests {
             on_complete: Vec::new(),
             on_deliver: Vec::new(),
             on_failure: Vec::new(),
-            on_completion: Vec::new(),
         };
 
         assert_eq!(task.artifact_sources(), vec!["report", "audio"]);
@@ -867,7 +436,6 @@ mod tests {
             on_complete: Vec::new(),
             on_deliver: Vec::new(),
             on_failure: Vec::new(),
-            on_completion: Vec::new(),
         };
 
         assert_eq!(task.artifact_sources(), vec!["primary_audio"]);
@@ -882,7 +450,6 @@ mod tests {
             on_complete: Vec::new(),
             on_deliver: Vec::new(),
             on_failure: Vec::new(),
-            on_completion: Vec::new(),
         };
 
         let rendered = toml::to_string_pretty(&task).unwrap();
@@ -900,7 +467,6 @@ mod tests {
             on_complete: vec!["notify_user:legacy".into()],
             on_deliver: vec!["notify_user:deliver".into()],
             on_failure: Vec::new(),
-            on_completion: Vec::new(),
         };
 
         assert_eq!(
@@ -918,7 +484,6 @@ mod tests {
             on_complete: vec!["notify_user:legacy".into()],
             on_deliver: Vec::new(),
             on_failure: Vec::new(),
-            on_completion: Vec::new(),
         };
 
         assert_eq!(task.delivery_actions(), &["notify_user:legacy".to_string()]);
@@ -984,69 +549,6 @@ ignore = []
     }
 
     #[test]
-    fn should_roundtrip_typed_validators_through_toml() {
-        let mut policy = WorkspacePolicy::for_session();
-        policy.validation.validators = vec![
-            Validator {
-                id: "cmd".into(),
-                required: true,
-                soft_fail: false,
-                timeout_ms: Some(3000),
-                phase: ValidatorPhaseKind::Completion,
-                spec: ValidatorSpec::Command {
-                    cmd: "echo".into(),
-                    args: vec!["hello".into()],
-                },
-            },
-            Validator {
-                id: "file".into(),
-                required: false,
-                soft_fail: false,
-                timeout_ms: None,
-                phase: ValidatorPhaseKind::TurnEnd,
-                spec: ValidatorSpec::FileExists {
-                    path: "out.txt".into(),
-                    min_bytes: Some(128),
-                },
-            },
-            Validator {
-                id: "tool".into(),
-                required: true,
-                soft_fail: false,
-                timeout_ms: Some(5000),
-                phase: ValidatorPhaseKind::Completion,
-                spec: ValidatorSpec::ToolCall {
-                    tool: "custom_tool".into(),
-                    args: serde_json::json!({"mode": "strict"}),
-                },
-            },
-        ];
-        let rendered = toml::to_string_pretty(&policy).unwrap();
-        assert!(rendered.contains("[[validation.validators]]"));
-        assert!(rendered.contains("kind = \"command\""));
-        assert!(rendered.contains("kind = \"file_exists\""));
-        assert!(rendered.contains("kind = \"tool_call\""));
-        let parsed: WorkspacePolicy = toml::from_str(&rendered).unwrap();
-        assert_eq!(parsed, policy);
-    }
-
-    #[test]
-    fn validator_defaults_to_required_and_completion_phase() {
-        let toml = r#"
-            id = "x"
-            kind = "file_exists"
-            path = "output.txt"
-        "#;
-        let parsed: Validator = toml::from_str(toml).unwrap();
-        assert_eq!(parsed.id, "x");
-        assert!(parsed.required, "required defaults to true");
-        assert!(!parsed.soft_fail, "soft_fail defaults to false");
-        assert_eq!(parsed.tier(), Required::Hard);
-        assert_eq!(parsed.phase, ValidatorPhaseKind::Completion);
-        assert!(parsed.timeout_ms.is_none());
-    }
-
-    #[test]
     fn write_workspace_policy_if_absent_creates_file_when_missing() {
         let temp = tempfile::tempdir().unwrap();
         let policy = WorkspacePolicy::for_session();
@@ -1074,202 +576,6 @@ ignore = []
         write_workspace_policy_if_absent(temp.path(), &WorkspacePolicy::for_session()).unwrap();
         let after = std::fs::read_to_string(&path).unwrap();
         assert_eq!(after, sentinel);
-    }
-
-    #[test]
-    fn magic_byte_kind_matches_recognized_prefixes() {
-        assert!(MagicByteKind::Mp3.matches(b"ID3\0\0"));
-        assert!(MagicByteKind::Mp3.matches(&[0xFF, 0xFB, 0x90, 0x00]));
-        assert!(!MagicByteKind::Mp3.matches(b"GIF87a"));
-
-        assert!(MagicByteKind::Wav.matches(b"RIFFxxxxWAVE"));
-        assert!(!MagicByteKind::Wav.matches(b"ID3xxxx"));
-
-        assert!(MagicByteKind::Pdf.matches(b"%PDF-1.4"));
-        assert!(MagicByteKind::Png.matches(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]));
-        assert!(MagicByteKind::Jpeg.matches(&[0xFF, 0xD8, 0xFF, 0xE0]));
-
-        // MP4: 'ftyp' must appear at byte offset 4 (after size prefix).
-        let mp4: [u8; 16] = [
-            0, 0, 0, 0x20, b'f', b't', b'y', b'p', b'i', b's', b'o', b'm', 0, 0, 0, 0,
-        ];
-        assert!(MagicByteKind::Mp4.matches(&mp4));
-    }
-
-    #[test]
-    fn magic_byte_kind_pptx_matches_zip_signatures() {
-        // PPTX is a ZIP archive — accept the OOXML local-file-header
-        // signature (`PK\x03\x04`) and the central-directory variants so a
-        // tool that emits a minimal/empty archive isn't spuriously rejected.
-        assert!(MagicByteKind::Pptx.matches(b"PK\x03\x04rest of zip"));
-        assert!(MagicByteKind::Pptx.matches(b"PK\x05\x06"));
-        assert!(MagicByteKind::Pptx.matches(b"PK\x07\x08"));
-        // An HTML error page surfaced in place of a PPTX must be rejected so
-        // the silent-failure path is caught at the harness gate.
-        assert!(!MagicByteKind::Pptx.matches(b"<!DOCTYPE html>"));
-    }
-
-    #[test]
-    fn spawn_task_validator_spec_roundtrips_through_toml_bare_and_full_forms() {
-        // Bare form: just the spec table. id, required, phase auto-filled.
-        let bare_toml = r#"
-            kind = "ominix_voice_exists"
-            name_arg = "name"
-        "#;
-        let bare: SpawnTaskValidatorSpec = toml::from_str(bare_toml).unwrap();
-        let validator = bare.into_validator("fm_voice_save", 0);
-        assert_eq!(validator.id, "fm_voice_save.on_completion[0]");
-        assert!(validator.required);
-        assert!(!validator.soft_fail);
-        assert_eq!(validator.tier(), Required::Hard);
-        assert_eq!(validator.phase, ValidatorPhaseKind::Completion);
-        match validator.spec {
-            ValidatorSpec::OminixVoiceExists { ref name_arg } => {
-                assert_eq!(name_arg, "name");
-            }
-            _ => panic!("expected OminixVoiceExists"),
-        }
-
-        // Full form: explicit id, required, phase.
-        let full_toml = r#"
-            id = "voice_optional"
-            required = false
-            phase = "completion"
-            kind = "magic_bytes"
-            glob = "*.mp3"
-            format = "mp3"
-        "#;
-        let full: SpawnTaskValidatorSpec = toml::from_str(full_toml).unwrap();
-        let validator = full.into_validator("ignored", 99);
-        assert_eq!(validator.id, "voice_optional");
-        assert!(!validator.required);
-        assert_eq!(validator.tier(), Required::None);
-    }
-
-    // -----------------------------------------------------------------
-    // Wave-3a: HttpProbeUntil + Sha256Match + soft_fail TOML roundtrips
-    // -----------------------------------------------------------------
-
-    #[test]
-    fn http_probe_until_roundtrips_through_toml_with_default_intervals() {
-        // Operators must be able to declare a polling probe in TOML with
-        // only the URL set; the runtime fills the poll/deadline defaults.
-        let toml = r#"
-            id = "voice_train_done"
-            kind = "http_probe_until"
-            url_template = "http://x/v1/train/status?task_id=${args.task_id}"
-            expected_contains = "complete"
-        "#;
-        let parsed: Validator = toml::from_str(toml).unwrap();
-        match parsed.spec {
-            ValidatorSpec::HttpProbeUntil {
-                ref url_template,
-                expected_status,
-                ref expected_contains,
-                poll_interval_ms,
-                deadline_ms,
-            } => {
-                assert_eq!(
-                    url_template,
-                    "http://x/v1/train/status?task_id=${args.task_id}"
-                );
-                assert_eq!(expected_status, 200);
-                assert_eq!(expected_contains.as_deref(), Some("complete"));
-                assert_eq!(poll_interval_ms, 2_000);
-                assert_eq!(deadline_ms, 30_000);
-            }
-            ref other => panic!("expected HttpProbeUntil, got {other:?}"),
-        }
-        // Round-trip the validator through TOML to confirm fields survive.
-        let rendered = toml::to_string_pretty(&parsed).unwrap();
-        let reparsed: Validator = toml::from_str(&rendered).unwrap();
-        assert_eq!(parsed, reparsed);
-    }
-
-    #[test]
-    fn sha256_match_roundtrips_through_toml() {
-        let toml = r#"
-            id = "skill_main_hash"
-            kind = "sha256_match"
-            glob = "skill_main"
-            sha256 = "${args.expected_sha256}"
-        "#;
-        let parsed: Validator = toml::from_str(toml).unwrap();
-        match parsed.spec {
-            ValidatorSpec::Sha256Match {
-                ref glob,
-                ref sha256,
-            } => {
-                assert_eq!(glob, "skill_main");
-                assert_eq!(sha256, "${args.expected_sha256}");
-            }
-            ref other => panic!("expected Sha256Match, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn soft_fail_validator_roundtrips_through_toml() {
-        // The soft_fail companion field is the Wave-3a serde contract for
-        // partial-artifact contracts: hard-required validators that should
-        // surface as warnings rather than demote the spawn task.
-        let toml = r#"
-            id = "sub_artifact_warn"
-            required = true
-            soft_fail = true
-            kind = "file_exists"
-            path = "sub-artifact.md"
-        "#;
-        let parsed: Validator = toml::from_str(toml).unwrap();
-        assert!(parsed.required, "required field preserved verbatim");
-        assert!(parsed.soft_fail, "soft_fail toggled on");
-        assert_eq!(parsed.tier(), Required::Soft);
-        // Round-trip: soft_fail must serialize and deserialize cleanly.
-        let rendered = toml::to_string_pretty(&parsed).unwrap();
-        assert!(
-            rendered.contains("soft_fail = true"),
-            "soft_fail = true should be emitted in TOML: {rendered}"
-        );
-        let reparsed: Validator = toml::from_str(&rendered).unwrap();
-        assert_eq!(reparsed, parsed);
-    }
-
-    #[test]
-    fn soft_fail_default_false_is_omitted_from_serialized_toml() {
-        // Existing operator policies (no soft_fail field) must round-trip
-        // byte-for-byte: soft_fail = false is the default and shouldn't
-        // surface in the rendered TOML.
-        let toml = r#"
-            id = "primary_required"
-            kind = "file_exists"
-            path = "primary.md"
-        "#;
-        let parsed: Validator = toml::from_str(toml).unwrap();
-        assert!(!parsed.soft_fail);
-        let rendered = toml::to_string_pretty(&parsed).unwrap();
-        assert!(
-            !rendered.contains("soft_fail"),
-            "default soft_fail = false must not be emitted: {rendered}"
-        );
-    }
-
-    #[test]
-    fn validator_tier_collapses_required_and_soft_fail_correctly() {
-        // The 4-case truth table from `Validator::tier`'s rustdoc.
-        let make = |required: bool, soft_fail: bool| Validator {
-            id: "x".into(),
-            required,
-            soft_fail,
-            timeout_ms: None,
-            phase: ValidatorPhaseKind::Completion,
-            spec: ValidatorSpec::FileExists {
-                path: "x".into(),
-                min_bytes: None,
-            },
-        };
-        assert_eq!(make(true, false).tier(), Required::Hard);
-        assert_eq!(make(true, true).tier(), Required::Soft);
-        assert_eq!(make(false, false).tier(), Required::None);
-        assert_eq!(make(false, true).tier(), Required::Soft);
     }
 
     // ----- WorkspacePolicyKind::Coding (Audit Gap-1 + section 7 Q3) -----

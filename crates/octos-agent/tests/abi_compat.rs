@@ -43,10 +43,6 @@ fn copy_fixture_into_workspace(fixture: &str, project_root: &Path) {
 
 #[test]
 fn should_load_workspace_policy_v1_session_fixture() {
-    use octos_agent::workspace_policy::{
-        SpawnTaskValidatorSpec, ValidatorFileSource, ValidatorSpec,
-    };
-
     let temp = tempfile::tempdir().unwrap();
     copy_fixture_into_workspace("workspace_policy_v1_session.toml", temp.path());
 
@@ -70,57 +66,24 @@ fn should_load_workspace_policy_v1_session_fixture() {
             .any(|line| line == "file_size_min:$artifact:1024"),
         "expected fm_tts verify action for artifact size",
     );
-    // octos #1034: the podcast_generate contract opts into the
-    // `spawn_only_files` source via the new ABI fields. The fixture is the
-    // durable promise of that shape — parsing it must populate `source =
-    // SpawnOnlyFiles` and `extension = Some("mp3")` on the MagicBytes
-    // validator so an older operator policy that committed the prior glob
-    // form will surface a clear deserialization error rather than silently
-    // fall back to the glob path.
-    let podcast = policy
-        .spawn_tasks
-        .get("podcast_generate")
-        .expect("podcast_generate spawn task contract");
-    let saw_magic = podcast.on_completion.iter().any(|entry| {
-        matches!(
-            entry,
-            SpawnTaskValidatorSpec::Bare(ValidatorSpec::MagicBytes {
-                source: ValidatorFileSource::SpawnOnlyFiles,
-                extension,
-                ..
-            }) if extension.as_deref() == Some("mp3")
-        )
-    });
-    assert!(
-        saw_magic,
-        "podcast fixture must declare MagicBytes(spawn_only_files)"
-    );
-
-    // octos #1040 (follow-up to #1035 / #1037): mofa_comic, mofa_infographic,
-    // and mofa_frame all carry MagicBytes(Png) on the `spawn_only_files`
-    // source with the `extension = "png"` filter. The fixture is the
-    // durable promise of that shape; the round-trip pins both the new ABI
-    // field defaults AND the per-contract opt-in.
-    for tool in ["mofa_comic", "mofa_infographic", "mofa_frame"] {
-        let entry = policy
-            .spawn_tasks
-            .get(tool)
-            .unwrap_or_else(|| panic!("v1 fixture must declare {tool} spawn task"));
-        let saw = entry.on_completion.iter().any(|spec| {
-            matches!(
-                spec,
-                SpawnTaskValidatorSpec::Bare(ValidatorSpec::MagicBytes {
-                    source: ValidatorFileSource::SpawnOnlyFiles,
-                    extension,
-                    ..
-                }) if extension.as_deref() == Some("png")
-            )
-        });
+    // The fixture still carries the retired `on_completion` validator tables
+    // from octos #1034/#1040/#1036. The typed validator surface has been
+    // removed from `WorkspaceSpawnTaskPolicy`, and the policy structs do NOT
+    // use `deny_unknown_fields` — so legacy operator contracts that declare
+    // those keys must keep parsing (silently tolerated; the gates no-op).
+    for tool in [
+        "podcast_generate",
+        "fm_voice_save",
+        "mofa_slides",
+        "mofa_comic",
+        "mofa_infographic",
+        "mofa_frame",
+        "manage_skills",
+        "deep_search",
+    ] {
         assert!(
-            saw,
-            "{tool} fixture must declare MagicBytes(png, spawn_only_files, extension=png); \
-             got {:?}",
-            entry.on_completion,
+            policy.spawn_tasks.contains_key(tool),
+            "v1 fixture must still declare the {tool} spawn task"
         );
     }
 }

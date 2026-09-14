@@ -328,7 +328,7 @@ pub struct ToolContext {
     /// `Optional` because Phase 1 is additive — no consumer reads this
     /// yet. Phase 2 PRs will migrate the pipeline tool's working_dir,
     /// plugin tool `work_dir`, file tools, shell, etc. to read from
-    /// this field; Phase 3 will retire bespoke validators like
+    /// this field; the bespoke per-artifact check DSL lives in the
     /// `api_session_workspace_dirs` in favour of
     /// [`SessionScope::workspace`]. See `octos_core::session_scope`
     /// for the contract and migration notes.
@@ -577,7 +577,7 @@ pub struct ToolResult {
     /// Optional named outputs the tool wants the contract layer to read.
     /// spawn_only plugin tools emit this via `"named_outputs": {"key": "value"}`
     /// in their stdout JSON envelope. The contract layer forwards each entry
-    /// to validators so `${output.<key>}` interpolation can resolve against
+    /// to downstream consumers so `${output.<key>}` references can resolve against
     /// tool-emitted values (e.g. `mofa_publish` emitting `deploy_url`).
     /// Values are restricted to strings in v1; key shape must match
     /// `[a-z][a-z0-9_]*`. Absent (`None`) when the tool emits nothing.
@@ -805,7 +805,6 @@ pub mod args;
 pub mod apply_patch;
 pub mod ask_user_question;
 pub mod coding_tools;
-pub mod delegate;
 pub mod diff_edit;
 pub mod edit_file;
 pub mod glob_tool;
@@ -841,10 +840,6 @@ pub use coding_tools::{
     BashTool, CloseAgentTool, DelegateAliasTool, ExecCommandTool, ResumeAgentTool, SendInputTool,
     SpawnAgentTool, ToolCatalogEntry, ToolSearchTool, ToolSuggestTool, UpdatePlanTool,
     ViewImageTool, WaitAgentTool, WriteStdinTool,
-};
-pub use delegate::{
-    DELEGATED_DENY_GROUP, DELEGATION_METRIC, DelegateTool, DelegationEvent, DelegationOutcome,
-    DepthBudget, MAX_DEPTH, build_delegated_child_policy,
 };
 pub use diff_edit::DiffEditTool;
 pub use edit_file::EditFileTool;

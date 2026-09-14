@@ -392,7 +392,7 @@ async fn spawn_threads_configured_sandbox_into_validator_registry() {
 /// #1607 (codex-review follow-up): the default (unconfigured) SpawnTool
 /// keeps a `SandboxConfig::default()` and stays host-independent — an
 /// explicit `SandboxMode::None` resolves to `NoSandbox` (is_noop), so the
-/// validator registry runs command validators directly (pre-#1607
+/// sandbox runs commands directly (pre-#1607
 /// behaviour) on hosts without a real backend.
 #[tokio::test]
 async fn spawn_none_sandbox_registry_is_noop() {
@@ -413,7 +413,7 @@ async fn spawn_none_sandbox_registry_is_noop() {
     assert!(
         registry.sandbox().is_noop(),
         "SandboxMode::None must resolve to a no-op backend so command \
-             validators run directly (host-independent)"
+             commands run directly (host-independent)"
     );
 }
 

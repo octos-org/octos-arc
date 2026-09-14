@@ -500,14 +500,13 @@ pub trait Sandbox: Send + Sync {
     /// Whether this backend is the Docker container sandbox.
     ///
     /// #1607 (codex-review follow-up): Docker bind-mounts the workspace at a
-    /// fixed in-container path (`/workspace`), but `Command` validators
-    /// interpolate absolute *host* paths (e.g. `${output.patch_path}` ->
-    /// `/host/ws/.../foo.patch`) which don't exist inside the container, so a
-    /// previously-passing required validator would start failing. Before
-    /// #1607, command validators ran on the host and worked. `ValidatorRunner`
-    /// uses this to keep Docker-mode command validators on the pre-#1607 direct
-    /// (host) path rather than silently breaking them. Full in-container path
-    /// translation is a known follow-up. Non-Docker backends inherit `false`.
+    /// fixed in-container path (`/workspace`), while template interpolation in
+    /// workspace contracts can reference absolute *host* paths (e.g.
+    /// `${output.patch_path}` -> `/host/ws/.../foo.patch`) which don't exist
+    /// inside the container. Backends use this predicate to keep Docker-mode
+    /// sessions on the direct (host) execution path rather than silently
+    /// breaking them. Full in-container path translation is a known follow-up.
+    /// Non-Docker backends inherit `false`.
     fn is_docker(&self) -> bool {
         false
     }
@@ -2168,7 +2167,7 @@ mod tests {
         // #2196 review MUST-FIX invariant: `is_noop()` is a CONSTRUCTION-TIME
         // property. A backend built from a `Confine` decision must never
         // (dynamically or otherwise) report no-op — `is_noop() == true` is
-        // the exact transition validators.rs / tools/check.rs use to run
+        // the exact transition sandbox consumers (spawn/exec/check) use to run
         // argv DIRECTLY on the host, so a confining backend that flips to
         // no-op converts fail-closed paths into raw host execution. (The
         // Windows AppContainer half of this — whose old override re-probed

@@ -3168,19 +3168,6 @@ impl TaskSupervisor {
                     Some(runtime_detail.to_string()),
                 );
             }
-            HarnessEventPayload::ValidatorResult { data } => {
-                self.mark_runtime_state(
-                    task_id,
-                    TaskRuntimeState::VerifyingOutputs,
-                    Some(runtime_detail.to_string()),
-                );
-                if !data.passed {
-                    let message = data.message.clone().unwrap_or_else(|| {
-                        "validator rejected structured harness event".to_string()
-                    });
-                    self.mark_failed(task_id, message);
-                }
-            }
             HarnessEventPayload::Failure { data } => {
                 self.mark_runtime_state(
                     task_id,
@@ -3188,11 +3175,6 @@ impl TaskSupervisor {
                     Some(runtime_detail.to_string()),
                 );
                 self.mark_failed(task_id, data.message.clone());
-            }
-            HarnessEventPayload::McpServerCall { .. } => {
-                // MCP-server dispatch events are audit records — they describe
-                // a call that already mapped onto the supervisor via
-                // run-to-completion. Nothing to reapply to lifecycle state.
             }
             HarnessEventPayload::SubAgentDispatch { .. } => {
                 // Dispatch events are observational — they record the fact
