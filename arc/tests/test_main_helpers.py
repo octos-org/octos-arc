@@ -313,10 +313,28 @@ class CostGuardTests(unittest.TestCase):
         flow.llm_proxy.total_tokens = 0; flow.turn_count = 3
         self.assertTrue(flow.wound_down())
 
-    def test_should_be_off_by_default(self):
+    def test_should_stay_unset_until_the_tree_is_known_and_never_trip_a_normal_run(self):
         import argparse
         from pathlib import Path
         from types import SimpleNamespace
         flow = m.Flow(argparse.Namespace(web_port=1), Path("."), Path("."))
+        self.assertEqual((flow.max_total_tokens, flow.max_turns), (-1, -1))
         flow.llm_proxy = SimpleNamespace(total_tokens=10**9); flow.turn_count = 10**6
+        self.assertFalse(flow.wound_down())  # -1 = not derived yet -> inactive
+        # keep-sized tree: calibrated run (26M tokens, 35 turns) is far below the derived limits
+        flow.max_total_tokens = max(6_000_000, 2_500_000 * 32); flow.max_turns = max(24, 4 * 32)
+        flow.llm_proxy.total_tokens = 26_000_000; flow.turn_count = 35
         self.assertFalse(flow.wound_down())
+        flow.llm_proxy.total_tokens = 80_000_000
+        self.assertTrue(flow.wound_down())
+
+    def test_should_honor_absolute_ceiling(self):
+        import argparse
+        from pathlib import Path
+        from types import SimpleNamespace
+        flow = m.Flow(argparse.Namespace(web_port=1), Path("."), Path("."))
+        flow.max_total_tokens, flow.max_turns, flow.max_total_tokens_abs = 0, 0, 75_000_000
+        flow.llm_proxy = SimpleNamespace(total_tokens=74_999_999); flow.turn_count = 999
+        self.assertFalse(flow.wound_down())
+        flow.llm_proxy.total_tokens = 75_000_000
+        self.assertTrue(flow.wound_down())

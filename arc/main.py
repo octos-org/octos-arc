@@ -1109,9 +1109,15 @@ class Flow:
         self.node_budget_cap = int(os.environ.get("OCTOS_NODE_TIME_BUDGET", "1500"))
         self.repair_rounds = int(os.environ.get("OCTOS_REPAIR_ROUNDS", "5"))
         self.repair_rounds_explicit = bool(os.environ.get("OCTOS_REPAIR_ROUNDS"))
-        # Run-wide cost guard (0 = off): billable tokens (prompt + completion) and agent turns.
-        self.max_total_tokens = int(os.environ.get("OCTOS_ARC_MAX_TOTAL_TOKENS", "0"))
-        self.max_turns = int(os.environ.get("OCTOS_ARC_MAX_TURNS", "0"))
+        # Run-wide cost guard. Defaults scale with the tree and sit ~3x above a normal run
+        # (calibration: cloud keep 2224a9013528, 32 nodes, PASSED 32/32, 9,038 s, ¥16.58 ≈ 26M
+        # platform tokens ≈ 0.8M tokens and ~1.1 turns per node), so they never truncate a
+        # healthy run; they only stop repair loops that have gone pathological. Explicit env
+        # values override (0 = off). OCTOS_ARC_MAX_TOTAL_TOKENS_ABS is the optional absolute
+        # ceiling for a per-run spend rule (e.g. ¥50 ≈ 75M tokens at the observed ¥0.63/M).
+        self.max_total_tokens = int(os.environ.get("OCTOS_ARC_MAX_TOTAL_TOKENS", "-1"))
+        self.max_turns = int(os.environ.get("OCTOS_ARC_MAX_TURNS", "-1"))
+        self.max_total_tokens_abs = int(os.environ.get("OCTOS_ARC_MAX_TOTAL_TOKENS_ABS", "0"))
         self.turn_count = 0
         self._wound_down_logged = False
         self.design_enabled = os.environ.get("OCTOS_DESIGN_TURN", "1") != "0"
@@ -1148,12 +1154,13 @@ class Flow:
         turns, remaining nodes get one implement turn each, one final suite, done."""
         proxy = getattr(self, "llm_proxy", None)
         tokens = proxy.total_tokens if proxy is not None else 0
-        over = (self.max_total_tokens and tokens >= self.max_total_tokens) or \
-               (self.max_turns and self.turn_count >= self.max_turns)
+        over = (self.max_total_tokens > 0 and tokens >= self.max_total_tokens) or \
+               (self.max_turns > 0 and self.turn_count >= self.max_turns) or \
+               (self.max_total_tokens_abs > 0 and tokens >= self.max_total_tokens_abs)
         if over and not self._wound_down_logged:
             self._wound_down_logged = True
             log(f"[guard] cost guard tripped: {tokens} billable tokens, {self.turn_count} turns "
-                f"(limits {self.max_total_tokens} / {self.max_turns}); no further repair turns")
+                f"(limits {self.max_total_tokens} / {self.max_turns} / abs {self.max_total_tokens_abs}); no further repair turns")
         return bool(over)
 
     def remaining(self) -> float:
@@ -2080,6 +2087,12 @@ class Flow:
             self.n_nodes = len(ordered)
             if not self.repair_rounds_explicit and self.n_nodes > 2:
                 self.repair_rounds = 3  # big trees: identical-failure/no-improvement stops make 5 rounds rare anyway
+            if self.max_total_tokens < 0:
+                self.max_total_tokens = max(6_000_000, 2_500_000 * self.n_nodes)   # ~3x the calibrated 0.8M/node
+            if self.max_turns < 0:
+                self.max_turns = max(24, 4 * self.n_nodes)                          # ~3.5x the calibrated 1.1/node
+            log(f"[guard] cost guard: {self.max_total_tokens} tokens / {self.max_turns} turns"
+                + (f" / absolute {self.max_total_tokens_abs}" if self.max_total_tokens_abs else ""))
 
             self.tests_dir = locate_acceptance_tests(tree, BUNDLE_DIR)
             if self.tests_dir:
