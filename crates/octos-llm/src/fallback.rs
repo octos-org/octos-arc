@@ -1,5 +1,4 @@
-//! Fallback provider — wraps a primary provider with QoS-ranked fallbacks
-//! and cooldown-based failure exclusion.
+//! Fallback provider — wraps a primary provider with ranked fallbacks.
 
 use std::sync::Arc;
 
@@ -14,32 +13,18 @@ use crate::provider::{
     attribute_lane_failures,
 };
 use crate::retry::RetryProvider;
-use crate::router::ProviderRouter;
 use crate::types::{ChatResponse, ChatStream, ToolSpec};
 
-/// A provider that falls back to compatible alternatives on failure.
-/// When a provider fails, it's put in cooldown via the router so future
-/// requests avoid it temporarily.
+/// A provider that falls back to alternatives on failure. The chain's own
+/// circuit breaker (`ProviderChain`) tracks degraded slots across requests.
 pub struct FallbackProvider {
     primary: Arc<dyn LlmProvider>,
     fallbacks: Vec<Arc<dyn LlmProvider>>,
-    /// Optional router reference for recording failures (cooldown).
-    router: Option<Arc<ProviderRouter>>,
 }
 
 impl FallbackProvider {
     pub fn new(primary: Arc<dyn LlmProvider>, fallbacks: Vec<Arc<dyn LlmProvider>>) -> Self {
-        Self {
-            primary,
-            fallbacks,
-            router: None,
-        }
-    }
-
-    /// Attach a router for cooldown tracking.
-    pub fn with_router(mut self, router: Arc<ProviderRouter>) -> Self {
-        self.router = Some(router);
-        self
+        Self { primary, fallbacks }
     }
 
     /// Create a FallbackProvider only if there are fallbacks available.
@@ -52,26 +37,6 @@ impl FallbackProvider {
             primary
         } else {
             Arc::new(Self::new(primary, fallbacks))
-        }
-    }
-
-    /// Create with router for cooldown tracking.
-    pub fn wrap_with_router(
-        primary: Arc<dyn LlmProvider>,
-        fallbacks: Vec<Arc<dyn LlmProvider>>,
-        router: Arc<ProviderRouter>,
-    ) -> Arc<dyn LlmProvider> {
-        if fallbacks.is_empty() {
-            primary
-        } else {
-            Arc::new(Self::new(primary, fallbacks).with_router(router))
-        }
-    }
-
-    /// Record a failure for cooldown tracking.
-    fn record_failure(&self, model_id: &str) {
-        if let Some(ref router) = self.router {
-            router.record_failure(model_id);
         }
     }
 
@@ -133,7 +98,6 @@ impl LlmProvider for FallbackProvider {
                         &failures,
                     ));
                 }
-                self.record_failure(self.primary.model_id());
                 warn!(
                     primary = self.primary.model_id(),
                     error = %primary_err,
@@ -164,7 +128,6 @@ impl LlmProvider for FallbackProvider {
                             return Ok(resp);
                         }
                         Err(e) => {
-                            self.record_failure(fb.model_id());
                             warn!(
                                 fallback = fb.model_id(),
                                 error = %e,
@@ -203,7 +166,6 @@ impl LlmProvider for FallbackProvider {
                         &failures,
                     ));
                 }
-                self.record_failure(self.primary.model_id());
                 warn!(
                     primary = self.primary.model_id(),
                     error = %primary_err,
@@ -222,7 +184,6 @@ impl LlmProvider for FallbackProvider {
                     match fb.chat_stream(messages, tools, config).await {
                         Ok(stream) => return Ok(self.stream_with_provider_index(i + 1, stream)),
                         Err(e) => {
-                            self.record_failure(fb.model_id());
                             warn!(fallback = fb.model_id(), error = %e, "fallback stream also failed");
                             failures.push(LaneFailure::capture(fb.as_ref(), &e));
                         }

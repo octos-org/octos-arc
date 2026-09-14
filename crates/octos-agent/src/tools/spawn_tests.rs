@@ -361,7 +361,6 @@ async fn test_spawn_returns_immediately() {
         origin: std::sync::Mutex::new(("cli".into(), "test".into())),
         worker_count: AtomicU32::new(0),
         provider_policy: None,
-        provider_router: None,
         worker_prompt: None,
         background_result_sender: None,
         child_session_sender: None,

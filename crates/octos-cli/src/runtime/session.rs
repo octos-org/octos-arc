@@ -1291,7 +1291,6 @@ tools = ["read_file"]
             session_store_root: None,
             config: crate::config::Config::default(),
             llm: Arc::new(StubLlm),
-            adaptive_router: None,
             runtime_qos_catalog: None,
             primary_model_id: "stub-model".to_string(),
             provider_name: "stub".to_string(),
@@ -1317,7 +1316,6 @@ tools = ["read_file"]
             memory_inject_tokens: 2500,
             memory_refresh_enabled: true,
             hook_executor: None,
-            lane_routing: None,
         })
     }
 
@@ -2067,7 +2065,6 @@ tools = ["read_file"]
             session_store_root: None,
             config: crate::config::Config::default(),
             llm: Arc::new(StubLlm),
-            adaptive_router: None,
             runtime_qos_catalog: None,
             primary_model_id: "stub-model".to_string(),
             provider_name: "stub".to_string(),
@@ -2093,7 +2090,6 @@ tools = ["read_file"]
             memory_inject_tokens: 2500,
             memory_refresh_enabled: true,
             hook_executor: Some(executor),
-            lane_routing: None,
         })
     }
 

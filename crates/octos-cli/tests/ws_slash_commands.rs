@@ -153,25 +153,18 @@ async fn should_handle_unknown_slash_command_gracefully() {
     );
 }
 
-// ── Scenario 5 — /queue and /adaptive must also be intercepted ──────────
+// ── Scenario 5 — session-actor commands must also be intercepted ──────────
 
-/// Issue #1013 explicitly calls out `/queue` and `/adaptive` as part of
-/// the set that pre-fix reached the LLM. These don't have full WS-side
-/// state (the per-session-actor queue mode and AdaptiveRouter live on
-/// the gateway transport), but they MUST still be intercepted so they
-/// don't leak the slash text into LLM context.
+/// Issue #1013 explicitly calls out `/queue` as part of the set that
+/// pre-fix reached the LLM. These don't have full WS-side state (the
+/// per-session-actor queue mode lives on the gateway transport), but
+/// they MUST still be intercepted so they don't leak the slash text
+/// into LLM context.
 #[tokio::test]
 async fn should_intercept_session_actor_style_commands_on_ws() {
     let (ctx, _tmp, _session_key) = setup_ctx().await;
 
-    for cmd in [
-        "/queue",
-        "/adaptive",
-        "/router",
-        "/status",
-        "/reset",
-        "/thinking",
-    ] {
+    for cmd in ["/queue", "/status", "/reset", "/thinking"] {
         let reply = try_dispatch_slash_command(cmd, &ctx).await;
         assert!(
             reply.is_some(),

@@ -864,9 +864,8 @@ impl LlmProvider for OpenAIProvider {
             // Codex round-2 MINOR: thread the provider_label so the
             // operator sees e.g. "minimax/MiniMax-M2.5-highspeed"
             // instead of just "MiniMax-M2.5-highspeed". This is the
-            // lane label the AdaptiveRouter and failover ledger use,
-            // so the wire envelope can be cross-referenced with the
-            // router events.
+            // lane label the failover ledger uses, so the wire
+            // envelope can be cross-referenced with failover events.
             let body = crate::provider::truncate_error_body(&body);
             return Err(crate::error::LlmError::from_status_with_label(
                 status.as_u16(),

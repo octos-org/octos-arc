@@ -193,7 +193,6 @@ fn should_emit_memory_snapshot(context: &str) -> bool {
     !context.trim().is_empty()
 }
 const APPUI_METHOD_PROFILE_LLM_TEST: &str = "profile/llm/test";
-const APPUI_METHOD_PROFILE_LLM_FETCH_MODELS: &str = "profile/llm/fetch_models";
 /// Named provider lanes (`sub_providers`) for per-node pipeline routing (e.g.
 /// `bg_research`'s `cheap`/`strong` lanes). `/research` in the TUI reads +
 /// edits these; they persist to `profile.config.sub_providers` and rebuild the
@@ -285,7 +284,6 @@ const APPUI_EXTRA_METHODS: &[&str] = &[
     APPUI_METHOD_PROFILE_LLM_UPSERT,
     APPUI_METHOD_PROFILE_LLM_DELETE,
     APPUI_METHOD_PROFILE_LLM_TEST,
-    APPUI_METHOD_PROFILE_LLM_FETCH_MODELS,
     APPUI_METHOD_PROFILE_SUB_PROVIDERS_LIST,
     APPUI_METHOD_PROFILE_SUB_PROVIDERS_UPSERT,
     APPUI_METHOD_PROFILE_SUB_PROVIDERS_REMOVE,
@@ -5835,28 +5833,6 @@ async fn ui_protocol_connection(
             UiCommand::SystemStatusGet(params) => {
                 handle_system_status_get(&ws, &state, id, params).await;
             }
-            UiCommand::RouterSetMode(params) => {
-                handle_router_set_mode(
-                    &ws,
-                    &state,
-                    connection_profile_id,
-                    routed_profile_id,
-                    id,
-                    params,
-                )
-                .await;
-            }
-            UiCommand::RouterGetMetrics(params) => {
-                handle_router_get_metrics(
-                    &ws,
-                    &state,
-                    connection_profile_id,
-                    routed_profile_id,
-                    id,
-                    params,
-                )
-                .await;
-            }
         }
     }
 
@@ -6459,34 +6435,6 @@ where
                 UiCommand::SystemStatusGet(params) => {
                     handle_system_status_get(&ws, &state, id, params).await;
                 }
-                UiCommand::RouterSetMode(params) => {
-                    // stdio is a local single-user transport with no authenticated
-                    // tenant scope, so `connection_profile_id` is `None` (no
-                    // cross-tenant enforcement); `connection_profile_id_owned`
-                    // remains the resolution fallback. Only the hosted WS path,
-                    // which carries an authenticated `connection_profile_id`,
-                    // enforces the tenant gate.
-                    handle_router_set_mode(
-                        &ws,
-                        &state,
-                        None,
-                        connection_profile_id_owned.as_deref(),
-                        id,
-                        params,
-                    )
-                    .await;
-                }
-                UiCommand::RouterGetMetrics(params) => {
-                    handle_router_get_metrics(
-                        &ws,
-                        &state,
-                        None,
-                        connection_profile_id_owned.as_deref(),
-                        id,
-                        params,
-                    )
-                    .await;
-                }
             }
         }
         Ok::<(), eyre::Report>(())
@@ -6913,7 +6861,7 @@ struct RawLlmRoute {
 }
 
 /// The typed main-model selection + inference-parameter schema shared by
-/// `profile/llm/upsert`, `profile/llm/test`, and `profile/llm/fetch_models`
+/// `profile/llm/upsert` and `profile/llm/test`
 /// (#2166). Test and Save parse the identical shape, so a payload that
 /// probes successfully is byte-for-byte the payload that persists.
 ///
@@ -6978,7 +6926,7 @@ struct RawProfileLlmSelectParams {
     route_id: Option<String>,
 }
 
-/// Typed AppUI `profile/llm/upsert` / `test` / `fetch_models` params
+/// Typed AppUI `profile/llm/upsert` / `test` params
 /// (#2166). Unknown keys are rejected with their full dotted paths —
 /// `never return applied:true after discarding requested settings`.
 #[derive(Debug, Default, Deserialize)]
@@ -7186,7 +7134,7 @@ fn validate_llm_inference_fields(selection: &RawLlmSelection) -> Result<(), RpcE
 }
 
 /// Shared param pipeline for `profile/llm/upsert` / `test` /
-/// `fetch_models`: unknown-field pre-pass → typed deserialize (with
+/// `test`/`upsert`: unknown-field pre-pass → typed deserialize (with
 /// `deny_unknown_fields`) → range validation. One place so Test and Save
 /// can never drift.
 fn parse_llm_selection_params(
@@ -9796,95 +9744,6 @@ async fn raw_profile_llm_test(
     }
 }
 
-async fn raw_profile_llm_fetch_models(
-    state: &Arc<AppState>,
-    request: &RpcRequest<Value>,
-    connection_profile_id: Option<&str>,
-) -> Result<Value, RpcError> {
-    let params: RawProfileLlmUpsertParams = parse_llm_selection_params(request)?;
-    let profile_id =
-        raw_scoped_llm_profile_id(params.profile_id.clone(), None, connection_profile_id)?;
-    let profile = state
-        .profile_store
-        .as_ref()
-        .and_then(|store| store.get(&profile_id).ok().flatten());
-
-    let family_id = nonempty(params.selection.family_id)
-        .ok_or_else(|| RpcError::invalid_params("selection.family_id is required"))?;
-    let base_url = nonempty(params.selection.route.base_url);
-    // The route's protocol override feeds strategy resolution — ignoring it
-    // here is what forced Anthropic-protocol families onto the OpenAI/Bearer
-    // /v1/models probe.
-    let api_type = nonempty(params.selection.route.api_type);
-    let api_key_env = nonempty(params.selection.route.api_key_env)
-        .or_else(|| dashboard_family_api_key_env(&family_id));
-
-    let api_key = secret_from_value(params.api_key).or_else(|| {
-        api_key_env.as_ref().and_then(|env_name| {
-            // Resolve a keychain marker to the real secret (e.g. a scoped Vertex
-            // SA JSON); plain values pass through unchanged.
-            let raw = profile.as_ref()?.config.env_vars.get(env_name)?;
-            crate::auth::keychain::resolve_value(env_name, raw)
-        })
-    });
-
-    let api_key = match api_key {
-        Some(key) => key,
-        // Keyless local families still get model listing — their /v1/models
-        // answers without auth (red-team pass).
-        None if octos_llm::registry::is_keyless(&family_id) => String::new(),
-        None => {
-            return Ok(json!({
-                "profile_id": profile_id,
-                "family_id": family_id,
-                "api_type": api_type,
-                "models": [],
-                "status": "no_api_key",
-                "reason": "no_api_key",
-            }));
-        }
-    };
-
-    // Protocol-aware discovery, shared verbatim with the admin REST
-    // `/api/my/provider-models` surface: the strategy resolves from the route
-    // (api_type override, then the family's declared protocol — per-model for
-    // families like r9s that pick the wire protocol by model name), and the
-    // typed outcome keeps "enter the model id manually" distinguishable from
-    // "credential/endpoint invalid" — instead of collapsing every failure
-    // into an empty list + `provider_unavailable`.
-    let route = octos_llm::discovery::resolve_model_discovery(
-        Some(&family_id),
-        api_type.as_deref(),
-        nonempty(params.selection.model_id).as_deref(),
-        base_url.as_deref(),
-    );
-    let outcome = octos_llm::discovery::discover_models(
-        &route,
-        &api_key,
-        base_url.as_deref(),
-        Some(&family_id),
-    )
-    .await;
-    let status = outcome.status_label();
-    let mut result = json!({
-        "profile_id": profile_id,
-        "family_id": family_id,
-        "api_type": api_type,
-        "models": outcome.models().unwrap_or(&[]),
-        // Typed status: discovered | unsupported | authentication_failed |
-        // endpoint_unreachable | invalid_response | rate_limited.
-        "status": status,
-    });
-    if let Some(message) = outcome.message() {
-        // Safe, redacted provider message (never contains the credential).
-        result["message"] = Value::String(message.to_string());
-        // `reason` mirrors `status` on failures for clients still reading the
-        // old collapsed field.
-        result["reason"] = Value::String(status.to_string());
-    }
-    Ok(result)
-}
-
 fn build_test_llm_provider(
     family_id: &str,
     model_id: &str,
@@ -10530,9 +10389,6 @@ async fn handle_raw_appui_rpc(
         APPUI_METHOD_PROFILE_LLM_DELETE => {
             raw_profile_llm_delete(state, request, connection_profile_id).await
         }
-        APPUI_METHOD_PROFILE_LLM_FETCH_MODELS => {
-            raw_profile_llm_fetch_models(state, request, connection_profile_id).await
-        }
         APPUI_METHOD_PROFILE_SUB_PROVIDERS_LIST => {
             raw_profile_sub_providers_list(state, request, connection_profile_id)
         }
@@ -10885,7 +10741,6 @@ fn raw_method_is_dispatched(method: &str, _stdio_transport: bool) -> bool {
             | APPUI_METHOD_PROFILE_LLM_TEST
             | APPUI_METHOD_PROFILE_LLM_SELECT
             | APPUI_METHOD_PROFILE_LLM_DELETE
-            | APPUI_METHOD_PROFILE_LLM_FETCH_MODELS
             | APPUI_METHOD_PROFILE_SUB_PROVIDERS_LIST
             | APPUI_METHOD_PROFILE_SUB_PROVIDERS_UPSERT
             | APPUI_METHOD_PROFILE_SUB_PROVIDERS_REMOVE
@@ -11007,8 +10862,6 @@ fn validate_session_ingress_command_scope(
         UiCommand::SessionWorkspaceGet(params) => SessionKey(params.session_id.clone()),
         UiCommand::SessionTitleSet(params) => SessionKey(params.session_id.clone()),
         UiCommand::SessionDelete(params) => SessionKey(params.session_id.clone()),
-        UiCommand::RouterSetMode(params) => params.session_id.clone(),
-        UiCommand::RouterGetMetrics(params) => params.session_id.clone(),
     };
 
     if actual == *allowed_session_id {
@@ -17800,209 +17653,6 @@ fn task_cancel_rpc_error(task_id: &TaskId, error: octos_agent::TaskCancelError) 
     }
 }
 
-/// Wave4-A: resolve the per-session `AdaptiveRouter` (if any) by routing
-/// through the same `resolve_session_profile_runtime` path used by
-/// `session/open` and `turn/start`. Returns `None` for sessions whose
-/// profile has no router attached — single-provider config or
-/// `adaptive_routing.enabled = false`.
-fn resolve_router_for_session(
-    state: &Arc<AppState>,
-    session_id: &SessionKey,
-    connection_profile_id: Option<&str>,
-    routed_profile_id: Option<&str>,
-) -> Result<Option<Arc<octos_llm::AdaptiveRouter>>, RpcError> {
-    // Tenant-scope gate (P1). Without it the `session_id.profile_id()`-first
-    // precedence below lets a tenant-B connection pass a `session_id` that
-    // embeds tenant-A's profile and resolve — then `set_mode` mutate /
-    // `get_metrics` read — tenant-A's `AdaptiveRouter`. Placing the check
-    // inside the shared resolver protects BOTH router handlers by
-    // construction.
-    authorize_router_session_scope(session_id, connection_profile_id, routed_profile_id)?;
-    let active_profile_id = session_id
-        .profile_id()
-        .map(ToOwned::to_owned)
-        .or_else(|| routed_profile_id.map(ToOwned::to_owned));
-    Ok(
-        resolve_session_profile_runtime(state, active_profile_id.as_deref())
-            .and_then(|profile_runtime| profile_runtime.adaptive_router.clone()),
-    )
-}
-
-/// Tenant-scope gate for the router RPCs.
-///
-/// A hosted WS connection is authorized for its own authenticated
-/// `connection_profile_id` AND — on a per-tenant subdomain — the
-/// `routed_profile_id` that `is_authorized_for_profile` already cleared at
-/// upgrade time (an admin / parent account operating a tenant it owns; a
-/// forged `Host` for an unauthorized tenant 403s before this point, so a
-/// present `routed_profile_id` is always trustworthy). A `session_id` whose
-/// embedded profile is EITHER is in scope; a different tenant is rejected.
-///
-/// - An unscoped connection (`connection_profile_id == None` — bootstrap
-///   admin token / local solo) is authorized for every profile.
-/// - A bare (profile-less) `session_id` is authorized under the connection's
-///   auth, matching `validate_authenticated_session_scope`'s `None` arm.
-///
-/// This is deliberately a touch more permissive than the bare
-/// `validate_session_scope(session_id, None, connection_profile_id)` other
-/// handlers use (it also honours `routed_profile_id`): a router RPC on a
-/// hosted subdomain must not regress the authorized admin/parent access that
-/// existed before this gate landed, while a genuine cross-tenant `session_id`
-/// (matching neither authorized profile) is still rejected. `authenticated_
-/// scope_mismatch_error` tags the rejection `auth_scope_violation` so the
-/// handler emits the same 1008 close the other scope checks do.
-fn authorize_router_session_scope(
-    session_id: &SessionKey,
-    connection_profile_id: Option<&str>,
-    routed_profile_id: Option<&str>,
-) -> Result<(), RpcError> {
-    let Some(connection_profile_id) = connection_profile_id else {
-        return Ok(());
-    };
-    let Some(session_profile) = session_id.profile_id() else {
-        return Ok(());
-    };
-    if session_profile == connection_profile_id || routed_profile_id == Some(session_profile) {
-        return Ok(());
-    }
-    Err(authenticated_scope_mismatch_error(
-        "session_id is outside the authorized profile scope",
-        connection_profile_id,
-        Some(session_profile),
-    ))
-}
-
-/// Wave4-A handler for `router/set_mode`. Parses `params.mode` into the
-/// `AdaptiveMode` enum (lowercase string), dispatches to
-/// `AdaptiveRouter::set_mode`, and returns a typed ack.
-///
-/// Returns `INVALID_PARAMS` for unknown modes and a typed
-/// `runtime_unavailable` data tag when the session has no router (so
-/// the client can disable its mode-switcher UI).
-async fn handle_router_set_mode(
-    ws: &WsConnection,
-    state: &Arc<AppState>,
-    connection_profile_id: Option<&str>,
-    routed_profile_id: Option<&str>,
-    id: String,
-    params: octos_core::ui_protocol::RouterSetModeParams,
-) {
-    let method = octos_core::ui_protocol::methods::ROUTER_SET_MODE;
-    let mode = match params.mode.as_str() {
-        "off" => octos_llm::AdaptiveMode::Off,
-        "hedge" => octos_llm::AdaptiveMode::Hedge,
-        "lane" => octos_llm::AdaptiveMode::Lane,
-        other => {
-            let _ = send_rpc_error(
-                ws,
-                Some(id),
-                RpcError::invalid_params(format!(
-                    "{method}: unknown mode '{other}' (expected off | hedge | lane)"
-                )),
-            );
-            return;
-        }
-    };
-    let router = match resolve_router_for_session(
-        state,
-        &params.session_id,
-        connection_profile_id,
-        routed_profile_id,
-    ) {
-        Ok(Some(router)) => router,
-        Ok(None) => {
-            let _ = send_rpc_error(
-                ws,
-                Some(id),
-                RpcError::invalid_params(format!(
-                    "{method}: no adaptive router attached to this session"
-                ))
-                .with_data(json!({ "kind": "runtime_unavailable" })),
-            );
-            return;
-        }
-        // Cross-tenant session_id on a profile-scoped connection: reject
-        // before touching another tenant's router.
-        Err(error) => {
-            send_scope_error(ws, id, error);
-            return;
-        }
-    };
-    router.set_mode(mode);
-    let result = octos_core::ui_protocol::RouterSetModeResult { mode: params.mode };
-    let value = match serde_json::to_value(&result) {
-        Ok(v) => v,
-        Err(error) => {
-            let _ = send_rpc_error(
-                ws,
-                Some(id),
-                RpcError::malformed_result(format!("{method}: serialize result: {error}")),
-            );
-            return;
-        }
-    };
-    let _ = send_rpc_result(ws, id, value);
-}
-
-/// Wave4-A handler for `router/get_metrics`. Returns the same payload
-/// shape as the `router/status` notification (lane scores, breaker
-/// states, mode, current provider).
-async fn handle_router_get_metrics(
-    ws: &WsConnection,
-    state: &Arc<AppState>,
-    connection_profile_id: Option<&str>,
-    routed_profile_id: Option<&str>,
-    id: String,
-    params: octos_core::ui_protocol::RouterGetMetricsParams,
-) {
-    let method = octos_core::ui_protocol::methods::ROUTER_GET_METRICS;
-    let router = match resolve_router_for_session(
-        state,
-        &params.session_id,
-        connection_profile_id,
-        routed_profile_id,
-    ) {
-        Ok(Some(router)) => router,
-        Ok(None) => {
-            let _ = send_rpc_error(
-                ws,
-                Some(id),
-                RpcError::invalid_params(format!(
-                    "{method}: no adaptive router attached to this session"
-                ))
-                .with_data(json!({ "kind": "runtime_unavailable" })),
-            );
-            return;
-        }
-        // Cross-tenant session_id on a profile-scoped connection: reject
-        // before reading another tenant's router metrics.
-        Err(error) => {
-            send_scope_error(ws, id, error);
-            return;
-        }
-    };
-    let status = router.adaptive_status();
-    let result = octos_core::ui_protocol::RouterGetMetricsResult {
-        provider_name: router.current_lane_key(),
-        mode: status.mode.to_string(),
-        qos_ranking: status.qos_ranking,
-        lane_scores: router.lane_scores(),
-        circuit_breakers: router.breaker_states(),
-    };
-    let value = match serde_json::to_value(&result) {
-        Ok(v) => v,
-        Err(error) => {
-            let _ = send_rpc_error(
-                ws,
-                Some(id),
-                RpcError::malformed_result(format!("{method}: serialize result: {error}")),
-            );
-            return;
-        }
-    };
-    let _ = send_rpc_result(ws, id, value);
-}
-
 fn task_relaunch_rpc_error(task_id: &TaskId, error: octos_agent::TaskRelaunchError) -> RpcError {
     match error {
         octos_agent::TaskRelaunchError::NotFound => RpcError::unknown_task_id(task_id),
@@ -18602,28 +18252,6 @@ async fn run_standalone_turn(
         );
     let system_prompt_base = agent_snapshot;
 
-    // Wave4-A: emit an initial `router/status` snapshot adjacent to
-    // `turn/started` so clients can render the routing pill before the
-    // first token. No-op when this profile has no `AdaptiveRouter`
-    // attached (single-provider or `enabled = false`).
-    let adaptive_router_ref = session_runtime.profile.adaptive_router.clone();
-    emit_router_status_durable(&ws, &ledger, &session_id, adaptive_router_ref.as_ref());
-
-    // Wave4-A: subscribe to the AdaptiveRouter's broadcast channel and
-    // forward `FailoverEvent`s as `router/failover` notifications for
-    // the duration of this turn. The abort handle ends the forwarder
-    // when the turn ends — see the `.abort()` call near
-    // `try_emit_terminal(, steer_buffer.as_ref())` below.
-    let failover_forwarder = spawn_router_failover_forwarder(
-        ws.clone(),
-        ledger.clone(),
-        session_id.clone(),
-        adaptive_router_ref.clone(),
-    );
-    let _failover_abort = failover_forwarder.as_ref().map(|handle| AbortOnDrop {
-        abort: handle.abort_handle(),
-    });
-
     let slash_ctx = ws_slash::SlashCommandContext {
         sessions: sessions.clone(),
         session_id: session_id.clone(),
@@ -18645,7 +18273,6 @@ async fn run_standalone_turn(
                 .add_message_with_seq(&session_id, assistant_message)
                 .await;
         }
-        stop_failover_forwarder(failover_forwarder).await;
         try_emit_terminal(
             &turn_state,
             TerminalReason::Completed,
@@ -19732,34 +19359,14 @@ async fn run_standalone_turn(
             "turn/start carries rewrite_for; current build forwards the prompt without in-place ledger rewrite (β-1 advisory)"
         );
     }
-    // Wave4-A (Codex P1): stamp the originating session/turn id into a
-    // tokio task_local so the AdaptiveRouter's failover publisher can
-    // attribute events to the right session. Without this, sessions
-    // sharing a profile-scoped router would re-emit one another's
-    // failovers (the router fans out to all subscribers).
+    // Stamp the originating session/turn id into a tokio task_local so
+    // prompt-cache observation events attribute usage to the right
+    // session/turn (see `octos_llm::cache_manifest`). Without this,
+    // usage lands under the redacted "unattributed" stream key.
     let router_ctx = octos_llm::RouterContext {
         session_id: Some(session_id.0.clone()),
         turn_id: Some(turn_id.0.to_string()),
     };
-    // RFC-3 (#1292): resolve the session's topic to a capability lane
-    // and stamp it onto a task-local so the AdaptiveRouter narrows
-    // candidate-selection to the lane's `(provider, model)` list. The
-    // gateway/SessionActor side does the same — both turn paths need
-    // identical plumbing for slides/code/research topics to land on
-    // the right model regardless of which transport opened the
-    // session. Built-in defaults apply when the profile has no
-    // `lane_routing` block, so fleet profiles see no behavior change
-    // unless they opt in via config.
-    let lane_ctx = octos_llm::LaneContext::for_topic(
-        session_id.topic(),
-        session_runtime.profile.lane_routing.as_ref(),
-    );
-    // Wave-4c (#945): feed turn-end latency into the AdaptiveRouter's
-    // per-session auto-escalation state machine so the web/serve path
-    // benefits from the same Lane → Hedge auto-flip the gateway has had
-    // since FA-11.
-    let auto_escalation_router = session_runtime.profile.adaptive_router.clone();
-    let auto_escalation_session_id = session_id.0.clone();
     // #1128 codex P1 re-review #2 — clone the session manager Arc
     // before the agent_task spawn moves the original. We need the
     // clone alive in this outer scope for the post-turn self-paced
@@ -19786,13 +19393,9 @@ async fn run_standalone_turn(
     // itself untouched).
     let turn_span = crate::turn_trace::turn_span(&session_id, &turn_id);
     let agent_task = tokio::spawn(async move {
-        let start = std::time::Instant::now();
-        // RFC-3 (#1292): wrap the agent.process_message future in the
-        // lane scope FIRST (innermost task-local), then router
-        // context, so the AdaptiveRouter sees both when chat()
-        // recurses through the agent loop. Lane and router contexts
-        // are orthogonal — lane filters slot eligibility, router
-        // context attributes failover events.
+        // Wrap the agent.process_message future in the router context
+        // (session/turn attribution for prompt-cache observation) so
+        // every chat() the turn recurses through stays attributed.
         // UPCR-2026-023: nest the user-question task-local INSIDE the approval
         // scope, mirroring how `TOOL_APPROVAL_CTX` wraps the turn. The two are
         // orthogonal blocking bridges. The scope is installed only when the
@@ -19832,22 +19435,9 @@ async fn run_standalone_turn(
         };
         let result = octos_llm::with_router_context(
             router_ctx,
-            octos_llm::with_lane_context(
-                lane_ctx,
-                octos_agent::tools::TOOL_APPROVAL_CTX
-                    .scope(approval_requester, scoped_message_future),
-            ),
+            octos_agent::tools::TOOL_APPROVAL_CTX.scope(approval_requester, scoped_message_future),
         )
         .await;
-        let llm_latency = start.elapsed();
-
-        // Drive the router's auto-escalation. We pass the raw session id
-        // (with `api:` prefix preserved) so concurrent gateway + serve
-        // accesses on the same router are namespaced separately and do
-        // not collide on the per-session window.
-        if let Some(router) = auto_escalation_router.as_ref() {
-            router.record_turn_latency(&auto_escalation_session_id, llm_latency);
-        }
 
         // Reuse the canonical persistence path for actual truncated output,
         // without turning an incomplete model response into a successful turn.
@@ -20875,18 +20465,6 @@ async fn run_standalone_turn(
     // realistic re-entries, and stale entries get evicted by
     // subsequent persist activity rather than relying on a
     // cancellation-safe cleanup path.
-
-    // Wave4-A: emit a final `router/status` snapshot adjacent to
-    // `turn/completed` so clients see the actual provider that ran
-    // the turn + any breaker / lane-score deltas. No-op when no
-    // AdaptiveRouter is attached.
-    emit_router_status_durable(&ws, &ledger, &session_id, adaptive_router_ref.as_ref());
-
-    // Wave4-A (Codex P1): tear down the failover forwarder task AND
-    // await its JoinHandle so the detached task cannot outlive the
-    // turn — without the await, the forwarder could keep forwarding
-    // to a half-torn-down writer.
-    stop_failover_forwarder(failover_forwarder).await;
 
     // Issue #961: when the LLM invoked a `spawn_only` tool (e.g.
     // `bg_research`), the agent's main loop emits `done`/`error` and the
@@ -23546,165 +23124,6 @@ fn send_turn_error_with_details(
     )
 }
 
-/// Wave4-A: build a `RouterStatusEvent` from an `AdaptiveRouter` snapshot.
-/// `router` is `None` for sessions without an adaptive router attached;
-/// callers MUST skip emission in that case.
-pub(crate) fn build_router_status_event(
-    session_id: &SessionKey,
-    router: &Arc<octos_llm::AdaptiveRouter>,
-) -> octos_core::ui_protocol::RouterStatusEvent {
-    let status = router.adaptive_status();
-    octos_core::ui_protocol::RouterStatusEvent {
-        session_id: session_id.clone(),
-        provider_name: router.current_lane_key(),
-        mode: status.mode.to_string(),
-        qos_ranking: status.qos_ranking,
-        lane_scores: router.lane_scores(),
-        circuit_breakers: router.breaker_states(),
-    }
-}
-
-/// Wave4-A: emit a `RouterStatus` notification on the durable path.
-///
-/// Codex P1: this MUST NOT use lifecycle delivery — `send_lifecycle`
-/// latches the connection as `failed` on backpressure / closed, which
-/// the read loop interprets as "tear down everything". A status pill
-/// frame missing under backpressure is not worth killing the turn.
-/// Durable delivery still ledgers the frame for reconnect-replay but
-/// degrades gracefully under push pressure.
-///
-/// No-op when `router` is `None`.
-fn emit_router_status_durable(
-    ws: &WsConnection,
-    ledger: &UiProtocolLedger,
-    session_id: &SessionKey,
-    router: Option<&Arc<octos_llm::AdaptiveRouter>>,
-) {
-    let Some(router) = router else {
-        return;
-    };
-    let event = build_router_status_event(session_id, router);
-    let notif = UiNotification::RouterStatus(event);
-    let method = notif.method().to_string();
-    if let Err(error) = send_notification_durable(ws, ledger, notif) {
-        tracing::debug!(
-            target: "octos::ui_protocol::ws",
-            method = %method,
-            error = ?error,
-            "router/status durable enqueue failed; non-fatal for turn"
-        );
-    }
-}
-
-fn spawn_router_failover_forwarder(
-    ws: WsConnection,
-    ledger: Arc<UiProtocolLedger>,
-    session_id: SessionKey,
-    router: Option<Arc<octos_llm::AdaptiveRouter>>,
-) -> Option<tokio::task::JoinHandle<()>> {
-    let router = router?;
-    let mut rx = router.subscribe_failover();
-    let session_id_str = session_id.0.clone();
-    let join = tokio::spawn(async move {
-        loop {
-            match rx.recv().await {
-                Ok(event) => {
-                    // Codex P1: filter on originating_session_id. When
-                    // the publisher provided a session id, only forward
-                    // events that match this forwarder's session. When
-                    // it didn't (test paths / CLI smoke), pass through
-                    // so headless tests still observe failover events.
-                    if let Some(originating) = event.originating_session_id.as_deref() {
-                        if originating != session_id_str {
-                            continue;
-                        }
-                    }
-                    // #48c — the EVENT row is stricter than the notice
-                    // filter above (which stays verbatim): only an
-                    // EXPLICIT own-session stamp writes a row. None and
-                    // other sessions write nothing.
-                    let own_session_event =
-                        event.originating_session_id.as_deref() == Some(session_id_str.as_str());
-                    if own_session_event {
-                        // #48b — OLP observability: same-shaped
-                        // `fallback_switch` row as the gateway path, written
-                        // BEFORE the durable client notice; best-effort (an
-                        // unwritable data_dir or a None data_dir skips the
-                        // row and never blocks the notice).
-                        if let Some(data_dir) = ledger.config_data_dir() {
-                            let detail = format!(
-                                "router failover: {} -> {} ({}, {}ms)",
-                                event.from_provider,
-                                event.to_provider,
-                                event.reason,
-                                event.elapsed_ms
-                            );
-                            crate::obs_events::append_obs_event(
-                                &data_dir,
-                                &crate::obs_events::ObsEvent::new("fallback_switch", &detail)
-                                    .session(Some(&session_id_str))
-                                    .model_lane(Some(&event.to_provider)),
-                            );
-                        }
-                    }
-                    let notif = UiNotification::RouterFailover(
-                        octos_core::ui_protocol::RouterFailoverEvent {
-                            session_id: session_id.clone(),
-                            from_provider: event.from_provider,
-                            to_provider: event.to_provider,
-                            reason: event.reason,
-                            elapsed_ms: event.elapsed_ms,
-                        },
-                    );
-                    // Best-effort durable — failover events ledger for
-                    // reconnect-replay. Hard-close errors (FatalClosed,
-                    // Closed) mean the client is gone; break out so
-                    // this task can't outlive the connection (Codex P1).
-                    match send_notification_durable(&ws, &ledger, notif) {
-                        Ok(()) => {}
-                        Err(SendError::FatalClosed) | Err(SendError::Closed) => {
-                            tracing::debug!(
-                                target: "octos::ui_protocol::ws",
-                                "failover forwarder: connection closed; exiting"
-                            );
-                            break;
-                        }
-                        Err(SendError::LifecycleFailure(_)) | Err(SendError::BackpressureDrop) => {
-                            // Drop surfaced as a `replay_lossy`
-                            // opportunistic emission inside
-                            // `send_notification_durable`. Continue.
-                            continue;
-                        }
-                    }
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                    tracing::debug!(
-                        target: "octos::ui_protocol::ws",
-                        skipped,
-                        "router failover subscriber lagged — events dropped"
-                    );
-                    continue;
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-            }
-        }
-    });
-    Some(join)
-}
-
-/// Wave4-A (Codex P1): abort + await the failover forwarder so the
-/// detached task cannot outlive the connection or forward a frame to a
-/// half-torn-down writer. `abort()` is best-effort; the subsequent
-/// `await` is what guarantees the task has actually stopped before
-/// turn cleanup returns. Awaiting an aborted JoinHandle returns a
-/// `JoinError` we ignore.
-async fn stop_failover_forwarder(handle: Option<tokio::task::JoinHandle<()>>) {
-    if let Some(handle) = handle {
-        handle.abort();
-        let _ = handle.await;
-    }
-}
-
 /// Short STATIC message used for the minimal same-id error reply emitted when a
 /// request RESPONSE (result or error) is too large to deliver even after the
 /// oversized-frame preview pass. It carries NO echoed payload — only enough for
@@ -24228,10 +23647,8 @@ fn ledger_event_cursor(event: &UiProtocolLedgerEvent) -> Option<UiCursor> {
             // record); kept exhaustive while the variants exist.
 
             | UiNotification::FileAttached(_)
-            // Wave4-A: router/queue notifications don't carry their own
+            // Wave4-A: queue notifications don't carry their own
             // cursor — they're stateless lifecycle pushes.
-            | UiNotification::RouterStatus(_)
-            | UiNotification::RouterFailover(_)
             | UiNotification::QueueState(_)
             // M15 autonomy notifications do not carry durable UiCursor values.
             // AgentOutputDelta carries an OutputCursor for the agent output

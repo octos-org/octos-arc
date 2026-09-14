@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use eyre::{Result, WrapErr};
 use metrics::counter;
 use octos_core::{AgentId, InboundMessage, SessionScope, Task, TaskContext, TaskKind, TaskResult};
-use octos_llm::{ContextWindowOverride, LlmProvider, ProviderRouter};
+use octos_llm::{ContextWindowOverride, LlmProvider};
 use octos_memory::EpisodeStore;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
@@ -1073,8 +1073,6 @@ pub struct SpawnTool {
     worker_count: AtomicU32,
     /// Inherited provider policy applied to subagent registries.
     provider_policy: Option<ToolPolicy>,
-    /// Optional router for resolving prefixed model IDs to sub-providers.
-    provider_router: Option<Arc<ProviderRouter>>,
     /// Default worker prompt for sub-agents (overrides compiled-in worker.txt).
     worker_prompt: Option<String>,
     /// Direct delivery channel to session actor (bypasses InboundMessage relay).
@@ -1190,7 +1188,6 @@ impl SpawnTool {
             origin: std::sync::Mutex::new(("cli".into(), "default".into())),
             worker_count: AtomicU32::new(0),
             provider_policy: None,
-            provider_router: None,
             worker_prompt: None,
             background_result_sender: None,
             child_session_sender: None,
@@ -1234,7 +1231,6 @@ impl SpawnTool {
             origin: std::sync::Mutex::new((channel.into(), chat_id.into())),
             worker_count: AtomicU32::new(0),
             provider_policy: None,
-            provider_router: None,
             worker_prompt: None,
             background_result_sender: None,
             child_session_sender: None,
@@ -1292,7 +1288,6 @@ impl SpawnTool {
             ),
             worker_count: AtomicU32::new(0),
             provider_policy: self.provider_policy.clone(),
-            provider_router: self.provider_router.clone(),
             worker_prompt: self.worker_prompt.clone(),
             background_result_sender: self.background_result_sender.clone(),
             child_session_sender: self.child_session_sender.clone(),
@@ -1415,12 +1410,6 @@ impl SpawnTool {
             .join(".octos")
             .join("spawn-deliverables")
             .join(worker_id.to_string()))
-    }
-
-    /// Set a provider router for multi-model sub-agent support.
-    pub fn with_provider_router(mut self, router: Arc<ProviderRouter>) -> Self {
-        self.provider_router = Some(router);
-        self
     }
 
     /// Set a default worker prompt for sub-agents (overrides compiled-in worker.txt).
@@ -1737,44 +1726,12 @@ impl SpawnTool {
         model: Option<&str>,
         context_window: Option<u32>,
     ) -> Result<Arc<dyn LlmProvider>> {
-        let (base, default_cw): (Arc<dyn LlmProvider>, Option<u32>) =
-            match (model, &self.provider_router) {
-                (Some(model_key), Some(router)) => {
-                    // An unresolvable model key must degrade to the parent
-                    // provider, matching the pipeline handler's fallback —
-                    // model-assignment may name catalog models this profile's
-                    // router never registered, and that must not fail the spawn.
-                    let provider = match router.resolve(model_key) {
-                        Ok(p) => p,
-                        // Keep the router's error — it lists the registered
-                        // keys, which is what makes the gap actionable.
-                        Err(err) => {
-                            warn!(
-                                model = model_key,
-                                %err,
-                                "sub-agent model not in provider router; using parent provider"
-                            );
-                            self.llm.clone()
-                        }
-                    };
-                    // Look up default_context_window from metadata
-                    let key = model_key.split_once('/').map_or(model_key, |(k, _)| k);
-                    let default_cw = router
-                        .list_models_with_meta()
-                        .iter()
-                        .find(|m| m.key == key)
-                        .and_then(|m| m.default_context_window);
-                    (provider, default_cw)
-                }
-                (Some(model_key), None) => {
-                    warn!(
-                        model = model_key,
-                        "model specified but no provider router configured; using parent provider"
-                    );
-                    (self.llm.clone(), None)
-                }
-                _ => (self.llm.clone(), None),
-            };
+        // The per-key sub-provider router was removed with the routing stack:
+        // a spawned worker always starts from the parent provider (a `model`
+        // hint only feeds the context-window default lookup below, which is
+        // gone with the router metadata, so it is informational today).
+        let _ = model;
+        let (base, default_cw): (Arc<dyn LlmProvider>, Option<u32>) = (self.llm.clone(), None);
 
         // LLM-specified context_window takes priority, then config default
         let effective_cw = context_window.or(default_cw);
@@ -2549,52 +2506,10 @@ impl Tool for SpawnTool {
     }
 
     fn input_schema(&self) -> serde_json::Value {
-        // Build dynamic model field based on available sub-providers
-        let model_prop = match &self.provider_router {
-            Some(router) => {
-                let models = router.list_models_with_meta();
-                if models.is_empty() {
-                    serde_json::json!({
-                        "type": "string",
-                        "description": "Prefixed model ID for the subagent. No sub-providers currently configured."
-                    })
-                } else {
-                    let mut desc_parts =
-                        vec!["Model key for the subagent. Available models:".to_string()];
-                    let mut enum_vals = Vec::new();
-                    for m in &models {
-                        let mut line =
-                            format!("- '{}': {} ({})", m.key, m.model_id, m.provider_name);
-                        if let Some(ref cost) = m.cost_info {
-                            line.push_str(&format!(", {cost}"));
-                        }
-                        line.push_str(&format!(", {}k max ctx", m.context_window / 1000));
-                        line.push_str(&format!(", {}k max output", m.max_output_tokens / 1000));
-                        if let Some(default_cw) = m.default_context_window {
-                            line.push_str(&format!(", {}k default budget", default_cw / 1000));
-                        }
-                        if let Some(ref desc) = m.description {
-                            line.push_str(&format!(". {desc}"));
-                        }
-                        desc_parts.push(line);
-                        enum_vals.push(serde_json::Value::String(m.key.clone()));
-                        enum_vals.push(serde_json::Value::String(format!(
-                            "{}/{}",
-                            m.key, m.model_id
-                        )));
-                    }
-                    serde_json::json!({
-                        "type": "string",
-                        "description": desc_parts.join("\n"),
-                        "enum": enum_vals
-                    })
-                }
-            }
-            None => serde_json::json!({
-                "type": "string",
-                "description": "Prefixed model ID for the subagent (e.g. 'anthropic/claude-haiku'). Requires a provider router."
-            }),
-        };
+        let model_prop = serde_json::json!({
+            "type": "string",
+            "description": "Optional model hint for the subagent. Sub-agents run on the parent provider; model selection follows the profile's provider chain."
+        });
 
         serde_json::json!({
             "type": "object",

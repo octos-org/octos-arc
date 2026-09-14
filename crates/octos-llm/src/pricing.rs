@@ -151,21 +151,12 @@ pub struct CacheRates {
 ///
 /// Native `anthropic` plus the relabeled proxies that construct an
 /// `AnthropicProvider` under a custom label: `zai` / `zai-coding` (GLM over
-/// the Anthropic API) and `r9s` when it is serving a `claude-*` model (r9s
-/// auto-selects the Anthropic protocol for claude models and OpenAI for the
-/// rest — see `registry/r9s.rs`). A label CONTAINING "anthropic" also counts,
-/// covering custom Anthropic-compatible endpoints. zhipu / dashscope /
-/// minimax / moonshot-coding are OpenAI-protocol re-hosts and are
+/// the Anthropic API). A label CONTAINING "anthropic" also counts, covering
+/// custom Anthropic-compatible endpoints. OpenAI-protocol re-hosts are
 /// deliberately excluded.
-fn speaks_anthropic_protocol(provider: &str, model: &str) -> bool {
+fn speaks_anthropic_protocol(provider: &str, _model: &str) -> bool {
     let p = provider.to_ascii_lowercase();
-    p.contains("anthropic")
-        || p == "zai"
-        || p == "zai-coding"
-        // Mirror r9s construction EXACTLY (case-sensitive `starts_with("claude-")`
-        // on the RAW model): r9s speaks the Anthropic protocol only for the models
-        // it actually builds an `AnthropicProvider` for — see `registry::r9s`.
-        || (p == "r9s" && crate::registry::r9s::prefers_anthropic(model))
+    p.contains("anthropic") || p == "zai" || p == "zai-coding"
 }
 
 /// The prompt-cache rate card for the answering slot, keyed on its
@@ -179,14 +170,14 @@ fn speaks_anthropic_protocol(provider: &str, model: &str) -> bool {
 ///   every catalog row that carries a cached rate (`catalog.rs`: sonnet-4
 ///   0.3/3.0, haiku-4.5 0.08/0.80 — both exactly 0.1x). This branch is keyed
 ///   on PROTOCOL, not on the family label, because a relabeled proxy (zai
-///   serving GLM, r9s serving claude) still emits Anthropic cache accounting.
+///   serving GLM) still emits Anthropic cache accounting.
 /// - `gemini` / `vertex` / `google`: implicit caching bills cached tokens at
 ///   25% of the input rate (catalog row gemini-2.5-flash: 0.0375/0.15 =
 ///   0.25x). No per-token write charge — explicit-cache STORAGE is
 ///   time-billed, octos never creates explicit caches, and the Gemini parser
 ///   never reports write tokens, so 0.0 writes can never make a real token
 ///   vanish.
-/// - everything else (openai, openrouter, deepseek, local, unknown/empty):
+/// - everything else (openai, deepseek, moonshot-coding, unknown/empty):
 ///   no cached READ rate is knowable — the catalog's only OpenAI row carries
 ///   `cache_read_per_mtok: None`, and the public discount varies per model
 ///   FAMILY (0.5x for gpt-4o-era, deeper for newer), so a provider-wide
@@ -552,33 +543,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_mirror_r9s_construction_predicate_when_pricing_cache() {
-        // #2194 R3: r9s auto-selects the Anthropic protocol ONLY for
-        // `model.starts_with("claude-")` (case-sensitive; see registry/r9s.rs).
-        // Cache pricing must classify by the SAME predicate, or a model r9s
-        // actually serves over the OpenAI protocol (mixed-case "Claude-...", or
-        // a "claude"-prefixed-but-not-"claude-" name) is handed Anthropic cache
-        // rates it never earns. Before this fix pricing used a LOWERCASED
-        // `starts_with("claude")` and diverged from construction.
-        assert_eq!(
-            cache_rates("r9s", "claude-3-5-sonnet").read_multiplier,
-            CACHE_READ_INPUT_MULTIPLIER,
-            "r9s + claude-* is Anthropic protocol -> 0.1x cache reads",
-        );
-        assert_eq!(
-            cache_rates("r9s", "Claude-3-5-sonnet").read_multiplier,
-            1.0,
-            "r9s builds an OpenAIProvider for a non-'claude-' (mixed-case) model, \
-             so pricing must NOT hand it Anthropic cache rates",
-        );
-        assert_eq!(
-            cache_rates("r9s", "claude2-experimental").read_multiplier,
-            1.0,
-            "a 'claude'-prefixed-but-not-'claude-' model is OpenAI protocol at r9s",
-        );
-    }
-
-    #[test]
     fn test_known_model_pricing() {
         let p = model_pricing("claude-sonnet-4-20250514").unwrap();
         assert!((p.input_per_million - 3.0).abs() < f64::EPSILON);
@@ -759,11 +723,7 @@ mod tests {
             40_000,
             8_000,
         );
-        for (provider, model) in [
-            ("zai", "glm-4.6"),
-            ("zai-coding", "glm-4.6"),
-            ("r9s", "claude-3-5-sonnet"),
-        ] {
+        for (provider, model) in [("zai", "glm-4.6"), ("zai-coding", "glm-4.6")] {
             let cost =
                 p.cost_with_cache_for_provider(provider, model, 100_000, 10_000, 40_000, 8_000);
             assert!(

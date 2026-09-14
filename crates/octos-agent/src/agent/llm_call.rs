@@ -166,9 +166,9 @@ impl Agent {
             .as_ref()
             .and_then(|manager| manager.prompt_cache_epoch_id())
             .or_else(|| self.prompt_cache_epoch_id.clone());
-        // Session identity only: `self.llm` may be an AdaptiveRouter whose
-        // `provider_name()`/`model_id()` re-run selection per call, and cache
-        // affinity must not flap with it (route is logged above instead).
+        // Session identity only: `self.llm` may be a failover chain whose
+        // `provider_name()`/`model_id()` re-run slot selection per call, and
+        // cache affinity must not flap with it (route is logged above instead).
         provider_config.prompt_cache_context = Some(build_prompt_cache_context(
             &prompt_fingerprint,
             messages,

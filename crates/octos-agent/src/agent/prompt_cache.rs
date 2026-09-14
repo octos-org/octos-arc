@@ -140,7 +140,7 @@ pub(super) fn fingerprint_prompt(messages: &[Message], tools: &[ToolSpec]) -> Pr
     }
 }
 
-/// Cache identity is derived from SESSION identity only. `AdaptiveRouter`
+/// Cache identity is derived from SESSION identity only. The failover chain
 /// re-runs slot selection on every call, so hashing `provider_name()` /
 /// `model_id()` here made `prompt_cache_key` and the fallback epoch flap with a
 /// circuit breaker and routed the request away from the server holding the
@@ -607,7 +607,7 @@ mod tests {
 
     #[test]
     fn should_keep_affinity_and_fallback_epoch_stable_when_route_selection_flaps() {
-        // AdaptiveRouter re-runs provider selection per call; a circuit-breaker
+        // A failover chain re-runs provider selection per call; a circuit-breaker
         // flap must not rotate prompt_cache_key (the endpoint would route away
         // from the server holding the prefix) or the non-OUP fallback epoch.
         // Route identity is no longer an input at all, so two builds for the

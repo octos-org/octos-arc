@@ -174,18 +174,6 @@ pub struct Config {
     #[serde(default)]
     pub sub_providers: Vec<SubProviderConfig>,
 
-    /// Adaptive routing configuration for dynamic provider selection.
-    /// When enabled, replaces static priority failover with metrics-driven routing.
-    #[serde(default)]
-    pub adaptive_routing: Option<AdaptiveRoutingConfig>,
-
-    /// Credential pool configuration (M6.5, F-005). Named pool of API
-    /// keys / OAuth tokens with persistent cooldowns and rotation
-    /// strategies. Absent → no pool is opened; adapters fall back to
-    /// single-credential behavior.
-    #[serde(default)]
-    pub credential_pool: Option<CredentialPoolConfig>,
-
     /// AppUi (octos-app, octoscode, etc.) session defaults applied by
     /// `octos serve`. Operators can anchor every AppUi session that
     /// does not advertise the `session.workspace_cwd.v1` capability to
@@ -291,55 +279,6 @@ impl Default for AppUiConfig {
             allowed_origins: Vec::new(),
             default_session_cwd: None,
             sessions_in_cwd: default_sessions_in_cwd(),
-        }
-    }
-}
-
-/// Top-level credential-pool configuration for `chat` / `serve`. Mirrors
-/// the per-profile shape in `crate::profiles::CredentialPoolConfig` so
-/// operators who do not use the multi-profile setup can still enable the
-/// M6.5 pool via the top-level config.json.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CredentialPoolConfig {
-    /// Optional override for the persistent state file. Defaults to
-    /// `<data_dir>/credential_pool.redb` when absent.
-    #[serde(default)]
-    pub state_path: Option<String>,
-    /// Pool name used in metrics labels (e.g. `"anthropic"`). Default:
-    /// `"default"`.
-    #[serde(default = "default_credential_pool_name")]
-    pub name: String,
-    /// Rotation strategy identifier: `"fill_first"`, `"round_robin"`,
-    /// `"random"`, `"least_used"`. Defaults to `round_robin`.
-    #[serde(default = "default_credential_pool_strategy")]
-    pub strategy: String,
-    /// Credential ids that belong to the pool. Paired at runtime with
-    /// API keys from `env_vars`.
-    #[serde(default)]
-    pub credential_ids: Vec<String>,
-    /// Default cooldown applied to 429 responses without an explicit
-    /// `reset_at` hint. Milliseconds.
-    #[serde(default)]
-    pub default_cooldown_ms: Option<u64>,
-}
-
-fn default_credential_pool_name() -> String {
-    "default".into()
-}
-
-fn default_credential_pool_strategy() -> String {
-    "round_robin".into()
-}
-
-impl Default for CredentialPoolConfig {
-    fn default() -> Self {
-        Self {
-            state_path: None,
-            name: default_credential_pool_name(),
-            strategy: default_credential_pool_strategy(),
-            credential_ids: Vec::new(),
-            default_cooldown_ms: None,
         }
     }
 }
@@ -701,227 +640,6 @@ pub fn merge_host_memory_into_profile(
             profile_refresh.enabled = host_refresh.enabled;
         }
     }
-}
-
-/// Adaptive routing mode (config-level, maps to `AdaptiveMode` at runtime).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum AdaptiveRoutingMode {
-    /// Static priority order, failover only on circuit-broken.
-    #[default]
-    Off,
-    /// Hedged racing: fire to 2 providers, take winner, cancel loser.
-    Hedge,
-    /// Score-based lane changing: dynamically pick the best single provider.
-    Lane,
-}
-
-impl From<AdaptiveRoutingMode> for octos_llm::AdaptiveMode {
-    fn from(m: AdaptiveRoutingMode) -> Self {
-        match m {
-            AdaptiveRoutingMode::Off => Self::Off,
-            AdaptiveRoutingMode::Hedge => Self::Hedge,
-            AdaptiveRoutingMode::Lane => Self::Lane,
-        }
-    }
-}
-
-/// Adaptive routing configuration for dynamic LLM provider selection.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AdaptiveRoutingConfig {
-    /// Enable adaptive routing. Default: false.
-    #[serde(default)]
-    pub enabled: bool,
-
-    /// Latency threshold (ms) above which a soft penalty is applied. Default: 10000.
-    #[serde(default = "default_latency_threshold_ms")]
-    pub latency_threshold_ms: u64,
-
-    /// Error rate (0..1) above which provider is deprioritized. Default: 0.3.
-    #[serde(default = "default_error_rate_threshold")]
-    pub error_rate_threshold: f64,
-
-    /// Probability (0..1) of probing a non-primary provider. Default: 0.1.
-    #[serde(default = "default_probe_probability")]
-    pub probe_probability: f64,
-
-    /// Minimum seconds between probes to the same provider. Default: 60.
-    #[serde(default = "default_probe_interval_secs")]
-    pub probe_interval_secs: u64,
-
-    /// Consecutive failures before circuit breaker opens. Default: 3.
-    #[serde(default = "default_failure_threshold")]
-    pub failure_threshold: u32,
-
-    /// Adaptive mode: "off" (default), "hedge" (race 2 providers, take winner),
-    /// or "lane" (score-based single-provider selection). Mutually exclusive.
-    /// The ResponsivenessObserver can auto-escalate to "hedge" on degradation.
-    #[serde(default)]
-    pub mode: AdaptiveRoutingMode,
-
-    /// Enable quality-of-service ranking that factors in response quality
-    /// (not just latency/errors) when scoring providers. Orthogonal to mode.
-    /// Default: false.
-    #[serde(default)]
-    pub qos_ranking: bool,
-
-    /// Scoring weight for latency (0..1). Default: 0.3.
-    #[serde(default = "default_weight_latency")]
-    pub weight_latency: f64,
-    /// Scoring weight for error rate (0..1). Default: 0.3.
-    #[serde(default = "default_weight_error_rate")]
-    pub weight_error_rate: f64,
-    /// Scoring weight for config priority order (0..1). Default: 0.2.
-    #[serde(default = "default_weight_priority")]
-    pub weight_priority: f64,
-    /// Scoring weight for published token cost (0..1). Default: 0.2.
-    #[serde(default = "default_weight_cost")]
-    pub weight_cost: f64,
-
-    /// Auto-escalation: when sustained latency degradation is observed on a
-    /// session, the router auto-promotes `mode` to `Hedge` and restores it
-    /// on recovery. Defaults to enabled with FA-11/12-matching thresholds
-    /// (8s ceiling, 3-consecutive-slow trigger, 0.6 recovery factor).
-    /// Operators that explicitly want to disable the latency feedback loop
-    /// can set `auto_escalation.enabled = false`.
-    #[serde(default)]
-    pub auto_escalation: AutoEscalationConfigFile,
-}
-
-impl Default for AdaptiveRoutingConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            latency_threshold_ms: default_latency_threshold_ms(),
-            error_rate_threshold: default_error_rate_threshold(),
-            probe_probability: default_probe_probability(),
-            probe_interval_secs: default_probe_interval_secs(),
-            failure_threshold: default_failure_threshold(),
-            mode: AdaptiveRoutingMode::Off,
-            qos_ranking: false,
-            weight_latency: default_weight_latency(),
-            weight_error_rate: default_weight_error_rate(),
-            weight_priority: default_weight_priority(),
-            weight_cost: default_weight_cost(),
-            auto_escalation: AutoEscalationConfigFile::default(),
-        }
-    }
-}
-
-/// Per-config auto-escalation tunables. Mirrors `octos_llm::AutoEscalationConfig`
-/// but uses serde defaults so a missing `auto_escalation` block in
-/// `config.json` resolves to the recommended values.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AutoEscalationConfigFile {
-    #[serde(default = "default_auto_escalation_enabled")]
-    pub enabled: bool,
-    #[serde(default = "default_auto_escalation_window_size")]
-    pub window_size: usize,
-    #[serde(default = "default_auto_escalation_baseline_samples")]
-    pub baseline_samples: usize,
-    #[serde(default = "default_auto_escalation_degradation_threshold")]
-    pub degradation_threshold: f64,
-    #[serde(default = "default_auto_escalation_slow_trigger")]
-    pub slow_trigger: u32,
-    #[serde(default = "default_auto_escalation_latency_ceiling_ms")]
-    pub latency_ceiling_ms: u64,
-    #[serde(default = "default_auto_escalation_recovery_factor")]
-    pub recovery_factor: f64,
-}
-
-impl Default for AutoEscalationConfigFile {
-    fn default() -> Self {
-        Self {
-            enabled: default_auto_escalation_enabled(),
-            window_size: default_auto_escalation_window_size(),
-            baseline_samples: default_auto_escalation_baseline_samples(),
-            degradation_threshold: default_auto_escalation_degradation_threshold(),
-            slow_trigger: default_auto_escalation_slow_trigger(),
-            latency_ceiling_ms: default_auto_escalation_latency_ceiling_ms(),
-            recovery_factor: default_auto_escalation_recovery_factor(),
-        }
-    }
-}
-
-impl From<&AutoEscalationConfigFile> for octos_llm::AutoEscalationConfig {
-    fn from(c: &AutoEscalationConfigFile) -> Self {
-        Self {
-            enabled: c.enabled,
-            window_size: c.window_size,
-            baseline_samples: c.baseline_samples,
-            degradation_threshold: c.degradation_threshold,
-            slow_trigger: c.slow_trigger,
-            latency_ceiling_ms: c.latency_ceiling_ms,
-            recovery_factor: c.recovery_factor,
-        }
-    }
-}
-
-fn default_auto_escalation_enabled() -> bool {
-    true
-}
-fn default_auto_escalation_window_size() -> usize {
-    5
-}
-fn default_auto_escalation_baseline_samples() -> usize {
-    5
-}
-fn default_auto_escalation_degradation_threshold() -> f64 {
-    3.0
-}
-fn default_auto_escalation_slow_trigger() -> u32 {
-    3
-}
-fn default_auto_escalation_latency_ceiling_ms() -> u64 {
-    8_000
-}
-fn default_auto_escalation_recovery_factor() -> f64 {
-    0.6
-}
-
-impl From<&AdaptiveRoutingConfig> for octos_llm::AdaptiveConfig {
-    fn from(c: &AdaptiveRoutingConfig) -> Self {
-        Self {
-            failure_threshold: c.failure_threshold,
-            latency_threshold_ms: c.latency_threshold_ms,
-            error_rate_threshold: c.error_rate_threshold,
-            probe_probability: c.probe_probability,
-            probe_interval_secs: c.probe_interval_secs,
-            weight_latency: c.weight_latency,
-            weight_error_rate: c.weight_error_rate,
-            weight_priority: c.weight_priority,
-            weight_cost: c.weight_cost,
-            ..Default::default()
-        }
-    }
-}
-
-fn default_latency_threshold_ms() -> u64 {
-    10_000
-}
-fn default_error_rate_threshold() -> f64 {
-    0.3
-}
-fn default_probe_probability() -> f64 {
-    0.1
-}
-fn default_probe_interval_secs() -> u64 {
-    60
-}
-fn default_failure_threshold() -> u32 {
-    3
-}
-fn default_weight_latency() -> f64 {
-    0.3
-}
-fn default_weight_error_rate() -> f64 {
-    0.3
-}
-fn default_weight_priority() -> f64 {
-    0.2
-}
-fn default_weight_cost() -> f64 {
-    0.2
 }
 
 fn merge_env_memory_policy(config: &mut Config) {
@@ -1948,10 +1666,12 @@ mod tests {
     fn test_detect_provider_others() {
         assert_eq!(detect_provider("gemini-2.0-flash"), Some("gemini"));
         assert_eq!(detect_provider("deepseek-chat"), Some("deepseek"));
-        assert_eq!(detect_provider("kimi-k2.5"), Some("moonshot"));
-        assert_eq!(detect_provider("qwen-max"), Some("dashscope"));
-        assert_eq!(detect_provider("glm-4-plus"), Some("zhipu"));
-        assert_eq!(detect_provider("llama-3.3-70b"), Some("groq"));
+        // Coding-plan families (zai/zai_coding/moonshot_coding) are
+        // explicit-config only — no detect patterns by design.
+        assert_eq!(detect_provider("kimi-k2.5"), None);
+        assert_eq!(detect_provider("qwen-max"), None);
+        assert_eq!(detect_provider("glm-4-plus"), None);
+        assert_eq!(detect_provider("llama-3.3-70b"), None);
     }
 
     #[test]
@@ -2311,104 +2031,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(unsafe_code)]
-    fn custom_api_key_env_override_stays_exclusive() {
-        // Regression: an explicit custom `api_key_env` must NOT fall back to a
-        // provider's sibling key vars — otherwise a missing proxy key would leak
-        // an ambient KIMI_API_KEY to a custom endpoint.
-        with_isolated_home(|| {
-            let cfg = Config {
-                provider: Some("moonshot".to_string()),
-                api_key_env: Some("MY_PROXY_KEY".to_string()),
-                env_vars: std::collections::HashMap::from([(
-                    "KIMI_API_KEY".to_string(),
-                    "ambient-kimi".to_string(),
-                )]),
-                ..Default::default()
-            };
-            // MY_PROXY_KEY is unset; resolution must fail, not return the
-            // unrelated KIMI credential.
-            assert!(cfg.get_api_key("moonshot").is_err());
-        });
-    }
-
-    #[test]
-    #[allow(unsafe_code)]
-    fn custom_api_key_env_matching_alias_case_insensitively_stays_exclusive() {
-        // Regression (codex P1): env var names are case-sensitive on Unix, so a
-        // genuinely custom `kimi_api_key` (lowercase) is NOT the declared
-        // KIMI_API_KEY and must stay exclusive — it must not fall back to an
-        // ambient MOONSHOT_API_KEY and leak it to a custom endpoint.
-        with_isolated_home(|| {
-            unsafe { std::env::set_var("MOONSHOT_API_KEY", "ambient-moonshot") };
-            let cfg = Config {
-                provider: Some("moonshot".to_string()),
-                api_key_env: Some("kimi_api_key".to_string()),
-                ..Default::default()
-            };
-            assert!(cfg.get_api_key("moonshot").is_err());
-        });
-    }
-
-    #[test]
-    #[allow(unsafe_code)]
-    fn moonshot_accepts_either_declared_key_name() {
-        // Regression (symmetry): an init-generated config uses api_key_env =
-        // KIMI_API_KEY, but a user who set MOONSHOT_API_KEY must still resolve,
-        // because both are declared key names for the provider.
-        with_isolated_home(|| {
-            let cfg = Config {
-                provider: Some("moonshot".to_string()),
-                api_key_env: Some("KIMI_API_KEY".to_string()),
-                env_vars: std::collections::HashMap::from([(
-                    "MOONSHOT_API_KEY".to_string(),
-                    "mkey".to_string(),
-                )]),
-                ..Default::default()
-            };
-            assert_eq!(cfg.get_api_key("moonshot").unwrap(), "mkey");
-        });
-    }
-
-    #[test]
-    #[allow(unsafe_code)]
-    fn moonshot_kimi_config_resolves_moonshot_var_from_process_env() {
-        // Regression: the headline scenario — init writes api_key_env=KIMI_API_KEY
-        // but the user exports MOONSHOT_API_KEY in their shell — resolves via the
-        // process-env candidate loop (not the env_vars map).
-        with_isolated_home(|| {
-            unsafe { std::env::set_var("MOONSHOT_API_KEY", "from-shell") };
-            let cfg = Config {
-                provider: Some("moonshot".to_string()),
-                api_key_env: Some("KIMI_API_KEY".to_string()),
-                ..Default::default()
-            };
-            assert_eq!(cfg.get_api_key("moonshot").unwrap(), "from-shell");
-        });
-    }
-
-    #[test]
-    #[allow(unsafe_code)]
-    fn get_api_key_with_env_alias_agrees_with_get_api_key() {
-        // Regression (codex P1): the explicit-env entry point must treat a
-        // declared alias (KIMI_API_KEY) as a known name and run the full chain,
-        // so doctor/dashboard/embedding agree with chat runtime — resolving the
-        // sibling MOONSHOT_API_KEY rather than misclassifying KIMI as custom.
-        with_isolated_home(|| {
-            unsafe { std::env::set_var("MOONSHOT_API_KEY", "from-shell") };
-            let cfg = Config {
-                provider: Some("moonshot".to_string()),
-                ..Default::default()
-            };
-            assert_eq!(
-                cfg.get_api_key_with_env("moonshot", Some("KIMI_API_KEY"))
-                    .unwrap(),
-                "from-shell"
-            );
-        });
-    }
-
-    #[test]
     fn test_embedding_config_deserialize() {
         let json = r#"{
             "provider": "anthropic",
@@ -2483,44 +2105,6 @@ mod tests {
         };
         let warnings = config.validate();
         assert!(warnings.iter().any(|w| w.contains("out of range")));
-    }
-
-    /// Default `AdaptiveRoutingConfig` carries `auto_escalation.enabled = true`
-    /// so out-of-the-box installs get the latency-feedback loop.
-    #[test]
-    fn auto_escalation_defaults_match_router_defaults() {
-        let cfg = AdaptiveRoutingConfig::default();
-        assert!(cfg.auto_escalation.enabled);
-        let llm_cfg = octos_llm::AutoEscalationConfig::from(&cfg.auto_escalation);
-        assert!(llm_cfg.enabled);
-        assert_eq!(llm_cfg.latency_ceiling_ms, 8_000);
-        assert!((llm_cfg.recovery_factor - 0.6).abs() < f64::EPSILON);
-        assert_eq!(llm_cfg.slow_trigger, 3);
-    }
-
-    /// Missing `auto_escalation` block in JSON resolves to the in-code
-    /// defaults instead of disabling the feature.
-    #[test]
-    fn auto_escalation_missing_block_uses_defaults() {
-        let json = r#"{
-            "enabled": true,
-            "mode": "lane"
-        }"#;
-        let cfg: AdaptiveRoutingConfig = serde_json::from_str(json).unwrap();
-        assert!(cfg.auto_escalation.enabled);
-        assert_eq!(cfg.auto_escalation.latency_ceiling_ms, 8_000);
-    }
-
-    /// Operators can disable the feature explicitly.
-    #[test]
-    fn auto_escalation_can_be_disabled() {
-        let json = r#"{
-            "enabled": true,
-            "mode": "lane",
-            "auto_escalation": { "enabled": false }
-        }"#;
-        let cfg: AdaptiveRoutingConfig = serde_json::from_str(json).unwrap();
-        assert!(!cfg.auto_escalation.enabled);
     }
 
     #[test]

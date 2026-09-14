@@ -10,7 +10,7 @@
 //! (`GatewayDispatcher::try_dispatch_session_command` plus
 //! `SessionActor::try_handle_command`) runs BEFORE the LLM round-trip
 //! and short-circuits commands like `/clear`, `/new slides …`, `/new
-//! site …`, `/queue`, `/adaptive`, `/router`, `/status`, `/reset`,
+//! site …`, `/queue`, `/status`, `/reset`,
 //! `/thinking`. Without this interception on the WS path, every such
 //! message reached the LLM and got a conversational response —
 //! breaking the slides + sites scaffolding flow on the SPA entirely.
@@ -21,7 +21,7 @@
 //! the gateway path and the WS turn path call the helper before
 //! constructing the LLM request. On the gateway path the existing
 //! `GatewayDispatcher` chain is left untouched (it's wired into
-//! per-actor mutable state — `adaptive_router`, `queue_mode`, etc. —
+//! per-actor mutable state — `queue_mode`, etc. —
 //! that the WS turn path doesn't carry). On the WS path
 //! [`try_dispatch_slash_command`] runs first; if it returns
 //! `Some(reply)` the WS turn path persists the reply as an assistant
@@ -40,7 +40,7 @@
 //! * `/new <topic>` (no template prefix) — synthesises a "session
 //!   switched" reply. On the WS transport the SPA controls active
 //!   session via URL; this is purely a status acknowledgement.
-//! * `/queue`, `/adaptive`, `/router`, `/status`, `/reset`,
+//! * `/queue`, `/status`, `/reset`,
 //!   `/thinking` — return a "not available on this transport"
 //!   acknowledgement. These per-session-actor commands depend on
 //!   gateway-only state. The point is to INTERCEPT them so they
@@ -143,10 +143,9 @@ pub async fn try_dispatch_slash_command(
             ))
         }
         // Per-session-actor commands. Gateway carries the state these
-        // mutate (queue mode, adaptive router, etc.); the WS turn
-        // path doesn't. Intercept so they don't leak into LLM
-        // context.
-        "/queue" | "/adaptive" | "/router" | "/status" | "/reset" | "/thinking" => Some(format!(
+        // mutate (queue mode, etc.); the WS turn path doesn't.
+        // Intercept so they don't leak into LLM context.
+        "/queue" | "/status" | "/reset" | "/thinking" => Some(format!(
             "`{cmd}` is not yet wired on the web chat transport \
              (gateway-only for now). Issue #1013 follow-up will surface \
              the matching control in the SPA."
@@ -318,14 +317,7 @@ mod tests {
     #[tokio::test]
     async fn should_intercept_session_actor_style_commands() {
         let (ctx, _tmp, _key) = setup().await;
-        for cmd in [
-            "/queue",
-            "/adaptive",
-            "/router",
-            "/status",
-            "/reset",
-            "/thinking",
-        ] {
+        for cmd in ["/queue", "/status", "/reset", "/thinking"] {
             assert!(
                 try_dispatch_slash_command(cmd, &ctx).await.is_some(),
                 "{cmd} must be intercepted"

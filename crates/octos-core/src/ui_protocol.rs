@@ -1152,22 +1152,8 @@ pub mod methods {
     /// [`UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1`].
     pub const LAUNCH_RESOLVE: &str = "launch/resolve";
 
-    // ---- Wave4-A: adaptive routing + queue state ----
+    // ---- Wave4-A: queue state ----
 
-    /// Wave4-A `router/status` — adaptive routing snapshot notification.
-    /// Emitted by the server adjacent to `turn/started` and `turn/completed`
-    /// so the client always has a fresh status without polling.
-    pub const ROUTER_STATUS: &str = "router/status";
-    /// Wave4-A `router/failover` — adaptive router crossed lanes.
-    pub const ROUTER_FAILOVER: &str = "router/failover";
-    /// Wave4-A `router/set_mode` — runtime mode toggle command. Mode
-    /// change is session-scoped, not process-global.
-    pub const ROUTER_SET_MODE: &str = "router/set_mode";
-    /// Wave4-A `router/get_metrics` — on-demand snapshot of the
-    /// `AdaptiveStatus` plus full lane scores / breaker map. Returns
-    /// the same payload shape as the `router/status` notification but
-    /// as an RPC result.
-    pub const ROUTER_GET_METRICS: &str = "router/get_metrics";
     /// Wave4-A `queue/state` — pending-queue snapshot. Client-emitted
     /// today; the constant is defined so type-checked code paths across
     /// the workspace can reference one source of truth.
@@ -1258,8 +1244,6 @@ pub const UI_PROTOCOL_COMMAND_METHODS: &[&str] = &[
     methods::SESSION_TITLE_SET,
     methods::SESSION_DELETE,
     methods::SYSTEM_STATUS_GET,
-    methods::ROUTER_SET_MODE,
-    methods::ROUTER_GET_METRICS,
     methods::LAUNCH_RESOLVE,
 ];
 
@@ -1288,8 +1272,6 @@ pub const UI_PROTOCOL_NOTIFICATION_METHODS: &[&str] = &[
     methods::TURN_SPAWN_COMPLETE,
     methods::FILE_ATTACHED,
     methods::PROJECTION_ENVELOPE,
-    methods::ROUTER_STATUS,
-    methods::ROUTER_FAILOVER,
     methods::QUEUE_STATE,
     methods::AGENT_UPDATED,
     methods::AGENT_OUTPUT_DELTA,
@@ -1356,8 +1338,6 @@ pub const UI_PROTOCOL_FIRST_SERVER_METHODS: &[&str] = &[
     methods::SESSION_TITLE_SET,
     methods::SESSION_DELETE,
     methods::SYSTEM_STATUS_GET,
-    methods::ROUTER_SET_MODE,
-    methods::ROUTER_GET_METRICS,
     methods::LAUNCH_RESOLVE,
 ];
 
@@ -3094,50 +3074,6 @@ pub struct SystemStatusGetResult {
     pub status: Value,
 }
 
-// ----- Wave4-A `router/*` + `queue/state` -----
-
-/// Wave4-A `router/set_mode` params. `mode` is the lowercase string
-/// rendering of `octos_llm::AdaptiveMode` — `"off"`, `"hedge"`, or
-/// `"lane"`. The string is intentional (a) so the wire stays decoupled
-/// from `octos-llm`'s enum variant numeric layout and (b) so client
-/// implementations don't have to negotiate over numeric values.
-///
-/// Mode change is session-scoped — it persists for the lifetime of the
-/// `AdaptiveRouter` (process lifetime today), not across restarts.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RouterSetModeParams {
-    pub session_id: SessionKey,
-    pub mode: String,
-}
-
-/// Wave4-A `router/set_mode` result.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RouterSetModeResult {
-    /// New mode actually committed by the router (echo of `params.mode`
-    /// when the call succeeded). Returned so clients can confirm the
-    /// transition before swapping their pill state.
-    pub mode: String,
-}
-
-/// Wave4-A `router/get_metrics` params.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RouterGetMetricsParams {
-    pub session_id: SessionKey,
-}
-
-/// Wave4-A `router/get_metrics` result. Identical wire shape to
-/// [`RouterStatusEvent`] (excluding the redundant `session_id` echo)
-/// so a client can use the same code path for both — the notification
-/// is a push variant of the same snapshot.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RouterGetMetricsResult {
-    pub provider_name: String,
-    pub mode: String,
-    pub qos_ranking: bool,
-    pub lane_scores: BTreeMap<String, f64>,
-    pub circuit_breakers: BTreeMap<String, String>,
-}
-
 // ----- M10 Phase 1 `turn/spawn_complete` -----
 
 /// Notification params for legacy `turn/spawn_complete` records (M10 Phase
@@ -3751,8 +3687,6 @@ pub enum UiCommand {
     SessionDelete(SessionDeleteParams),
     SystemStatusGet(SystemStatusGetParams),
     // ---- Wave4-A: adaptive router controls ----
-    RouterSetMode(RouterSetModeParams),
-    RouterGetMetrics(RouterGetMetricsParams),
     // ---- launch/resolve: pre-session launch probe ----
     LaunchResolve(LaunchResolveParams),
 }
@@ -3790,8 +3724,6 @@ impl UiCommand {
             Self::SessionTitleSet(_) => methods::SESSION_TITLE_SET,
             Self::SessionDelete(_) => methods::SESSION_DELETE,
             Self::SystemStatusGet(_) => methods::SYSTEM_STATUS_GET,
-            Self::RouterSetMode(_) => methods::ROUTER_SET_MODE,
-            Self::RouterGetMetrics(_) => methods::ROUTER_GET_METRICS,
             Self::LaunchResolve(_) => methods::LAUNCH_RESOLVE,
         }
     }
@@ -3832,8 +3764,6 @@ impl UiCommand {
             Self::SessionTitleSet(params) => serde_json::to_value(params),
             Self::SessionDelete(params) => serde_json::to_value(params),
             Self::SystemStatusGet(params) => serde_json::to_value(params),
-            Self::RouterSetMode(params) => serde_json::to_value(params),
-            Self::RouterGetMetrics(params) => serde_json::to_value(params),
             Self::LaunchResolve(params) => serde_json::to_value(params),
         }?;
 
@@ -3909,10 +3839,6 @@ impl UiCommand {
             methods::SYSTEM_STATUS_GET => Ok(Self::SystemStatusGet(decode_optional_params(
                 method, params,
             )?)),
-            methods::ROUTER_SET_MODE => Ok(Self::RouterSetMode(decode_params(method, params)?)),
-            methods::ROUTER_GET_METRICS => {
-                Ok(Self::RouterGetMetrics(decode_params(method, params)?))
-            }
             _ => Err(RpcError::method_not_found(method)),
         }
     }
@@ -5730,51 +5656,6 @@ pub struct FileAttachedEvent {
     pub mime: Option<String>,
 }
 
-/// Wave4-A — adaptive router status snapshot pushed alongside `turn/started`
-/// and `turn/completed`. Mirrors `octos_llm::AdaptiveStatus` plus the
-/// information needed by clients to render the routing pill / lane debug
-/// view.
-///
-/// `lane_scores` carries one entry per active lane keyed by
-/// `"<provider_name>/<model_id>"` (the same key used in
-/// `model_catalog.json`). `circuit_breakers` carries the same keys mapped
-/// to a string-rendered breaker state (`"closed"`, `"open"`, `"half_open"`)
-/// so the wire shape stays stable when the underlying enum gains variants.
-///
-/// `BTreeMap` is intentional — deterministic wire order keeps the
-/// web-client diff path stable across re-renders.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RouterStatusEvent {
-    pub session_id: SessionKey,
-    /// Currently selected provider, in `"<provider_name>/<model_id>"` form.
-    pub provider_name: String,
-    /// Active adaptive mode (`off` | `hedge` | `lane`).
-    pub mode: String,
-    /// QoS quality-ranking toggle (orthogonal to mode).
-    pub qos_ranking: bool,
-    /// Per-lane scores, sorted by lane key for deterministic wire output.
-    pub lane_scores: BTreeMap<String, f64>,
-    /// Per-lane circuit-breaker state — `"closed"`, `"open"`, or
-    /// `"half_open"`. Lanes absent from this map have no breaker
-    /// observed yet (cold start).
-    pub circuit_breakers: BTreeMap<String, String>,
-}
-
-/// Wave4-A — emitted when the adaptive router fails over from one lane
-/// to another. `from_provider` / `to_provider` use the same
-/// `"<provider_name>/<model_id>"` key shape as
-/// [`RouterStatusEvent::lane_scores`]. `reason` is free-text from the
-/// router (e.g. "circuit_breaker_open", "score_drop"). `elapsed_ms` is
-/// the wall time from initial provider attempt to failover decision.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RouterFailoverEvent {
-    pub session_id: SessionKey,
-    pub from_provider: String,
-    pub to_provider: String,
-    pub reason: String,
-    pub elapsed_ms: u64,
-}
-
 /// Wave4-A — current send-queue depth observed by the client/server
 /// FIFO. `head_client_message_id` identifies the in-flight turn whose
 /// completion will release the next queued frame. `None` when the queue
@@ -5886,12 +5767,10 @@ pub enum UiNotification {
     /// Wave4-A: adaptive routing snapshot emitted on `turn/started` and
     /// `turn/completed` so clients can render the routing pill / lane
     /// debug view without polling.
-    RouterStatus(RouterStatusEvent),
     /// Wave4-A: adaptive router crossed a lane (failover). The status
     /// emitted at the next turn boundary will reflect the new lane, but
     /// clients that want to surface the transition itself (toast, status
     /// pill flash) subscribe to this notification.
-    RouterFailover(RouterFailoverEvent),
     /// Wave4-A: queue-state snapshot. Client-manufactured today — server
     /// never emits this. See [`QueueStateEvent`] docs.
     QueueState(QueueStateEvent),
@@ -5978,8 +5857,6 @@ impl UiNotification {
             Self::ReplayLossy(_) => methods::REPLAY_LOSSY,
             Self::TurnSpawnComplete(_) => methods::TURN_SPAWN_COMPLETE,
             Self::FileAttached(_) => methods::FILE_ATTACHED,
-            Self::RouterStatus(_) => methods::ROUTER_STATUS,
-            Self::RouterFailover(_) => methods::ROUTER_FAILOVER,
             Self::QueueState(_) => methods::QUEUE_STATE,
             Self::AgentUpdated(_) => methods::AGENT_UPDATED,
             Self::AgentOutputDelta(_) => methods::AGENT_OUTPUT_DELTA,
@@ -6025,8 +5902,6 @@ impl UiNotification {
             Self::ReplayLossy(event) => &event.session_id,
             Self::TurnSpawnComplete(event) => &event.session_id,
             Self::FileAttached(event) => &event.session_id,
-            Self::RouterStatus(event) => &event.session_id,
-            Self::RouterFailover(event) => &event.session_id,
             Self::QueueState(event) => &event.session_id,
             Self::AgentUpdated(event) => &event.session_id,
             Self::AgentOutputDelta(event) => &event.session_id,
@@ -6159,8 +6034,6 @@ impl UiNotification {
             Self::ReplayLossy(params) => serde_json::to_value(params),
             Self::TurnSpawnComplete(params) => serde_json::to_value(params),
             Self::FileAttached(params) => serde_json::to_value(params),
-            Self::RouterStatus(params) => serde_json::to_value(params),
-            Self::RouterFailover(params) => serde_json::to_value(params),
             Self::QueueState(params) => serde_json::to_value(params),
             Self::AgentUpdated(params) => serde_json::to_value(params),
             Self::AgentOutputDelta(params) => serde_json::to_value(params),
@@ -6289,8 +6162,6 @@ impl UiNotification {
                 Ok(Self::TurnSpawnComplete(decode_params(method, params)?))
             }
             methods::FILE_ATTACHED => Ok(Self::FileAttached(decode_params(method, params)?)),
-            methods::ROUTER_STATUS => Ok(Self::RouterStatus(decode_params(method, params)?)),
-            methods::ROUTER_FAILOVER => Ok(Self::RouterFailover(decode_params(method, params)?)),
             methods::QUEUE_STATE => Ok(Self::QueueState(decode_params(method, params)?)),
             methods::AGENT_UPDATED => Ok(Self::AgentUpdated(decode_params(method, params)?)),
             methods::AGENT_OUTPUT_DELTA => {

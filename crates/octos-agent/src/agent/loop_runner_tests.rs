@@ -1236,7 +1236,7 @@ async fn should_fire_call_checkpoints_after_exactly_n_completed_action_calls_whe
     assert!(tail(8).starts_with(CHECKPOINT_ENVELOPE_OPEN) && tail(8).contains("REFLECTION TWO"));
 }
 
-/// Simulates an `AdaptiveRouter` whose per-call slot selection flaps:
+/// Simulates a failover chain whose per-call slot selection flaps:
 /// `provider_name()`/`model_id()` alternate on every request. Records the
 /// `(affinity_key, epoch_id)` each request carried on its `ChatConfig`.
 struct FlappingRouteProvider {
@@ -1557,11 +1557,6 @@ impl LlmProvider for LedgerDrivenVerifier {
         assert!(
             matches!(config.tool_choice, ToolChoice::None),
             "verifier call must not expose tools"
-        );
-        assert_eq!(
-            octos_llm::current_lane_context().lane,
-            Some(octos_llm::Lane::FastChat),
-            "verifier call should use the cheap fast-chat lane"
         );
         let prompt = messages
             .iter()

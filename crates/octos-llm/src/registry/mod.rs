@@ -30,7 +30,7 @@ const CANONICAL_MODEL_CATALOG: &str = include_str!(concat!(
 fn family_defaults() -> &'static HashMap<String, String> {
     static DEFAULTS: OnceLock<HashMap<String, String>> = OnceLock::new();
     DEFAULTS.get_or_init(|| {
-        let catalog: crate::adaptive::QosCatalog =
+        let catalog: crate::catalog::QosCatalog =
             match serde_json::from_str(CANONICAL_MODEL_CATALOG) {
                 Ok(catalog) => catalog,
                 Err(error) => {
@@ -68,24 +68,12 @@ pub fn catalog_default_model(family: &str) -> Option<&'static str> {
 // ── Provider sub-modules ────────────────────────────────────────────────────
 
 mod anthropic;
-mod dashscope;
 mod deepseek;
 mod gemini;
-mod groq;
-mod local;
-mod minimax;
-mod moonshot;
 mod moonshot_coding;
-mod nvidia;
-mod ollama;
 mod openai;
-mod openrouter;
-pub(crate) mod r9s;
-mod vertex;
-mod vllm;
-mod zai;
+pub(crate) mod zai;
 mod zai_coding;
-mod zhipu;
 
 // ── Public types ────────────────────────────────────────────────────────────
 
@@ -141,19 +129,6 @@ pub struct ProviderEntry {
     pub requires_model: bool,
     /// Substrings in a model name that identify this provider (for auto-detection).
     pub detect_patterns: &'static [&'static str],
-    /// Declared model-discovery capability: which protocol-specific listing
-    /// strategy the family speaks, or that it has no model-list endpoint and
-    /// only accepts manual model ids. Consumed by
-    /// [`crate::discovery::resolve_model_discovery`] — the protocol is never
-    /// inferred from the family id string.
-    pub model_discovery: crate::discovery::ModelDiscovery,
-    /// Per-model discovery resolver for families that pick the wire protocol
-    /// by MODEL NAME (r9s serves `claude-*` over the Anthropic Messages API at
-    /// a rewritten `{base}/anthropic` root). Consulted by
-    /// [`crate::discovery::resolve_model_discovery`] ahead of the family-wide
-    /// `model_discovery` when a model is selected and no `api_type` override
-    /// applies; `None` means the family-wide declaration always rules.
-    pub model_discovery_for_model: Option<crate::discovery::ModelDiscoveryForModel>,
     /// Factory function with full control over provider construction.
     pub create: fn(CreateParams) -> Result<Arc<dyn LlmProvider>>,
 }
@@ -194,24 +169,12 @@ static ALL: &[ProviderEntry] = &[
     anthropic::ENTRY,
     openai::ENTRY,
     gemini::ENTRY,
-    vertex::ENTRY,
-    r9s::ENTRY,
-    openrouter::ENTRY,
     deepseek::ENTRY,
-    groq::ENTRY,
     // Coding-plan families FIRST so an explicit `moonshot-coding` / `zai-coding`
     // resolves to the coding endpoint before the base family's name/aliases.
     moonshot_coding::ENTRY,
-    moonshot::ENTRY,
-    dashscope::ENTRY,
-    minimax::ENTRY,
     zai_coding::ENTRY,
-    zhipu::ENTRY,
     zai::ENTRY,
-    nvidia::ENTRY,
-    ollama::ENTRY,
-    vllm::ENTRY,
-    local::ENTRY,
 ];
 
 // ── Public API ──────────────────────────────────────────────────────────────
@@ -228,9 +191,8 @@ pub fn all_entries() -> &'static [ProviderEntry] {
     ALL
 }
 
-/// Whether `family` constructs a provider without an API key (`local`,
-/// `ollama`, `vllm`). Connection-test and fetch-models surfaces must not
-/// dead-end on "no API key" for these families.
+/// Whether `family` constructs a provider without an API key. Connection-test
+/// surfaces must not dead-end on "no API key" for such families.
 pub fn is_keyless(family: &str) -> bool {
     lookup(family).is_some_and(|entry| !entry.requires_api_key)
 }
@@ -283,12 +245,8 @@ mod tests {
             ("anthropic", "claude-sonnet-4-20250514"),
             ("deepseek", "deepseek-v4-flash"),
             ("gemini", "gemini-2.5-flash"),
-            ("local", "local-default"),
-            ("minimax", "MiniMax-M3"),
             ("moonshot-coding", "k3"),
             ("openai", "gpt-4o"),
-            ("openrouter", "anthropic/claude-sonnet-4-6"),
-            ("vertex", "gemini-2.5-flash"),
             ("zai", "glm-5-turbo"),
             ("zai-coding", "glm-5.3"),
         ] {
@@ -306,7 +264,7 @@ mod tests {
     /// which is exactly the fragility this replaced.
     #[test]
     fn the_catalog_declares_at_most_one_default_per_family() {
-        let catalog: crate::adaptive::QosCatalog =
+        let catalog: crate::catalog::QosCatalog =
             serde_json::from_str(CANONICAL_MODEL_CATALOG).expect("canonical catalog parses");
 
         let mut by_family: HashMap<&str, Vec<&str>> = HashMap::new();
@@ -329,22 +287,6 @@ mod tests {
         );
     }
 
-    /// `openrouter` and `nvidia` models carry a slash of their own
-    /// (`anthropic/claude-sonnet-4-6`), so the family split must take the FIRST
-    /// separator only — splitting on the last would yield family `anthropic`
-    /// and silently give OpenRouter no default.
-    #[test]
-    fn a_model_id_containing_a_slash_still_resolves_to_its_family() {
-        assert_eq!(
-            catalog_default_model("openrouter"),
-            Some("anthropic/claude-sonnet-4-6")
-        );
-        assert_eq!(
-            catalog_default_model("nvidia"),
-            Some("meta/llama-3.3-70b-instruct")
-        );
-    }
-
     /// An unregistered family has no default rather than a wrong one.
     #[test]
     fn an_unknown_family_has_no_default() {
@@ -355,7 +297,7 @@ mod tests {
     fn lookup_by_name() {
         assert!(lookup("anthropic").is_some());
         assert!(lookup("deepseek").is_some());
-        assert!(lookup("vllm").is_some());
+        assert!(lookup("zai-coding").is_some());
     }
 
     #[test]
@@ -363,67 +305,8 @@ mod tests {
         let e = lookup("google").unwrap();
         assert_eq!(e.name, "gemini");
 
-        let e = lookup("kimi").unwrap();
-        assert_eq!(e.name, "moonshot");
-
-        let e = lookup("qwen").unwrap();
-        assert_eq!(e.name, "dashscope");
-
-        let e = lookup("glm").unwrap();
-        assert_eq!(e.name, "zhipu");
-
         let e = lookup("z.ai").unwrap();
         assert_eq!(e.name, "zai");
-
-        let e = lookup("nim").unwrap();
-        assert_eq!(e.name, "nvidia");
-
-        let e = lookup("r9s").unwrap();
-        assert_eq!(e.name, "r9s");
-
-        let e = lookup("r9s.ai").unwrap();
-        assert_eq!(e.name, "r9s");
-    }
-
-    /// Every engine name a user might type for a local OpenAI-compatible
-    /// server resolves to the ONE unified `local` family.
-    #[test]
-    fn should_resolve_local_engine_aliases_to_the_local_family() {
-        for alias in [
-            "local",
-            "llamacpp",
-            "llama.cpp",
-            "llama-server",
-            "llama_server",
-            "lmstudio",
-            "lm-studio",
-            "openai-compatible",
-        ] {
-            let e = lookup(alias).unwrap_or_else(|| panic!("{alias} must resolve"));
-            assert_eq!(e.name, "local", "{alias} must resolve to the local family");
-        }
-    }
-
-    /// `local` is fully optional: no key, no base URL, no model required —
-    /// zero-config onboarding is the family's contract.
-    #[test]
-    fn should_require_nothing_for_the_local_family() {
-        let e = lookup("local").unwrap();
-        assert!(e.api_key_env.is_none());
-        assert!(!e.requires_api_key);
-        assert!(!e.requires_base_url);
-        assert!(!e.requires_model);
-        assert_eq!(
-            e.default_base_url,
-            Some(crate::local_discovery::DEFAULT_BASE_URL)
-        );
-        // The default must also be a doctor discovery candidate, or the two
-        // lists have drifted.
-        assert!(
-            crate::local_discovery::CANDIDATE_BASE_URLS
-                .contains(&e.default_base_url.expect("default set")),
-            "local default base URL must appear in CANDIDATE_BASE_URLS"
-        );
     }
 
     #[test]
@@ -440,19 +323,7 @@ mod tests {
 
     #[test]
     fn all_entries_count() {
-        assert_eq!(all_entries().len(), 19);
-    }
-
-    /// Keyless = provider construction succeeds with no API key. The
-    /// dashboard/TUI test + fetch-models surfaces gate on this.
-    #[test]
-    fn should_classify_keyless_families() {
-        assert!(is_keyless("local"));
-        assert!(is_keyless("ollama"));
-        assert!(is_keyless("vllm"));
-        assert!(!is_keyless("anthropic"));
-        assert!(!is_keyless("openai"));
-        assert!(!is_keyless("not-a-provider"));
+        assert_eq!(all_entries().len(), 7);
     }
 
     /// The coding-plan families resolve to their coding endpoints + default
@@ -475,20 +346,8 @@ mod tests {
         assert_eq!(zc.default_base_url, Some("https://api.z.ai/api/anthropic"));
         assert_eq!(lookup("z.ai-coding").map(|e| e.name), Some("zai-coding"));
 
-        // The base families are unshadowed by the coding families.
-        assert_eq!(lookup("kimi").map(|e| e.name), Some("moonshot"));
+        // The base zai family is unshadowed by the coding family.
         assert_eq!(lookup("z.ai").map(|e| e.name), Some("zai"));
-    }
-
-    #[test]
-    fn vertex_entry_is_registered_with_sa_json_credential() {
-        let e = lookup("vertex").expect("vertex provider should be registered");
-        assert_eq!(e.name, "vertex");
-        // Credential is the SA JSON, resolved through the VERTEX_SA_JSON channel.
-        assert_eq!(e.api_key_env, Some("VERTEX_SA_JSON"));
-        assert!(e.requires_api_key);
-        // bare gemini model names must NOT auto-route to vertex.
-        assert_eq!(detect_provider("gemini-2.5-flash"), Some("gemini"));
     }
 
     #[test]
@@ -502,11 +361,6 @@ mod tests {
         assert_eq!(detect_provider("o4-mini"), Some("openai"));
         assert_eq!(detect_provider("gemini-2.5-flash"), Some("gemini"));
         assert_eq!(detect_provider("deepseek-chat"), Some("deepseek"));
-        assert_eq!(detect_provider("kimi-k2.5"), Some("moonshot"));
-        assert_eq!(detect_provider("qwen-max"), Some("dashscope"));
-        assert_eq!(detect_provider("glm-4-plus"), Some("zhipu"));
-        assert_eq!(detect_provider("MiniMax-M2.5"), Some("minimax"));
-        assert_eq!(detect_provider("llama-3.3-70b"), Some("groq"));
     }
 
     #[test]

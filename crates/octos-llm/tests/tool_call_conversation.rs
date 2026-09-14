@@ -13,7 +13,7 @@ use octos_core::{Message, MessageRole, ToolCall};
 use octos_llm::anthropic::AnthropicProvider;
 use octos_llm::gemini::GeminiProvider;
 use octos_llm::openai::OpenAIProvider;
-use octos_llm::{AdaptiveConfig, AdaptiveRouter, ChatConfig, LlmProvider, ToolSpec};
+use octos_llm::{ChatConfig, LlmProvider, ToolSpec};
 
 // ---------------------------------------------------------------------------
 // Extensive tool definitions — exercises complex schemas, nested objects,
@@ -930,84 +930,3 @@ async fn test_all_providers_tool_call_conversation() {
 // ---------------------------------------------------------------------------
 // Adaptive router test: verify scoring works with real providers
 // ---------------------------------------------------------------------------
-
-#[tokio::test]
-#[ignore]
-async fn test_adaptive_router_with_real_providers() {
-    println!("\n=== Adaptive Router test with real providers ===\n");
-
-    let mut providers: Vec<Arc<dyn LlmProvider>> = Vec::new();
-
-    if let Ok(key) = std::env::var("DASHSCOPE_API_KEY") {
-        providers.push(Arc::new(
-            OpenAIProvider::new(key, "qwen3-coder-flash")
-                .with_base_url("https://dashscope.aliyuncs.com/compatible-mode/v1"),
-        ));
-    }
-    if let Ok(key) = std::env::var("OPENAI_API_KEY") {
-        providers.push(Arc::new(OpenAIProvider::new(key, "gpt-4o-mini")));
-    }
-    if let Ok(key) = std::env::var("GEMINI_API_KEY") {
-        providers.push(Arc::new(GeminiProvider::new(key, "gemini-2.5-flash")));
-    }
-
-    if providers.len() < 2 {
-        println!(
-            "Need at least 2 providers. Set DASHSCOPE_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY."
-        );
-        return;
-    }
-
-    let config = AdaptiveConfig {
-        probe_probability: 0.5,
-        probe_interval_secs: 0,
-        ..Default::default()
-    };
-
-    let router = AdaptiveRouter::new(providers, &[], config);
-
-    let messages = build_tool_call_conversation();
-    let tools = all_tools();
-    let chat_config = ChatConfig {
-        max_tokens: Some(400),
-        temperature: Some(0.3),
-        ..Default::default()
-    };
-
-    println!("Sending 5 requests through adaptive router...\n");
-    for i in 1..=5 {
-        let start = Instant::now();
-        match router.chat(&messages, &tools, &chat_config).await {
-            Ok(resp) => {
-                let content = resp.content.unwrap_or_default();
-                println!(
-                    "  Request {i}: {:.1}s  in={} out={}  => {}",
-                    start.elapsed().as_secs_f64(),
-                    resp.usage.input_tokens,
-                    resp.usage.output_tokens,
-                    &content[..content.len().min(60)]
-                );
-            }
-            Err(e) => {
-                println!(
-                    "  Request {i}: {:.1}s  ERROR: {e:#}",
-                    start.elapsed().as_secs_f64()
-                );
-            }
-        }
-    }
-
-    println!("\n--- Adaptive Router Metrics ---");
-    for (provider, model, snap) in router.metrics_snapshots() {
-        println!(
-            "  {provider}/{model}: ema={:.0}ms p95={:.0}ms err={:.1}% ok={} fail={} consec_fail={}",
-            snap.latency_ema_ms,
-            snap.p95_latency_ms,
-            snap.error_rate * 100.0,
-            snap.success_count,
-            snap.failure_count,
-            snap.consecutive_failures,
-        );
-    }
-    println!();
-}

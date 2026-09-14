@@ -208,7 +208,7 @@ pub(crate) struct ShellRetryRecovery {
 /// The in-band `RotateAndRetry` arm degrades to `Bail` in this release
 /// because no in-band credential-rotation hook is wired on `Agent` yet;
 /// lane rotation is already handled by the outer provider chain
-/// (`RetryProvider` → `AdaptiveRouter`) one layer down, so surfacing
+/// (`RetryProvider` → `ProviderChain`) one layer down, so surfacing
 /// the error is safe — the next inbound message starts a fresh retry
 /// state anyway.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

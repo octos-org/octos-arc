@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use eyre::{Result, WrapErr};
 use octos_agent::{HookExecutor, SandboxConfig, ToolPolicy, ToolRegistry, create_sandbox};
-use octos_llm::{AdaptiveRouter, LlmProvider, QosCatalog};
+use octos_llm::{LlmProvider, QosCatalog};
 use octos_memory::{EpisodeStore, MemoryStore};
 use tracing::{info, warn};
 
@@ -22,7 +22,7 @@ use crate::commands::chat;
 use crate::commands::gateway::build_system_prompt;
 use crate::config::Config;
 use crate::profiles::{UserProfile, config_from_profile};
-use crate::qos_catalog::{ExporterMode, build_adaptive_provider_chain};
+use crate::qos_catalog::build_provider_chain;
 use crate::skills_scope::build_account_skills_loader;
 
 static STDIO_SOLO_LEAN_DEFAULTS: AtomicBool = AtomicBool::new(false);
@@ -50,12 +50,8 @@ fn stdio_solo_lean_defaults_enabled() -> bool {
 /// Anything that is an *account property* of the logged-in user:
 ///
 /// - **`llm`** — the top-level LLM provider chain (already wrapped by
-///   `RetryProvider` → `ProviderChain` → optional [`AdaptiveRouter`]).
-///   Two sessions opened by the same user hit the same provider chain.
-/// - **`adaptive_router`** — `Some` only when QoS-aware adaptive
-///   routing was successfully built (more than one provider). Owned
-///   here because the per-profile metrics exporter wants a typed
-///   handle, not a `dyn` provider.
+///   `RetryProvider` → `ProviderChain`). Two sessions opened by the
+///   same user hit the same provider chain.
 /// - **`credentials`** — resolved API keys / secrets keyed by env-var
 ///   name. Populated from `profile.config.env_vars` via the keychain;
 ///   passed to MCP server spawns and plugin invocations on the session
@@ -134,28 +130,17 @@ pub struct ProfileRuntime {
     pub config: crate::config::Config,
 
     /// The fully-wrapped LLM provider chain for this profile.
-    /// Includes retry, provider failover, and (if `adaptive_router`
-    /// is `Some`) adaptive routing. Every session for this profile
-    /// uses this same provider.
+    /// Includes retry and provider failover. Every session for this
+    /// profile uses this same provider.
     pub llm: Arc<dyn LlmProvider>,
 
-    /// Typed handle to the adaptive router if QoS-aware adaptive
-    /// routing was wired in. `None` when only a single provider was
-    /// configured (no failover to optimize). Held separately from
-    /// `llm` so the metrics exporter and the runtime QoS catalog
-    /// reader don't have to downcast the `dyn LlmProvider`.
-    pub adaptive_router: Option<Arc<AdaptiveRouter>>,
-
     /// Materialized runtime QoS catalog produced alongside the
-    /// adaptive chain. Populated even when [`Self::adaptive_router`]
-    /// is `None` — `build_adaptive_provider_chain` derives a
-    /// cold-start catalog from `model_catalog.json` for single-
-    /// provider profiles too, and the downstream sub-provider
-    /// router needs that seed for fallback ranking.
+    /// provider chain — a cold-start catalog derived from
+    /// `model_catalog.json` (context-window / pricing seed).
     pub runtime_qos_catalog: Option<QosCatalog>,
 
     /// The primary (base) provider's `model_id()` *before* the
-    /// adaptive router / retry / swappable wrapping is applied.
+    /// retry / failover wrapping is applied.
     /// Gateway uses this for `resolve_provider_policy(..., model_id)`
     /// and as the `primary_key` of the sub-provider router's
     /// fallback ranking.
@@ -283,19 +268,6 @@ pub struct ProfileRuntime {
     /// loop. `None` keeps the legacy behaviour when no hooks are
     /// configured (the agent's default `hooks: None` field).
     pub hook_executor: Option<Arc<HookExecutor>>,
-
-    /// RFC-3 (#1292) — per-topic model lane routing config (overrides
-    /// only; built-in defaults always apply on top of this).
-    ///
-    /// When `Some`, the session-actor and the WS turn handler use this
-    /// to resolve `session.topic()` to a [`octos_llm::Lane`] and pass
-    /// it to the chat call via [`octos_llm::with_lane_context`]. When
-    /// `None`, the built-in defaults from `octos_llm::lane` still apply
-    /// for the well-known prefixes (slides / site / podcast / research
-    /// / code); profiles that haven't opted into RFC-3 see no behavior
-    /// change because the [`octos_llm::AdaptiveRouter`] silently falls
-    /// through when zero candidates match.
-    pub lane_routing: Option<octos_llm::LaneRoutingConfig>,
 }
 
 /// Which OS process is calling [`ProfileRuntime::bootstrap`].
@@ -347,7 +319,7 @@ impl ProfileRuntime {
     /// 1. Derives a [`crate::config::Config`] from the profile via
     ///    [`config_from_profile`].
     /// 2. Builds the LLM provider chain via
-    ///    [`chat::create_provider`] + [`build_adaptive_provider_chain`].
+    ///    [`chat::create_provider`] + [`build_provider_chain`].
     /// 3. Opens [`EpisodeStore`] + [`MemoryStore`] against `data_dir`.
     /// 4. Constructs the base [`ToolRegistry`] (builtins + WebSearch
     ///    with profile keys + browser w/ profile-config timeout + MCP +
@@ -439,15 +411,8 @@ impl ProfileRuntime {
             )?,
         };
         let primary_model_id = base_provider.model_id().to_string();
-        let bundle = build_adaptive_provider_chain(
-            base_provider,
-            &config,
-            data_dir,
-            no_retry,
-            ExporterMode::Spawn,
-        );
+        let bundle = build_provider_chain(base_provider, &config, data_dir, no_retry);
         let llm = bundle.llm.clone();
-        let adaptive_router = bundle.adaptive_router.clone();
         let runtime_qos_catalog = bundle.runtime_qos_catalog.clone();
 
         // Step 4: open the memory stores.
@@ -583,28 +548,19 @@ impl ProfileRuntime {
         // failure on the dspfac profile (May 13 2026).
         //
         // Profile scope is sufficient: the pipeline tool only captures
-        // `llm` / `memory` / `data_dir` / `plugin_dirs` / optional
-        // `adaptive_router` / `provider_policy`, all of which are
-        // profile-level. Per-session workspace context is threaded
-        // separately via `PipelineHostContext` at execute time (see
+        // `llm` / `memory` / `data_dir` / `plugin_dirs` /
+        // `provider_policy`, all of which are profile-level.
+        // Per-session workspace context is threaded separately via
+        // `PipelineHostContext` at execute time (see
         // `crates/octos-pipeline/src/tool.rs::execute`).
         //
         // `mark_spawn_only` keeps the tool out of LRU eviction and
         // tells the execution loop to background the call so the chat
         // bubble doesn't block on the long-running pipeline. The
         // message text mirrors session_actor.rs:2287-2291 verbatim.
-        // `the pipeline tool's with_provider_router` takes
-        // `octos_llm::ProviderRouter` (a sub-provider routing
-        // registry assembled from `config.sub_providers` in the
-        // gateway path). The serve path doesn't build that table
-        // — the adaptive router that lives on `ProfileRuntime`
-        // is `AdaptiveRouter`, a distinct concrete type for
-        // top-level multi-provider QoS routing. Skipping
-        // `with_provider_router` here is correct; the
-        // `default_provider` we hand in (`llm`) is already wrapped
-        // by `RetryProvider` → `ProviderChain` → `AdaptiveRouter`
-        // when adaptive is configured, so per-node calls still
-        // fan out through the adaptive layer.
+        // The `default_provider` we hand in (`llm`) is already wrapped
+        // by `RetryProvider` → `ProviderChain`, so per-node calls
+        // fail over through the static chain.
         //
         // The profile's embedding provider was resolved ONCE back in Step 4
         // (the episodic index has to be sized from it). The same handle feeds
@@ -761,7 +717,6 @@ impl ProfileRuntime {
             // fields below carry the pre-extracted hot-path state.
             config: config.clone(),
             llm,
-            adaptive_router,
             runtime_qos_catalog,
             primary_model_id,
             provider_name,
@@ -788,7 +743,6 @@ impl ProfileRuntime {
             memory_store,
             embedder,
             hook_executor,
-            lane_routing: profile.config.lane_routing.clone(),
         }))
     }
 }

@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::{PromptCacheContext, TokenUsage, current_router_context};
+use crate::{PromptCacheContext, TokenUsage};
 
 const SCHEMA: &str = "octos.provider-cache-input-manifest.v1";
 const OBSERVATION_SCHEMA: &str = "octos.provider-cache-observation.v1";
@@ -49,7 +49,7 @@ struct PromptCacheObservationScope {
 
 /// Run one provider attempt with its cache identity available to the final
 /// provider serializer. OUP supplies real session/turn identity separately via
-/// [`crate::RouterContext`]; this scope adds the redacted provider affinity and
+/// [`crate::with_router_context`]; this scope adds the redacted provider affinity and
 /// distinguishes retry attempts. It intentionally does not invent a turn ID
 /// for callers outside an OUP/router scope.
 pub async fn with_prompt_cache_observation_context<F, T>(
@@ -640,6 +640,40 @@ fn global_observer() -> &'static PromptCacheObserver {
             PromptCacheObserver::in_memory(capacity)
         })
     })
+}
+
+/// Per-task context the API layer pushes BEFORE calling `provider.chat()`:
+/// the originating session/turn identity, hashed into prompt-cache
+/// observation events. The context is `Cell`-style — fork-friendly with
+/// [`with_router_context`].
+#[derive(Debug, Clone, Default)]
+pub struct RouterContext {
+    pub session_id: Option<String>,
+    pub turn_id: Option<String>,
+}
+
+tokio::task_local! {
+    /// See [`RouterContext`]. Default `RouterContext::default()` when no
+    /// scope wraps the chat() call (test paths, CLI smoke).
+    static ROUTER_CONTEXT: RouterContext;
+}
+
+/// Run `fut` with the given [`RouterContext`] in scope. The API/session layer
+/// wraps every turn's chat() path with this so cache-usage attribution covers
+/// the whole turn without new call sites.
+pub async fn with_router_context<F, T>(ctx: RouterContext, fut: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    ROUTER_CONTEXT.scope(ctx, fut).await
+}
+
+/// Snapshot the active [`RouterContext`]. Returns [`RouterContext::default`]
+/// (no originating session/turn) when no scope wraps the caller. Used to
+/// re-establish the context across a `tokio::spawn` boundary (foreground tool
+/// tasks) so a tool's own LLM sub-call keeps the turn's cache attribution.
+pub fn current_router_context() -> RouterContext {
+    ROUTER_CONTEXT.try_with(|c| c.clone()).unwrap_or_default()
 }
 
 fn current_correlation(epoch_id: Option<&str>) -> CorrelationIdentity {
@@ -1366,8 +1400,8 @@ mod tests {
             stable_prefix_hash: "sha256:stable".to_owned(),
             semantic_boundaries: Vec::new(),
         };
-        let correlation = crate::with_router_context(
-            crate::RouterContext {
+        let correlation = with_router_context(
+            RouterContext {
                 session_id: Some("raw-session".to_owned()),
                 turn_id: Some("raw-turn".to_owned()),
             },

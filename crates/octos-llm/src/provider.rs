@@ -130,19 +130,12 @@ pub trait LlmProvider: Send + Sync {
         false
     }
 
-    /// Export provider QoS metrics as JSON (for adaptive routers).
-    /// Returns `None` for simple providers; overridden by `AdaptiveRouter`.
-    fn export_metrics(&self) -> Option<serde_json::Value> {
-        None
-    }
-
     /// Report a late failure (e.g. empty response detected after stream consumption).
-    /// The adaptive router uses this to update failure metrics so subsequent calls
-    /// may failover to a different provider.
+    /// Composites use this to penalize the slot that served the response so
+    /// subsequent calls fail over to a different provider.
     fn report_late_failure(&self) {}
 
     /// Report streaming throughput metrics after a stream is fully consumed.
-    /// Used by the adaptive router to update throughput scoring.
     fn report_stream_metrics(&self, _output_tokens: u32, _stream_duration_us: u64) {}
 
     /// Wire protocol this provider speaks, rendered into lane-attributed
@@ -164,7 +157,6 @@ pub enum ApiStyle {
     OpenAiChatCompletions,
     OpenAiResponses,
     GeminiGenerateContent,
-    OpenRouterChatCompletions,
 }
 
 impl ApiStyle {
@@ -174,7 +166,6 @@ impl ApiStyle {
             Self::OpenAiChatCompletions => "openai_chat_completions",
             Self::OpenAiResponses => "openai_responses",
             Self::GeminiGenerateContent => "gemini_generate_content",
-            Self::OpenRouterChatCompletions => "openrouter_chat_completions",
         }
     }
 }
@@ -393,12 +384,12 @@ pub fn build_streaming_http_client(connect_timeout_secs: u64) -> reqwest::Client
 }
 
 /// Shared test doubles for wrapper-forwarding tests. `TwoLaneStub` mimics a
-/// composite whose slot 1 is a different lane (what `ProviderChain` /
-/// `AdaptiveRouter` report after failover); `StubLane` is a concrete lane that
-/// either always succeeds or always fails with an HTTP 500.
+/// composite whose slot 1 is a different lane (what `ProviderChain` reports
+/// after failover); `StubLane` is a concrete lane that either always succeeds
+/// or always fails with an HTTP 500.
 /// Flat-lane bookkeeping shared by the composites (`ProviderChain`,
-/// `FallbackProvider`, `AdaptiveRouter`): the first flat lane index owned by
-/// slot `slot`, given every slot's [`LlmProvider::provider_lane_count`].
+/// `FallbackProvider`): the first flat lane index owned by slot `slot`, given
+/// every slot's [`LlmProvider::provider_lane_count`].
 pub(crate) fn lane_offset_for_slot(lane_counts: &[usize], slot: usize) -> usize {
     lane_counts.iter().take(slot).sum()
 }
@@ -723,10 +714,6 @@ mod lane_attribution_helper_tests {
             crate::gemini::GeminiProvider::new("k", "m").api_style(),
             Some(ApiStyle::GeminiGenerateContent)
         );
-        assert_eq!(
-            crate::openrouter::OpenRouterProvider::new("k", "m").api_style(),
-            Some(ApiStyle::OpenRouterChatCompletions)
-        );
         let inner: Arc<dyn LlmProvider> =
             Arc::new(crate::anthropic::AnthropicProvider::new("k", "m"));
         assert_eq!(
@@ -735,11 +722,7 @@ mod lane_attribution_helper_tests {
         );
         assert_eq!(inner.api_style(), Some(ApiStyle::AnthropicMessages));
         assert_eq!(
-            crate::context_override::ContextWindowOverride::new(inner.clone(), 1).api_style(),
-            Some(ApiStyle::AnthropicMessages)
-        );
-        assert_eq!(
-            crate::swappable::SwappableProvider::new(inner).api_style(),
+            crate::context_override::ContextWindowOverride::new(inner, 1).api_style(),
             Some(ApiStyle::AnthropicMessages)
         );
         assert_eq!(test_lanes::TwoLaneStub.api_style(), None);

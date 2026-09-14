@@ -772,8 +772,6 @@ fn ui_protocol_v1_wire_contract_is_golden() {
             "session/title.set",
             "session/delete",
             "system/status.get",
-            "router/set_mode",
-            "router/get_metrics",
             "launch/resolve",
         ]
     );
@@ -803,8 +801,6 @@ fn ui_protocol_v1_wire_contract_is_golden() {
             "turn/spawn_complete",
             "file/attached",
             "projection/envelope",
-            "router/status",
-            "router/failover",
             "queue/state",
             "agent/updated",
             "agent/output/delta",
@@ -872,8 +868,6 @@ fn ui_protocol_v1_wire_contract_is_golden() {
             "session/title.set",
             "session/delete",
             "system/status.get",
-            "router/set_mode",
-            "router/get_metrics",
             "launch/resolve",
         ]
     );
@@ -946,8 +940,6 @@ fn ui_protocol_v1_representative_wire_payloads_are_golden() {
                 "session/title.set",
                 "session/delete",
                 "system/status.get",
-                "router/set_mode",
-                "router/get_metrics",
                 "launch/resolve",
                             ],
             "supported_notifications": [
@@ -974,8 +966,6 @@ fn ui_protocol_v1_representative_wire_payloads_are_golden() {
                 "turn/spawn_complete",
                 "file/attached",
                     "projection/envelope",
-                "router/status",
-                "router/failover",
                 "queue/state",
                 "agent/updated",
                 "agent/output/delta",
@@ -5420,92 +5410,9 @@ fn envelope_wire_session_id_is_normalized_to_base_key_with_topic_preserved() {
 }
 
 // ------------------------------------------------------------------
-// Wave4-A: router/status, router/failover, queue/state, router/set_mode,
-// router/get_metrics round-trip + wire-shape tests.
+// Wave4-A: queue/state round-trip tests. (The router/* protocol pair
+// was removed with the adaptive routing stack.)
 // ------------------------------------------------------------------
-
-/// Wave4-A: `router/status` notification round-trips through JSON-RPC
-/// with deterministic `BTreeMap` ordering and the correct wire tag.
-#[test]
-fn router_status_notification_round_trips_with_deterministic_order() {
-    let mut lane_scores = BTreeMap::new();
-    lane_scores.insert("zai/glm-5-turbo".into(), 0.21);
-    lane_scores.insert("dashscope/qwen3.5-plus".into(), 0.41);
-    lane_scores.insert("ollama/llama3.2".into(), 0.62);
-
-    let mut breakers = BTreeMap::new();
-    breakers.insert("zai/glm-5-turbo".into(), "closed".into());
-    breakers.insert("dashscope/qwen3.5-plus".into(), "half_open".into());
-    breakers.insert("ollama/llama3.2".into(), "open".into());
-
-    let notif = UiNotification::RouterStatus(RouterStatusEvent {
-        session_id: SessionKey("local:demo".into()),
-        provider_name: "zai/glm-5-turbo".into(),
-        mode: "lane".into(),
-        qos_ranking: true,
-        lane_scores: lane_scores.clone(),
-        circuit_breakers: breakers.clone(),
-    });
-
-    // Method tag matches the constant.
-    assert_eq!(notif.method(), methods::ROUTER_STATUS);
-
-    // Round-trip through JSON-RPC notification envelope.
-    let rpc = notif
-        .clone()
-        .into_rpc_notification()
-        .expect("serialize router/status");
-    assert_eq!(rpc.method, methods::ROUTER_STATUS);
-
-    let json = serde_json::to_string(&rpc).expect("to_string");
-    let parsed_rpc: RpcNotification<Value> = serde_json::from_str(&json).expect("from_str rpc");
-    let decoded = UiNotification::from_rpc_notification(parsed_rpc).expect("decode router/status");
-    assert_eq!(decoded, notif);
-
-    // BTreeMap ordering is deterministic — the first key in the wire
-    // payload must be the lex-smallest, so a re-serialization byte-
-    // matches.
-    let wire_keys: Vec<String> = serde_json::to_value(&notif)
-        .expect("value")
-        .get("lane_scores")
-        .and_then(|v| v.as_object())
-        .map(|obj| obj.keys().cloned().collect())
-        .unwrap_or_default();
-    assert_eq!(
-        wire_keys,
-        vec![
-            "dashscope/qwen3.5-plus".to_string(),
-            "ollama/llama3.2".to_string(),
-            "zai/glm-5-turbo".to_string(),
-        ],
-        "lane_scores keys must be in BTreeMap (lex-sorted) order"
-    );
-}
-
-/// Wave4-A: `router/failover` round-trips with the failover metadata
-/// the AdaptiveRouter emits when it crosses a lane.
-#[test]
-fn router_failover_notification_round_trips() {
-    let notif = UiNotification::RouterFailover(RouterFailoverEvent {
-        session_id: SessionKey("local:demo".into()),
-        from_provider: "zai/glm-5-turbo".into(),
-        to_provider: "dashscope/qwen3.5-plus".into(),
-        reason: "circuit_breaker_open".into(),
-        elapsed_ms: 12_345,
-    });
-    assert_eq!(notif.method(), methods::ROUTER_FAILOVER);
-
-    let rpc = notif
-        .clone()
-        .into_rpc_notification()
-        .expect("serialize router/failover");
-    let json = serde_json::to_string(&rpc).expect("to_string");
-    let parsed_rpc: RpcNotification<Value> = serde_json::from_str(&json).expect("from_str");
-    let decoded =
-        UiNotification::from_rpc_notification(parsed_rpc).expect("decode router/failover");
-    assert_eq!(decoded, notif);
-}
-
 /// Wave4-A: `queue/state` round-trips with `head_client_message_id`
 /// both populated (in-flight) and absent (queue idle).
 #[test]
@@ -5551,97 +5458,16 @@ fn queue_state_notification_round_trips_with_and_without_head() {
     assert_eq!(decoded, notif_empty);
 }
 
-/// Wave4-A: `router/set_mode` command round-trips and dispatches
-/// through the standard `UiCommand` request shape.
+/// Wave4-A: capability advertisement still carries `queue/state` so
+/// clients that negotiate at handshake time can subscribe. (The
+/// router/* notifications were removed with the adaptive routing stack.)
 #[test]
-fn router_set_mode_command_round_trips() {
-    let command = UiCommand::RouterSetMode(RouterSetModeParams {
-        session_id: SessionKey("local:demo".into()),
-        mode: "hedge".into(),
-    });
-    assert_eq!(command.method(), methods::ROUTER_SET_MODE);
-
-    let rpc = command
-        .clone()
-        .into_rpc_request("req-set-mode")
-        .expect("serialize router/set_mode");
-    assert_eq!(rpc.method, methods::ROUTER_SET_MODE);
-    assert_eq!(rpc.params["mode"], json!("hedge"));
-
-    let json = serde_json::to_string(&rpc).expect("to_string");
-    let parsed_rpc: RpcRequest<Value> = serde_json::from_str(&json).expect("from_str");
-    let decoded = UiCommand::from_rpc_request(parsed_rpc).expect("decode router/set_mode");
-    assert_eq!(decoded, command);
-}
-
-/// Wave4-A: `router/get_metrics` request + result round-trip. Mirrors
-/// the wire shape of the `router/status` notification so clients can
-/// reuse the deserializer.
-#[test]
-fn router_get_metrics_command_and_result_round_trip() {
-    let command = UiCommand::RouterGetMetrics(RouterGetMetricsParams {
-        session_id: SessionKey("local:demo".into()),
-    });
-    assert_eq!(command.method(), methods::ROUTER_GET_METRICS);
-
-    let rpc = command
-        .clone()
-        .into_rpc_request("req-get-metrics")
-        .expect("serialize router/get_metrics");
-    let json = serde_json::to_string(&rpc).expect("to_string");
-    let parsed_rpc: RpcRequest<Value> = serde_json::from_str(&json).expect("from_str");
-    let decoded = UiCommand::from_rpc_request(parsed_rpc).expect("decode router/get_metrics");
-    assert_eq!(decoded, command);
-
-    // Result round-trips with deterministic BTreeMap order.
-    let mut lane_scores = BTreeMap::new();
-    lane_scores.insert("a/b".into(), 0.1);
-    lane_scores.insert("c/d".into(), 0.2);
-    let mut breakers = BTreeMap::new();
-    breakers.insert("a/b".into(), "closed".into());
-    breakers.insert("c/d".into(), "closed".into());
-    let result = RouterGetMetricsResult {
-        provider_name: "a/b".into(),
-        mode: "lane".into(),
-        qos_ranking: false,
-        lane_scores: lane_scores.clone(),
-        circuit_breakers: breakers.clone(),
-    };
-    let json = serde_json::to_string(&result).expect("serialize result");
-    let parsed: RouterGetMetricsResult = serde_json::from_str(&json).expect("deserialize result");
-    assert_eq!(parsed.provider_name, result.provider_name);
-    assert_eq!(parsed.lane_scores, lane_scores);
-    assert_eq!(parsed.circuit_breakers, breakers);
-}
-
-/// Wave4-A: capability advertisement carries the three new notification
-/// methods (`router/status`, `router/failover`, `queue/state`) so
-/// clients that negotiate at handshake time can subscribe.
-#[test]
-fn wave4a_router_methods_are_in_capabilities() {
+fn wave4a_queue_state_is_in_capabilities() {
     let caps = UiProtocolCapabilities::first_server_slice();
-    assert!(
-        caps.supported_notifications
-            .contains(&methods::ROUTER_STATUS.to_owned()),
-        "router/status must be advertised as a supported notification"
-    );
-    assert!(
-        caps.supported_notifications
-            .contains(&methods::ROUTER_FAILOVER.to_owned()),
-        "router/failover must be advertised as a supported notification"
-    );
     assert!(
         caps.supported_notifications
             .contains(&methods::QUEUE_STATE.to_owned()),
         "queue/state must be advertised as a supported notification"
-    );
-    assert!(
-        caps.supports_method(methods::ROUTER_SET_MODE),
-        "router/set_mode must be a supported command method"
-    );
-    assert!(
-        caps.supports_method(methods::ROUTER_GET_METRICS),
-        "router/get_metrics must be a supported command method"
     );
 }
 

@@ -1397,11 +1397,9 @@ async fn llm_upsert_keeps_inference_params_per_model_without_leakage() {
     assert_eq!(llm.fallbacks[0].context_window, None, "no cross-model leak");
 }
 
-/// Key requirement mirrors the runtime factory, not just the registry
-/// flag: an `anthropic`/`responses` api_type override needs a key even
-/// on a registry-keyless family, and a family the registry doesn't know
-/// can never construct — both would persist a bricked primary if the
-/// validator waved them through (codex P1 on the keyless-select fix).
+/// Key requirement mirrors the runtime factory: a family the registry
+/// doesn't know can never construct — it would persist a bricked primary
+/// if the validator waved it through (codex P1 on the keyless-select fix).
 #[tokio::test]
 async fn llm_select_rejects_unactivatable_api_type_and_unknown_families() {
     let dir = tempfile::tempdir().unwrap();
@@ -1442,40 +1440,6 @@ async fn llm_select_rejects_unactivatable_api_type_and_unknown_families() {
     )
     .await
     .expect("seed keyed primary");
-
-    // Registry-keyless family, but the anthropic protocol override
-    // requires a key: keyless select must reject.
-    raw_profile_llm_upsert(
-        &state,
-        &upsert(
-            "ollama",
-            "llama3",
-            json!({
-                "route_id": "official",
-                "api_type": "anthropic",
-                "api_key_env": "OCTOS_TEST_OLLAMA_ANTHROPIC_KEY",
-            }),
-        ),
-        None,
-    )
-    .await
-    .expect("seed anthropic-over-keyless fallback");
-    let error = raw_profile_llm_select(
-        &state,
-        &RpcRequest::new(
-            "s-anthropic".to_string(),
-            APPUI_METHOD_PROFILE_LLM_SELECT.to_string(),
-            json!({ "profile_id": "dev", "model_id": "llama3" }),
-        ),
-        None,
-    )
-    .await
-    .expect_err("anthropic api_type needs a key even on keyless families");
-    assert_eq!(
-        error.data.as_ref().and_then(|data| data.get("kind")),
-        Some(&json!("llm_key_missing")),
-        "got {error:?}"
-    );
 
     // A family the registry doesn't know can never construct.
     raw_profile_llm_upsert(
@@ -1546,28 +1510,6 @@ async fn llm_select_rejects_unactivatable_api_type_and_unknown_families() {
         Some(&json!("llm_provider_unresolved")),
         "got {error:?}"
     );
-
-    // Registry-keyless family on its native protocol still selects
-    // without any key.
-    raw_profile_llm_upsert(
-        &state,
-        &upsert("ollama", "llama3-native", json!({ "route_id": "official" })),
-        None,
-    )
-    .await
-    .expect("seed native keyless fallback");
-    let result = raw_profile_llm_select(
-        &state,
-        &RpcRequest::new(
-            "s-native".to_string(),
-            APPUI_METHOD_PROFILE_LLM_SELECT.to_string(),
-            json!({ "profile_id": "dev", "model_id": "llama3-native" }),
-        ),
-        None,
-    )
-    .await
-    .expect("keyless family on its native protocol selects fine");
-    assert_eq!(result["applied"], true);
 }
 
 /// `profile/llm/upsert` with `set_primary` must be lossless: replacing
@@ -2641,30 +2583,25 @@ fn catalog_result_sourced_from_registry_and_canonical_catalog() {
 
     // Key-env comes from the registry, not a hand-maintained env map.
     assert_eq!(families["zai"]["env"], "ZAI_API_KEY");
-    // Curation: glm-5.3 + kimi-k2.6 + kimi-k3 present; deepseek-chat removed.
+    // Curation: glm-5.3 + k3 present; deepseek-chat removed.
     assert!(
         ids("zai").contains(&"glm-5.3".to_owned()),
         "{:?}",
         ids("zai")
     );
     assert!(
-        ids("moonshot").contains(&"kimi-k2.6".to_owned()),
+        ids("moonshot-coding").contains(&"k3".to_owned()),
         "{:?}",
-        ids("moonshot")
+        ids("moonshot-coding")
     );
-    assert!(
-        ids("moonshot").contains(&"kimi-k3".to_owned()),
-        "{:?}",
-        ids("moonshot")
-    );
-    // kimi-k3 onboards under the moonshot family key-env with its
+    // k3 onboards under the moonshot-coding family key-env with its
     // researched 1M context window.
-    assert_eq!(families["moonshot"]["env"], "MOONSHOT_API_KEY");
-    let k3 = families["moonshot"]["models"]
+    assert_eq!(families["moonshot-coding"]["env"], "KIMI_CODING_API_KEY");
+    let k3 = families["moonshot-coding"]["models"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|m| m["id"] == "kimi-k3")
+        .find(|m| m["id"] == "k3")
         .unwrap();
     assert_eq!(k3["context_window"], 1_048_576);
     assert_eq!(k3["max_output"], 131_072);
@@ -5025,27 +4962,6 @@ fn capabilities_advertise_local_solo_profile_create_only_when_supported() {
 }
 
 #[test]
-fn stdio_capabilities_advertise_shared_router_methods_and_notifications() {
-    let state = AppState::empty_for_tests();
-    let capabilities = ConnectionUiFeatures::stdio_defaults().advertised_capabilities(&state);
-
-    assert!(capabilities.supports_method(methods::ROUTER_SET_MODE));
-    assert!(capabilities.supports_method(methods::ROUTER_GET_METRICS));
-    assert!(
-        capabilities
-            .supported_notifications
-            .iter()
-            .any(|method| method == methods::ROUTER_STATUS)
-    );
-    assert!(
-        capabilities
-            .supported_notifications
-            .iter()
-            .any(|method| method == methods::ROUTER_FAILOVER)
-    );
-}
-
-#[test]
 fn stdio_capabilities_omit_auth_bound_methods_and_report_unsupported() {
     let dir = tempfile::tempdir().unwrap();
     for state in [AppState::empty_for_tests(), local_profile_state(dir.path())] {
@@ -6076,297 +5992,6 @@ async fn profile_llm_test_without_api_key_returns_not_applied() {
             .as_str()
             .is_some_and(|error| error.contains("No API key"))
     );
-}
-
-#[tokio::test]
-async fn profile_llm_fetch_models_without_api_key_returns_no_api_key_reason() {
-    let state = Arc::new(AppState::empty_for_tests());
-    let request = RpcRequest::new(
-        "1",
-        APPUI_METHOD_PROFILE_LLM_FETCH_MODELS,
-        json!({
-            "selection": {
-                "family_id": "custom",
-                "route": {
-                    "route_id": "custom",
-                    "base_url": "http://127.0.0.1:9/v1",
-                    "api_type": "openai"
-                }
-            }
-        }),
-    );
-
-    let result = raw_profile_llm_fetch_models(&state, &request, Some("ada"))
-        .await
-        .expect("fetch_models result");
-
-    assert_eq!(result["profile_id"], json!("ada"));
-    assert_eq!(result["family_id"], json!("custom"));
-    assert_eq!(result["models"], json!([]));
-    assert_eq!(result["reason"], json!("no_api_key"));
-}
-
-#[tokio::test]
-async fn profile_llm_fetch_models_requires_family_id() {
-    let state = Arc::new(AppState::empty_for_tests());
-    let request = RpcRequest::new(
-        "1",
-        APPUI_METHOD_PROFILE_LLM_FETCH_MODELS,
-        json!({ "selection": {} }),
-    );
-    let error = raw_profile_llm_fetch_models(&state, &request, Some("ada"))
-        .await
-        .expect_err("missing family_id should error");
-    assert!(error.message.contains("family_id"));
-}
-
-#[tokio::test]
-async fn profile_llm_fetch_models_returns_typed_reason_when_provider_unreachable() {
-    let state = Arc::new(AppState::empty_for_tests());
-    let request = RpcRequest::new(
-        "1",
-        APPUI_METHOD_PROFILE_LLM_FETCH_MODELS,
-        json!({
-            "selection": {
-                "family_id": "custom",
-                "route": {
-                    "route_id": "custom",
-                    "base_url": "http://127.0.0.1:1/v1",
-                    "api_type": "openai"
-                }
-            },
-            "api_key": "sk-fake"
-        }),
-    );
-
-    let result = raw_profile_llm_fetch_models(&state, &request, Some("ada"))
-        .await
-        .expect("fetch_models result");
-
-    assert_eq!(result["models"], json!([]));
-    // Typed, distinguishable failure — not the old collapsed
-    // `provider_unavailable` that hid auth/protocol/manual-entry differences.
-    assert_eq!(result["status"], json!("endpoint_unreachable"));
-    assert_eq!(result["reason"], json!("endpoint_unreachable"));
-    assert!(result["message"].is_string());
-}
-
-/// One captured discovery request: path plus the auth-relevant headers.
-struct CapturedDiscoveryRequest {
-    path: String,
-    authorization: Option<String>,
-    x_api_key: Option<String>,
-}
-
-/// Raw-TCP loopback fixture for fetch_models: serves a fixed JSON status/body
-/// for every request and records path + auth headers, so tests can pin the
-/// EXACT wire behavior (no Bearer on Anthropic-protocol families, no
-/// duplicated version segments on versioned roots).
-async fn spawn_discovery_fixture(
-    status_line: &'static str,
-    body: &'static str,
-) -> (
-    String,
-    Arc<tokio::sync::Mutex<Vec<CapturedDiscoveryRequest>>>,
-) {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let captured = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-    let recorded = captured.clone();
-    tokio::spawn(async move {
-        loop {
-            let Ok((mut socket, _)) = listener.accept().await else {
-                return;
-            };
-            // Read until the END OF HEADERS — a single read can return a
-            // partial request, and answering before the client finished
-            // sending makes the close reset the connection mid-request.
-            let mut raw = Vec::new();
-            let mut chunk = [0_u8; 2048];
-            loop {
-                match socket.read(&mut chunk).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(read) => {
-                        raw.extend_from_slice(&chunk[..read]);
-                        if raw.windows(4).any(|w| w == b"\r\n\r\n") {
-                            break;
-                        }
-                    }
-                }
-            }
-            let request = String::from_utf8_lossy(&raw).to_string();
-            let mut lines = request.split("\r\n");
-            let request_line = lines.next().unwrap_or_default().to_string();
-            let path = request_line
-                .split_whitespace()
-                .nth(1)
-                .unwrap_or_default()
-                .to_string();
-            let header = |name: &str| -> Option<String> {
-                lines.clone().find_map(|line| {
-                    let (key, value) = line.split_once(':')?;
-                    key.eq_ignore_ascii_case(name)
-                        .then(|| value.trim().to_string())
-                })
-            };
-            recorded.lock().await.push(CapturedDiscoveryRequest {
-                path,
-                authorization: header("authorization"),
-                x_api_key: header("x-api-key"),
-            });
-            let response = format!(
-                "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
-                 Connection: close\r\n\r\n{body}",
-                body.len()
-            );
-            let _ = socket.write_all(response.as_bytes()).await;
-        }
-    });
-    (format!("http://{address}"), captured)
-}
-
-#[tokio::test]
-async fn profile_llm_fetch_models_zai_never_gets_a_bearer_v1_models_probe() {
-    let (root, captured) =
-        spawn_discovery_fixture("200 OK", r#"{"data":[{"id":"glm-5.2"},{"id":"glm-4.7"}]}"#).await;
-    let state = Arc::new(AppState::empty_for_tests());
-    // Saved AppUI routes default api_type to "openai" — exactly the shape
-    // that used to force the Bearer /v1/models probe onto zai.
-    let request = RpcRequest::new(
-        "1",
-        APPUI_METHOD_PROFILE_LLM_FETCH_MODELS,
-        json!({
-            "selection": {
-                "family_id": "zai",
-                "route": {
-                    "route_id": "official",
-                    "base_url": format!("{root}/api/anthropic"),
-                    "api_type": "openai"
-                }
-            },
-            "api_key": "zai-secret-key"
-        }),
-    );
-
-    let result = raw_profile_llm_fetch_models(&state, &request, Some("ada"))
-        .await
-        .expect("fetch_models result");
-
-    assert_eq!(result["status"], json!("discovered"));
-    assert_eq!(result["models"], json!(["glm-4.7", "glm-5.2"]));
-    let requests = captured.lock().await;
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].path, "/api/anthropic/v1/models");
-    assert!(
-        requests[0].authorization.is_none(),
-        "zai speaks the Anthropic Messages protocol — never a Bearer probe"
-    );
-    assert_eq!(requests[0].x_api_key.as_deref(), Some("zai-secret-key"));
-}
-
-#[tokio::test]
-async fn profile_llm_fetch_models_r9s_claude_selection_probes_the_anthropic_root() {
-    let (root, captured) =
-        spawn_discovery_fixture("200 OK", r#"{"data":[{"id":"claude-sonnet-4"}]}"#).await;
-    let state = Arc::new(AppState::empty_for_tests());
-    // r9s serves claude-* over the Anthropic Messages protocol at a rewritten
-    // `{base}/anthropic` root — the probe must follow the SELECTED model
-    // (octos#2185), not the family-wide OpenAI declaration.
-    let request = RpcRequest::new(
-        "1",
-        APPUI_METHOD_PROFILE_LLM_FETCH_MODELS,
-        json!({
-            "selection": {
-                "family_id": "r9s",
-                "model_id": "claude-sonnet-4",
-                "route": {
-                    "route_id": "official",
-                    "base_url": format!("{root}/v1")
-                }
-            },
-            "api_key": "r9s-secret-key"
-        }),
-    );
-
-    let result = raw_profile_llm_fetch_models(&state, &request, Some("ada"))
-        .await
-        .expect("fetch_models result");
-
-    assert_eq!(result["status"], json!("discovered"));
-    assert_eq!(result["models"], json!(["claude-sonnet-4"]));
-    let requests = captured.lock().await;
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].path, "/anthropic/v1/models");
-    assert!(
-        requests[0].authorization.is_none(),
-        "r9s claude-* speaks Anthropic Messages — never a Bearer probe"
-    );
-    assert_eq!(requests[0].x_api_key.as_deref(), Some("r9s-secret-key"));
-}
-
-#[tokio::test]
-async fn profile_llm_fetch_models_r9s_non_claude_selection_keeps_the_openai_listing() {
-    let (root, captured) = spawn_discovery_fixture("200 OK", r#"{"data":[{"id":"gpt-5"}]}"#).await;
-    let state = Arc::new(AppState::empty_for_tests());
-    let request = RpcRequest::new(
-        "1",
-        APPUI_METHOD_PROFILE_LLM_FETCH_MODELS,
-        json!({
-            "selection": {
-                "family_id": "r9s",
-                "model_id": "gpt-5",
-                "route": {
-                    "route_id": "official",
-                    "base_url": format!("{root}/v1")
-                }
-            },
-            "api_key": "r9s-secret-key"
-        }),
-    );
-
-    let result = raw_profile_llm_fetch_models(&state, &request, Some("ada"))
-        .await
-        .expect("fetch_models result");
-
-    assert_eq!(result["status"], json!("discovered"));
-    let requests = captured.lock().await;
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].path, "/v1/models");
-    assert_eq!(
-        requests[0].authorization.as_deref(),
-        Some("Bearer r9s-secret-key")
-    );
-}
-
-#[tokio::test]
-async fn profile_llm_fetch_models_distinguishes_auth_failures_from_unavailability() {
-    let (root, _) = spawn_discovery_fixture("401 Unauthorized", r#"{"error":{}}"#).await;
-    let state = Arc::new(AppState::empty_for_tests());
-    let request = RpcRequest::new(
-        "1",
-        APPUI_METHOD_PROFILE_LLM_FETCH_MODELS,
-        json!({
-            "selection": {
-                "family_id": "custom",
-                "route": {
-                    "route_id": "custom",
-                    "base_url": format!("{root}/v1"),
-                    "api_type": "openai"
-                }
-            },
-            "api_key": "sk-wrong"
-        }),
-    );
-
-    let result = raw_profile_llm_fetch_models(&state, &request, Some("ada"))
-        .await
-        .expect("fetch_models result");
-
-    assert_eq!(result["models"], json!([]));
-    assert_eq!(result["status"], json!("authentication_failed"));
-    assert_eq!(result["reason"], json!("authentication_failed"));
 }
 
 #[tokio::test]
@@ -10011,83 +9636,6 @@ fn send_scope_error_on_stdio_answers_without_closing() {
     );
 }
 
-#[test]
-fn resolve_router_for_session_rejects_cross_tenant_session_id() {
-    // P1: a profile-scoped (tenant-B) connection must not resolve — and so
-    // must not be able to `set_mode` / read metrics on — a router for a
-    // `session_id` that embeds tenant-A's profile. The tenant gate fires
-    // BEFORE any ProfileRuntime lookup, so an empty test state suffices to
-    // prove the rejection. Without the gate this returned `Ok(None)` (and
-    // the handler would go on to resolve tenant-A's runtime).
-    let state = Arc::new(AppState::empty_for_tests());
-    let session_a = SessionKey::with_profile("tenant-a", "api", "chat-1");
-    // `AdaptiveRouter` is not `Debug`, so `.expect_err` on the `Ok` type
-    // does not compile — match instead.
-    let error = match resolve_router_for_session(&state, &session_a, Some("tenant-b"), None) {
-        Err(error) => error,
-        Ok(_) => panic!("cross-tenant router access must be rejected"),
-    };
-    assert!(is_auth_scope_violation(&error));
-}
-
-#[test]
-fn resolve_router_for_session_allows_same_tenant() {
-    // Same-tenant scope passes the gate; with no ProfileRuntime registered
-    // in the empty test state the router resolves to `None` (`Ok(None)`) —
-    // NOT an error. Proves the gate is scope-only, not a blanket denial.
-    let state = Arc::new(AppState::empty_for_tests());
-    let session_a = SessionKey::with_profile("tenant-a", "api", "chat-1");
-    let resolved = resolve_router_for_session(&state, &session_a, Some("tenant-a"), None)
-        .expect("same-tenant scope must pass the gate");
-    assert!(resolved.is_none());
-}
-
-#[test]
-fn resolve_router_for_session_admin_connection_is_unscoped() {
-    // An unscoped (admin, `connection_profile_id == None`) connection is
-    // authorized for every profile — it passes the gate for any
-    // `session_id`, matching every other mutating RPC handler.
-    let state = Arc::new(AppState::empty_for_tests());
-    let session_a = SessionKey::with_profile("tenant-a", "api", "chat-1");
-    let resolved = resolve_router_for_session(&state, &session_a, None, None)
-        .expect("admin connection must pass the gate");
-    assert!(resolved.is_none());
-}
-
-#[test]
-fn resolve_router_for_session_allows_authorized_routed_profile() {
-    // Codex P2: an OTP-admin / parent connection authorized for a tenant
-    // subdomain carries `connection_profile_id == <its own user id>` and
-    // `routed_profile_id == <tenant>` (is_authorized_for_profile cleared it
-    // at upgrade). The gate must NOT reject a session_id embedding the
-    // routed tenant — that access is authorized and predates the gate.
-    let state = Arc::new(AppState::empty_for_tests());
-    let tenant_session = SessionKey::with_profile("tenant-b", "api", "chat-1");
-    let resolved = resolve_router_for_session(
-        &state,
-        &tenant_session,
-        Some("admin-user"), // connection == the admin's own user id
-        Some("tenant-b"),   // routed == the authorized tenant subdomain
-    )
-    .expect("authorized routed profile must pass the gate");
-    assert!(resolved.is_none());
-}
-
-#[test]
-fn resolve_router_for_session_rejects_tenant_outside_routed_and_connection() {
-    // Even WITH a routed profile present, a session_id embedding a third
-    // tenant (neither the connection's own id nor the authorized routed
-    // tenant) is still rejected — the union does not become allow-any.
-    let state = Arc::new(AppState::empty_for_tests());
-    let other = SessionKey::with_profile("tenant-c", "api", "chat-1");
-    let error =
-        match resolve_router_for_session(&state, &other, Some("admin-user"), Some("tenant-b")) {
-            Err(error) => error,
-            Ok(_) => panic!("a third-tenant session_id must be rejected"),
-        };
-    assert!(is_auth_scope_violation(&error));
-}
-
 /// Codex BLOCK regression (2026-05-13): with the writer channel at
 /// capacity 2 and one slot already used, `send_scope_error` must use
 /// the remaining slot for the 1008 close — NOT the courtesy error
@@ -12379,7 +11927,6 @@ fn client_hello_feature_tokens_rebuild_stdio_negotiated_capabilities() {
     assert!(capabilities.supports_method(methods::AGENT_LIST));
     assert!(capabilities.supports_method(methods::REVIEW_START));
     assert!(!capabilities.supports_method(methods::LOOP_LIST));
-    assert!(capabilities.supports_method(methods::ROUTER_SET_MODE));
 }
 
 #[test]
@@ -21881,7 +21428,6 @@ async fn make_m11e_profile_with_llm_and_sandbox(
         session_store_root: None,
         config: crate::config::Config::default(),
         llm,
-        adaptive_router: None,
         runtime_qos_catalog: None,
         primary_model_id: "m11e-stub".to_string(),
         provider_name: "stub".to_string(),
@@ -21907,7 +21453,6 @@ async fn make_m11e_profile_with_llm_and_sandbox(
         memory_inject_tokens: 2500,
         memory_refresh_enabled: false,
         hook_executor: None,
-        lane_routing: None,
     })
 }
 
@@ -25338,7 +24883,6 @@ fn should_omit_cost_when_no_run_was_priced() {
 #[test]
 fn obs_events_doc_lists_new_kinds() {
     let src = include_str!("../obs_events.rs");
-    assert!(src.contains("fallback_switch"), "doc lists fallback_switch");
     assert!(
         src.contains("malformed_exhausted"),
         "doc lists malformed_exhausted"

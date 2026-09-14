@@ -57,7 +57,7 @@ pub struct ProfileConfig {
     /// Named provider lanes for per-node pipeline routing (e.g. the
     /// `bg_research` pipeline's `cheap`/`strong` nodes) and sub-agent model
     /// selection. These are ISOLATED from the primary coding provider: the serve
-    /// path builds a `ProviderRouter` from these entries ONLY (never the coding
+    /// path resolves lane providers from these entries ONLY (never the coding
     /// primary/fallbacks), so a research-lane failover trips its own circuit
     /// breakers and can never disturb the coding conversation's provider or its
     /// KV/prompt cache. Empty by default (pipeline nodes then use the shared
@@ -127,33 +127,11 @@ pub struct ProfileConfig {
     /// Sandbox configuration for tool isolation.
     #[serde(default)]
     pub sandbox: octos_agent::SandboxConfig,
-    /// Adaptive routing configuration (QoS weights, mode, etc.).
-    #[serde(default)]
-    pub adaptive_routing: Option<crate::config::AdaptiveRoutingConfig>,
     /// Optional cost / provenance budget policy for swarm dispatches
     /// (M7.4). Absent or empty => no enforcement; the ledger still
     /// records attributions so operators can audit spend retroactively.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_budget: Option<octos_agent::CostBudgetPolicy>,
-    /// Credential pool configuration (M6.5). Named pools of API keys / OAuth
-    /// tokens with persistent cooldowns and rotation strategies.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub credential_pool: Option<CredentialPoolConfig>,
-    /// RFC-3 (#1292) — per-topic model lane routing. When set, the
-    /// session-actor and the WS turn handler resolve the session's
-    /// `topic()` to a [`octos_llm::Lane`] using these overrides on
-    /// top of the built-in defaults, then scope the LLM chat call
-    /// inside [`octos_llm::with_lane_context`] so the
-    /// [`octos_llm::AdaptiveRouter`] narrows its candidate set to
-    /// the lane's `(provider, model)` list before scoring.
-    ///
-    /// Absent / `None` ⇒ pre-RFC-3 behavior: the router uses the
-    /// profile-default provider chain unchanged. The built-in lane
-    /// defaults still apply for topic prefixes (`slides`, `code`,
-    /// `research`, etc.) — the per-profile field only carries
-    /// **overrides**.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lane_routing: Option<octos_llm::LaneRoutingConfig>,
     /// Skill-layering (v1) selection layer. Merged through
     /// [`ProfileStore::effective_config`] alongside hooks / env / sandbox /
     /// plugins so a profile inherits the operator's default skill selection
@@ -258,80 +236,6 @@ impl ProfileSkillsConfig {
     }
 }
 
-/// Credential pool configuration (M6.5).
-///
-/// Schema-versioned per M4.6 — older profiles default to
-/// `schema_version = 1`. A pool entry names a set of secrets (typically API
-/// keys) that the runtime rotates under the chosen strategy. The secrets
-/// themselves live in `env_vars` under `api_key_env`; only ids / knobs are
-/// persisted here.
-///
-/// Classified `RestartRequired` in `diff_profiles` (see the RP05 pattern) —
-/// rotating strategy or pool membership at runtime would require tearing
-/// down live provider clients, so the safer default is to restart.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CredentialPoolConfig {
-    /// Schema version for forward compatibility (M4.6 pattern).
-    #[serde(default = "octos_agent::default_credential_pool_config_schema_version")]
-    pub schema_version: u32,
-    /// Named pools keyed by integration id (e.g. `"anthropic"`, `"openai"`).
-    #[serde(default)]
-    pub pools: HashMap<String, CredentialPoolEntry>,
-}
-
-impl Default for CredentialPoolConfig {
-    fn default() -> Self {
-        Self {
-            schema_version: octos_agent::default_credential_pool_config_schema_version(),
-            pools: HashMap::new(),
-        }
-    }
-}
-
-/// Single credential pool definition.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CredentialPoolEntry {
-    /// Rotation strategy identifier: `"fill_first"`, `"round_robin"`,
-    /// `"random"`, `"least_used"`. Defaults to `round_robin` when absent.
-    #[serde(default = "default_rotation_strategy")]
-    pub strategy: String,
-    /// Ordered credential ids that belong to this pool. The runtime pairs
-    /// each id with an API key env var from `env_vars` via `api_key_env`.
-    #[serde(default)]
-    pub credential_ids: Vec<String>,
-    /// Per-credential env var names (legacy bulk form). When both this and
-    /// `credential_ids` are present, `credential_ids` takes priority and
-    /// env vars are looked up by id.
-    #[serde(default)]
-    pub credential_env_vars: Vec<String>,
-    /// Default cooldown applied to 429 responses without an explicit
-    /// `reset_at` hint. Milliseconds.
-    #[serde(default)]
-    pub default_cooldown_ms: Option<u64>,
-    /// Optional override for the persistent state file. Defaults to
-    /// `<data_dir>/credential_pool.redb` per M6.5 spec.
-    #[serde(default)]
-    pub state_path: Option<String>,
-}
-
-impl Default for CredentialPoolEntry {
-    fn default() -> Self {
-        Self {
-            strategy: default_rotation_strategy(),
-            credential_ids: Vec::new(),
-            credential_env_vars: Vec::new(),
-            default_cooldown_ms: None,
-            state_path: None,
-        }
-    }
-}
-
-fn default_rotation_strategy() -> String {
-    "round_robin".into()
-}
-
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum PatchField<T> {
     #[default]
@@ -379,13 +283,7 @@ pub struct ProfileConfigPatch {
     #[serde(default)]
     pub sandbox: Option<octos_agent::SandboxConfig>,
     #[serde(default)]
-    pub adaptive_routing: PatchField<crate::config::AdaptiveRoutingConfig>,
-    #[serde(default)]
     pub cost_budget: PatchField<octos_agent::CostBudgetPolicy>,
-    #[serde(default)]
-    pub credential_pool: PatchField<CredentialPoolConfig>,
-    #[serde(default)]
-    pub lane_routing: PatchField<octos_llm::LaneRoutingConfig>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -531,25 +429,10 @@ impl ProfileConfig {
         if let Some(sandbox) = patch.sandbox {
             self.sandbox = sandbox;
         }
-        match patch.adaptive_routing {
-            PatchField::Absent => {}
-            PatchField::Clear => self.adaptive_routing = None,
-            PatchField::Value(adaptive_routing) => self.adaptive_routing = Some(adaptive_routing),
-        }
         match patch.cost_budget {
             PatchField::Absent => {}
             PatchField::Clear => self.cost_budget = None,
             PatchField::Value(cost_budget) => self.cost_budget = Some(cost_budget),
-        }
-        match patch.credential_pool {
-            PatchField::Absent => {}
-            PatchField::Clear => self.credential_pool = None,
-            PatchField::Value(credential_pool) => self.credential_pool = Some(credential_pool),
-        }
-        match patch.lane_routing {
-            PatchField::Absent => {}
-            PatchField::Clear => self.lane_routing = None,
-            PatchField::Value(lane_routing) => self.lane_routing = Some(lane_routing),
         }
 
         self.normalize_llm_contract();
@@ -1678,15 +1561,7 @@ pub(crate) fn config_from_profile(profile: &UserProfile) -> Config {
         context_filter: vec![],
         sub_providers: profile.config.sub_providers.clone(),
         auth_token: None,
-        adaptive_routing: profile.config.adaptive_routing.clone(),
         #[cfg(feature = "api")]
-        #[cfg(feature = "api")]
-        // F-005: credential pool + content routing are per-profile
-        // fields on `ProfileConfig`; the flattened `Config` used by
-        // gateway consumers does not currently surface them, so leave
-        // these as `None`. Gateway runtime can still read them off
-        // `profile.config` directly when needed.
-        credential_pool: None,
         // #1774: thread the profile's formatting opt-in so `octos serve`
         // sessions honor it (review: hardcoding false here left serve
         // permanently OFF while chat/gateway/acp worked).
@@ -1712,7 +1587,7 @@ pub enum ProfileChange {
 /// Compare two profiles and classify the nature of changes.
 ///
 /// Restart-required: llm, review, search, apps, channels,
-///   env_vars, email, hooks, sandbox, routing, credential_pool, plugins.
+///   env_vars, email, hooks, sandbox, routing, plugins.
 /// Hot-reloadable: system_prompt, max_history, max_iterations,
 ///   max_concurrent_sessions, browser_timeout_secs.
 pub fn diff_profiles(old: &UserProfile, new: &UserProfile) -> ProfileChange {
@@ -1737,21 +1612,8 @@ pub fn diff_profiles(old: &UserProfile, new: &UserProfile) -> ProfileChange {
     if oc.sandbox != nc.sandbox {
         restart_fields.push("sandbox".into());
     }
-    if oc.adaptive_routing != nc.adaptive_routing {
-        restart_fields.push("adaptive_routing".into());
-    }
     if oc.cost_budget != nc.cost_budget {
         restart_fields.push("cost_budget".into());
-    }
-    if oc.credential_pool != nc.credential_pool {
-        restart_fields.push("credential_pool".into());
-    }
-    // Section B (codex review round-6): plugin loader policy changes
-    // (e.g. flipping a plugin-independent setting) only take effect during
-    // bootstrap, so a toggle must trigger a gateway restart to flush
-    // the stale plugin registry and apply the new gate.
-    if oc.lane_routing != nc.lane_routing {
-        restart_fields.push("lane_routing".into());
     }
 
     if !restart_fields.is_empty() {
@@ -2338,29 +2200,6 @@ mod tests {
     }
 
     #[test]
-    fn test_profile_config_patch_updates_plugin_and_lane_policy() {
-        let mut config = ProfileConfig::default();
-        let mut lane_routing = octos_llm::LaneRoutingConfig::default();
-        lane_routing
-            .topic_lanes
-            .insert("code".into(), octos_llm::Lane::CodeCapable);
-
-        config.apply_patch(ProfileConfigPatch {
-            lane_routing: PatchField::Value(lane_routing.clone()),
-            ..Default::default()
-        });
-
-        assert_eq!(config.lane_routing.as_ref(), Some(&lane_routing));
-
-        config.apply_patch(ProfileConfigPatch {
-            lane_routing: PatchField::Clear,
-            ..Default::default()
-        });
-
-        assert!(config.lane_routing.is_none());
-    }
-
-    #[test]
     fn test_profile_config_patch_clears_structured_llm_contract() {
         let mut config = ProfileConfig {
             llm: Some(llm_profile(
@@ -2600,81 +2439,6 @@ mod tests {
             diff_profiles(&base, &changed),
             ProfileChange::HotReloadable
         ));
-    }
-
-    #[test]
-    fn should_classify_credential_pool_as_restart_required() {
-        let base = UserProfile {
-            id: "m65-diff".into(),
-            name: "M6.5".into(),
-            enabled: false,
-            data_dir: None,
-            parent_id: None,
-            public_subdomain: None,
-            config: ProfileConfig {
-                credential_pool: Some(CredentialPoolConfig {
-                    schema_version: 1,
-                    pools: [(
-                        "anthropic".into(),
-                        CredentialPoolEntry {
-                            strategy: "round_robin".into(),
-                            credential_ids: vec!["k1".into(), "k2".into()],
-                            ..Default::default()
-                        },
-                    )]
-                    .into(),
-                }),
-                ..Default::default()
-            },
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
-
-        let mut changed = base.clone();
-        changed.config.credential_pool = Some(CredentialPoolConfig {
-            schema_version: 1,
-            pools: [(
-                "anthropic".into(),
-                CredentialPoolEntry {
-                    strategy: "fill_first".into(),
-                    credential_ids: vec!["k1".into(), "k2".into(), "k3".into()],
-                    ..Default::default()
-                },
-            )]
-            .into(),
-        });
-
-        match diff_profiles(&base, &changed) {
-            ProfileChange::RestartRequired(fields) => {
-                assert!(
-                    fields.iter().any(|f| f == "credential_pool"),
-                    "expected `credential_pool` in restart-required fields, got {fields:?}",
-                );
-            }
-            other => panic!("expected RestartRequired, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn should_default_credential_pool_config_schema_version() {
-        let cfg = CredentialPoolConfig::default();
-        assert_eq!(cfg.schema_version, 1);
-        assert!(cfg.pools.is_empty());
-
-        // Deserialization backfills the schema version.
-        let raw = serde_json::json!({
-            "pools": {
-                "openai": {
-                    "credential_ids": ["a", "b"]
-                }
-            }
-        });
-        let parsed: CredentialPoolConfig = serde_json::from_value(raw).unwrap();
-        assert_eq!(parsed.schema_version, 1);
-        assert_eq!(parsed.pools.len(), 1);
-        let p = &parsed.pools["openai"];
-        assert_eq!(p.strategy, "round_robin");
-        assert_eq!(p.credential_ids, vec!["a".to_string(), "b".to_string()]);
     }
 
     #[test]

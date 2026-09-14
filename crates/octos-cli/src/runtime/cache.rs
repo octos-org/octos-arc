@@ -769,7 +769,6 @@ mod tests {
             session_store_root: None,
             config: crate::config::Config::default(),
             llm: Arc::new(StubLlm),
-            adaptive_router: None,
             runtime_qos_catalog: None,
             primary_model_id: "stub-model".to_string(),
             provider_name: "stub".to_string(),
@@ -795,7 +794,6 @@ mod tests {
             memory_inject_tokens: 2500,
             memory_refresh_enabled: false,
             hook_executor: None,
-            lane_routing: None,
         })
     }
 
