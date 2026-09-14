@@ -3,14 +3,11 @@
 pub mod auth;
 mod cache;
 pub mod chat;
-mod clean;
-mod completions;
 mod config;
 pub mod gateway;
 
-#[cfg(feature = "api")]
-pub mod agent_factory;
-mod init;
+#[cfg(all(test, feature = "api"))]
+mod agent_factory;
 #[cfg(feature = "api")]
 pub(crate) mod oup_client;
 #[cfg(feature = "api")]
@@ -31,12 +28,9 @@ use eyre::Result;
 pub use auth::AuthCommand;
 pub use cache::CacheCommand;
 pub use chat::ChatCommand;
-pub use clean::CleanCommand;
-pub use completions::CompletionsCommand;
 pub use config::ConfigCommand;
 pub use octos_arc::ArcCommand;
 
-pub use init::InitCommand;
 #[cfg_attr(not(test), allow(unused_imports))]
 #[cfg(feature = "api")]
 pub use serve::ServeCommand;
@@ -85,16 +79,10 @@ pub enum Command {
     Cache(CacheCommand),
     /// Inspect the saved startup config (`show` / `path`); read-only.
     Config(ConfigCommand),
-    /// Initialize a new .octos configuration.
-    Init(InitCommand),
     /// Start the REST API server (requires --features api).
     #[cfg(feature = "api")]
     Serve(ServeCommand),
 
-    /// Clean up stale state and cache files.
-    Clean(CleanCommand),
-    /// Generate shell completions.
-    Completions(CompletionsCommand),
     /// Manage agent skills (list, install, remove).
     Skills(SkillsCommand),
 }
@@ -245,11 +233,8 @@ impl Executable for Command {
             }
             Self::Cache(cmd) => cmd.execute(),
             Self::Config(cmd) => cmd.execute(),
-            Self::Init(cmd) => cmd.execute(),
             #[cfg(feature = "api")]
             Self::Serve(cmd) => cmd.execute(),
-            Self::Clean(cmd) => cmd.execute(),
-            Self::Completions(cmd) => cmd.execute(),
         }
     }
 }

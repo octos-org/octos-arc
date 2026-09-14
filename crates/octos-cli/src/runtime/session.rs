@@ -926,8 +926,8 @@ pub(crate) fn resolve_sessions_root_from_hint(
 /// not fail session bootstrap (the transcript store still works), it only
 /// risks leaking runtime state into git, which we log.
 ///
-/// Selective (not `*`) to match the `octos init` convention
-/// (`init.rs`: `sessions/`, `tasks/`, `*.redb`) and to leave a
+/// Selective (not `*`) to match the historical bootstrap layout
+/// (`sessions/`, `tasks/`, `*.redb`) and to leave a
 /// deliberately-committed `<cwd>/.octos/config.json` untouched; `users/` is
 /// added because per-project transcripts + their sidecars land under
 /// `<cwd>/.octos/users/<base>/sessions/`; `context_ledgers/` because the

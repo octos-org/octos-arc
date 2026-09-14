@@ -103,8 +103,8 @@ fn overview(path: &Path) -> String {
          octos config show   Print the saved config.json.\n  \
          octos config path   Print the resolved config.json path.\n\
          \n\
-         To change settings, edit {path} directly (or run `octos init` for a\n\
-         provider quickstart). The `cli.<cmd>` block sets startup defaults for\n\
+         To change settings, edit {path} directly. The `cli.<cmd>` block sets\n\
+         startup defaults for\n\
          {layered}; an explicit CLI flag or env var still wins.\n"
     )
 }
@@ -113,7 +113,7 @@ fn show(path: &Path) -> Result<()> {
     match std::fs::read_to_string(path) {
         Ok(contents) if contents.trim().is_empty() => {
             println!(
-                "{} is empty. Edit it directly (or run `octos init`) to set it up.",
+                "{} is empty. Edit it directly to set it up.",
                 path.display()
             );
             Ok(())
@@ -125,7 +125,7 @@ fn show(path: &Path) -> Result<()> {
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             println!(
-                "No config yet at {}.\nEdit it directly (or run `octos init`) to create one.",
+                "No config yet at {}.\nEdit it directly to create one.",
                 path.display()
             );
             Ok(())

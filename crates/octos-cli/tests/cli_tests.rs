@@ -11,21 +11,6 @@ fn octos_binary() -> std::path::PathBuf {
     path
 }
 
-fn clear_provider_env(cmd: &mut Command) {
-    for key in [
-        "OPENAI_API_KEY",
-        "ANTHROPIC_API_KEY",
-        "GEMINI_API_KEY",
-        "DEEPSEEK_API_KEY",
-        "KIMI_API_KEY",
-        "DASHSCOPE_API_KEY",
-        "MINIMAX_API_KEY",
-        "ZAI_API_KEY",
-    ] {
-        cmd.env_remove(key);
-    }
-}
-
 #[test]
 fn test_help_command() {
     let output = Command::new(octos_binary())
@@ -36,11 +21,8 @@ fn test_help_command() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("octos"));
-    assert!(stdout.contains("init"));
     assert!(stdout.contains("chat"));
     assert!(stdout.contains("status"));
-    assert!(stdout.contains("clean"));
-    assert!(stdout.contains("completions"));
 }
 
 #[test]
@@ -56,20 +38,6 @@ fn test_version_command() {
 }
 
 #[test]
-fn test_init_help() {
-    let output = Command::new(octos_binary())
-        .args(["init", "--help"])
-        .output()
-        .expect("Failed to execute command");
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Initialize"));
-    assert!(stdout.contains("--defaults"));
-    assert!(stdout.contains("--force"));
-}
-
-#[test]
 fn test_chat_help() {
     let output = Command::new(octos_binary())
         .args(["chat", "--help"])
@@ -82,235 +50,6 @@ fn test_chat_help() {
     assert!(stdout.contains("--model"));
     assert!(stdout.contains("--message"));
     assert!(stdout.contains("--verbose"));
-}
-
-#[test]
-fn test_clean_help() {
-    let output = Command::new(octos_binary())
-        .args(["clean", "--help"])
-        .output()
-        .expect("Failed to execute command");
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Clean"));
-    assert!(stdout.contains("--all"));
-    assert!(stdout.contains("--dry-run"));
-}
-
-#[test]
-fn test_completions_help() {
-    let output = Command::new(octos_binary())
-        .args(["completions", "--help"])
-        .output()
-        .expect("Failed to execute command");
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("completions"));
-}
-
-#[test]
-fn test_completions_bash() {
-    let output = Command::new(octos_binary())
-        .args(["completions", "bash"])
-        .output()
-        .expect("Failed to execute command");
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    // Bash completions should contain function definitions
-    assert!(stdout.contains("_octos"));
-}
-
-#[test]
-fn test_completions_zsh() {
-    let output = Command::new(octos_binary())
-        .args(["completions", "zsh"])
-        .output()
-        .expect("Failed to execute command");
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    // Zsh completions should contain compdef
-    assert!(stdout.contains("#compdef"));
-}
-
-#[test]
-fn test_completions_fish() {
-    let output = Command::new(octos_binary())
-        .args(["completions", "fish"])
-        .output()
-        .expect("Failed to execute command");
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    // Fish completions should contain complete command
-    assert!(stdout.contains("complete"));
-}
-
-#[test]
-fn test_init_defaults_in_temp_dir() {
-    let temp_dir = tempfile::tempdir().unwrap();
-
-    let mut cmd = Command::new(octos_binary());
-    clear_provider_env(&mut cmd);
-    let output = cmd
-        .env("ANTHROPIC_API_KEY", "test-ant-key")
-        .args(["init", "--defaults", "--cwd"])
-        .arg(temp_dir.path())
-        .output()
-        .expect("Failed to execute command");
-
-    assert!(output.status.success());
-
-    // Check config file was created
-    let config_path = temp_dir.path().join(".octos").join("config.json");
-    assert!(config_path.exists());
-
-    // Check config content
-    let content = std::fs::read_to_string(&config_path).unwrap();
-    assert!(content.contains("anthropic"));
-    assert!(content.contains("claude-sonnet-4-20250514"));
-}
-
-#[test]
-fn test_init_defaults_uses_octos_home_when_cwd_not_provided() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let octos_home = temp_dir.path().join("custom-home");
-    let unrelated_cwd = temp_dir.path().join("workspace");
-    std::fs::create_dir_all(&unrelated_cwd).unwrap();
-
-    let mut cmd = Command::new(octos_binary());
-    clear_provider_env(&mut cmd);
-    let output = cmd
-        .env("OPENAI_API_KEY", "test-openai-key")
-        .env("OCTOS_HOME", &octos_home)
-        .current_dir(&unrelated_cwd)
-        .args(["init", "--defaults"])
-        .output()
-        .expect("Failed to execute command");
-
-    assert!(output.status.success());
-
-    let home_config = octos_home.join("config.json");
-    assert!(
-        home_config.exists(),
-        "expected init to write config into OCTOS_HOME"
-    );
-    assert!(
-        !unrelated_cwd.join(".octos").join("config.json").exists(),
-        "init should not create a separate cwd/.octos config when OCTOS_HOME is set"
-    );
-
-    let content = std::fs::read_to_string(&home_config).unwrap();
-    assert!(content.contains("openai"));
-    assert!(content.contains("gpt-4.1-mini"));
-}
-
-#[test]
-fn test_init_defaults_refuses_to_overwrite_existing_config() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let octos_dir = temp_dir.path().join(".octos");
-    std::fs::create_dir_all(&octos_dir).unwrap();
-    let config_path = octos_dir.join("config.json");
-    let original = r#"{"provider":"sentinel","model":"keep-me"}"#;
-    std::fs::write(&config_path, original).unwrap();
-
-    let mut cmd = Command::new(octos_binary());
-    clear_provider_env(&mut cmd);
-    let output = cmd
-        .env("OPENAI_API_KEY", "test-openai-key")
-        .args(["init", "--defaults", "--cwd"])
-        .arg(temp_dir.path())
-        .output()
-        .expect("Failed to execute command");
-
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("Config already exists"));
-    assert_eq!(std::fs::read_to_string(&config_path).unwrap(), original);
-}
-
-#[test]
-fn test_init_defaults_force_overwrites_existing_config() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let octos_dir = temp_dir.path().join(".octos");
-    std::fs::create_dir_all(&octos_dir).unwrap();
-    let config_path = octos_dir.join("config.json");
-    std::fs::write(
-        &config_path,
-        r#"{"provider":"sentinel","model":"replace-me"}"#,
-    )
-    .unwrap();
-
-    let mut cmd = Command::new(octos_binary());
-    clear_provider_env(&mut cmd);
-    let output = cmd
-        .env("OPENAI_API_KEY", "test-openai-key")
-        .args(["init", "--defaults", "--force", "--cwd"])
-        .arg(temp_dir.path())
-        .output()
-        .expect("Failed to execute command");
-
-    assert!(output.status.success());
-    let content = std::fs::read_to_string(&config_path).unwrap();
-    assert!(content.contains("openai"));
-    assert!(content.contains("gpt-4.1-mini"));
-    assert!(!content.contains("sentinel"));
-}
-
-#[test]
-fn test_clean_no_octos_dir() {
-    let temp_dir = tempfile::tempdir().unwrap();
-
-    let output = Command::new(octos_binary())
-        .args(["clean", "--cwd"])
-        .arg(temp_dir.path())
-        .output()
-        .expect("Failed to execute command");
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("No .octos directory"));
-}
-
-#[test]
-fn test_clean_empty_octos_dir() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    std::fs::create_dir(temp_dir.path().join(".octos")).unwrap();
-
-    let output = Command::new(octos_binary())
-        .args(["clean", "--cwd"])
-        .arg(temp_dir.path())
-        .output()
-        .expect("Failed to execute command");
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Nothing to clean"));
-}
-
-#[test]
-fn test_clean_dry_run_with_all() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let octos_dir = temp_dir.path().join(".octos");
-    std::fs::create_dir_all(&octos_dir).unwrap();
-    std::fs::write(octos_dir.join("episodes.redb"), "fake-db").unwrap();
-
-    let output = Command::new(octos_binary())
-        .args(["clean", "--all", "--dry-run", "--cwd"])
-        .arg(temp_dir.path())
-        .output()
-        .expect("Failed to execute command");
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Would remove"));
-    assert!(stdout.contains("Dry run"));
-
-    // File should still exist
-    assert!(octos_dir.join("episodes.redb").exists());
 }
 
 // ── Skill system tests ──────────────────────────────────────────────
@@ -443,25 +182,4 @@ fn test_skills_install_and_remove() {
         !list_after_stdout.contains(&format!("  {skill_name} ")),
         "removed skill should not appear in list"
     );
-}
-
-#[test]
-fn test_clean_all_removes_redb() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let octos_dir = temp_dir.path().join(".octos");
-    std::fs::create_dir_all(&octos_dir).unwrap();
-    std::fs::write(octos_dir.join("episodes.redb"), "fake-db").unwrap();
-
-    let output = Command::new(octos_binary())
-        .args(["clean", "--all", "--cwd"])
-        .arg(temp_dir.path())
-        .output()
-        .expect("Failed to execute command");
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Cleaned"));
-
-    // Database file should be deleted
-    assert!(!octos_dir.join("episodes.redb").exists());
 }

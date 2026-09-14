@@ -982,7 +982,7 @@ impl Config {
                 if legacy_config != home_config && legacy_config.exists() {
                     tracing::info!(
                         path = %legacy_config.display(),
-                        "loading config (legacy ~/.octos — consider running `octos init` to migrate)"
+                        "loading config (legacy ~/.octos — migrate by moving it to the current config path)"
                     );
                     return Ok((Self::from_file(&legacy_config)?, Some(legacy_config)));
                 }
@@ -1021,7 +1021,7 @@ impl Config {
             tracing::info!(
                 path = %path.display(),
                 version = CURRENT_CONFIG_VERSION,
-                "Config file needs migration to version {}. Run `octos init` to update.",
+                "Config file needs migration to version {}; the migration is applied on load.",
                 CURRENT_CONFIG_VERSION
             );
         }
@@ -1303,7 +1303,8 @@ impl Config {
             Some(p) => p,
             None => {
                 warnings.push(
-                    "No provider configured. Run 'octos init' to set up your LLM provider."
+                    "No provider configured. Create config.json with a provider entry to set \
+                     up your LLM provider."
                         .to_string(),
                 );
                 return warnings;

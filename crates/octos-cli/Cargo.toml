@@ -19,7 +19,6 @@ octos-llm = { workspace = true }
 octos-bus = { workspace = true }
 async-trait = { workspace = true }
 clap = { workspace = true }
-clap_complete = { workspace = true }
 dirs = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

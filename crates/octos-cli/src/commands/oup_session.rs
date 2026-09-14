@@ -456,7 +456,6 @@ mod tests {
                 final_content,
             )),
             data.path().to_owned(),
-            workspace.path().to_owned(),
         );
         let session = OupSession::open(
             factory.oup_state().await.unwrap(),
@@ -554,11 +553,7 @@ mod tests {
             release: Default::default(),
             dropped: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         });
-        let factory = TestAgentFactory::new(
-            model.clone(),
-            data.path().to_owned(),
-            workspace.path().to_owned(),
-        );
+        let factory = TestAgentFactory::new(model.clone(), data.path().to_owned());
         let state = factory.oup_state().await.unwrap();
         let mut sessions = Vec::new();
         for _ in 0..2 {
