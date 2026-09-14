@@ -644,3 +644,20 @@ fragment ≈ 80–110 → ≈ 260–290 total worst case, ≈ 240 typical; dice 
 ≈ 190–210. At the fitted ¥2/M in, ¥7.5/M out: counter ≈ ¥0.0011–0.0012, dice ≈ ¥0.0009. Dry run traverses
 tiny → spec check → compact fallback. Generality: tier by spec size only; probe policy by tier; no task text.
 Cloud: 未评测 (next gap). Unit tests 97 OK.
+
+## Round 35 (phase 3 §1.1) — single-request codegen for every node of an N-node tree
+
+keep/bookstack spent ≈36 requests per node in tool mode (read/edit/verify steps). Now every node of any tree
+size takes the codegen path (`OCTOS_ARC_CODEGEN_MAX_NODES` default unlimited): one request that returns every
+changed file complete. The prompt quotes the existing sources selected by `relevant_sources`: backend entry
+files first (the router every node extends), then pages ranked by how many of the node's spec terms
+(locators, texts, routes, identifiers) they contain, within `OCTOS_ARC_CODEGEN_CONTEXT_CHARS` (default 90,000
+chars ≈ 26k tokens ≈ ¥0.05 input per request); the rest are listed by name. Stylesheets are never quoted. The
+harness manifests replace the skeleton turn. A node whose spec alone cannot fit the budget uses tool mode;
+codegen repairs (2) then tool mode remain the per-node fallback.
+
+Offline on the real keep workspace (cloud 2224a9013528, 5 source files, 86k chars): REQ-2.5.2 quotes
+server.js + app.js + index.html + build.js (≈72k chars ≈ 21k tokens), no omission. Dry run of keep (32 nodes):
+skeleton skipped, every node one codegen request, final suite + rehearsal reached, exit 0.
+Expected per node: 1–3 requests (≤5 target) instead of 36; cost dominated by input ≈ ¥0.05–0.15.
+Generality: selection by spec-term overlap and size only; no task names. Cloud: 未评测. Unit tests 99 OK.

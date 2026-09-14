@@ -359,7 +359,7 @@ def inline_sources(output_dir: Path, max_chars: int = 40000, exts: tuple = (".js
     return ("Current source files (quoted; edit them directly, no need to read):\n" + "".join(parts)) if parts else ""
 
 
-SOURCE_EXTS = (".html", ".js", ".mjs", ".cjs", ".css")
+SOURCE_EXTS = (".html", ".js", ".mjs", ".cjs")  # stylesheets never decide a spec; not quoted
 
 
 def app_source_files(output_dir: Path, exts: tuple = SOURCE_EXTS) -> list[Path]:
@@ -1355,7 +1355,7 @@ class Flow:
             probe_endpoint()
 
     def codegen_context_chars(self) -> int:
-        return int(os.environ.get("OCTOS_ARC_CODEGEN_CONTEXT_CHARS", "60000"))
+        return int(os.environ.get("OCTOS_ARC_CODEGEN_CONTEXT_CHARS", "90000"))
 
     def codegen_context_fits(self, spec_text: str) -> bool:
         """Spec + (trimmed) sources must fit the codegen prompt budget; the source

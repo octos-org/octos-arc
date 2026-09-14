@@ -388,4 +388,4 @@ class RelevantSourcesTests(unittest.TestCase):
             self.assertFalse(flow.codegen_mode())
         finally:
             del os.environ["OCTOS_ARC_CODEGEN_MAX_NODES"]
-        self.assertTrue(flow.codegen_context_fits("x" * 20000)); self.assertFalse(flow.codegen_context_fits("x" * 40000))
+        self.assertTrue(flow.codegen_context_fits("x" * 20000)); self.assertFalse(flow.codegen_context_fits("x" * 60000))
