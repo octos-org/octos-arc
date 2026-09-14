@@ -3707,7 +3707,6 @@ fn notification_session_id(notification: &UiNotification) -> &SessionKey {
         UiNotification::ReplayLossy(event) => &event.session_id,
         UiNotification::TurnSpawnComplete(event) => &event.session_id,
         UiNotification::FileAttached(event) => &event.session_id,
-        UiNotification::SessionEventBridged(event) => &event.session_id,
         UiNotification::RouterStatus(event) => &event.session_id,
         UiNotification::RouterFailover(event) => &event.session_id,
         UiNotification::QueueState(event) => &event.session_id,

@@ -1116,10 +1116,6 @@ pub mod methods {
     /// `message/delta`, `tool/*`, and
     /// `turn/completed` notifications it supersedes.
     pub const PROJECTION_ENVELOPE: &str = "projection/envelope";
-    /// UPCR-2026-014 (M9-α-9) `session/event` — wrapper envelope for
-    /// legacy `/api/sessions/:id/events/stream` SSE frames bridged onto
-    /// the unified v1 surface.
-    pub const SESSION_EVENT: &str = "session/event";
 
     // ---- M12 Phase D-1 auxiliary REST → WS surface ----
     // Each method below replaces a REST endpoint listed in the ADR's
@@ -1300,7 +1296,6 @@ pub const UI_PROTOCOL_NOTIFICATION_METHODS: &[&str] = &[
     methods::TURN_SPAWN_COMPLETE,
     methods::FILE_ATTACHED,
     methods::PROJECTION_ENVELOPE,
-    methods::SESSION_EVENT,
     methods::ROUTER_STATUS,
     methods::ROUTER_FAILOVER,
     methods::QUEUE_STATE,
@@ -5792,20 +5787,6 @@ pub struct FileAttachedEvent {
     pub mime: Option<String>,
 }
 
-/// UPCR-2026-014 (M9-α-9): wrapper for legacy
-/// `/api/sessions/:id/events/stream` SSE frames bridged onto the WS
-/// surface. `kind` is the legacy SSE `type` field; `payload` is the
-/// full frame body.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SessionEventBridgedEvent {
-    pub session_id: SessionKey,
-    pub kind: String,
-    pub payload: Value,
-    /// Echo of any `topic` field carried on the legacy frame.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub topic: Option<String>,
-}
-
 /// Wave4-A — adaptive router status snapshot pushed alongside `turn/started`
 /// and `turn/completed`. Mirrors `octos_llm::AdaptiveStatus` plus the
 /// information needed by clients to render the routing pill / lane debug
@@ -5959,10 +5940,6 @@ pub enum UiNotification {
     TurnSpawnComplete(TurnSpawnCompleteEvent),
     /// UPCR-2026-014 (M9-α-9): per-turn file attachment event.
     FileAttached(FileAttachedEvent),
-    /// UPCR-2026-014 (M9-α-9): wrapper for legacy
-    /// `/api/sessions/:id/events/stream` SSE frames bridged onto the
-    /// unified v1 ledger.
-    SessionEventBridged(SessionEventBridgedEvent),
     /// Wave4-A: adaptive routing snapshot emitted on `turn/started` and
     /// `turn/completed` so clients can render the routing pill / lane
     /// debug view without polling.
@@ -6058,7 +6035,6 @@ impl UiNotification {
             Self::ReplayLossy(_) => methods::REPLAY_LOSSY,
             Self::TurnSpawnComplete(_) => methods::TURN_SPAWN_COMPLETE,
             Self::FileAttached(_) => methods::FILE_ATTACHED,
-            Self::SessionEventBridged(_) => methods::SESSION_EVENT,
             Self::RouterStatus(_) => methods::ROUTER_STATUS,
             Self::RouterFailover(_) => methods::ROUTER_FAILOVER,
             Self::QueueState(_) => methods::QUEUE_STATE,
@@ -6106,7 +6082,6 @@ impl UiNotification {
             Self::ReplayLossy(event) => &event.session_id,
             Self::TurnSpawnComplete(event) => &event.session_id,
             Self::FileAttached(event) => &event.session_id,
-            Self::SessionEventBridged(event) => &event.session_id,
             Self::RouterStatus(event) => &event.session_id,
             Self::RouterFailover(event) => &event.session_id,
             Self::QueueState(event) => &event.session_id,
@@ -6178,9 +6153,6 @@ impl UiNotification {
             Self::FileAttached(event) => {
                 event.topic.as_deref().or_else(|| event.session_id.topic())
             }
-            Self::SessionEventBridged(event) => {
-                event.topic.as_deref().or_else(|| event.session_id.topic())
-            }
             Self::Envelope(event) => event.topic.as_deref().or_else(|| event.session_id.topic()),
             Self::EnvelopeV2(event) => event.topic.as_deref().or_else(|| event.session_id.topic()),
             _ => self.session_id().topic(),
@@ -6211,7 +6183,6 @@ impl UiNotification {
             Self::TurnSteerDropped(event) => set_topic_if_absent(&mut event.topic, &topic),
             Self::TurnSpawnComplete(event) => set_topic_if_absent(&mut event.topic, &topic),
             Self::FileAttached(event) => set_topic_if_absent(&mut event.topic, &topic),
-            Self::SessionEventBridged(event) => set_topic_if_absent(&mut event.topic, &topic),
             Self::Envelope(event) => set_topic_if_absent(&mut event.topic, &topic),
             Self::EnvelopeV2(event) => set_topic_if_absent(&mut event.topic, &topic),
             _ => {}
@@ -6245,7 +6216,6 @@ impl UiNotification {
             Self::ReplayLossy(params) => serde_json::to_value(params),
             Self::TurnSpawnComplete(params) => serde_json::to_value(params),
             Self::FileAttached(params) => serde_json::to_value(params),
-            Self::SessionEventBridged(params) => serde_json::to_value(params),
             Self::RouterStatus(params) => serde_json::to_value(params),
             Self::RouterFailover(params) => serde_json::to_value(params),
             Self::QueueState(params) => serde_json::to_value(params),
@@ -6376,7 +6346,6 @@ impl UiNotification {
                 Ok(Self::TurnSpawnComplete(decode_params(method, params)?))
             }
             methods::FILE_ATTACHED => Ok(Self::FileAttached(decode_params(method, params)?)),
-            methods::SESSION_EVENT => Ok(Self::SessionEventBridged(decode_params(method, params)?)),
             methods::ROUTER_STATUS => Ok(Self::RouterStatus(decode_params(method, params)?)),
             methods::ROUTER_FAILOVER => Ok(Self::RouterFailover(decode_params(method, params)?)),
             methods::QUEUE_STATE => Ok(Self::QueueState(decode_params(method, params)?)),

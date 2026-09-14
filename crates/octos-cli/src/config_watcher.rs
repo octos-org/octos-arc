@@ -242,9 +242,8 @@ impl ConfigWatcher {
         let mut hot_history = None;
         let mut has_hot = false;
 
-        // Provider/model changes are hot-reloadable (switch_model tool does
-        // live swap via SwappableProvider; restarting would kill in-flight
-        // responses).
+        // Provider/model changes are hot-reloadable; restarting would
+        // kill in-flight responses.
         if old.base_url != new.base_url {
             restart_fields.push("base_url".into());
         }
@@ -424,7 +423,7 @@ mod tests {
 
     #[test]
     fn test_provider_change_no_restart() {
-        // Provider/model changes are hot-reloadable (switch_model does live swap)
+        // Provider/model changes are hot-reloadable
         let dir = TempDir::new().unwrap();
         let path = write_config(&dir, r#"{"provider": "anthropic"}"#);
         let old_config = Config::from_file(&path).unwrap();

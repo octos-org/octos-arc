@@ -162,11 +162,6 @@ pub struct UiProtocolRuntimeResources {
 }
 
 pub struct AppState {
-    /// Shared HTTP client for webhook proxying.
-    /// Bootstrap admin auth token from config/env (used only until the
-    /// hashed admin-token file is created via dashboard rotation).
-    pub auth_token: Option<String>,
-
     /// Prometheus metrics handle.
     pub metrics_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
 
@@ -211,11 +206,6 @@ pub struct AppState {
 
     pub ui_protocol: UiProtocolRuntimeResources,
 
-    pub http_client: reqwest::Client,
-    /// Path to the global config.json file (for admin bot config editing).
-    pub config_path: Option<PathBuf>,
-    /// Persistent sysinfo instance for accurate CPU metrics across polls.
-    pub sysinfo: tokio::sync::Mutex<sysinfo::System>,
     /// Tenant store for tunnel management.
     /// Cache of frps run_id → tenant_id from Login verification.
     /// Startup-normalized exact origins from `appui.allowed_origins` (or its
@@ -260,20 +250,6 @@ pub struct AppState {
     /// lazily-bootstrapped profile runtimes so a host opt-out of memory
     /// refresh (DEFAULT-ON) also binds profiles created after startup.
     pub host_memory: Option<crate::config::MemoryConfig>,
-    /// Solo-profile id/email ledger (multi-user accounts were removed with
-    /// the dashboard; the store remains for `profile/local/create`).
-    /// Optional path to the JSONL harness-event sink. When `Some`,
-    /// typed harness events (e.g. `SwarmReviewDecision`) are appended
-    /// to the file in addition to being broadcast live to harness
-    /// SSE subscribers. When `None`, events are broadcast-only — so a
-    /// decision made while no subscriber is connected is lost. Wired
-    /// by `octos serve` from the `OCTOS_HARNESS_EVENT_SINK` env var.
-    pub harness_event_sink_path: Option<String>,
-    /// Credential pool (M6.5, F-005). Initialised at startup from
-    /// `config.credential_pool` when present; `None` falls back to the
-    /// legacy single-credential flow. Shared with session actors so
-    /// per-LLM-call `acquire`/`mark_*` operations see a consistent view.
-    pub credential_pool: Option<Arc<octos_llm::PersistentCredentialPool>>,
     /// M7.9 / W2: shared session-task supervisor lookup. Used by the
     /// `POST /api/tasks/{task_id}/cancel` and
     /// `POST /api/tasks/{task_id}/restart-from-node` endpoints to
@@ -333,20 +309,14 @@ impl AppState {
             profile_skill_mutation_locks: Arc::new(ProfileSkillMutationLocks::new()),
             sessions: None,
             started_at: chrono::Utc::now(),
-            auth_token: None,
             metrics_handle: None,
             profile_store: None,
-            http_client: reqwest::Client::new(),
-            config_path: None,
-            sysinfo: tokio::sync::Mutex::new(crate::sysinfo_budget::new_metrics_system()),
             appui_allowed_origins: Vec::new(),
             solo_login_enabled: false,
             dangerous_default_permissions: false,
             default_network_denied: false,
             llm_compaction: false,
             host_memory: None,
-            harness_event_sink_path: None,
-            credential_pool: None,
             task_query_store: None,
             appui_default_session_cwd: None,
             work_secret_store: Arc::new(

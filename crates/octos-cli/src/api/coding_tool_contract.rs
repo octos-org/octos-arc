@@ -35,7 +35,6 @@ pub(crate) const MCP_STATUS_DISABLED: &str = "disabled";
 pub(crate) const CODING_PATCH_TOOL_CAPABILITY_V1: &str = "coding.patch_tool.v1";
 pub(crate) const CODING_EXEC_SESSION_CAPABILITY_V1: &str = "coding.exec_session.v1";
 pub(crate) const CODING_PLAN_TOOL_CAPABILITY_V1: &str = "coding.plan_tool.v1";
-pub(crate) const CODING_USER_INPUT_TOOL_CAPABILITY_V1: &str = "coding.user_input_tool.v1";
 pub(crate) const CODING_SUBAGENT_ALIASES_CAPABILITY_V1: &str = "coding.subagent_aliases.v1";
 // Optional capabilities declared by UPCR-2026-020 §3.
 //
@@ -71,7 +70,6 @@ pub(crate) const CODING_P0_REQUIRED_TOOL_NAMES: &[&str] = &[
     "exec_command",
     "write_stdin",
     "update_plan",
-    "request_user_input",
     "spawn_agent",
     "send_input",
     "resume_agent",
@@ -84,7 +82,6 @@ pub(crate) const OCTOS_KNOWN_MODEL_VISIBLE_TOOLS: &[&str] = &[
     "exec_command",
     "write_stdin",
     "update_plan",
-    "request_user_input",
     "spawn_agent",
     "send_input",
     "resume_agent",
@@ -241,14 +238,6 @@ const REQUIRED_CODING_TOOLS: &[RequiredToolSpec] = &[
         partial_alias_detail: None,
     },
     RequiredToolSpec {
-        name: "request_user_input",
-        category: "interaction",
-        capability: CODING_USER_INPUT_TOOL_CAPABILITY_V1,
-        aliases: &[],
-        policy: "allowed",
-        partial_alias_detail: None,
-    },
-    RequiredToolSpec {
         name: "spawn_agent",
         category: "agent",
         capability: CODING_SUBAGENT_ALIASES_CAPABILITY_V1,
@@ -322,13 +311,6 @@ const OCTOS_TOOL_SPECS: &[OctosToolSpec] = &[
         aliases: &[],
         policy: "allowed",
         detail: None,
-    },
-    OctosToolSpec {
-        name: "request_user_input",
-        category: "interaction",
-        aliases: &[],
-        policy: "allowed",
-        detail: Some("Visible host-interaction shim; synchronous UI blocking is host-dependent."),
     },
     OctosToolSpec {
         name: "spawn_agent",
@@ -854,10 +836,6 @@ mod tests {
         assert_eq!(CODING_EXEC_SESSION_CAPABILITY_V1, "coding.exec_session.v1");
         assert_eq!(CODING_PLAN_TOOL_CAPABILITY_V1, "coding.plan_tool.v1");
         assert_eq!(
-            CODING_USER_INPUT_TOOL_CAPABILITY_V1,
-            "coding.user_input_tool.v1"
-        );
-        assert_eq!(
             CODING_SUBAGENT_ALIASES_CAPABILITY_V1,
             "coding.subagent_aliases.v1"
         );
@@ -1010,7 +988,7 @@ mod tests {
             "wait_agent",
             "close_agent",
         ];
-        let available = &["apply_patch", "update_plan", "request_user_input"];
+        let available = &["apply_patch", "update_plan"];
         let context = ToolStatusListContext {
             available_model_tools: available,
             deferred_model_tools: deferred,
@@ -1051,7 +1029,7 @@ mod tests {
             "wait_agent",
             "close_agent",
         ];
-        let available = &["apply_patch", "update_plan", "request_user_input"];
+        let available = &["apply_patch", "update_plan"];
         let context = ToolStatusListContext {
             available_model_tools: available,
             disabled_model_tools: deferred,
@@ -1077,7 +1055,7 @@ mod tests {
         // (e.g. `shell` aliasing `exec_command`), the contract should
         // surface `deferred` against the alias rather than `missing`.
         let context = ToolStatusListContext {
-            available_model_tools: &["apply_patch", "update_plan", "request_user_input"],
+            available_model_tools: &["apply_patch", "update_plan"],
             deferred_model_tools: &["shell", "spawn"],
             ..ToolStatusListContext::default_for_session("coding:test")
         };
@@ -1106,7 +1084,6 @@ mod tests {
                 "exec_command",
                 "write_stdin",
                 "update_plan",
-                "request_user_input",
                 "spawn",
                 "read_task_output",
                 "send_input",

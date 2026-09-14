@@ -21,9 +21,6 @@ pub mod build_cache;
 /// `turn/steer_dropped` return (the `api` module does the sending).
 #[cfg_attr(not(feature = "api"), allow(dead_code))]
 pub(crate) mod steer_return;
-/// task-sysinfo-proc-stat-fd-budget: the one place the metrics `sysinfo::System`
-/// is constructed (handle cache off, no startup process snapshot).
-pub(crate) mod sysinfo_budget;
 /// task-interrupt-breaks-progress-wait: the standalone-turn loop's next-step
 /// race (interrupt vs progress), kept feature-independent so it is testable.
 #[cfg_attr(not(feature = "api"), allow(dead_code))]
@@ -67,7 +64,5 @@ mod qos_catalog;
 pub mod runtime;
 pub mod session_actor;
 pub mod skills_scope;
-pub mod stream_reporter;
-pub mod tools;
 #[cfg(feature = "api")]
 pub mod usage_ledger;

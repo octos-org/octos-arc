@@ -71,9 +71,6 @@ pub struct ProfileConfig {
     /// `[[mcp_servers]]` block silently never registered any tools.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_servers: Vec<octos_agent::McpServerConfig>,
-    /// Per-tenant reply-voice (TTS timbre) choice. Voice route/ASR settings stay
-    /// platform-level on the serve config; only the chosen timbre is per-user.
-    /// Applied at profile bootstrap over the shared `VoiceConfig.default_voice`
     /// Per-profile memory subsystem settings (e.g. the token budget for the
     /// memory block injected into the system prompt). `None` → defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]

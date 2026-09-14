@@ -72,8 +72,6 @@ tokio-util = { version = "0.7", optional = true }
 futures = { workspace = true, optional = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true, optional = true }
-rand = { workspace = true, optional = true }
-sysinfo = { version = "0.34", optional = true }
 redb.workspace = true
 
 [target.'cfg(unix)'.dependencies]
@@ -109,7 +107,7 @@ keyring = { workspace = true, features = ["windows-native"] }
 # chat, ACP and serve use one OUP dispatcher. Minimal library builds can opt
 # out, but never silently fall back to independent chat/ACP agent loops.
 default = ["api"]
-api = ["dep:axum", "dep:tower-http", "dep:tokio-util", "dep:futures", "dep:metrics-exporter-prometheus", "dep:rand", "dep:sysinfo", "dep:subtle"]
+api = ["dep:axum", "dep:tower-http", "dep:tokio-util", "dep:futures", "dep:metrics-exporter-prometheus", "dep:subtle"]
 git = ["octos-agent/git"]
 ast = ["octos-agent/ast"]
 

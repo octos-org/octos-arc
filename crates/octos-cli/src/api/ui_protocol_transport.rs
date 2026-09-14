@@ -11456,7 +11456,7 @@ fn ledger_event_matches_topic_scope(
     // can drop the topic suffix from `session_id` (TurnStarted,
     // MessageDelta, ToolStarted/Progress/Completed, Approval*, Task*,
     // TurnCompleted/Error/SpawnComplete, projection envelopes,
-    // FileAttached, SessionEventBridged). #1329 closes the P0-A class
+    // FileAttached). #1329 closes the P0-A class
     // routing drop: emitters populate `topic` from the upstream
     // SessionKey BEFORE any `base_key()` strip, so a topic-scoped
     // subscriber routes the event correctly even when `session_id`
@@ -24394,9 +24394,6 @@ fn ledger_event_cursor(event: &UiProtocolLedgerEvent) -> Option<UiCursor> {
             // record); kept exhaustive while the variants exist.
 
             | UiNotification::FileAttached(_)
-            // Streamed reply-audio chunks are ephemeral; their ordering lives
-            // in the segment_id/seq, not a durable ledger cursor.
-            | UiNotification::SessionEventBridged(_)
             // Wave4-A: router/queue notifications don't carry their own
             // cursor — they're stateless lifecycle pushes.
             | UiNotification::RouterStatus(_)

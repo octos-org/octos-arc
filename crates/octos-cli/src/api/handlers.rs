@@ -763,8 +763,8 @@ pub struct TopicQueryParams {
 
 // `SessionEventStreamQueryParams` and the `/api/sessions/{id}/events/stream`
 // route it served were deleted in M9-α-5/α-6 (ADR PR #830 / audit issue
-// #845). Every session-event subscriber now consumes the
-// `session/event.v1` notification on `/api/ui-protocol/ws`.
+// #845); the bridging `session/event` notification was retired with it
+// (slim round 5).
 
 fn default_page_limit() -> usize {
     100

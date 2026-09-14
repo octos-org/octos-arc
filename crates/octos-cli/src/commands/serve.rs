@@ -68,10 +68,6 @@ pub struct ServeCommand {
     #[arg(long)]
     pub model: Option<String>,
 
-    /// Auth token for API access (overrides config).
-    #[arg(long)]
-    pub auth_token: Option<String>,
-
     /// Enable the no-password "solo" login (`POST /api/auth/solo*`) for a
     /// local single-user install. OFF by default. Only honoured for direct
     /// loopback requests on a Local-mode host with profile/user stores, and
@@ -278,7 +274,7 @@ impl ServeCommand {
             })?;
         }
 
-        let (config, resolved_config_path) = if let Some(config_path) = &self.config {
+        let (config, _) = if let Some(config_path) = &self.config {
             tracing::info!(path = %config_path.display(), "loading config (--config)");
             (Config::from_file(config_path)?, Some(config_path.clone()))
         } else {
@@ -344,40 +340,6 @@ impl ServeCommand {
             };
         let metrics_handle = Some(init_metrics());
 
-        // Security: warn if binding to non-localhost without auth token
-        // Check CLI arg, then OCTOS_AUTH_TOKEN env var
-        let auth_token = if self.auth_token.is_some() {
-            self.auth_token
-        } else if let Ok(env_token) = std::env::var("OCTOS_AUTH_TOKEN") {
-            Some(env_token)
-        } else if let Some(ref cfg_token) = config.auth_token {
-            if !cfg_token.is_empty() {
-                Some(cfg_token.clone())
-            } else {
-                None
-            }
-        } else if self.host != "127.0.0.1" && self.host != "localhost" && self.host != "::1" {
-            tracing::warn!(
-                "Binding to {} without --auth-token is dangerous! \
-                 Generating a random token for this session.",
-                self.host
-            );
-            // Generate cryptographically random token
-            use rand::Rng;
-            let mut rng = rand::thread_rng();
-            let a: u64 = rng.r#gen();
-            let b: u64 = rng.r#gen();
-            let token = format!("{a:016x}{b:016x}");
-            println!(
-                "{}: {} (auto-generated, pass --auth-token to set your own)",
-                "Auth token".yellow(),
-                token
-            );
-            Some(token)
-        } else {
-            None
-        };
-
         // Initialize profile store and process manager for admin dashboard.
         // Registry (`<id>.json`) resolves from the SHARED `state_home`; the
         // per-profile `<id>/data` runtime tree roots under the per-instance
@@ -394,35 +356,6 @@ impl ServeCommand {
         // therefore a fail-closed old-version/startup condition, never an
         // excuse to append an offline snapshot behind the live cache.
 
-        // M11-F regression fix REG-4: bootstrap bundled app-skills
-        // (`crates/app-skills/`) and platform-skills (`crates/platform-
-        // skills/`) into `<octos_home>/{bundled-app-skills,platform-
-        // skills}/` so every `ProfileRuntime` we build below can scan
-        // them via `Config::plugin_dirs_from_project`. Pre-M11-F
-        // `serve.rs::try_create_agent` did this unconditionally per
-        // agent build; M11-F deleted the helper and never restored the
-        // call, so a clean install of `octos serve` came up with zero
-        // bundled skills available to `/api/chat` (weather, time, news,
-        // deep-search) and zero platform skills (voice). Doing it once
-        // at process startup matches the gateway flow and keeps the
-        // per-profile loop free of redundant disk writes.
-        if self.stdio && self.solo {
-            tracing::info!("stdio/solo: bundled app-skills and platform-skills bootstrap disabled");
-        } else {
-            octos_agent::bootstrap::bootstrap_bundled_skills(&data_dir);
-            octos_agent::bootstrap::bootstrap_platform_skills(&data_dir);
-        }
-        // Preflight: if the sibling app-skill binaries are missing beside the
-        // running `octos` executable, bootstrap silently skipped them and the
-        // affected tools (get_weather, etc.) will NOT register. Warn loudly so
-        // a bare-binary deploy is diagnosable instead of a silent plugin_count=0.
-        let missing = octos_agent::bootstrap::missing_bundled_skill_binaries();
-        if !(self.stdio && self.solo) && !missing.is_empty() {
-            tracing::warn!(
-                missing = ?missing,
-                "bundled skill binaries missing beside the octos executable — this looks like a bare-binary install; app-skill tools (get_weather, etc.) will NOT register. Deploy the full bundle (scripts/build-local-bundle.sh / scripts/install.sh), not just the octos binary."
-            );
-        }
         // M11-D — build the per-profile runtime catalog. For every
         // enabled profile that has an active primary LLM selection,
         // call `ProfileRuntime::bootstrap` and stash the resulting
@@ -502,14 +435,6 @@ impl ServeCommand {
 
         // Spawn auth cleanup task if auth manager is active
 
-        // F-005: Wire the credential pool at startup. Absent config →
-        // stays `None` so the session actor falls back to the legacy
-        // single-credential flow.
-        let credential_pool_init =
-            super::build_credential_pool(config.credential_pool.as_ref(), &data_dir);
-
-        let harness_sink_init = std::env::var("OCTOS_HARNESS_EVENT_SINK").ok();
-
         // Issue #1001 follow-up: in-memory signed-preview token cache.
         // Issue #1009: construct the cache first so we can spawn the
         // background sweeper and own the resulting handle inside
@@ -564,33 +489,14 @@ impl ServeCommand {
             profile_skill_mutation_locks: Arc::new(crate::api::ProfileSkillMutationLocks::new()),
             sessions,
             started_at: chrono::Utc::now(),
-            auth_token,
             metrics_handle,
             profile_store: Some(profile_store.clone()),
-            http_client: reqwest::Client::new(),
-            // If a config file was loaded, admin edits target that exact file.
-            // If none existed at startup, fall back to THIS serve's resolved
-            // config_home (which already accounts for the `--data-dir` FLAG —
-            // not just env), so admin writes under `serve --data-dir T` land in
-            // `T/config.json`, not a recomputed XDG path. (admin_setup's own
-            // None branch can't see the CLI flag; this closes that leak.)
-            config_path: resolved_config_path.or_else(|| Some(ctx.config_home.join("config.json"))),
-            // task-sysinfo-proc-stat-fd-budget: no startup process snapshot,
-            // no retained /proc handles (see sysinfo_budget).
-            sysinfo: tokio::sync::Mutex::new(crate::sysinfo_budget::new_metrics_system()),
             appui_allowed_origins,
             host_memory: config.memory.clone(),
             solo_login_enabled: solo_login_enabled_flag,
             dangerous_default_permissions: dangerous_default_permissions_flag,
             default_network_denied: default_network_denied_flag,
             llm_compaction: self.llm_compaction,
-            // Harness JSONL event sink — wired from the
-            // `OCTOS_HARNESS_EVENT_SINK` env var when the caller wants
-            // review decisions and swarm dispatch events persisted (see
-            // `/api/events/harness`). `None` keeps the pre-M7.6
-            // behaviour of broadcast-only.
-            harness_event_sink_path: harness_sink_init,
-            credential_pool: credential_pool_init,
             // HTTP/gateway serve: session actors live in gateway
             // processes, so `task_query_store` stays `None` and the
             // cancel/restart handlers proxy via `resolve_api_port` (the

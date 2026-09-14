@@ -49,7 +49,7 @@
 //! closed (503) on an unregistered profile — there is no server-
 //! wide agent fallback. Gateway layers its gateway-specific
 //! composition (`SwappableProvider`, `provider_router`,
-//! `SwitchModelTool`, admin tools, auto-defer, `pipeline_factory`)
+//! admin tools, auto-defer, `pipeline_factory`)
 //! on top of the profile runtime; nothing duplicates the LLM/
 //! credentials/skills/plugin/registry assembly the runtime owns.
 

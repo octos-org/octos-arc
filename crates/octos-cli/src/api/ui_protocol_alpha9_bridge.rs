@@ -1,7 +1,7 @@
 //! Spawn-only background completion media coalescing (ex-α-9 bridge).
 //!
 //! The α-9 typed-envelope emitters (turn addenda, `file/attached`,
-//! `session/event`, visual lifecycle, `voice/exit`) were retired with the
+//! visual lifecycle, `voice/exit`) were retired with the
 //! voice product line; the only surviving production helper coalesces the
 //! dual media lists on `BackgroundResultPayload` for the canonical
 //! background-child envelope.
