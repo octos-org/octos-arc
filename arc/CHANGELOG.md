@@ -524,3 +524,31 @@ placeholder (was a fixed /login|/register|/logout list).
 - [✔] Acceptance/robustness probes: /favicon.ico + unknown path/API are browser/grader facts, not task facts.
 - [✔] Local parity: prompts render for Counter/Dice/Evolution/TB offline (1,940 / 1,577 / 2,521 / 14,791 chars,
   ports clause only where a spec names a port); unit tests 79 OK. Live runs 未评测 (key reserved for keep).
+
+## Round 30 — existing app that satisfies no spec → fresh build; codegen effort by spec size
+
+Cloud (octos account, main@032a57ac): Evolution counter c30b29eab45b 2/2 ¥0.209 / 202 s, dice 10b04d36f704
+2/2 ¥0.368 / 279 s (personal account same package: ¥0.0044). The template handed to that account is the
+platform's React/Vite/Express/SQLite scaffold with a placeholder home page (template.yaml `web-react-express`),
+not a working app: the probe found 0/1 for every node, the flow still treated it as evolution (implement on
+top of the scaffold, then rewrite → multi-request).
+
+Generic rule (no template names involved): if the probe ran and NO node's specs pass against the existing app
+(placeholder page, scaffold that does not build/start, or an app the new specs no longer accept), the app is
+not a usable base → frontend/ and backend/ move to `.arc/template-discarded/` and the task is built fresh
+(single-request codegen per node with our manifests). A real previous app keeps the probe/1-request path.
+
+Codegen effort is now derived from spec size (`OCTOS_ARC_CODEGEN_REASONING_CHARS`, default 5000): specs
+below it get reasoning none and the compact size rule; larger specs (e.g. multi-page apps with sessions) keep
+the base mode and the multi-page mechanisms. Previously both hinged on node count, so a 2-node counter tree
+paid 4.4k reasoning tokens and got navigation/cookie mechanisms that crowded out the page script (first
+pass 0/1).
+
+| scenario (local) | before | after |
+|---|---|---|
+| Evolution counter, placeholder template | evolution path, implement + rewrite (cloud ¥0.21–0.37) | fresh build, 2 requests, 1,283 / 713 = 1,996 tokens, 2/2, grade 100 |
+| Evolution counter, real template (no snapshot) | 1 request 976 | 1 request 799 / 379 = 1,178, 2/2, grade 100 |
+| Dice | 743 tokens | 743 tokens, 1/1, grade 100 |
+
+Generality check: decision derived from probe results only; thresholds from spec size; no task/template
+names. Cloud: 未评测.
