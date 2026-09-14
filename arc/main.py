@@ -2060,13 +2060,15 @@ class Flow:
         rounds = int(os.environ.get("OCTOS_FINAL_REPAIR_ROUNDS", "2"))
         workers = workers_for_final(getattr(self, "mem_limit", None), int(os.environ.get("OCTOS_ARC_FINAL_WORKERS", "4")))
         previous_failing: set[str] | None = None
+        best: dict | None = None  # L17: best full-suite round (passed, sha, summary, grouped)
+        last_passed = -1
         for attempt in range(rounds + 1):
             summary = self.run_specs(all_specs, workers=workers, grader_like=True)
             if summary.error and summary.killed:
                 # Cloud 29c840566f36: the runner was OOM-killed under a 512 MiB
                 # cgroup; two repair rounds were wasted on a non-failure.
                 log(f"[acceptance] full suite could not run ({summary.error[:120]}); keeping per-node verdicts")
-                return
+                break
             if summary.error:
                 # The app does not even start the way the grader starts it: every node fails.
                 log(f"[acceptance] full suite (grader-like start) failed: {summary.error[:300]}")
@@ -2082,11 +2084,12 @@ class Flow:
                 failures = failure_summaries(RunSummary(results=[r for rs in grouped.values() for r in rs]))
             log(f"[acceptance] full suite round {attempt}: {summary.passed}/{summary.total}; failing nodes "
                 f"{sorted(k for k in grouped if k) or ('all' if None in grouped and not summary.results else [])}")
-            for node_id, specs in self.spec_map.items():
-                if node_id and specs and summary.results:
-                    self.record_tests(node_id, specs, RunSummary(results=[r for r in summary.results
-                                      if Path(r.file or "").name in {Path(p).name for p in specs}]))
-                    self.test_verdict[node_id] = node_id not in grouped
+            self.record_full_suite(summary, grouped)
+            last_passed = summary.passed
+            if best is None or summary.passed > best["passed"]:
+                if attempt > 0:
+                    self.commit(f"chore: full acceptance suite {summary.passed}/{summary.total} (best so far)")
+                best = {"passed": summary.passed, "sha": self.head(), "summary": summary, "grouped": grouped}
             if not grouped:
                 self.commit(f"chore: full acceptance suite {summary.passed}/{summary.total} pass (parallel)")
                 return
@@ -2109,6 +2112,20 @@ class Flow:
             self.turn(prompt, min(self.node_timeout, max(120, self.remaining() - 200)),
                       f"full-suite repair {attempt + 1}/{rounds}")
             self.commit(f"fix: full-suite repair {attempt + 1}")
+        # L17 (ported from the Rust harness): deliver the best full-suite round, not the last one.
+        if best is not None and best["sha"] and last_passed < best["passed"] and self.head() != best["sha"]:
+            log(f"[acceptance] full suite: last round {last_passed} < best {best['passed']}; restoring the best state")
+            self.restore_app(best["sha"])
+            self.record_full_suite(best["summary"], best["grouped"])
+            self.commit(f"chore: keep best full-suite state {best['passed']}/{best['summary'].total}")
+
+    def record_full_suite(self, summary: RunSummary, grouped: dict) -> None:
+        """Per-node verdicts and traceability from one full-suite round."""
+        for node_id, specs in self.spec_map.items():
+            if node_id and specs and summary.results:
+                self.record_tests(node_id, specs, RunSummary(results=[r for r in summary.results
+                                  if Path(r.file or "").name in {Path(p).name for p in specs}]))
+                self.test_verdict[node_id] = node_id not in grouped
 
     # -- skeleton ---------------------------------------------------------
     def skeleton(self, tree: dict) -> None:

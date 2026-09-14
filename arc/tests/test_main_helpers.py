@@ -389,3 +389,58 @@ class RelevantSourcesTests(unittest.TestCase):
         finally:
             del os.environ["OCTOS_ARC_CODEGEN_MAX_NODES"]
         self.assertTrue(flow.codegen_context_fits("x" * 20000)); self.assertFalse(flow.codegen_context_fits("x" * 60000))
+
+
+class FinalSuiteBestRoundTests(unittest.TestCase):
+    """L17 port: the final suite delivers the best round. Simulated with stubbed test runs."""
+    def _flow(self, rounds_results):
+        import argparse, tempfile
+        from pathlib import Path
+        from types import SimpleNamespace
+        from acceptance import RunSummary, TestOutcome
+        root = Path(tempfile.mkdtemp()); (root / "t").mkdir()
+        for n in ("REQ-1", "REQ-2"):
+            (root / "t" / f"{n}.spec.ts").write_text("x")
+        flow = m.Flow(argparse.Namespace(web_port=1), root, root)
+        flow.tests_dir = root / "t"; flow.spec_map = {"REQ-1": ["REQ-1.spec.ts"], "REQ-2": ["REQ-2.spec.ts"], None: []}
+        flow.runner = object(); flow.test_verdict = {"REQ-1": False}
+        flow.heads = iter(["sha0", "sha1", "sha2"]); flow.restored = []; flow.commits = []
+        it = iter(rounds_results)
+        def run_specs(specs, workers=None, grader_like=False):
+            passed = next(it)
+            results = [TestOutcome(title=f"{n} t", ok=i < passed, status="passed" if i < passed else "failed", duration_ms=1,
+                                   file=f"{n}.spec.ts") for i, n in enumerate(["REQ-1", "REQ-2"])]
+            return RunSummary(passed=passed, total=2, results=results)
+        flow.run_specs = run_specs
+        flow.head = lambda: getattr(flow, "_head", "sha0")
+        flow.commit = lambda msg: (flow.commits.append(msg), setattr(flow, "_head", f"sha{len(flow.commits)}"))[1] or True
+        flow.restore_app = lambda sha: flow.restored.append(sha)
+        flow.turn = lambda *a, **k: (True, "repaired")
+        flow.record_tests = lambda *a, **k: None
+        flow.remaining = lambda: 10_000
+        flow.wound_down = lambda: False
+        flow.sources_text = lambda: ""; flow.corrections_text = lambda: ""
+        return flow
+
+    def test_should_restore_best_state_after_regressing_repairs(self):
+        import os
+        os.environ["OCTOS_FINAL_REPAIR_ROUNDS"] = "2"
+        try:
+            flow = self._flow([1, 0, 0])
+            flow.final_acceptance()
+        finally:
+            del os.environ["OCTOS_FINAL_REPAIR_ROUNDS"]
+        # round 0 (1/2) is best at sha0; repairs regress to 0/2 twice (identical failures stop) -> restore sha0
+        self.assertEqual(flow.restored, ["sha0"])
+        self.assertTrue(flow.test_verdict["REQ-1"]); self.assertFalse(flow.test_verdict["REQ-2"])
+
+    def test_should_not_restore_when_last_round_is_best(self):
+        import os
+        os.environ["OCTOS_FINAL_REPAIR_ROUNDS"] = "1"
+        try:
+            flow = self._flow([0, 1])
+            flow.final_acceptance()
+        finally:
+            del os.environ["OCTOS_FINAL_REPAIR_ROUNDS"]
+        self.assertEqual(flow.restored, [])
+        self.assertTrue(flow.test_verdict["REQ-1"])

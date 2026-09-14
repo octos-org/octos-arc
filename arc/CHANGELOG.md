@@ -661,3 +661,17 @@ server.js + app.js + index.html + build.js (≈72k chars ≈ 21k tokens), no omi
 skeleton skipped, every node one codegen request, final suite + rehearsal reached, exit 0.
 Expected per node: 1–3 requests (≤5 target) instead of 36; cost dominated by input ≈ ¥0.05–0.15.
 Generality: selection by spec-term overlap and size only; no task names. Cloud: 未评测. Unit tests 99 OK.
+
+## Round 36 (phase 3 §1.3) — L17 ported: the final suite delivers its best round
+
+The full-suite loop now records each round's pass count with the commit it tested (a new best after a repair
+is committed as "best so far"). When the loop ends — repair rounds exhausted, identical failures, time or
+cost guard — on a round worse than the best, frontend/ and backend/ are restored to the best commit and the
+per-node verdicts and traceability are re-recorded from that round's results (`record_full_suite`). Ported
+from the Rust harness's L17 (docs/arc-optimizations.md); before, a regressing full-suite repair shipped as-is.
+Rehearsal/grading parity: the full suite already runs grader-like with `workers_for_final` (450 MiB per
+worker → 4 under 2 GiB, matching `--workers=4`), 10 s test budget, 3 s slow-test threshold (round 28 / PR 81).
+
+Verified by simulated rounds (1/2 → 0/2 → 0/2 restores the 1/2 state and its verdicts; 0/2 → 2/2 keeps the last
+round) and a TB dry run through the full-suite path. Generality: pure loop logic, no task content.
+Cloud: 未评测 (needs a TB gap). Unit tests 105 OK.
