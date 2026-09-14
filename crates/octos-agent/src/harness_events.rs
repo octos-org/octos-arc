@@ -20,7 +20,6 @@ use tracing::warn;
 use crate::abi_schema::{
     COST_ATTRIBUTION_SCHEMA_VERSION, HARNESS_ERROR_SCHEMA_VERSION,
     HARNESS_PROGRESS_EVENT_SCHEMA_VERSION, SUB_AGENT_DISPATCH_SCHEMA_VERSION,
-    SWARM_DISPATCH_SCHEMA_VERSION, SWARM_REVIEW_DECISION_SCHEMA_VERSION,
 };
 use crate::harness_errors::HarnessErrorEvent;
 use crate::task_supervisor::TaskSupervisor;
@@ -55,20 +54,12 @@ fn default_sub_agent_dispatch_schema_version() -> u32 {
     SUB_AGENT_DISPATCH_SCHEMA_VERSION
 }
 
-fn default_swarm_dispatch_schema_version() -> u32 {
-    SWARM_DISPATCH_SCHEMA_VERSION
-}
-
 fn default_cost_attribution_schema_version() -> u32 {
     COST_ATTRIBUTION_SCHEMA_VERSION
 }
 
 fn default_harness_progress_event_schema_version() -> u32 {
     HARNESS_PROGRESS_EVENT_SCHEMA_VERSION
-}
-
-fn default_swarm_review_decision_schema_version() -> u32 {
-    SWARM_REVIEW_DECISION_SCHEMA_VERSION
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -374,10 +365,6 @@ pub enum HarnessEventPayload {
         #[serde(flatten)]
         data: HarnessPhaseEvent,
     },
-    Artifact {
-        #[serde(flatten)]
-        data: HarnessArtifactEvent,
-    },
     ValidatorResult {
         #[serde(flatten)]
         data: HarnessValidatorResultEvent,
@@ -403,44 +390,13 @@ pub enum HarnessEventPayload {
         #[serde(flatten)]
         data: HarnessSubAgentDispatchEvent,
     },
-    SwarmDispatch {
-        #[serde(flatten)]
-        data: HarnessSwarmDispatchEvent,
-    },
-    /// Supervisor review outcome for a completed swarm dispatch (M7.6).
-    ///
-    /// Emitted when the contract-authoring dashboard's review gate
-    /// accepts or rejects a finalized `SwarmResult`. Typed so the
-    /// provenance ledger, archive, and Matrix audit stream all see the
-    /// same decision without re-parsing free-form JSON.
-    SwarmReviewDecision {
-        #[serde(flatten)]
-        data: HarnessSwarmReviewDecisionEvent,
-    },
     CostAttribution {
         #[serde(flatten)]
         data: HarnessCostAttributionEvent,
     },
-    /// Content-classified smart routing decision (M6.6).
-    ///
-    /// Emitted once per chat turn, before the adaptive router picks a lane.
-    /// Contract: `octos.harness.event.v1 { kind: "routing.decision", tier, reasons }`.
-    #[serde(rename = "routing.decision")]
-    RoutingDecision {
-        #[serde(flatten)]
-        data: HarnessRoutingDecisionEvent,
-    },
     CredentialRotation {
         #[serde(flatten)]
         data: HarnessCredentialRotationEvent,
-    },
-    /// Emitted once per session load after [`octos_bus::ResumePolicy`] runs
-    /// (M8.6). Carries a typed report so operators can see what the
-    /// sanitizer dropped and whether the worktree (if any) was still
-    /// present on disk.
-    SessionSanitized {
-        #[serde(flatten)]
-        data: HarnessSessionSanitizedEvent,
     },
     /// Periodic progress summary emitted by the `AgentSummaryGenerator`
     /// (M8.7). Produced every `tick` seconds while a spawn_only sub-agent
@@ -492,23 +448,6 @@ pub struct HarnessPhaseEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct HarnessArtifactEvent {
-    pub session_id: String,
-    pub task_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workflow: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub phase: Option<String>,
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-    #[serde(flatten)]
-    pub extra: HashMap<String, Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HarnessValidatorResultEvent {
     #[serde(default = "default_validator_result_schema_version")]
     pub schema_version: u32,
@@ -553,84 +492,6 @@ pub struct HarnessFailureEvent {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retryable: Option<bool>,
-    #[serde(flatten)]
-    pub extra: HashMap<String, Value>,
-}
-
-/// Typed payload emitted when the `octos-swarm` primitive dispatches a
-/// batch of contracts to MCP-backed sub-agents. Supervisors consume
-/// these events to render live swarm state and drive re-dispatch on
-/// partial failure.
-///
-/// The schema is versioned so downstream tooling can reject unknown
-/// variants instead of silently dropping fields.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct HarnessSwarmDispatchEvent {
-    #[serde(default = "default_swarm_dispatch_schema_version")]
-    pub schema_version: u32,
-    pub session_id: String,
-    pub task_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workflow: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub phase: Option<String>,
-    /// Stable dispatch identifier — persists across process restart so
-    /// the primitive can reload state and resume.
-    pub dispatch_id: String,
-    /// Topology label: `"parallel"` / `"sequential"` / `"pipeline"` /
-    /// `"fanout"`. Stable metric cardinality.
-    pub topology: String,
-    /// Aggregate outcome label: `"success"` / `"partial"` / `"failed"` /
-    /// `"aborted"`.
-    pub outcome: String,
-    /// Number of sub-contracts issued at dispatch time.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub total_subtasks: Option<u32>,
-    /// How many of them reached a successful terminal state.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub completed_subtasks: Option<u32>,
-    /// Retry round index (0 = first round). Bounded by the primitive's
-    /// MAX_RETRY_ROUNDS constant.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub retry_round: Option<u32>,
-    /// Optional human-readable error message for non-success outcomes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-    #[serde(flatten)]
-    pub extra: HashMap<String, Value>,
-}
-
-/// Supervisor decision event emitted by the M7.6 review gate. Captures
-/// whether the reviewer accepted or rejected a finalized swarm dispatch,
-/// who reviewed it, and optional freeform notes. Downstream tooling
-/// (Matrix audit, ledger archive, operator summary) reads the typed
-/// variant so the decision never round-trips through stringly-typed JSON.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct HarnessSwarmReviewDecisionEvent {
-    #[serde(default = "default_swarm_review_decision_schema_version")]
-    pub schema_version: u32,
-    pub session_id: String,
-    pub task_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workflow: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub phase: Option<String>,
-    /// Dispatch id the review applies to. Matches the
-    /// [`HarnessSwarmDispatchEvent::dispatch_id`] the primitive emits
-    /// when the swarm finalises.
-    pub dispatch_id: String,
-    /// `true` when the reviewer accepted the aggregate artifact. `false`
-    /// routes the dispatch back to the supervisor for re-contract or
-    /// abandonment.
-    pub accepted: bool,
-    /// Stable identifier of the reviewer (user id, email, Matrix handle).
-    /// Kept short enough to fit the session_id bound.
-    pub reviewer: String,
-    /// Optional free-form notes. Bounded to
-    /// [`MAX_MESSAGE_BYTES`](crate::harness_events::MAX_HARNESS_EVENT_LINE_BYTES)
-    /// so a single review cannot blow the event line limit.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub notes: Option<String>,
     #[serde(flatten)]
     pub extra: HashMap<String, Value>,
 }
@@ -714,76 +575,6 @@ pub struct HarnessCostAttributionEvent {
     /// Dispatch outcome echoed from the originating
     /// [`HarnessSubAgentDispatchEvent::outcome`].
     pub outcome: String,
-    #[serde(flatten)]
-    pub extra: HashMap<String, Value>,
-}
-
-/// Content-classified smart routing decision payload (M6.6).
-///
-/// Emitted once per chat turn with the classifier's tier choice and the
-/// reasons that drove it. Useful for dashboards, A/B evaluation, and
-/// debugging mis-classification.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct HarnessRoutingDecisionEvent {
-    pub session_id: String,
-    pub task_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workflow: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub phase: Option<String>,
-    /// Lowercase tier label: `"cheap"` or `"strong"`.
-    pub tier: String,
-    /// Optional lane hint (set by M6.5 credential-pool-aware selection).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lane: Option<String>,
-    /// Ordered reasons (`"code_fence"`, `"keyword:debug"`, ...).
-    #[serde(default)]
-    pub reasons: Vec<String>,
-    /// Classified input length in chars.
-    #[serde(default)]
-    pub input_chars: usize,
-    #[serde(flatten)]
-    pub extra: HashMap<String, Value>,
-}
-
-/// Typed payload emitted when [`octos_bus::ResumePolicy`] sanitizes a
-/// session transcript on load (M8.6).
-///
-/// The report fields mirror [`octos_bus::SessionSanitizeReport`] one-for-
-/// one so operators can build dashboards without joining against a raw
-/// log. `worktree_missing` is a hard signal that the sub-agent's git
-/// worktree was cleaned up externally (Claude Code issue #22355) — the
-/// caller should refuse to resume and start a fresh session instead.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct HarnessSessionSanitizedEvent {
-    pub session_id: String,
-    pub task_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workflow: Option<String>,
-    /// Messages loaded from JSONL before any filter ran.
-    pub input_len: usize,
-    /// Messages remaining after all 4 filter passes.
-    pub output_len: usize,
-    /// Tool-call assistant messages whose ids lacked matching results and
-    /// were not pinned by retry state.
-    #[serde(default)]
-    pub unresolved_tool_uses_dropped: usize,
-    /// Assistant messages with reasoning but no content or tool calls
-    /// (non-tail only).
-    #[serde(default)]
-    pub orphan_thinking_dropped: usize,
-    /// Assistant messages with whitespace-only content.
-    #[serde(default)]
-    pub whitespace_only_dropped: usize,
-    /// Count of [`octos_bus::ReplacementStateRef`] entries recovered.
-    #[serde(default)]
-    pub content_replacements_restored: usize,
-    /// `true` when `workspace_root` was provided and missing on disk.
-    #[serde(default)]
-    pub worktree_missing: bool,
-    /// Non-fatal diagnostics from the policy. Order-preserving.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub warnings: Vec<String>,
     #[serde(flatten)]
     pub extra: HashMap<String, Value>,
 }
@@ -904,25 +695,6 @@ impl HarnessEvent {
         }
     }
 
-    /// Convenience builder for a `SwarmDispatch` event. Takes a
-    /// pre-populated [`HarnessSwarmDispatchEvent`] so callers pay the
-    /// construction cost once and this helper stays below clippy's
-    /// argument limit.
-    pub fn swarm_dispatch(data: HarnessSwarmDispatchEvent) -> Self {
-        Self {
-            schema: HARNESS_EVENT_SCHEMA_V1.to_string(),
-            payload: HarnessEventPayload::SwarmDispatch { data },
-        }
-    }
-
-    /// Convenience builder for a `SwarmReviewDecision` event (M7.6).
-    pub fn swarm_review_decision(data: HarnessSwarmReviewDecisionEvent) -> Self {
-        Self {
-            schema: HARNESS_EVENT_SCHEMA_V1.to_string(),
-            payload: HarnessEventPayload::SwarmReviewDecision { data },
-        }
-    }
-
     /// Convenience builder for a `CostAttribution` event.
     pub fn cost_attribution(data: HarnessCostAttributionEvent) -> Self {
         Self {
@@ -976,64 +748,6 @@ impl HarnessEvent {
                     outcome: outcome.into(),
                     contract: contract.map(Into::into),
                     error: error.map(Into::into),
-                    extra: HashMap::new(),
-                },
-            },
-        }
-    }
-
-    /// Build a `routing.decision` event for the content-classified smart router (M6.6).
-    pub fn routing_decision(
-        session_id: impl Into<String>,
-        task_id: impl Into<String>,
-        workflow: Option<impl Into<String>>,
-        tier: impl Into<String>,
-        reasons: Vec<String>,
-        input_chars: usize,
-    ) -> Self {
-        Self {
-            schema: HARNESS_EVENT_SCHEMA_V1.to_string(),
-            payload: HarnessEventPayload::RoutingDecision {
-                data: HarnessRoutingDecisionEvent {
-                    session_id: session_id.into(),
-                    task_id: task_id.into(),
-                    workflow: workflow.map(Into::into),
-                    phase: None,
-                    tier: tier.into(),
-                    lane: None,
-                    reasons,
-                    input_chars,
-                    extra: HashMap::new(),
-                },
-            },
-        }
-    }
-
-    /// Construct a `SessionSanitized` event from a
-    /// [`octos_bus::SessionSanitizeReport`] (M8.6). The caller supplies
-    /// session_id/task_id/workflow from its runtime context; the rest of
-    /// the fields come straight from the report.
-    pub fn session_sanitized(
-        session_id: impl Into<String>,
-        task_id: impl Into<String>,
-        workflow: Option<impl Into<String>>,
-        report: &octos_bus::SessionSanitizeReport,
-    ) -> Self {
-        Self {
-            schema: HARNESS_EVENT_SCHEMA_V1.to_string(),
-            payload: HarnessEventPayload::SessionSanitized {
-                data: HarnessSessionSanitizedEvent {
-                    session_id: session_id.into(),
-                    task_id: task_id.into(),
-                    workflow: workflow.map(Into::into),
-                    input_len: report.input_len,
-                    output_len: report.output_len,
-                    unresolved_tool_uses_dropped: report.unresolved_tool_uses_dropped,
-                    orphan_thinking_dropped: report.orphan_thinking_dropped,
-                    whitespace_only_dropped: report.whitespace_only_dropped,
-                    content_replacements_restored: report.content_replacements_restored,
-                    worktree_missing: report.worktree_missing,
-                    warnings: report.warnings.clone(),
                     extra: HashMap::new(),
                 },
             },
@@ -1129,16 +843,6 @@ impl HarnessEvent {
                 validate_phase(&data.phase)?;
                 validate_optional_message(data.message.as_deref())?;
             }
-            HarnessEventPayload::Artifact { data } => {
-                validate_common_ids(&data.session_id, &data.task_id)?;
-                validate_optional_name("workflow", data.workflow.as_deref(), MAX_WORKFLOW_BYTES)?;
-                validate_optional_name("phase", data.phase.as_deref(), MAX_PHASE_BYTES)?;
-                validate_bounded("artifact name", &data.name, MAX_MESSAGE_BYTES)?;
-                validate_optional_message(data.message.as_deref())?;
-                if let Some(path) = data.path.as_deref() {
-                    validate_bounded("artifact path", path, MAX_MESSAGE_BYTES)?;
-                }
-            }
             HarnessEventPayload::ValidatorResult { data } => {
                 if data.schema_version > VALIDATOR_RESULT_SCHEMA_VERSION {
                     return Err(HarnessEventError(format!(
@@ -1190,37 +894,6 @@ impl HarnessEvent {
                 validate_bounded("sub-agent outcome", &data.outcome, MAX_MESSAGE_BYTES)?;
                 validate_optional_message(data.message.as_deref())?;
             }
-            HarnessEventPayload::SwarmDispatch { data } => {
-                if data.schema_version > SWARM_DISPATCH_SCHEMA_VERSION {
-                    return Err(HarnessEventError(format!(
-                        "unsupported swarm dispatch schema_version {} (max supported: {})",
-                        data.schema_version, SWARM_DISPATCH_SCHEMA_VERSION
-                    )));
-                }
-                validate_common_ids(&data.session_id, &data.task_id)?;
-                validate_optional_name("workflow", data.workflow.as_deref(), MAX_WORKFLOW_BYTES)?;
-                validate_optional_name("phase", data.phase.as_deref(), MAX_PHASE_BYTES)?;
-                validate_bounded("swarm dispatch_id", &data.dispatch_id, MAX_MESSAGE_BYTES)?;
-                validate_bounded("swarm topology", &data.topology, MAX_MESSAGE_BYTES)?;
-                validate_bounded("swarm outcome", &data.outcome, MAX_MESSAGE_BYTES)?;
-                validate_optional_message(data.message.as_deref())?;
-            }
-            HarnessEventPayload::SwarmReviewDecision { data } => {
-                if data.schema_version > SWARM_REVIEW_DECISION_SCHEMA_VERSION {
-                    return Err(HarnessEventError(format!(
-                        "unsupported swarm review decision schema_version {} (max supported: {})",
-                        data.schema_version, SWARM_REVIEW_DECISION_SCHEMA_VERSION
-                    )));
-                }
-                validate_common_ids(&data.session_id, &data.task_id)?;
-                validate_optional_name("workflow", data.workflow.as_deref(), MAX_WORKFLOW_BYTES)?;
-                validate_optional_name("phase", data.phase.as_deref(), MAX_PHASE_BYTES)?;
-                validate_bounded("review dispatch_id", &data.dispatch_id, MAX_MESSAGE_BYTES)?;
-                validate_bounded("reviewer", &data.reviewer, MAX_SESSION_ID_BYTES)?;
-                if let Some(notes) = data.notes.as_deref() {
-                    validate_bounded("review notes", notes, MAX_MESSAGE_BYTES)?;
-                }
-            }
             HarnessEventPayload::CostAttribution { data } => {
                 if data.schema_version > COST_ATTRIBUTION_SCHEMA_VERSION {
                     return Err(HarnessEventError(format!(
@@ -1248,16 +921,6 @@ impl HarnessEvent {
                     )));
                 }
             }
-            HarnessEventPayload::RoutingDecision { data } => {
-                validate_common_ids(&data.session_id, &data.task_id)?;
-                validate_optional_name("workflow", data.workflow.as_deref(), MAX_WORKFLOW_BYTES)?;
-                validate_optional_name("phase", data.phase.as_deref(), MAX_PHASE_BYTES)?;
-                validate_bounded("tier", &data.tier, MAX_PHASE_BYTES)?;
-                validate_optional_name("lane", data.lane.as_deref(), MAX_PHASE_BYTES)?;
-                for reason in &data.reasons {
-                    validate_bounded("reason", reason, MAX_MESSAGE_BYTES)?;
-                }
-            }
             HarnessEventPayload::CredentialRotation { data } => {
                 validate_common_ids(&data.session_id, &data.task_id)?;
                 validate_bounded(
@@ -1267,13 +930,6 @@ impl HarnessEvent {
                 )?;
                 validate_bounded("reason", &data.reason, MAX_PHASE_BYTES)?;
                 validate_bounded("strategy", &data.strategy, MAX_PHASE_BYTES)?;
-            }
-            HarnessEventPayload::SessionSanitized { data } => {
-                validate_common_ids(&data.session_id, &data.task_id)?;
-                validate_optional_name("workflow", data.workflow.as_deref(), MAX_WORKFLOW_BYTES)?;
-                for warning in &data.warnings {
-                    validate_bounded("warning", warning, MAX_MESSAGE_BYTES)?;
-                }
             }
             HarnessEventPayload::SubagentProgress { data } => {
                 validate_common_ids(&data.session_id, &data.task_id)?;
@@ -1351,23 +1007,6 @@ impl HarnessEvent {
                     "current_phase": current_phase,
                     "message": message,
                     "progress_message": message,
-                })
-            }
-            HarnessEventPayload::Artifact { data } => {
-                let workflow = data.workflow.as_deref().or(fallback_workflow_kind);
-                let current_phase = data.phase.as_deref().or(fallback_current_phase);
-                serde_json::json!({
-                    "schema": self.schema,
-                    "kind": "artifact",
-                    "session_id": data.session_id,
-                    "task_id": data.task_id,
-                    "workflow": workflow,
-                    "workflow_kind": workflow,
-                    "phase": data.phase,
-                    "current_phase": current_phase,
-                    "artifact_name": data.name,
-                    "artifact_path": data.path,
-                    "message": data.message,
                 })
             }
             HarnessEventPayload::ValidatorResult { data } => {
@@ -1454,47 +1093,6 @@ impl HarnessEvent {
                     "message": data.message,
                 })
             }
-            HarnessEventPayload::SwarmDispatch { data } => {
-                let workflow = data.workflow.as_deref().or(fallback_workflow_kind);
-                let current_phase = data.phase.as_deref().or(fallback_current_phase);
-                serde_json::json!({
-                    "schema": self.schema,
-                    "schema_version": data.schema_version,
-                    "kind": "swarm_dispatch",
-                    "session_id": data.session_id,
-                    "task_id": data.task_id,
-                    "workflow": workflow,
-                    "workflow_kind": workflow,
-                    "phase": data.phase,
-                    "current_phase": current_phase,
-                    "dispatch_id": data.dispatch_id,
-                    "topology": data.topology,
-                    "outcome": data.outcome,
-                    "total_subtasks": data.total_subtasks,
-                    "completed_subtasks": data.completed_subtasks,
-                    "retry_round": data.retry_round,
-                    "message": data.message,
-                })
-            }
-            HarnessEventPayload::SwarmReviewDecision { data } => {
-                let workflow = data.workflow.as_deref().or(fallback_workflow_kind);
-                let current_phase = data.phase.as_deref().or(fallback_current_phase);
-                serde_json::json!({
-                    "schema": self.schema,
-                    "schema_version": data.schema_version,
-                    "kind": "swarm_review_decision",
-                    "session_id": data.session_id,
-                    "task_id": data.task_id,
-                    "workflow": workflow,
-                    "workflow_kind": workflow,
-                    "phase": data.phase,
-                    "current_phase": current_phase,
-                    "dispatch_id": data.dispatch_id,
-                    "accepted": data.accepted,
-                    "reviewer": data.reviewer,
-                    "notes": data.notes,
-                })
-            }
             HarnessEventPayload::CostAttribution { data } => {
                 let workflow = data.workflow.as_deref().or(fallback_workflow_kind);
                 let current_phase = data.phase.as_deref().or(fallback_current_phase);
@@ -1517,24 +1115,6 @@ impl HarnessEvent {
                     "outcome": data.outcome,
                 })
             }
-            HarnessEventPayload::RoutingDecision { data } => {
-                let workflow = data.workflow.as_deref().or(fallback_workflow_kind);
-                let current_phase = data.phase.as_deref().or(fallback_current_phase);
-                serde_json::json!({
-                    "schema": self.schema,
-                    "kind": "routing.decision",
-                    "session_id": data.session_id,
-                    "task_id": data.task_id,
-                    "workflow": workflow,
-                    "workflow_kind": workflow,
-                    "phase": data.phase,
-                    "current_phase": current_phase,
-                    "tier": data.tier,
-                    "lane": data.lane,
-                    "reasons": data.reasons,
-                    "input_chars": data.input_chars,
-                })
-            }
             HarnessEventPayload::CredentialRotation { data } => {
                 serde_json::json!({
                     "schema": self.schema,
@@ -1544,26 +1124,6 @@ impl HarnessEvent {
                     "credential_id": data.credential_id,
                     "reason": data.reason,
                     "strategy": data.strategy,
-                })
-            }
-            HarnessEventPayload::SessionSanitized { data } => {
-                let workflow = data.workflow.as_deref().or(fallback_workflow_kind);
-                serde_json::json!({
-                    "schema": self.schema,
-                    "kind": "session_sanitized",
-                    "session_id": data.session_id,
-                    "task_id": data.task_id,
-                    "workflow": workflow,
-                    "workflow_kind": workflow,
-                    "current_phase": fallback_current_phase,
-                    "input_len": data.input_len,
-                    "output_len": data.output_len,
-                    "unresolved_tool_uses_dropped": data.unresolved_tool_uses_dropped,
-                    "orphan_thinking_dropped": data.orphan_thinking_dropped,
-                    "whitespace_only_dropped": data.whitespace_only_dropped,
-                    "content_replacements_restored": data.content_replacements_restored,
-                    "worktree_missing": data.worktree_missing,
-                    "warnings": data.warnings,
                 })
             }
             HarnessEventPayload::SubagentProgress { data } => {
@@ -1605,18 +1165,13 @@ impl HarnessEvent {
         match &self.payload {
             HarnessEventPayload::Progress { data } => &data.session_id,
             HarnessEventPayload::Phase { data } => &data.session_id,
-            HarnessEventPayload::Artifact { data } => &data.session_id,
             HarnessEventPayload::ValidatorResult { data } => &data.session_id,
             HarnessEventPayload::Retry { data } => &data.session_id,
             HarnessEventPayload::Failure { data } => &data.session_id,
             HarnessEventPayload::McpServerCall { data } => &data.session_id,
             HarnessEventPayload::SubAgentDispatch { data } => &data.session_id,
-            HarnessEventPayload::SwarmDispatch { data } => &data.session_id,
-            HarnessEventPayload::SwarmReviewDecision { data } => &data.session_id,
             HarnessEventPayload::CostAttribution { data } => &data.session_id,
-            HarnessEventPayload::RoutingDecision { data } => &data.session_id,
             HarnessEventPayload::CredentialRotation { data } => &data.session_id,
-            HarnessEventPayload::SessionSanitized { data } => &data.session_id,
             HarnessEventPayload::SubagentProgress { data } => &data.session_id,
             HarnessEventPayload::Error { data } => &data.session_id,
         }
@@ -1626,18 +1181,13 @@ impl HarnessEvent {
         match &self.payload {
             HarnessEventPayload::Progress { data } => &data.task_id,
             HarnessEventPayload::Phase { data } => &data.task_id,
-            HarnessEventPayload::Artifact { data } => &data.task_id,
             HarnessEventPayload::ValidatorResult { data } => &data.task_id,
             HarnessEventPayload::Retry { data } => &data.task_id,
             HarnessEventPayload::Failure { data } => &data.task_id,
             HarnessEventPayload::McpServerCall { data } => &data.task_id,
             HarnessEventPayload::SubAgentDispatch { data } => &data.task_id,
-            HarnessEventPayload::SwarmDispatch { data } => &data.task_id,
-            HarnessEventPayload::SwarmReviewDecision { data } => &data.task_id,
             HarnessEventPayload::CostAttribution { data } => &data.task_id,
-            HarnessEventPayload::RoutingDecision { data } => &data.task_id,
             HarnessEventPayload::CredentialRotation { data } => &data.task_id,
-            HarnessEventPayload::SessionSanitized { data } => &data.task_id,
             HarnessEventPayload::SubagentProgress { data } => &data.task_id,
             HarnessEventPayload::Error { data } => &data.task_id,
         }
@@ -1647,18 +1197,13 @@ impl HarnessEvent {
         match &self.payload {
             HarnessEventPayload::Progress { data } => data.workflow.as_deref(),
             HarnessEventPayload::Phase { data } => data.workflow.as_deref(),
-            HarnessEventPayload::Artifact { data } => data.workflow.as_deref(),
             HarnessEventPayload::ValidatorResult { data } => data.workflow.as_deref(),
             HarnessEventPayload::Retry { data } => data.workflow.as_deref(),
             HarnessEventPayload::Failure { data } => data.workflow.as_deref(),
             HarnessEventPayload::McpServerCall { .. } => None,
             HarnessEventPayload::SubAgentDispatch { data } => data.workflow.as_deref(),
-            HarnessEventPayload::SwarmDispatch { data } => data.workflow.as_deref(),
-            HarnessEventPayload::SwarmReviewDecision { data } => data.workflow.as_deref(),
             HarnessEventPayload::CostAttribution { data } => data.workflow.as_deref(),
-            HarnessEventPayload::RoutingDecision { data } => data.workflow.as_deref(),
             HarnessEventPayload::CredentialRotation { .. } => None,
-            HarnessEventPayload::SessionSanitized { data } => data.workflow.as_deref(),
             HarnessEventPayload::SubagentProgress { .. } => None,
             HarnessEventPayload::Error { data } => data.workflow.as_deref(),
         }
@@ -1668,18 +1213,13 @@ impl HarnessEvent {
         match &self.payload {
             HarnessEventPayload::Progress { data } => Some(data.phase.as_str()),
             HarnessEventPayload::Phase { data } => Some(data.phase.as_str()),
-            HarnessEventPayload::Artifact { data } => data.phase.as_deref(),
             HarnessEventPayload::ValidatorResult { data } => data.phase.as_deref(),
             HarnessEventPayload::Retry { data } => data.phase.as_deref(),
             HarnessEventPayload::Failure { data } => data.phase.as_deref(),
             HarnessEventPayload::McpServerCall { .. } => None,
             HarnessEventPayload::SubAgentDispatch { data } => data.phase.as_deref(),
-            HarnessEventPayload::SwarmDispatch { data } => data.phase.as_deref(),
-            HarnessEventPayload::SwarmReviewDecision { data } => data.phase.as_deref(),
             HarnessEventPayload::CostAttribution { data } => data.phase.as_deref(),
-            HarnessEventPayload::RoutingDecision { data } => data.phase.as_deref(),
             HarnessEventPayload::CredentialRotation { .. } => None,
-            HarnessEventPayload::SessionSanitized { .. } => None,
             HarnessEventPayload::SubagentProgress { .. } => None,
             HarnessEventPayload::Error { data } => data.phase.as_deref(),
         }
@@ -2441,34 +1981,6 @@ mod tests {
     }
 
     #[test]
-    fn routing_decision_event_round_trips_and_keeps_kind() {
-        let event = HarnessEvent::routing_decision(
-            "session-1",
-            "task-1",
-            Some("chat"),
-            "strong",
-            vec!["code_fence".into(), "keyword:debug".into()],
-            512,
-        );
-        event.validate().expect("routing decision should be valid");
-
-        let json = serde_json::to_string(&event).unwrap();
-        assert!(json.contains(r#""schema":"octos.harness.event.v1""#));
-        assert!(json.contains(r#""kind":"routing.decision""#));
-        assert!(json.contains(r#""tier":"strong""#));
-
-        let parsed = HarnessEvent::from_json_line(&json).unwrap();
-        assert_eq!(parsed.session_id(), "session-1");
-        assert_eq!(parsed.task_id(), "task-1");
-
-        let detail = parsed.runtime_detail_value(None, None);
-        assert_eq!(detail["kind"], "routing.decision");
-        assert_eq!(detail["tier"], "strong");
-        assert_eq!(detail["input_chars"], 512);
-        assert_eq!(detail["reasons"][0], "code_fence");
-    }
-
-    #[test]
     fn subagent_progress_event_roundtrips_json_line() {
         let at = chrono::Utc::now();
         let event = HarnessEvent::subagent_progress(
@@ -2664,126 +2176,5 @@ mod tests {
         assert_eq!(detail["workflow_kind"], "custom_report");
         assert_eq!(detail["current_phase"], "rendering");
         assert_eq!(detail["progress_message"], "Rendering section 2/5");
-    }
-
-    /// M8.6: `SessionSanitized` round-trips through JSON and reports the
-    /// report fields in `runtime_detail_value`.
-    #[test]
-    fn session_sanitized_event_round_trips() {
-        let report = octos_bus::SessionSanitizeReport {
-            input_len: 12,
-            output_len: 9,
-            unresolved_tool_uses_dropped: 2,
-            orphan_thinking_dropped: 1,
-            whitespace_only_dropped: 0,
-            content_replacements_restored: 3,
-            worktree_missing: false,
-            warnings: vec!["mtime bump degraded".into()],
-        };
-        let event =
-            HarnessEvent::session_sanitized("api:session", "task-resume", Some("coding"), &report);
-
-        assert!(event.validate().is_ok());
-        let json = serde_json::to_string(&event).unwrap();
-        assert!(
-            json.contains(r#""kind":"session_sanitized""#),
-            "event should serialize the session_sanitized kind; got: {json}"
-        );
-
-        let parsed = HarnessEvent::from_json_line(&json).unwrap();
-        match &parsed.payload {
-            HarnessEventPayload::SessionSanitized { data } => {
-                assert_eq!(data.input_len, 12);
-                assert_eq!(data.output_len, 9);
-                assert_eq!(data.unresolved_tool_uses_dropped, 2);
-                assert_eq!(data.orphan_thinking_dropped, 1);
-                assert_eq!(data.whitespace_only_dropped, 0);
-                assert_eq!(data.content_replacements_restored, 3);
-                assert!(!data.worktree_missing);
-                assert_eq!(data.warnings, vec!["mtime bump degraded".to_string()]);
-            }
-            other => panic!("expected SessionSanitized variant, got {other:?}"),
-        }
-
-        let detail = parsed.runtime_detail_value(None, None);
-        assert_eq!(detail["kind"], "session_sanitized");
-        assert_eq!(detail["input_len"], 12);
-        assert_eq!(detail["output_len"], 9);
-        assert_eq!(detail["content_replacements_restored"], 3);
-    }
-
-    /// M8.6: a worktree-missing event must flag the condition so operators
-    /// can see it on the task dashboard.
-    #[test]
-    fn session_sanitized_event_flags_worktree_missing() {
-        let report = octos_bus::SessionSanitizeReport {
-            input_len: 4,
-            output_len: 4,
-            worktree_missing: true,
-            ..Default::default()
-        };
-        let event = HarnessEvent::session_sanitized(
-            "api:session",
-            "task-resume",
-            Option::<String>::None,
-            &report,
-        );
-
-        assert!(event.validate().is_ok());
-        let detail = event.runtime_detail_value(None, None);
-        assert_eq!(detail["worktree_missing"], true);
-        assert_eq!(detail["kind"], "session_sanitized");
-    }
-
-    /// M8.6: verify the sink pipeline delivers a session-sanitized event
-    /// to the task supervisor exactly as it does for progress/phase
-    /// events. This is the "emit via sink" happy path the caller-side
-    /// wiring relies on.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn should_emit_session_sanitized_event_when_sink_configured() {
-        let supervisor = Arc::new(TaskSupervisor::new());
-        let task_id = supervisor.register("resume", "call-1", Some("api:session"));
-        supervisor.mark_running(&task_id);
-
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        supervisor.set_on_change(move |task| {
-            let _ = tx.send(task.clone());
-        });
-
-        let sink = HarnessEventSink::new(supervisor.clone(), task_id.clone(), "api:session")
-            .expect("create sink");
-
-        let report = octos_bus::SessionSanitizeReport {
-            input_len: 3,
-            output_len: 2,
-            unresolved_tool_uses_dropped: 1,
-            ..Default::default()
-        };
-        let event = HarnessEvent::session_sanitized(
-            "api:session",
-            task_id.clone(),
-            Some("coding"),
-            &report,
-        );
-
-        write_event_to_sink(sink.path().display().to_string(), &event).unwrap();
-
-        let updated = tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                let task = rx.recv().await.expect("task update");
-                if task.id == task_id && task.runtime_detail.is_some() {
-                    break task;
-                }
-            }
-        })
-        .await
-        .expect("sink should deliver the session_sanitized event");
-
-        let detail: Value =
-            serde_json::from_str(updated.runtime_detail.as_deref().unwrap()).unwrap();
-        assert_eq!(detail["kind"], "session_sanitized");
-        assert_eq!(detail["input_len"], 3);
-        assert_eq!(detail["output_len"], 2);
-        assert_eq!(detail["unresolved_tool_uses_dropped"], 1);
     }
 }

@@ -838,9 +838,9 @@ pub mod code_structure;
 pub use apply_patch::ApplyPatchTool;
 pub use ask_user_question::AskUserQuestionTool;
 pub use coding_tools::{
-    BashTool, CloseAgentTool, DelegateAliasTool, ExecCommandTool, RequestUserInputTool,
-    ResumeAgentTool, SendInputTool, SpawnAgentTool, ToolCatalogEntry, ToolSearchTool,
-    ToolSuggestTool, UpdatePlanTool, ViewImageTool, WaitAgentTool, WriteStdinTool,
+    BashTool, CloseAgentTool, DelegateAliasTool, ExecCommandTool, ResumeAgentTool, SendInputTool,
+    SpawnAgentTool, ToolCatalogEntry, ToolSearchTool, ToolSuggestTool, UpdatePlanTool,
+    ViewImageTool, WaitAgentTool, WriteStdinTool,
 };
 pub use delegate::{
     DELEGATED_DENY_GROUP, DELEGATION_METRIC, DelegateTool, DelegationEvent, DelegationOutcome,

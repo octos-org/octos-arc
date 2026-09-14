@@ -68,9 +68,6 @@ const DEFAULT_PROVIDER_UNAVAILABLE_LIMIT: u32 = 4;
 const DEFAULT_NETWORK_LIMIT: u32 = 4;
 const DEFAULT_TIMEOUT_LIMIT: u32 = 3;
 const DEFAULT_TOOL_EXECUTION_LIMIT: u32 = 5;
-const DEFAULT_PLUGIN_SPAWN_LIMIT: u32 = 2;
-const DEFAULT_PLUGIN_TIMEOUT_LIMIT: u32 = 3;
-const DEFAULT_PLUGIN_PROTOCOL_LIMIT: u32 = 2;
 const DEFAULT_DELEGATE_DEPTH_LIMIT: u32 = 1;
 const DEFAULT_INTERNAL_LIMIT: u32 = 1;
 /// Hook-deny (policy) errors escalate immediately — retrying a policy
@@ -102,9 +99,6 @@ pub struct LoopRetryLimits {
     pub network: u32,
     pub timeout: u32,
     pub tool_execution: u32,
-    pub plugin_spawn: u32,
-    pub plugin_timeout: u32,
-    pub plugin_protocol: u32,
     pub delegate_depth_exceeded: u32,
     pub internal: u32,
     /// Added with the PolicyDeny variant (#2249). `serde(default)` keeps
@@ -127,9 +121,6 @@ impl Default for LoopRetryLimits {
             network: DEFAULT_NETWORK_LIMIT,
             timeout: DEFAULT_TIMEOUT_LIMIT,
             tool_execution: DEFAULT_TOOL_EXECUTION_LIMIT,
-            plugin_spawn: DEFAULT_PLUGIN_SPAWN_LIMIT,
-            plugin_timeout: DEFAULT_PLUGIN_TIMEOUT_LIMIT,
-            plugin_protocol: DEFAULT_PLUGIN_PROTOCOL_LIMIT,
             delegate_depth_exceeded: DEFAULT_DELEGATE_DEPTH_LIMIT,
             internal: DEFAULT_INTERNAL_LIMIT,
             policy: DEFAULT_POLICY_LIMIT,
@@ -156,7 +147,7 @@ pub enum LoopDecision {
     CompactAndRetry,
     /// Not retryable here — caller should surface the error and stop. Used
     /// for structural failures (auth, invalid request, content filter,
-    /// delegation depth, tool/plugin faults, bugs).
+    /// delegation depth, tool faults, bugs).
     Escalate,
     /// Bucket exhausted: the same failure happened more times than the
     /// configured limit. Caller must treat this as a hard stop to avoid
@@ -218,9 +209,6 @@ pub struct LoopRetryCounters {
     pub network: u32,
     pub timeout: u32,
     pub tool_execution: u32,
-    pub plugin_spawn: u32,
-    pub plugin_timeout: u32,
-    pub plugin_protocol: u32,
     pub delegate_depth_exceeded: u32,
     pub internal: u32,
     /// Added with the PolicyDeny variant (#2249). `serde(default)` keeps
@@ -274,15 +262,6 @@ impl LoopRetryCounters {
         self.tool_execution = self
             .tool_execution
             .saturating_add(turn.tool_execution.saturating_sub(base.tool_execution));
-        self.plugin_spawn = self
-            .plugin_spawn
-            .saturating_add(turn.plugin_spawn.saturating_sub(base.plugin_spawn));
-        self.plugin_timeout = self
-            .plugin_timeout
-            .saturating_add(turn.plugin_timeout.saturating_sub(base.plugin_timeout));
-        self.plugin_protocol = self
-            .plugin_protocol
-            .saturating_add(turn.plugin_protocol.saturating_sub(base.plugin_protocol));
         self.delegate_depth_exceeded = self.delegate_depth_exceeded.saturating_add(
             turn.delegate_depth_exceeded
                 .saturating_sub(base.delegate_depth_exceeded),
@@ -515,17 +494,6 @@ impl LoopRetryState {
                 &mut self.counters.tool_execution,
                 self.limits.tool_execution,
             ),
-            HarnessError::PluginSpawn { .. } => {
-                (&mut self.counters.plugin_spawn, self.limits.plugin_spawn)
-            }
-            HarnessError::PluginTimeout { .. } => (
-                &mut self.counters.plugin_timeout,
-                self.limits.plugin_timeout,
-            ),
-            HarnessError::PluginProtocol { .. } => (
-                &mut self.counters.plugin_protocol,
-                self.limits.plugin_protocol,
-            ),
             HarnessError::DelegateDepthExceeded { .. } => (
                 &mut self.counters.delegate_depth_exceeded,
                 self.limits.delegate_depth_exceeded,
@@ -741,9 +709,6 @@ mod tests {
             network: v,
             timeout: v,
             tool_execution: v,
-            plugin_spawn: v,
-            plugin_timeout: v,
-            plugin_protocol: v,
             delegate_depth_exceeded: v,
             internal: v,
             policy: v,
@@ -760,9 +725,6 @@ mod tests {
             network: v + 7,
             timeout: v + 8,
             tool_execution: v + 9,
-            plugin_spawn: v + 10,
-            plugin_timeout: v + 11,
-            plugin_protocol: v + 12,
             delegate_depth_exceeded: v + 13,
             internal: v + 14,
             policy: v + 15,
@@ -779,9 +741,6 @@ mod tests {
             network: v,
             timeout: v,
             tool_execution: v,
-            plugin_spawn: v,
-            plugin_timeout: v,
-            plugin_protocol: v,
             delegate_depth_exceeded: v,
             internal: v,
             policy: v,
@@ -968,19 +927,6 @@ mod tests {
                 message: "x".into(),
             },
             tool_error(),
-            HarnessError::PluginSpawn {
-                plugin_name: "p".into(),
-                message: "x".into(),
-            },
-            HarnessError::PluginTimeout {
-                plugin_name: "p".into(),
-                timeout_secs: 5,
-                message: "x".into(),
-            },
-            HarnessError::PluginProtocol {
-                plugin_name: "p".into(),
-                message: "x".into(),
-            },
             HarnessError::DelegateDepthExceeded {
                 depth: 3,
                 limit: 2,

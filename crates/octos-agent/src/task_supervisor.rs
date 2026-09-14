@@ -3168,13 +3168,6 @@ impl TaskSupervisor {
                     Some(runtime_detail.to_string()),
                 );
             }
-            HarnessEventPayload::Artifact { .. } => {
-                self.mark_runtime_state(
-                    task_id,
-                    TaskRuntimeState::DeliveringOutputs,
-                    Some(runtime_detail.to_string()),
-                );
-            }
             HarnessEventPayload::ValidatorResult { data } => {
                 self.mark_runtime_state(
                     task_id,
@@ -3214,30 +3207,6 @@ impl TaskSupervisor {
                     Some(runtime_detail.to_string()),
                 );
             }
-            HarnessEventPayload::SwarmDispatch { .. } => {
-                // Swarm dispatch events are observational from the
-                // supervisor's perspective — the `octos-swarm` primitive
-                // owns its own redb-backed session state and drives the
-                // retry loop. We just surface the aggregate detail so
-                // operators can see fan-out progress.
-                self.mark_runtime_state(
-                    task_id,
-                    TaskRuntimeState::ExecutingTool,
-                    Some(runtime_detail.to_string()),
-                );
-            }
-            HarnessEventPayload::SwarmReviewDecision { .. } => {
-                // Review decisions are supervisor-authored audit records.
-                // They do not move the task lifecycle — the originating
-                // dispatch already reached a terminal state when the
-                // review panel was shown. Surface the detail so operators
-                // can see accept/reject transitions on the timeline.
-                self.mark_runtime_state(
-                    task_id,
-                    snapshot.runtime_state,
-                    Some(runtime_detail.to_string()),
-                );
-            }
             HarnessEventPayload::CostAttribution { .. } => {
                 // Cost attributions are purely observational — they are
                 // committed after a sub-agent dispatch succeeds and do
@@ -3250,33 +3219,10 @@ impl TaskSupervisor {
                     Some(runtime_detail.to_string()),
                 );
             }
-            HarnessEventPayload::RoutingDecision { .. } => {
-                // Routing decisions are observational — they do not change the
-                // task's lifecycle state. We still attach the detail so the
-                // operator dashboard can surface the tier/reasons for this
-                // turn without inventing a dedicated sidecar channel.
-                self.mark_runtime_state(
-                    task_id,
-                    TaskRuntimeState::ExecutingTool,
-                    Some(runtime_detail.to_string()),
-                );
-            }
             HarnessEventPayload::CredentialRotation { .. } => {
                 // Credential rotations are observability-only — they do not
                 // change the task lifecycle. We still update runtime_detail
                 // so operators can see which key is now active.
-                self.mark_runtime_state(
-                    task_id,
-                    snapshot.runtime_state,
-                    Some(runtime_detail.to_string()),
-                );
-            }
-            HarnessEventPayload::SessionSanitized { .. } => {
-                // Session-sanitize events are observability-only (M8.6).
-                // They fire once per resume and describe what the resume
-                // policy dropped — the task lifecycle is not affected; the
-                // session actor will subsequently drive normal
-                // Queued → Executing transitions as usual.
                 self.mark_runtime_state(
                     task_id,
                     snapshot.runtime_state,

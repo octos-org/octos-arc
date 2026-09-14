@@ -96,7 +96,6 @@ const CODEX_P0: &[&str] = &[
     "exec_command",
     "write_stdin",
     "update_plan",
-    "request_user_input",
     "spawn_agent",
     "send_input",
     "resume_agent",
@@ -148,45 +147,6 @@ async fn update_plan_emits_structured_metadata_event() {
         "echoed plan must match the model-provided arguments"
     );
 }
-
-/// #972 / M14-B acceptance: `request_user_input` MUST generate a
-/// structured UI event so the AppUI layer can render the user-input
-/// request without parsing the `output` blob. The contract is the
-/// `structured_metadata` envelope with `codex_tool = "request_user_input"`,
-/// the original request echoed under `request`, and a `host_response_channel`
-/// hint that lets the client tell whether a synchronous response path
-/// is wired (M14-E live soak scope) or not (current state).
-#[tokio::test]
-async fn request_user_input_emits_structured_metadata_event() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let registry = ToolRegistry::with_builtins(temp.path());
-    let tool = registry
-        .get("request_user_input")
-        .expect("request_user_input tool registered");
-    let request_args = json!({
-        "prompt": "Pick a deploy target",
-        "choices": ["staging", "prod"],
-    });
-    let result = tool
-        .execute(&request_args)
-        .await
-        .expect("request_user_input ok");
-    assert!(result.success);
-    let meta = result
-        .structured_metadata
-        .as_ref()
-        .expect("request_user_input must emit structured_metadata");
-    assert_eq!(meta["codex_tool"], json!("request_user_input"));
-    assert_eq!(
-        meta["request"], request_args,
-        "request payload must round-trip into the structured event"
-    );
-    assert!(
-        meta.get("host_response_channel").is_some(),
-        "structured event must declare host response channel state for the client"
-    );
-}
-
 struct FakeSpawnTool;
 
 #[async_trait::async_trait]

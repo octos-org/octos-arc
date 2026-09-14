@@ -17,9 +17,7 @@ use tracing::{debug, info, warn};
 
 use crate::config::ChatConfig;
 use crate::credential_pool::{CredentialPool, ErrorId, rotation_reason};
-use crate::provider::{
-    LANE_FAILED_FAIL_FAST, LANES_EXHAUSTED, LaneFailure, LlmProvider, attribute_lane_failures,
-};
+use crate::provider::{LANES_EXHAUSTED, LaneFailure, LlmProvider, attribute_lane_failures};
 use crate::responsiveness::ResponsivenessObserver;
 #[cfg(test)]
 use crate::types::StreamEvent;
@@ -778,7 +776,7 @@ where
 
 /// Snapshot the active [`RouterContext`]. Returns [`RouterContext::default`]
 /// (no originating session/turn) when no scope wraps the caller. Mirrors
-/// [`current_lane_context`](crate::current_lane_context) / [`current_llm_call_policy`](crate::current_llm_call_policy);
+/// [`current_lane_context`](crate::current_lane_context);
 /// used to re-establish the routing context across a `tokio::spawn` boundary
 /// (foreground tool tasks) so a tool's own LLM sub-call keeps the turn's
 /// failover attribution instead of publishing unattributed events.
@@ -2461,10 +2459,8 @@ impl LlmProvider for AdaptiveRouter {
             "adaptive router selected provider"
         );
 
-        let fail_fast = crate::current_llm_call_policy() == crate::LlmCallPolicy::FailFast;
-
         // ── Hedged racing: fire to 2 providers, take the winner ────────
-        if !fail_fast && mode == AdaptiveMode::Hedge && self.slots.len() > 1 {
+        if mode == AdaptiveMode::Hedge && self.slots.len() > 1 {
             if let Some(result) = self.hedged_chat(start_idx, messages, tools, config).await {
                 return result;
             }
@@ -2482,13 +2478,8 @@ impl LlmProvider for AdaptiveRouter {
                     self.slots[start_idx].provider.as_ref(),
                     &e,
                 )];
-                if self.slots.len() == 1 || fail_fast {
-                    let outcome = if fail_fast {
-                        LANE_FAILED_FAIL_FAST
-                    } else {
-                        LANES_EXHAUSTED
-                    };
-                    return Err(attribute_lane_failures(e, outcome, &failures));
+                if self.slots.len() == 1 {
+                    return Err(attribute_lane_failures(e, LANES_EXHAUSTED, &failures));
                 }
 
                 warn!(
@@ -2563,7 +2554,6 @@ impl LlmProvider for AdaptiveRouter {
         config: &ChatConfig,
     ) -> Result<ChatStream> {
         let (start_idx, _is_probe) = self.pinned_slot();
-        let fail_fast = crate::current_llm_call_policy() == crate::LlmCallPolicy::FailFast;
 
         // Wave4-A: failover elapsed-time anchor — see equivalent comment
         // in `chat()` above.
@@ -2578,13 +2568,8 @@ impl LlmProvider for AdaptiveRouter {
                     self.slots[start_idx].provider.as_ref(),
                     &e,
                 )];
-                if self.slots.len() == 1 || fail_fast {
-                    let outcome = if fail_fast {
-                        LANE_FAILED_FAIL_FAST
-                    } else {
-                        LANES_EXHAUSTED
-                    };
-                    return Err(attribute_lane_failures(e, outcome, &failures));
+                if self.slots.len() == 1 {
+                    return Err(attribute_lane_failures(e, LANES_EXHAUSTED, &failures));
                 }
 
                 warn!(

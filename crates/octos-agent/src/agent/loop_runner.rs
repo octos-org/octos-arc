@@ -539,40 +539,6 @@ impl Agent {
         }
     }
 
-    /// Task 8 — FailFast foreground-LLM-call failure handling.
-    ///
-    /// Called ONLY from the foreground LLM call sites (not from tool/verifier
-    /// dispatch). When the loop runs under
-    /// [`octos_llm::LlmCallPolicy::FailFast`] and a foreground LLM call fails,
-    /// this:
-    ///   1. Excludes hook-deny errors (`"LLM call denied by hook"`): returns
-    ///      `false` WITHOUT emitting a [`crate::TurnFailure`] so the caller
-    ///      falls through to the existing dispatch path and the permission
-    ///      behaviour is preserved byte-for-byte.
-    ///   2. Otherwise runs [`Self::classify_loop_error`] EXACTLY ONCE (records
-    ///      the metric + harness event; honours the "all escaping Reports go
-    ///      through the classifier" invariant) and returns `true` so the caller
-    ///      bails with the ORIGINAL `report` (NOT through
-    ///      `handle_loop_error_with_dispatch`).
-    ///
-    /// Returns `false` under Normal policy so non-FailFast behaviour — and the
-    /// entire `handle_loop_error_with_dispatch` path — is unchanged.
-    fn failfast_llm_bail(&self, report: &eyre::Report) -> bool {
-        if octos_llm::current_llm_call_policy() != octos_llm::LlmCallPolicy::FailFast {
-            return false;
-        }
-        // Exclude hook-deny: preserve existing permission behaviour (no
-        // TurnFailure, fall through to the caller's dispatch path).
-        if report.to_string().starts_with("LLM call denied by hook") {
-            return false;
-        }
-        // Classify exactly once (keeps metric + harness-event side effects and
-        // the #488 invariant). The original `report` still bubbles out to the
-        // caller.
-        let _classified = self.classify_loop_error(report, None);
-        true
-    }
-
     /// Budget grace-call dispatch (M6.2). When the loop hits a hard iteration
     /// or token budget, this asks the retry state machine whether to grant
     /// one free iteration past budget. Only `MaxIterations` and `MaxTokens`
@@ -1455,14 +1421,6 @@ impl Agent {
                     {
                         Ok(r) => r,
                         Err(e) if e.to_string().contains("empty response after") => {
-                            // Under FailFast an empty response is TERMINAL —
-                            // do NOT make the adaptive 2nd call; bail with the
-                            // original error.
-                            if octos_llm::current_llm_call_policy()
-                                == octos_llm::LlmCallPolicy::FailFast
-                            {
-                                return Err(attach_partial_usage(e, turn.total_usage().clone()));
-                            }
                             // Empty response after retries -- try once more (adaptive router
                             // may select a different provider on this second attempt).
                             turn.record_retry(LoopRetryReason::ProviderFailover {
@@ -1486,9 +1444,6 @@ impl Agent {
                             {
                                 Ok(r) => r,
                                 Err(e) => {
-                                    if self.failfast_llm_bail(&e) {
-                                        return Err(attach_partial_usage(e, turn.total_usage().clone()));
-                                    }
                                     match self.handle_loop_error_with_dispatch(
                                         &e,
                                         &mut retry_state,
@@ -1573,9 +1528,6 @@ impl Agent {
                                     ),
                                     turn.total_usage().clone(),
                                 ));
-                            }
-                            if self.failfast_llm_bail(&e) {
-                                return Err(attach_partial_usage(e, turn.total_usage().clone()));
                             }
                             match self.handle_loop_error_with_dispatch(
                                 &e,
@@ -2594,9 +2546,6 @@ impl Agent {
                 {
                     Ok(pair) => pair,
                     Err(e) => {
-                        if self.failfast_llm_bail(&e) {
-                            return Err(attach_partial_usage(e, turn.total_usage().clone()));
-                        }
                         match self.handle_loop_error_with_dispatch(
                             &e,
                             &mut retry_state,

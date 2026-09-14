@@ -13,16 +13,12 @@ pub mod agents;
 pub mod approval;
 pub mod arc_task;
 pub mod behaviour;
-pub mod bootstrap;
 pub mod bridge;
 pub mod builtin_skills;
-pub mod bundled_app_skills;
 pub mod compaction;
 pub mod compaction_tiered;
 pub mod cost_ledger;
 pub mod dispatch_policy;
-pub mod event_bus;
-pub mod exec_env;
 pub mod file_state_cache;
 pub mod format;
 pub mod harness_errors;
@@ -39,9 +35,6 @@ pub mod profile;
 pub mod progress;
 pub mod prompt_context;
 pub mod prompt_guard;
-pub mod prompt_layer;
-pub mod provider_tools;
-pub mod recorder;
 pub mod role_template;
 pub mod sandbox;
 mod sanitize;
@@ -74,10 +67,9 @@ pub use abi_schema::{
     CREDENTIAL_POOL_CONFIG_SCHEMA_VERSION, HARNESS_ERROR_SCHEMA_VERSION,
     HARNESS_PROGRESS_EVENT_SCHEMA_VERSION, HOOK_PAYLOAD_SCHEMA_VERSION,
     PROGRESS_EVENT_SCHEMA_VERSION, SESSION_SUMMARY_SCHEMA_VERSION,
-    SUB_AGENT_DISPATCH_SCHEMA_VERSION, SWARM_DISPATCH_SCHEMA_VERSION,
-    SWARM_REVIEW_DECISION_SCHEMA_VERSION, SWARM_SUPERVISOR_CONFIG_SCHEMA_VERSION,
-    TASK_RESULT_SCHEMA_VERSION, UnsupportedSchemaVersionError, WORKSPACE_POLICY_SCHEMA_VERSION,
-    check_supported, default_credential_pool_config_schema_version,
+    SUB_AGENT_DISPATCH_SCHEMA_VERSION, TASK_RESULT_SCHEMA_VERSION, UnsupportedSchemaVersionError,
+    WORKSPACE_POLICY_SCHEMA_VERSION, check_supported,
+    default_credential_pool_config_schema_version,
 };
 pub use agent::{
     Agent, AgentConfig, AssistantSegmentProvenance, ConversationResponse,
@@ -89,7 +81,7 @@ pub use agent::{
         SHELL_SPIRAL_VARIANT,
     },
     memory::MIN_EPISODE_SIMILARITY,
-    normalize_tool_call_id, rich_output,
+    normalize_tool_call_id,
     verifier::{
         AgentVerifierConfig, ErrorClass, TURN_LEDGER_SCHEMA_VERSION, TurnLedgerEntry, TurnOutcome,
         VerifierVerdict,
@@ -115,8 +107,6 @@ pub use dispatch_policy::{
     DispatchBackendMetadata, DispatchPolicy, DispatchTarget, GateDenial, enforce_dispatch_gates,
     enforce_dispatch_gates_for_backend,
 };
-pub use event_bus::{EventBus, EventSubscriber};
-pub use exec_env::{DockerEnvironment, ExecEnvironment, ExecOutput, LocalEnvironment};
 pub use file_state_cache::{
     CacheEntry as FileCacheEntry, DEFAULT_MAX_ENTRIES as FILE_CACHE_DEFAULT_MAX_ENTRIES,
     DEFAULT_MAX_TOTAL_BYTES as FILE_CACHE_DEFAULT_MAX_TOTAL_BYTES, FILE_UNCHANGED_STUB_PREFIX,
@@ -124,12 +114,11 @@ pub use file_state_cache::{
 };
 pub use harness_errors::{HarnessError, HarnessErrorEvent, OCTOS_LOOP_ERROR_TOTAL, RecoveryHint};
 pub use harness_events::{
-    HARNESS_EVENT_SCHEMA_V1, HarnessArtifactEvent, HarnessCostAttributionEvent,
-    HarnessCredentialRotationEvent, HarnessCredentialRotationSink, HarnessEvent, HarnessEventError,
-    HarnessEventPayload, HarnessEventSink, HarnessFailureEvent, HarnessMcpServerCallEvent,
-    HarnessPhaseEvent, HarnessProgressEvent, HarnessRetryEvent, HarnessSessionSanitizedEvent,
-    HarnessSubAgentDispatchEvent, HarnessSubagentProgressEvent, HarnessSwarmDispatchEvent,
-    HarnessSwarmReviewDecisionEvent, HarnessValidatorResultEvent, MAX_HARNESS_EVENT_LINE_BYTES,
+    HARNESS_EVENT_SCHEMA_V1, HarnessCostAttributionEvent, HarnessCredentialRotationEvent,
+    HarnessCredentialRotationSink, HarnessEvent, HarnessEventError, HarnessEventPayload,
+    HarnessEventSink, HarnessFailureEvent, HarnessMcpServerCallEvent, HarnessPhaseEvent,
+    HarnessProgressEvent, HarnessRetryEvent, HarnessSubAgentDispatchEvent,
+    HarnessSubagentProgressEvent, HarnessValidatorResultEvent, MAX_HARNESS_EVENT_LINE_BYTES,
     emit_registered_credential_rotation_event,
 };
 pub use hooks::{
@@ -150,9 +139,6 @@ pub use progress::{ConsoleReporter, ProgressEvent, ProgressReporter, SilentRepor
 pub use prompt_context::{
     PromptContextManager, PromptContextPhase, PromptContextReport, PromptContextRequest,
 };
-pub use prompt_layer::PromptLayerBuilder;
-pub use provider_tools::{ProviderToolsets, ToolAdjustment};
-pub use recorder::{BlackBoxRecorder, RecordEntry};
 pub use role_template::{
     APPROVAL_ASK, APPROVAL_NEVER, ModelPreference, ROLE_EXPLORER, ROLE_IMPLEMENTER, ROLE_REVIEWER,
     ROLE_TEST_WORKER, RoleTemplate, RoleTemplateSummary, SANDBOX_AUTO, SANDBOX_NONE,

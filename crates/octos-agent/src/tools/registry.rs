@@ -16,10 +16,9 @@ use super::CodeStructureTool;
 use super::policy::{self, ToolPolicy};
 use super::{
     ApplyPatchTool, AskUserQuestionTool, CloseAgentTool, DiffEditTool, EditFileTool,
-    ExecCommandTool, GlobTool, GrepTool, ListDirTool, ReadFileTool, RequestUserInputTool,
-    ResumeAgentTool, SendInputTool, ShellTool, SpawnAgentTool, Tool, ToolCatalogEntry, ToolResult,
-    ToolSearchTool, ToolSuggestTool, UpdatePlanTool, ViewImageTool, WaitAgentTool, WriteFileTool,
-    WriteStdinTool,
+    ExecCommandTool, GlobTool, GrepTool, ListDirTool, ReadFileTool, ResumeAgentTool, SendInputTool,
+    ShellTool, SpawnAgentTool, Tool, ToolCatalogEntry, ToolResult, ToolSearchTool, ToolSuggestTool,
+    UpdatePlanTool, ViewImageTool, WaitAgentTool, WriteFileTool, WriteStdinTool,
 };
 use crate::sandbox::{NoSandbox, Sandbox};
 
@@ -1155,9 +1154,8 @@ impl ToolRegistry {
         );
         registry.register(WriteStdinTool);
         registry.register(UpdatePlanTool);
-        registry.register(RequestUserInputTool);
-        // UPCR-2026-023: structured AskUserQuestion. The synchronous,
-        // answer-routed superset of `request_user_input`.
+        // UPCR-2026-023: structured AskUserQuestion (synchronous,
+        // answer-routed user-input request).
         registry.register(AskUserQuestionTool::new());
         registry.register(SpawnAgentTool::new());
         // #1172: Codex-compatible `delegate` one-call wrapper. The default

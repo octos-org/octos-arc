@@ -7,7 +7,6 @@
 //! - Ollama (local models)
 
 pub mod adaptive;
-mod call_policy;
 mod config;
 pub mod context;
 mod context_override;
@@ -55,7 +54,6 @@ pub use cache_manifest::{
     PromptCacheObservation, PromptCacheObservedUsage, PromptCacheObserver,
     record_prompt_cache_usage, with_prompt_cache_observation_context,
 };
-pub use call_policy::{LlmCallPolicy, current_llm_call_policy, with_llm_call_policy};
 pub use catalog::{ModelCapabilities, ModelCatalog, ModelCost, ModelInfo};
 pub use config::{
     CacheRetention, ChatConfig, PromptCacheContext, ReasoningEffort, ResponseFormat,

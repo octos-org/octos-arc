@@ -1027,7 +1027,6 @@ mod tests {
         assert_eq!(narrowed.allow, vec!["read_file", "shell"]);
         assert!(!policy.is_allowed("delegate_task"));
         assert!(!policy.is_allowed("spawn"));
-        assert!(!policy.is_allowed("message"));
         assert!(!policy.is_allowed("save_memory"));
         // RECURSION GUARD (peer-review fix): the rest of the spawn family
         // must be denied too — with spawn_agent / send_input / the

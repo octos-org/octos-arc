@@ -261,8 +261,6 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
             "resume_agent",
             "wait_agent",
             "close_agent",
-            // User messaging — children report through the parent.
-            "message",
             // Memory writes.
             "save_memory",
             "memory_note",
@@ -437,7 +435,6 @@ mod tests {
         assert!(info.tools.contains(&"spawn"));
         assert!(info.tools.contains(&"spawn_agent"));
         assert!(info.tools.contains(&"send_input"));
-        assert!(info.tools.contains(&"message"));
         assert!(info.tools.contains(&"save_memory"));
         // Command execution is intentionally absent — see the table
         // comment. Delegated children keep shell; confinement is the
@@ -455,7 +452,6 @@ mod tests {
         // Tools in group:delegated must be denied under a delegated child.
         assert!(!policy.is_allowed("delegate_task"));
         assert!(!policy.is_allowed("spawn"));
-        assert!(!policy.is_allowed("message"));
         assert!(!policy.is_allowed("save_memory"));
         // Tools not in the group remain allowed by default. `shell` staying
         // allowed is DELIBERATE, not an oversight: delegated children are

@@ -10,8 +10,8 @@ use tracing::warn;
 
 use crate::config::ChatConfig;
 use crate::provider::{
-    LANE_FAILED_FAIL_FAST, LANE_FAILED_NOT_FAILOVER_WORTHY, LANES_EXHAUSTED, LaneFailure,
-    LlmProvider, attribute_lane_failures,
+    LANE_FAILED_NOT_FAILOVER_WORTHY, LANES_EXHAUSTED, LaneFailure, LlmProvider,
+    attribute_lane_failures,
 };
 use crate::retry::RetryProvider;
 use crate::router::ProviderRouter;
@@ -126,13 +126,6 @@ impl LlmProvider for FallbackProvider {
             }
             Err(primary_err) => {
                 let mut failures = vec![LaneFailure::capture(self.primary.as_ref(), &primary_err)];
-                if crate::current_llm_call_policy() == crate::LlmCallPolicy::FailFast {
-                    return Err(attribute_lane_failures(
-                        primary_err,
-                        LANE_FAILED_FAIL_FAST,
-                        &failures,
-                    ));
-                }
                 if !RetryProvider::should_failover(&primary_err) {
                     return Err(attribute_lane_failures(
                         primary_err,
@@ -203,13 +196,6 @@ impl LlmProvider for FallbackProvider {
             Ok(stream) => Ok(self.stream_with_provider_index(0, stream)),
             Err(primary_err) => {
                 let mut failures = vec![LaneFailure::capture(self.primary.as_ref(), &primary_err)];
-                if crate::current_llm_call_policy() == crate::LlmCallPolicy::FailFast {
-                    return Err(attribute_lane_failures(
-                        primary_err,
-                        LANE_FAILED_FAIL_FAST,
-                        &failures,
-                    ));
-                }
                 if !RetryProvider::should_failover(&primary_err) {
                     return Err(attribute_lane_failures(
                         primary_err,
@@ -420,70 +406,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_not_failover_when_failfast() {
-        use crate::{LlmCallPolicy, with_llm_call_policy};
-
+    async fn should_failover_to_fallback_when_primary_fails() {
         let primary = CountingProvider::always_err_500();
         let fallback = CountingProvider::ok();
         let fb_calls = fallback.calls.clone();
         let chain = FallbackProvider::new(Arc::new(primary), vec![Arc::new(fallback)]);
 
-        let result = with_llm_call_policy(LlmCallPolicy::FailFast, async {
-            chain.chat(&[], &[], &ChatConfig::default()).await
-        })
-        .await;
+        let result = chain.chat(&[], &[], &ChatConfig::default()).await;
 
-        assert!(
-            result.is_err(),
-            "FailFast returns primary error, no failover"
-        );
-        assert_eq!(
-            fb_calls.load(Ordering::SeqCst),
-            0,
-            "fallback must not be called"
-        );
-    }
-
-    #[tokio::test]
-    async fn should_not_failover_stream_when_failfast() {
-        use crate::{LlmCallPolicy, with_llm_call_policy};
-
-        let primary = CountingProvider::always_err_500();
-        let fallback = CountingProvider::ok();
-        let fb_calls = fallback.calls.clone();
-        let chain = FallbackProvider::new(Arc::new(primary), vec![Arc::new(fallback)]);
-
-        let result = with_llm_call_policy(LlmCallPolicy::FailFast, async {
-            chain.chat_stream(&[], &[], &ChatConfig::default()).await
-        })
-        .await;
-
-        assert!(
-            result.is_err(),
-            "FailFast returns primary error, no failover"
-        );
-        assert_eq!(
-            fb_calls.load(Ordering::SeqCst),
-            0,
-            "fallback must not be called on stream"
-        );
-    }
-
-    #[tokio::test]
-    async fn should_failover_when_normal_policy() {
-        use crate::{LlmCallPolicy, with_llm_call_policy};
-
-        let primary = CountingProvider::always_err_500();
-        let fallback = CountingProvider::ok();
-        let fb_calls = fallback.calls.clone();
-        let chain = FallbackProvider::new(Arc::new(primary), vec![Arc::new(fallback)]);
-
-        let result = with_llm_call_policy(LlmCallPolicy::Normal, async {
-            chain.chat(&[], &[], &ChatConfig::default()).await
-        })
-        .await;
-
-        assert!(result.is_ok(), "Normal policy should failover and succeed");
+        assert!(result.is_ok(), "should failover and succeed");
         assert_eq!(
             fb_calls.load(Ordering::SeqCst),
             1,
@@ -587,17 +518,15 @@ mod tests {
 
     #[tokio::test]
     async fn fallback_winner_is_attributed_with_its_slot_index() {
-        use crate::{LlmCallPolicy, with_llm_call_policy};
         // #2194 R5: primary fails, fallback answers -> the response must carry
         // the fallback's slot index (1) so pricing resolves the fallback's lane.
         let primary = CountingProvider::always_err_500();
         let fallback = CountingProvider::ok();
         let fp = FallbackProvider::new(Arc::new(primary), vec![Arc::new(fallback)]);
-        let result = with_llm_call_policy(LlmCallPolicy::Normal, async {
-            fp.chat(&[], &[], &ChatConfig::default()).await
-        })
-        .await
-        .expect("fallback answers under Normal policy");
+        let result = fp
+            .chat(&[], &[], &ChatConfig::default())
+            .await
+            .expect("fallback answers");
         assert_eq!(
             result.provider_index,
             Some(1),
@@ -710,7 +639,6 @@ mod provider_index_tests {
     use crate::provider::LlmProvider;
     use crate::provider::test_lanes::StubLane;
     use crate::types::StreamEvent;
-    use crate::{LlmCallPolicy, with_llm_call_policy};
 
     fn chain_with_failing_primary() -> FallbackProvider {
         FallbackProvider::new(
@@ -778,11 +706,10 @@ mod provider_index_tests {
     async fn should_tag_provider_index_one_and_resolve_fallback_identity_when_fallback_serves_chat()
     {
         let chain = chain_with_failing_primary();
-        let response = with_llm_call_policy(LlmCallPolicy::Normal, async {
-            chain.chat(&[], &[], &ChatConfig::default()).await
-        })
-        .await
-        .expect("fallback lane serves the request");
+        let response = chain
+            .chat(&[], &[], &ChatConfig::default())
+            .await
+            .expect("fallback lane serves the request");
 
         assert_eq!(
             response.provider_index,
@@ -810,11 +737,7 @@ mod provider_index_tests {
             Arc::new(StubLane::ok("primary", "model-p")),
             vec![Arc::new(StubLane::ok("secondary", "model-s"))],
         );
-        let response = with_llm_call_policy(LlmCallPolicy::Normal, async {
-            chain.chat(&[], &[], &ChatConfig::default()).await
-        })
-        .await
-        .unwrap();
+        let response = chain.chat(&[], &[], &ChatConfig::default()).await.unwrap();
         assert_eq!(response.provider_index, Some(0));
         assert_eq!(
             chain
@@ -827,11 +750,10 @@ mod provider_index_tests {
     #[tokio::test]
     async fn should_prepend_provider_index_event_when_fallback_serves_stream() {
         let chain = chain_with_failing_primary();
-        let mut stream = with_llm_call_policy(LlmCallPolicy::Normal, async {
-            chain.chat_stream(&[], &[], &ChatConfig::default()).await
-        })
-        .await
-        .expect("fallback lane serves the stream");
+        let mut stream = chain
+            .chat_stream(&[], &[], &ChatConfig::default())
+            .await
+            .expect("fallback lane serves the stream");
         match stream.next().await {
             Some(StreamEvent::ProviderIndex(index)) => assert_eq!(index, 1),
             other => panic!("expected ProviderIndex(1) first, got {other:?}"),
@@ -869,7 +791,6 @@ mod lane_attribution_tests {
     use crate::openai::OpenAIProvider;
     use crate::provider::LlmProvider;
     use crate::retry::RetryProvider;
-    use crate::{LlmCallPolicy, with_llm_call_policy};
 
     /// A loopback URL with nothing listening (connection refused).
     async fn refused_url() -> String {
@@ -899,12 +820,9 @@ mod lane_attribution_tests {
         );
         let chain = FallbackProvider::new(k3, vec![zai]);
 
-        let result = with_llm_call_policy(LlmCallPolicy::Normal, async {
-            chain
-                .chat_stream(&[Message::user("hi")], &[], &ChatConfig::default())
-                .await
-        })
-        .await;
+        let result = chain
+            .chat_stream(&[Message::user("hi")], &[], &ChatConfig::default())
+            .await;
         let Err(err) = result else {
             panic!("both lanes fail")
         };

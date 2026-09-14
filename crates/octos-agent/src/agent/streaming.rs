@@ -97,23 +97,11 @@ impl Agent {
         // token can't hang the turn; the inter-chunk idle catches a stream
         // that stalls mid-flight; `llm_call_max` is the overall wall-clock
         // backstop.
-        // Voice fail-fast tightens TTFT / idle (a spoken reply can't wait
-        // minutes for the first token) and caps the overall at the voice
-        // deadline. Normal turns keep the generous production thresholds.
-        let thresholds =
-            if octos_llm::current_llm_call_policy() == octos_llm::LlmCallPolicy::FailFast {
-                StreamTimeouts {
-                    first_token_grace_secs: super::VOICE_STREAM_TTFT_SECS,
-                    inter_chunk_idle_secs: super::VOICE_STREAM_IDLE_SECS,
-                    overall_max_secs: self.config.voice_overall_deadline.as_secs(),
-                }
-            } else {
-                StreamTimeouts {
-                    first_token_grace_secs: self.config.llm_first_token_grace.as_secs(),
-                    inter_chunk_idle_secs: self.config.llm_stream_idle.as_secs(),
-                    overall_max_secs: self.effective_llm_call_max_secs(),
-                }
-            };
+        let thresholds = StreamTimeouts {
+            first_token_grace_secs: self.config.llm_first_token_grace.as_secs(),
+            inter_chunk_idle_secs: self.config.llm_stream_idle.as_secs(),
+            overall_max_secs: self.effective_llm_call_max_secs(),
+        };
         self.consume_stream_inner(
             stream,
             iteration,

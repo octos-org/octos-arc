@@ -132,25 +132,8 @@ pub enum HarnessError {
     Network { message: String },
     /// Request timed out (client-side or provider-side).
     Timeout { message: String },
-    /// A tool's `execute` returned `Err(...)` or panicked. Distinct from
-    /// plugin spawn failures so the dashboard can separate fault domains.
+    /// A tool's `execute` returned `Err(...)` or panicked.
     ToolExecution { tool_name: String, message: String },
-    /// A plugin executable could not be spawned (missing binary, exec denied).
-    PluginSpawn {
-        plugin_name: String,
-        message: String,
-    },
-    /// A plugin process exceeded its execution timeout.
-    PluginTimeout {
-        plugin_name: String,
-        timeout_secs: u64,
-        message: String,
-    },
-    /// A plugin returned malformed stdout / violated the binary protocol.
-    PluginProtocol {
-        plugin_name: String,
-        message: String,
-    },
     /// Reserved for M6.7 — the spawn/delegate chain exceeded its configured
     /// depth limit. Included here so variant naming stays stable across M6.x
     /// milestones.
@@ -216,17 +199,14 @@ impl HarnessError {
             HarnessError::Network { .. } => "network",
             HarnessError::Timeout { .. } => "timeout",
             HarnessError::ToolExecution { .. } => "tool_execution",
-            HarnessError::PluginSpawn { .. } => "plugin_spawn",
-            HarnessError::PluginTimeout { .. } => "plugin_timeout",
-            HarnessError::PluginProtocol { .. } => "plugin_protocol",
             HarnessError::DelegateDepthExceeded { .. } => "delegate_depth_exceeded",
             HarnessError::PolicyDeny { .. } => "policy",
             HarnessError::Internal { .. } => "internal",
         }
     }
 
-    /// True for variants raised INSIDE a tool-call batch (`tool_execution`,
-    /// `plugin_*`). The agent loop converts these into a tool-result message
+    /// True for variants raised INSIDE a tool-call batch (`tool_execution`).
+    /// The agent loop converts these into a tool-result message
     /// and CONTINUES the task (see `execution.rs`: the error is fed back to
     /// the model as feedback), so their `fail_fast` recovery hint scopes to
     /// the individual tool CALL — "don't retry this call" — not to the task.
@@ -239,10 +219,7 @@ impl HarnessError {
     /// so consumers of persisted/wire events can classify without
     /// reconstructing a `HarnessError`.
     pub fn variant_is_tool_scoped(variant: &str) -> bool {
-        matches!(
-            variant,
-            "tool_execution" | "plugin_spawn" | "plugin_timeout" | "plugin_protocol"
-        )
+        matches!(variant, "tool_execution")
     }
 
     /// Primary recovery hint for this variant. Each variant maps to exactly
@@ -252,8 +229,7 @@ impl HarnessError {
             // Transient — exponential backoff retries.
             HarnessError::RateLimited { .. }
             | HarnessError::Network { .. }
-            | HarnessError::Timeout { .. }
-            | HarnessError::PluginTimeout { .. } => RecoveryHint::BackoffRetry,
+            | HarnessError::Timeout { .. } => RecoveryHint::BackoffRetry,
 
             // Provider-side — the retry layer should try a fallback provider.
             HarnessError::ProviderUnavailable { .. } => RecoveryHint::SwitchProvider,
@@ -283,9 +259,7 @@ impl HarnessError {
             | HarnessError::InvalidRequest { .. }
             | HarnessError::ContentFiltered { .. }
             | HarnessError::DelegateDepthExceeded { .. }
-            | HarnessError::ToolExecution { .. }
-            | HarnessError::PluginSpawn { .. }
-            | HarnessError::PluginProtocol { .. } => RecoveryHint::FailFast,
+            | HarnessError::ToolExecution { .. } => RecoveryHint::FailFast,
 
             // Non-retryable, but NOT a fault: a lifecycle hook denied the
             // call (#2249). Surface for audit; never page, never retry.
@@ -310,9 +284,6 @@ impl HarnessError {
             | HarnessError::Network { message }
             | HarnessError::Timeout { message }
             | HarnessError::ToolExecution { message, .. }
-            | HarnessError::PluginSpawn { message, .. }
-            | HarnessError::PluginTimeout { message, .. }
-            | HarnessError::PluginProtocol { message, .. }
             | HarnessError::DelegateDepthExceeded { message, .. }
             | HarnessError::PolicyDeny { message }
             | HarnessError::Internal { message } => message,
@@ -504,18 +475,6 @@ impl HarnessError {
             HarnessError::ToolExecution { tool_name, .. } => {
                 out.insert("tool_name".into(), Value::from(tool_name.clone()));
             }
-            HarnessError::PluginSpawn { plugin_name, .. }
-            | HarnessError::PluginProtocol { plugin_name, .. } => {
-                out.insert("plugin_name".into(), Value::from(plugin_name.clone()));
-            }
-            HarnessError::PluginTimeout {
-                plugin_name,
-                timeout_secs,
-                ..
-            } => {
-                out.insert("plugin_name".into(), Value::from(plugin_name.clone()));
-                out.insert("timeout_secs".into(), Value::from(*timeout_secs));
-            }
             HarnessError::DelegateDepthExceeded { depth, limit, .. } => {
                 out.insert("depth".into(), Value::from(*depth));
                 out.insert("limit".into(), Value::from(*limit));
@@ -635,19 +594,6 @@ mod tests {
             },
             HarnessError::ToolExecution {
                 tool_name: "shell".into(),
-                message: "x".into(),
-            },
-            HarnessError::PluginSpawn {
-                plugin_name: "demo".into(),
-                message: "x".into(),
-            },
-            HarnessError::PluginTimeout {
-                plugin_name: "demo".into(),
-                timeout_secs: 30,
-                message: "x".into(),
-            },
-            HarnessError::PluginProtocol {
-                plugin_name: "demo".into(),
                 message: "x".into(),
             },
             HarnessError::DelegateDepthExceeded {

@@ -918,31 +918,6 @@ async fn update_plan_body(_: &dyn Tool, args: &Value, ctx: &ToolContext) -> Resu
     })
 }
 
-async fn request_user_input_body(
-    _: &dyn Tool,
-    args: &Value,
-    _: &ToolContext,
-) -> Result<ToolResult> {
-    Ok(ToolResult {
-        output: json!({
-            "ok": true,
-            "kind": "user_input_request",
-            "status": "requested",
-            "request": args,
-            "response": null,
-            "message": "User input request recorded in the transcript; no synchronous host response channel is attached to this runtime (non-interactive or unattended run). Do NOT wait or re-ask: proceed with your best judgment, state the assumption in one line, and continue the task so the user can redirect you later if needed."
-        })
-        .to_string(),
-        success: true,
-        structured_metadata: Some(json!({
-            "codex_tool": "request_user_input",
-            "request": args,
-            "host_response_channel": "not_attached",
-        })),
-        ..Default::default()
-    })
-}
-
 pub struct SpawnAgentTool {
     delegate: Option<Arc<dyn Tool>>,
 }
@@ -1828,12 +1803,6 @@ simple_codex_tool!(
     "update_plan",
     "Update the visible task plan for Codex-compatible coding workflows.",
     update_plan_body
-);
-simple_codex_tool!(
-    RequestUserInputTool,
-    "request_user_input",
-    "Request structured user input from the host UI.",
-    request_user_input_body
 );
 simple_codex_tool!(
     SendInputTool,

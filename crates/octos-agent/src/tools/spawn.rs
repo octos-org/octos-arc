@@ -11,7 +11,6 @@ use metrics::counter;
 use octos_core::{AgentId, InboundMessage, SessionScope, Task, TaskContext, TaskKind, TaskResult};
 use octos_llm::{ContextWindowOverride, LlmProvider, ProviderRouter};
 use octos_memory::EpisodeStore;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
@@ -2089,21 +2088,6 @@ fn workflow_terminal_artifact_kind(workflow: Option<&WorkflowMetadata>) -> Optio
         .filter(|kind| !kind.is_empty())
 }
 
-fn task_result_has_terminal_artifact_candidate(
-    task_result: &TaskResult,
-    workflow: Option<&WorkflowMetadata>,
-) -> bool {
-    let Some(required_kind) = workflow_terminal_artifact_kind(workflow) else {
-        return true;
-    };
-
-    task_result
-        .files_to_send
-        .iter()
-        .chain(task_result.files_modified.iter())
-        .any(|path| workflow_artifact_matches_kind(path, required_kind))
-}
-
 fn select_preferred_terminal_output(
     files: &[PathBuf],
     required_artifact_kind: &str,
@@ -2122,9 +2106,6 @@ fn select_preferred_terminal_output(
                 score += 20;
             }
             if required_artifact_kind == "audio" {
-                if name.contains("podcast") {
-                    score += 10;
-                }
                 if name.ends_with(".mp3") {
                     score += 5;
                 }
@@ -2180,38 +2161,6 @@ fn select_workflow_terminal_files(
     }
 
     Some(candidates)
-}
-
-fn workflow_is_research_podcast(workflow: Option<&WorkflowMetadata>) -> bool {
-    workflow.is_some_and(|workflow| workflow.workflow_kind == "research_podcast")
-}
-
-fn extract_inline_podcast_script(task_desc: &str) -> Option<String> {
-    let header_re = Regex::new(r"\[[^\]\r\n]+?\s+-\s*[^\],\r\n]+,\s*[^\]\r\n]+\]").ok()?;
-    let matches = header_re.find_iter(task_desc).collect::<Vec<_>>();
-    if matches.len() < 2 {
-        return None;
-    }
-
-    let mut script_lines = Vec::new();
-    for (index, header_match) in matches.iter().enumerate() {
-        let text_start = header_match.end();
-        let text_end = matches
-            .get(index + 1)
-            .map(|next| next.start())
-            .unwrap_or(task_desc.len());
-        let dialogue = task_desc[text_start..text_end].trim();
-        if dialogue.is_empty() {
-            continue;
-        }
-        script_lines.push(format!(
-            "{} {}",
-            header_match.as_str().trim(),
-            dialogue.replace('\n', " ").trim()
-        ));
-    }
-
-    (script_lines.len() >= 2).then(|| script_lines.join("\n"))
 }
 
 /// M8 Runtime Parity W2.B2 — single-shot recovery wrapper around
@@ -2290,61 +2239,6 @@ fn build_spawn_recovery_prompt(task_desc: &str, error_message: &str) -> String {
     )
 }
 
-async fn maybe_generate_inline_research_podcast(
-    tools: &ToolRegistry,
-    workflow: Option<&WorkflowMetadata>,
-    task_desc: &str,
-    task_result: &mut TaskResult,
-) {
-    if !workflow_is_research_podcast(workflow)
-        || !task_result.success
-        || task_result_has_terminal_artifact_candidate(task_result, workflow)
-    {
-        return;
-    }
-
-    let Some(script) = extract_inline_podcast_script(task_desc) else {
-        return;
-    };
-
-    warn!(
-        workflow = "research_podcast",
-        "worker completed without audio; invoking podcast_generate directly from inline script"
-    );
-    match tools
-        .execute("podcast_generate", &serde_json::json!({ "script": script }))
-        .await
-    {
-        Ok(tool_result) if tool_result.success => {
-            if let Some(path) = tool_result.file_modified.clone() {
-                task_result.files_modified.push(path);
-            }
-            task_result
-                .files_to_send
-                .extend(tool_result.files_to_send.clone());
-            let existing = task_result.output.trim();
-            task_result.output = if existing.is_empty() {
-                tool_result.output
-            } else {
-                format!("{existing}\n\n{}", tool_result.output)
-            };
-        }
-        Ok(tool_result) => {
-            task_result.success = false;
-            task_result.output = format!(
-                "research_podcast completed without audio, and direct podcast_generate failed: {}",
-                tool_result.output
-            );
-        }
-        Err(error) => {
-            task_result.success = false;
-            task_result.output = format!(
-                "research_podcast completed without audio, and direct podcast_generate errored: {error}"
-            );
-        }
-    }
-}
-
 /// The EFFECTIVE allow-list for the two consumers that cannot apply the local
 /// [`ToolPolicy`] deny-list: `allowed_tools` with every manifest-`disallowed`
 /// tool removed.
@@ -2363,7 +2257,7 @@ fn effective_allowed_tools(allowed_tools: &[String], disallowed_tools: &[String]
     if disallowed_tools.is_empty() {
         return allowed_tools.to_vec();
     }
-    // Deny entries carry the same wildcard (`podcast_*`) and group
+    // Deny entries carry the same wildcard (`*_generate`) and group
     // (`group:runtime`) semantics ToolPolicy enforces locally — prune with a
     // deny-only policy (empty allow = allow everything not denied) so the
     // effective set agrees with what the local policy would actually deny.
@@ -4207,19 +4101,10 @@ impl Tool for SpawnTool {
 
                 // M8 Runtime Parity W2.B2: wrap `run_task` with single-shot
                 // M8.9 recovery for the detached background path too.
-                let mut result = match availability_check {
+                let result = match availability_check {
                     Ok(()) => run_task_with_m8_9_recovery(&worker, &subtask, &task_desc).await,
                     Err(error) => Err(error),
                 };
-                if let Ok(task_result) = result.as_mut() {
-                    maybe_generate_inline_research_podcast(
-                        worker.tool_registry(),
-                        workflow_metadata.as_ref(),
-                        &task_desc,
-                        task_result,
-                    )
-                    .await;
-                }
 
                 // Review A F-004: actively run declared completion-phase
                 // validators before the existing ledger-read checks. The

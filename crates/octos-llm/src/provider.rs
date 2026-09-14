@@ -276,8 +276,6 @@ impl LaneFailure {
 
 /// Every eligible lane was tried.
 pub(crate) const LANES_EXHAUSTED: &str = "all lanes failed";
-/// The call policy forbade failover after the first failure.
-pub(crate) const LANE_FAILED_FAIL_FAST: &str = "lane failed (fail-fast policy, no failover)";
 /// The failure kind is not failover-worthy (`RetryProvider::should_failover`).
 pub(crate) const LANE_FAILED_NOT_FAILOVER_WORTHY: &str =
     "lane failed (not failover-worthy, no failover)";

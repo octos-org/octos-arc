@@ -308,7 +308,7 @@ fn relativize_workspace_path(path: &str, workspace_root: Option<&std::path::Path
 ///
 /// - When `output_files` is non-empty: emit empty content; the files
 ///   themselves carry the deliverable. This matches the legacy
-///   file-attached behaviour for `fm_tts` / `podcast_generate` / etc.
+///   file-attached behaviour for file-producing tools.
 /// - When `output_files` is empty: emit the tool's stdout `output` as
 ///   content. The contract verified the artifact-shaped portion of the
 ///   deliverable (e.g. the HttpProbe asserting deploy_url returned
@@ -656,19 +656,18 @@ impl Agent {
         // #1958: tokio task-locals are not inherited across `tokio::spawn`, so
         // a tool that makes its OWN `provider.chat()` sub-call
         // would otherwise run with the DEFAULT routing context — losing the
-        // turn's fail-fast policy and originating-session attribution (a
-        // verifier failover would then publish unattributed). Capture the call
-        // policy + router context here and re-establish them inside the spawned
-        // task around the tool future (below).
+        // turn's originating-session attribution (a verifier failover would
+        // then publish unattributed). Capture the router context here and
+        // re-establish it inside the spawned task around the tool future
+        // (below).
         //
         // Deliberately NOT the LANE context (codex #4): the wrap below applies
         // to EVERY foreground tool, and a synchronous `spawn` child or an
         // unresolved-model pipeline node that falls back to `self.llm` would
         // otherwise be pinned to the parent turn's lane (e.g. a research child
         // filtered to `CodeCapable`). The verifier is a simple completion check
-        // that routes fine on the default lane; attribution + policy are what
-        // matter, and neither regresses a lane-less child.
-        let captured_call_policy = octos_llm::current_llm_call_policy();
+        // that routes fine on the default lane; attribution is what matters,
+        // and it does not regress a lane-less child.
         let captured_router_ctx = octos_llm::current_router_context();
 
         tokio::spawn(async move {
@@ -1081,8 +1080,8 @@ impl Agent {
                         // Guard C (issue #607): inherit the parent
                         // agent's spawn nesting depth so spawn-only
                         // background tools that themselves dispatch
-                        // sub-agents (e.g. fm_tts → spawn) see the
-                        // higher value when their TOOL_CTX is read.
+                        // sub-agents see the higher value when their
+                        // TOOL_CTX is read.
                         spawn_depth: bg_spawn_depth,
                         // Phase 1 SessionScope migration: thread the
                         // shared scope onto the spawn_only TOOL_CTX so
@@ -1302,9 +1301,9 @@ impl Agent {
                                     // to `satisfied_completion_content`, which
                                     // preserves the Wave-3b mofa_publish path
                                     // (no files + URL text -> emit URL) and
-                                    // the legacy fm_tts / podcast_generate
-                                    // path (files + no text -> empty bubble,
-                                    // files carry the deliverable).
+                                    // the legacy file-carrying path (files +
+                                    // no text -> empty bubble, files carry
+                                    // the deliverable).
                                     let bubble_content = if r.output.trim().is_empty() {
                                         satisfied_completion_content(&output_files, &r.output)
                                     } else {
@@ -1520,10 +1519,9 @@ impl Agent {
                                         // The strict "no output files
                                         // produced" failure was too sharp
                                         // for skills with mixed sync/async
-                                        // tool families (e.g. mofa-fm marks
-                                        // its list/delete tools spawn_only
-                                        // for uniformity with the
-                                        // file-producing fm_tts/fm_voice_save).
+                                        // tool families, where some tools are
+                                        // marked spawn_only for uniformity
+                                        // with their file-producing siblings.
                                         let trimmed_output = r.output.trim();
                                         if !trimmed_output.is_empty() {
                                             tracing::info!(
@@ -2100,17 +2098,14 @@ impl Agent {
                     .execute_with_context(&ctx, &tc_name, &effective_args)
                     .await
             });
-            // #1958: re-establish the turn's fail-fast policy + originating-
-            // session attribution (captured before the spawn) around the tool
-            // future, so a tool that makes its own provider.chat() call
-            // keeps them instead of the post-spawn
-            // defaults. Lane is intentionally NOT restored here (codex #4 — see
-            // the capture comment above). Independent of the approval/question
-            // bridges below; wrapped innermost so those still apply.
-            let exec_future = octos_llm::with_router_context(
-                captured_router_ctx,
-                octos_llm::with_llm_call_policy(captured_call_policy, exec_future),
-            );
+            // #1958: re-establish the turn's originating-session attribution
+            // (captured before the spawn) around the tool future, so a tool
+            // that makes its own provider.chat() call keeps it instead of the
+            // post-spawn defaults. Lane is intentionally NOT restored here
+            // (codex #4 — see the capture comment above). Independent of the
+            // approval/question bridges below; wrapped innermost so those
+            // still apply.
+            let exec_future = octos_llm::with_router_context(captured_router_ctx, exec_future);
             let result = match (&captured_approval_ctx, &captured_user_question_ctx) {
                 (Some(approval), Some(question)) => {
                     TOOL_APPROVAL_CTX
@@ -3167,9 +3162,8 @@ mod tests {
 
     #[test]
     fn satisfied_completion_emits_empty_content_when_files_carry_deliverable() {
-        // Legacy artifact-carrying contracts (fm_tts, podcast_generate,
-        // mofa_slides, ...) still emit empty content because the files
-        // themselves are the deliverable.
+        // Legacy artifact-carrying contracts still emit empty content
+        // because the files themselves are the deliverable.
         let files = vec!["/tmp/a.mp3".to_string(), "/tmp/b.mp3".to_string()];
         let result = satisfied_completion_content(&files, "skill text result");
         assert_eq!(result, "");

@@ -95,7 +95,6 @@ pub(crate) const SPAWN_BUILTIN_TOOLS: &[&str] = &[
     "grep",
     "list_dir",
     "read_file",
-    "request_user_input",
     "resume_agent",
     "send_input",
     "shell",
