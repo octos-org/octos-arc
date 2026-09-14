@@ -827,7 +827,7 @@ TINY_SYSTEM = "Reply with HTML only."
 TINY_PROMPT = """\
 Playwright test the page at / must pass:
 {spec}
-Reply with the complete index.html only (inline script, no CSS, no comments).
+Reply with the complete index.html only: minimal markup, one inline <script>, no CSS, no comments, no blank lines.
 """
 
 TINY_PROMPT_EVOLUTION = """\
@@ -835,7 +835,7 @@ Current index.html:
 {page}
 Additional Playwright test it must also pass (keep existing behaviour):
 {spec}
-Reply with the complete updated index.html only (inline script, no CSS, no comments).
+Reply with the complete updated index.html only: minimal markup, one inline <script>, no CSS, no comments, no blank lines.
 """
 
 TINY_SERVER_JS = """\
@@ -2226,31 +2226,63 @@ class Flow:
 
 # ---------------------------------------------------------------- main
 
+def minimal_probe_body(model: str) -> bytes:
+    """Fallback chat probe that cannot bill reasoning: thinking disabled, one output token."""
+    return json.dumps({"model": model, "messages": [{"role": "user", "content": "OK"}], "max_tokens": 1,
+                       "thinking": {"type": "disabled"}}).encode()
+
+
+def endpoint_is_up(status: int) -> bool:
+    """Any non-5xx HTTP answer proves the endpoint is reachable (401/404 included)."""
+    return status < 500
+
+
 def probe_endpoint() -> None:
-    """Raw chat.completions probe; waits out proxy outages (up to 10 min)."""
+    """Wait out endpoint/proxy outages (up to 10 min) without spending tokens:
+    GET /models first (unbilled; any non-5xx answer = up). Only if that never
+    answers, one chat request with thinking disabled and max_tokens=1.
+    The old probe ("Reply with exactly: OK", max_tokens=4) let the model reason
+    before its 4-token answer — about ¥0.0008 per run, a third of a Smoke task."""
     key = os.environ.get("OPENAI_API_KEY", "")
     base = os.environ.get("OPENAI_BASE_URL")
     if not (key and base):
         return
     import urllib.request as _ur
-    body = json.dumps({"model": os.environ.get("MODEL", "deepseek-chat"),
-                       "messages": [{"role": "user", "content": "Reply with exactly: OK"}], "max_tokens": 4}).encode()
+    import urllib.error as _ue
+    headers = {"Content-Type": "application/json", "Authorization": "Bearer " + key}
     deadline = time.time() + 600
     attempt = 0
     while True:
         attempt += 1
-        req = _ur.Request(base.rstrip("/") + "/chat/completions", data=body, method="POST",
-                          headers={"Content-Type": "application/json", "Authorization": "Bearer " + key})
         try:
-            with _ur.urlopen(req, timeout=60) as resp:
-                log(f"[probe] raw chat/completions -> HTTP {resp.status}: {resp.read()[:120]!r}")
+            with _ur.urlopen(_ur.Request(base.rstrip("/") + "/models", headers=headers), timeout=30) as resp:
+                log(f"[probe] GET /models -> HTTP {resp.status} (endpoint up, no tokens spent)")
                 return
+        except _ue.HTTPError as exc:
+            if endpoint_is_up(exc.code):
+                log(f"[probe] GET /models -> HTTP {exc.code} (endpoint up, no tokens spent)")
+                return
+            log(f"[probe] attempt {attempt}: GET /models -> HTTP {exc.code}")
         except Exception as exc:  # noqa: BLE001
-            log(f"[probe] attempt {attempt} -> {exc}")
-            if time.time() >= deadline:
-                log("[probe] endpoint still failing after 10min; proceeding anyway")
-                return
-            time.sleep(30)
+            log(f"[probe] attempt {attempt}: GET /models -> {exc}")
+            # Some gateways expose only chat/completions: one minimal, reasoning-free request.
+            try:
+                req = _ur.Request(base.rstrip("/") + "/chat/completions", headers=headers, method="POST",
+                                  data=minimal_probe_body(os.environ.get("MODEL", "deepseek-chat")))
+                with _ur.urlopen(req, timeout=60) as resp:
+                    log(f"[probe] minimal chat probe -> HTTP {resp.status}")
+                    return
+            except _ue.HTTPError as exc2:
+                if endpoint_is_up(exc2.code):
+                    log(f"[probe] minimal chat probe -> HTTP {exc2.code} (endpoint up)")
+                    return
+                log(f"[probe] attempt {attempt}: chat -> HTTP {exc2.code}")
+            except Exception as exc2:  # noqa: BLE001
+                log(f"[probe] attempt {attempt}: chat -> {exc2}")
+        if time.time() >= deadline:
+            log("[probe] endpoint still failing after 10min; proceeding anyway")
+            return
+        time.sleep(30)
 
 
 def main() -> int:

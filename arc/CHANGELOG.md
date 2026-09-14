@@ -594,3 +594,20 @@ Offline token estimate (chars ÷ 3.8, the ratio measured on round-22 prompts):
 
 Dry-run (no model): counter and evolution traverse tiny → spec check → compact fallback → repair loop, exit 0.
 Live: 未评测 (key occupied by the Web queue; 5-minute window requested from C). Unit tests 93 OK.
+
+## Round 33 — token-free startup probe; tighter tiny output
+
+Cloud (main@6974ffcd, key idle): tiny tier all first pass — counter e123086d9c9d 1/1 ¥0.00275 (prompt 164 +
+completion 214, reasoning 0), dice ee470858da53 ¥0.00235 (115 + 174), octos counter b438df2a5fcb ¥0.00277,
+dice b88799874e8a ¥0.00238, octos Evolution counter bcf72deae878 2/2 ¥0.00281, dice 207f40662651 2/2 ¥0.00269.
+Fitting the two Smoke points gives ≈¥2/M input, ≈¥7.5/M output and a fixed ≈¥0.0008 per run — the startup
+probe: "Reply with exactly: OK" with max_tokens=4 still let the model produce reasoning_content (DeepSeek
+caps only the answer), i.e. about a third of a tiny-tier task.
+
+- Probe is now GET /models (unbilled; any non-5xx answer proves the endpoint is up). Only if that never
+  answers, one chat request with `thinking: disabled` and `max_tokens: 1`. Same 10-minute outage wait.
+- Tiny prompt's output sentence asks for minimal markup, one inline script, no CSS/comments/blank lines
+  (prompt +≈12 tokens; expected completion 214 → ≈150 for counter, 174 → ≈120 for dice).
+
+Expected per task at the fitted prices: counter ≈ ¥0.0003 + ¥0.0011 ≈ ¥0.0015, dice ≈ ¥0.0012. Generality:
+probe and output rule are endpoint/format facts, no task content. Cloud: 未评测 (next Web gap). Unit tests 95 OK.

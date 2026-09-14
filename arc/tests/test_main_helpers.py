@@ -281,3 +281,18 @@ test('REQ-1: roll a dice', async ({ page }) => {
     def test_should_strip_code_fences(self):
         self.assertEqual(m.strip_code_fences("```html\n<html></html>\n```"), "<html></html>")
         self.assertEqual(m.strip_code_fences("<html></html>"), "<html></html>")
+
+
+class ProbeTests(unittest.TestCase):
+    def test_minimal_probe_body_disables_thinking_and_caps_output(self):
+        import json
+        body = json.loads(m.minimal_probe_body("deepseek-v4-flash"))
+        self.assertEqual(body["max_tokens"], 1)
+        self.assertEqual(body["thinking"], {"type": "disabled"})
+        self.assertNotIn("reasoning_effort", body)
+
+    def test_any_non_5xx_means_endpoint_up(self):
+        for code in (200, 204, 401, 403, 404, 405, 429):
+            self.assertTrue(m.endpoint_is_up(code))
+        for code in (500, 502, 503, 504):
+            self.assertFalse(m.endpoint_is_up(code))
