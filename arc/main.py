@@ -1025,6 +1025,7 @@ class Flow:
         self.tests_dir: Path | None = None
         self.spec_map: dict = {None: []}
         self.probe_summaries: dict = {}
+        self.probe_count = 0  # nodes actually probed against the existing app
         self.aliases: dict[str, str] = {}
         self.runner: AcceptanceRunner | None = None
         self.designs: dict[str, dict] = {}
@@ -1680,6 +1681,26 @@ class Flow:
             log(f"[flow] {node_id}: source snapshot failed: {exc}")
             return None
 
+    def discard_template(self) -> Path | None:
+        """Move frontend/ and backend/ of a non-working existing app to
+        .arc/template-discarded/ so the fresh build starts from our own layout."""
+        dest = self.output_dir / ".arc" / "template-discarded"
+        try:
+            if dest.exists():
+                shutil.rmtree(dest)
+            dest.mkdir(parents=True, exist_ok=True)
+            moved = []
+            for name in ("frontend", "backend"):
+                src = self.output_dir / name
+                if src.exists():
+                    shutil.move(str(src), str(dest / name))
+                    moved.append(name)
+            log(f"[flow] existing app passes no spec; moved {moved} to {dest.relative_to(self.output_dir)} and building fresh")
+            return dest
+        except OSError as exc:
+            log(f"[flow] could not set the existing app aside: {exc}")
+            return None
+
     def already_passing_nodes(self, node_ids: list[str]) -> set[str]:
         """Evolution probe: run each candidate node's specs against the existing app
         (no LLM); nodes that fully pass need no implementation turn."""
@@ -1689,7 +1710,11 @@ class Flow:
             if not specs:
                 continue
             summary = self.run_specs(specs)
-            if summary.error or not summary.total:
+            self.probe_count += 1
+            if summary.error:
+                log(f"[acceptance] probe {node_id}: existing app does not build/start/serve ({summary.error[:160]})")
+                continue
+            if not summary.total:
                 continue
             log(f"[acceptance] probe {node_id}: {summary.passed}/{summary.total} against the existing app")
             if summary.all_passed:
@@ -1881,9 +1906,16 @@ class Flow:
                 # fingerprints cannot tell what is new. A node whose specs already
                 # pass against the existing app is unchanged — no LLM turn for it.
                 unchanged |= self.already_passing_nodes([n for n in node_ids if n not in unchanged])
+                if self.probe_count and not unchanged:
+                    # Nothing of the existing app satisfies any spec (a scaffold/placeholder
+                    # template, or an app the new specs no longer accept): it is not a usable
+                    # base. Set it aside and build the task fresh (cloud c30b29eab45b/10b04d36f704:
+                    # implement-then-rewrite on a placeholder cost 40-80x the fresh build).
+                    self.discard_template()
+                    self.evolution = False
                 self.nodes_to_implement = len([n for n in node_ids if n not in unchanged])
-                log(f"[flow] evolution mode after probing the existing app: unchanged {sorted(unchanged)}, "
-                    f"to implement {[i for i in node_ids if i not in unchanged]}")
+                log(f"[flow] {'evolution' if self.evolution else 'fresh build'} after probing the existing app: "
+                    f"unchanged {sorted(unchanged)}, to implement {[i for i in node_ids if i not in unchanged]}")
 
             octos_bin = find_octos()
             log(f"[octos] binary {octos_bin}")

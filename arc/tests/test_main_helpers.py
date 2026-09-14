@@ -197,3 +197,18 @@ class SnapshotSourcesTests(unittest.TestCase):
         self.assertTrue((dest / "frontend/src/index.html").is_file())
         self.assertTrue((dest / "backend/server.js").is_file())
         self.assertFalse((dest / "backend/node_modules").exists())
+
+
+class DiscardTemplateTests(unittest.TestCase):
+    def test_should_move_app_dirs_aside_and_clear_has_app(self):
+        import argparse, tempfile
+        from pathlib import Path
+        root = Path(tempfile.mkdtemp())
+        (root / "frontend").mkdir(); (root / "backend").mkdir()
+        (root / "frontend/package.json").write_text("{}"); (root / "backend/package.json").write_text("{}")
+        flow = m.Flow(argparse.Namespace(web_port=1), root, root)
+        self.assertTrue(flow.has_app())
+        dest = flow.discard_template()
+        self.assertFalse(flow.has_app())
+        self.assertTrue((dest / "frontend/package.json").is_file())
+        self.assertTrue((dest / "backend/package.json").is_file())
