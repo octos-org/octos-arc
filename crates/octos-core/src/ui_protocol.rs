@@ -343,9 +343,7 @@ fn method_capability_gate(method: &str) -> Option<&'static str> {
         | methods::SESSION_WORKSPACE_GET
         | methods::SESSION_TITLE_SET
         | methods::SESSION_DELETE
-        | methods::SYSTEM_STATUS_GET
-        | methods::CRON_LIST
-        | methods::CRON_TOGGLE => Some(UI_PROTOCOL_FEATURE_AUXILIARY_REST_TO_WS_V1),
+        | methods::SYSTEM_STATUS_GET => Some(UI_PROTOCOL_FEATURE_AUXILIARY_REST_TO_WS_V1),
         methods::AGENT_LIST
         | methods::AGENT_STATUS_READ
         | methods::AGENT_OUTPUT_READ
@@ -1146,10 +1144,6 @@ pub mod methods {
     /// Replaces `GET /api/status` — agent/server status (distinct from
     /// `/api/auth/status` which stays REST).
     pub const SYSTEM_STATUS_GET: &str = "system/status.get";
-    /// Replaces `GET /api/my/cron` — cron panel job listing.
-    pub const CRON_LIST: &str = "cron/list";
-    /// Replaces `PUT /api/my/cron/{job_id}/enabled` — cron job toggle.
-    pub const CRON_TOGGLE: &str = "cron/toggle";
 
     /// Pre-session launch probe. Given the project cwd + optional requested
     /// profile, the server decides whether to resume the folder's
@@ -1264,8 +1258,6 @@ pub const UI_PROTOCOL_COMMAND_METHODS: &[&str] = &[
     methods::SESSION_TITLE_SET,
     methods::SESSION_DELETE,
     methods::SYSTEM_STATUS_GET,
-    methods::CRON_LIST,
-    methods::CRON_TOGGLE,
     methods::ROUTER_SET_MODE,
     methods::ROUTER_GET_METRICS,
     methods::LAUNCH_RESOLVE,
@@ -1364,8 +1356,6 @@ pub const UI_PROTOCOL_FIRST_SERVER_METHODS: &[&str] = &[
     methods::SESSION_TITLE_SET,
     methods::SESSION_DELETE,
     methods::SYSTEM_STATUS_GET,
-    methods::CRON_LIST,
-    methods::CRON_TOGGLE,
     methods::ROUTER_SET_MODE,
     methods::ROUTER_GET_METRICS,
     methods::LAUNCH_RESOLVE,
@@ -3104,45 +3094,6 @@ pub struct SystemStatusGetResult {
     pub status: Value,
 }
 
-/// Params for `cron/list`. Empty today; the struct exists so `{}` /
-/// `null` params decode uniformly (mirrors [`SystemStatusGetParams`];
-/// the wire `params` MEMBER must still be present).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CronListParams {}
-
-/// Result for `cron/list`. Mirrors the JSON body of `GET /api/my/cron`:
-/// `jobs` is the rendered job array, `count` its length, and
-/// `gateway_running` reports whether a spawned gateway child owns
-/// `cron.json` (toggles are refused while it does).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CronListResult {
-    pub jobs: Value,
-    pub count: usize,
-    pub gateway_running: bool,
-    /// True when `jobs` was capped (row count or serialized byte budget) so the
-    /// result fits a single WS frame. `count` still reports the true total, so a
-    /// client can surface "showing N of `count`". Defaults to `false` for
-    /// backward compatibility with pre-truncation payloads.
-    #[serde(default)]
-    pub truncated: bool,
-}
-
-/// Params for `cron/toggle`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CronToggleParams {
-    pub job_id: String,
-    pub enabled: bool,
-}
-
-/// Result for `cron/toggle`. `job` is the updated job rendered exactly
-/// as a `cron/list` entry. Refusals (spawned gateway owns the store)
-/// surface as an RPC error whose `data.detail` is `"gateway_running"`
-/// with `data.rest_status = 409`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CronToggleResult {
-    pub job: Value,
-}
-
 // ----- Wave4-A `router/*` + `queue/state` -----
 
 /// Wave4-A `router/set_mode` params. `mode` is the lowercase string
@@ -3799,8 +3750,6 @@ pub enum UiCommand {
     SessionTitleSet(SessionTitleSetParams),
     SessionDelete(SessionDeleteParams),
     SystemStatusGet(SystemStatusGetParams),
-    CronList(CronListParams),
-    CronToggle(CronToggleParams),
     // ---- Wave4-A: adaptive router controls ----
     RouterSetMode(RouterSetModeParams),
     RouterGetMetrics(RouterGetMetricsParams),
@@ -3841,8 +3790,6 @@ impl UiCommand {
             Self::SessionTitleSet(_) => methods::SESSION_TITLE_SET,
             Self::SessionDelete(_) => methods::SESSION_DELETE,
             Self::SystemStatusGet(_) => methods::SYSTEM_STATUS_GET,
-            Self::CronList(_) => methods::CRON_LIST,
-            Self::CronToggle(_) => methods::CRON_TOGGLE,
             Self::RouterSetMode(_) => methods::ROUTER_SET_MODE,
             Self::RouterGetMetrics(_) => methods::ROUTER_GET_METRICS,
             Self::LaunchResolve(_) => methods::LAUNCH_RESOLVE,
@@ -3885,8 +3832,6 @@ impl UiCommand {
             Self::SessionTitleSet(params) => serde_json::to_value(params),
             Self::SessionDelete(params) => serde_json::to_value(params),
             Self::SystemStatusGet(params) => serde_json::to_value(params),
-            Self::CronList(params) => serde_json::to_value(params),
-            Self::CronToggle(params) => serde_json::to_value(params),
             Self::RouterSetMode(params) => serde_json::to_value(params),
             Self::RouterGetMetrics(params) => serde_json::to_value(params),
             Self::LaunchResolve(params) => serde_json::to_value(params),
@@ -3964,8 +3909,6 @@ impl UiCommand {
             methods::SYSTEM_STATUS_GET => Ok(Self::SystemStatusGet(decode_optional_params(
                 method, params,
             )?)),
-            methods::CRON_LIST => Ok(Self::CronList(decode_optional_params(method, params)?)),
-            methods::CRON_TOGGLE => Ok(Self::CronToggle(decode_params(method, params)?)),
             methods::ROUTER_SET_MODE => Ok(Self::RouterSetMode(decode_params(method, params)?)),
             methods::ROUTER_GET_METRICS => {
                 Ok(Self::RouterGetMetrics(decode_params(method, params)?))

@@ -5999,39 +5999,7 @@ async fn session_open_writes_active_profile_marker_only_with_flag_and_cwd() {
 #[tokio::test]
 async fn stdio_auth_bound_methods_return_typed_auth_unavailable() {
     let state = Arc::new(AppState::empty_for_tests());
-    let headers = HeaderMap::new();
     let (ws, mut rx) = ws_connection_for_test(16);
-
-    handle_cron_list(
-        &ws,
-        &state,
-        &headers,
-        None,
-        false,
-        "cron-list-unauth".into(),
-        CronListParams::default(),
-    )
-    .await;
-    let frame = recv_rpc_json(&mut rx).await;
-    assert_eq!(frame["id"], json!("cron-list-unauth"));
-    assert_eq!(frame["error"]["data"]["kind"], json!("auth_unavailable"));
-
-    handle_cron_toggle(
-        &ws,
-        &state,
-        &headers,
-        None,
-        false,
-        "cron-toggle-unauth".into(),
-        CronToggleParams {
-            job_id: "job-1".into(),
-            enabled: true,
-        },
-    )
-    .await;
-    let frame = recv_rpc_json(&mut rx).await;
-    assert_eq!(frame["id"], json!("cron-toggle-unauth"));
-    assert_eq!(frame["error"]["data"]["kind"], json!("auth_unavailable"));
 
     let contracts = Arc::new(UiProtocolContractStores::default());
     let ledger = Arc::new(UiProtocolLedger::new(16));
@@ -13213,15 +13181,15 @@ async fn rest_status_to_rpc_error_404_session_context_echoes_session_id() {
 }
 
 /// Codex review 2026-05-12 (MEDIUM 1, companion): a REST 404 from
-/// a non-session resource (a cron job row, a profile row) maps to
+/// a non-session resource (a profile row) maps to
 /// the `RESOURCE_NOT_FOUND` slot with `resource_type` +
 /// `identifier` echoed in `data`. Before this fix every 404 hit
 /// `UNKNOWN_SESSION` regardless of resource kind.
 #[tokio::test]
 async fn rest_status_to_rpc_error_404_resource_context_uses_not_found_slot() {
-    let context = RestResourceContext::resource("cron", "job-42");
+    let context = RestResourceContext::resource("profile", "row-7");
     let err = rest_status_to_rpc_error(
-        octos_core::ui_protocol::methods::CRON_TOGGLE,
+        octos_core::ui_protocol::methods::SESSION_SNAPSHOT,
         axum::http::StatusCode::NOT_FOUND,
         None,
         &context,
@@ -13235,11 +13203,11 @@ async fn rest_status_to_rpc_error_404_resource_context_uses_not_found_slot() {
     assert_eq!(data.get("kind").and_then(Value::as_str), Some("not_found"));
     assert_eq!(
         data.get("resource_type").and_then(Value::as_str),
-        Some("cron"),
+        Some("profile"),
     );
     assert_eq!(
         data.get("identifier").and_then(Value::as_str),
-        Some("job-42"),
+        Some("row-7"),
     );
     assert_eq!(data.get("rest_status").and_then(Value::as_u64), Some(404));
 }
@@ -21938,8 +21906,6 @@ async fn make_m11e_profile_with_llm_and_sandbox(
         embedder: None,
         memory_inject_tokens: 2500,
         memory_refresh_enabled: false,
-        cron_service: None,
-        runtime_lifecycle: None,
         hook_executor: None,
         lane_routing: None,
     })

@@ -772,8 +772,6 @@ fn ui_protocol_v1_wire_contract_is_golden() {
             "session/title.set",
             "session/delete",
             "system/status.get",
-            "cron/list",
-            "cron/toggle",
             "router/set_mode",
             "router/get_metrics",
             "launch/resolve",
@@ -874,8 +872,6 @@ fn ui_protocol_v1_wire_contract_is_golden() {
             "session/title.set",
             "session/delete",
             "system/status.get",
-            "cron/list",
-            "cron/toggle",
             "router/set_mode",
             "router/get_metrics",
             "launch/resolve",
@@ -950,8 +946,6 @@ fn ui_protocol_v1_representative_wire_payloads_are_golden() {
                 "session/title.set",
                 "session/delete",
                 "system/status.get",
-                "cron/list",
-                "cron/toggle",
                 "router/set_mode",
                 "router/get_metrics",
                 "launch/resolve",
@@ -4060,26 +4054,15 @@ fn aux_rest_to_ws_v1_methods_round_trip_through_rpc_envelope() {
             UiCommand::SystemStatusGet(SystemStatusGetParams::default()),
             methods::SYSTEM_STATUS_GET,
         ),
-        (
-            UiCommand::CronList(CronListParams::default()),
-            methods::CRON_LIST,
-        ),
-        (
-            UiCommand::CronToggle(CronToggleParams {
-                job_id: "job-1".into(),
-                enabled: false,
-            }),
-            methods::CRON_TOGGLE,
-        ),
     ];
     assert_eq!(
         cases.len(),
-        12,
-        "12 UiCommand arms cover the 12 auxiliary methods \
+        10,
+        "10 UiCommand arms cover the 10 auxiliary methods \
              (`session/list`, `session/snapshot`, `session/messages_page`, \
              `session/status.get`, `session/files.list`, `session/tasks.list`, \
              `session/workspace.get`, `session/title.set`, `session/delete`, \
-             `system/status.get`, `cron/list`, `cron/toggle`)"
+             `system/status.get`)"
     );
     for (command, expected_method) in cases {
         let rpc = command
@@ -4105,10 +4088,6 @@ fn aux_rest_to_ws_v1_empty_param_methods_accept_null_params() {
         UiCommand::from_method_and_params(methods::SYSTEM_STATUS_GET, Value::Null)
             .expect("system/status.get with null params");
     assert!(matches!(system_status_null, UiCommand::SystemStatusGet(_)));
-
-    let cron_list_null = UiCommand::from_method_and_params(methods::CRON_LIST, Value::Null)
-        .expect("cron/list with null params");
-    assert!(matches!(cron_list_null, UiCommand::CronList(_)));
 }
 
 #[test]
@@ -4157,25 +4136,6 @@ fn aux_rest_to_ws_v1_result_dtos_round_trip_via_serde_json() {
     let value = serde_json::to_value(&delete).expect("serialize");
     let decoded: SessionDeleteResult = serde_json::from_value(value).expect("deserialize");
     assert_eq!(decoded, delete);
-
-    let cron = CronListResult {
-        jobs: serde_json::json!([{ "id": "job-1" }]),
-        count: 1,
-        gateway_running: false,
-        truncated: false,
-    };
-    let value = serde_json::to_value(&cron).expect("serialize");
-    let decoded: CronListResult = serde_json::from_value(value).expect("deserialize");
-    assert_eq!(decoded.jobs, cron.jobs);
-    assert_eq!(decoded.count, cron.count);
-    assert!(!decoded.gateway_running);
-
-    let toggle = CronToggleResult {
-        job: serde_json::json!({ "id": "job-1", "enabled": false }),
-    };
-    let value = serde_json::to_value(&toggle).expect("serialize");
-    let decoded: CronToggleResult = serde_json::from_value(value).expect("deserialize");
-    assert_eq!(decoded.job, toggle.job);
 }
 
 #[test]
@@ -4240,8 +4200,6 @@ fn aux_rest_to_ws_v1_methods_are_capability_gated() {
         methods::SESSION_TITLE_SET,
         methods::SESSION_DELETE,
         methods::SYSTEM_STATUS_GET,
-        methods::CRON_LIST,
-        methods::CRON_TOGGLE,
     ] {
         assert!(
             !none.supports_method(method),
@@ -4263,8 +4221,6 @@ fn aux_rest_to_ws_v1_methods_are_capability_gated() {
         methods::SESSION_TITLE_SET,
         methods::SESSION_DELETE,
         methods::SYSTEM_STATUS_GET,
-        methods::CRON_LIST,
-        methods::CRON_TOGGLE,
     ] {
         assert!(
             with_feature.supports_method(method),
@@ -4412,22 +4368,6 @@ fn aux_rest_to_ws_v1_request_dtos_match_json_goldens() {
         serde_json::to_value(SystemStatusGetParams::default()).expect("serialize"),
         serde_json::json!({}),
     );
-
-    // cron/list — empty
-    assert_eq!(
-        serde_json::to_value(CronListParams::default()).expect("serialize"),
-        serde_json::json!({}),
-    );
-
-    // cron/toggle
-    assert_eq!(
-        serde_json::to_value(CronToggleParams {
-            job_id: "job-1".into(),
-            enabled: true,
-        })
-        .expect("serialize"),
-        serde_json::json!({ "job_id": "job-1", "enabled": true }),
-    );
 }
 
 /// Codex review 2026-05-12 (MEDIUM 2): JSON golden assertions for
@@ -4535,32 +4475,6 @@ fn aux_rest_to_ws_v1_result_dtos_match_json_goldens() {
         })
         .expect("serialize"),
         serde_json::json!({ "status": { "version": "0.1.1" } }),
-    );
-
-    // cron/list — `{ jobs, count, gateway_running, truncated }`
-    assert_eq!(
-        serde_json::to_value(CronListResult {
-            jobs: serde_json::json!([{ "id": "job-1" }]),
-            count: 1,
-            gateway_running: true,
-            truncated: false,
-        })
-        .expect("serialize"),
-        serde_json::json!({
-            "jobs": [{ "id": "job-1" }],
-            "count": 1,
-            "gateway_running": true,
-            "truncated": false,
-        }),
-    );
-
-    // cron/toggle — `{ job: <opaque cron/list entry> }`
-    assert_eq!(
-        serde_json::to_value(CronToggleResult {
-            job: serde_json::json!({ "id": "job-1", "enabled": false }),
-        })
-        .expect("serialize"),
-        serde_json::json!({ "job": { "id": "job-1", "enabled": false } }),
     );
 }
 

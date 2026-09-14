@@ -7,8 +7,6 @@ use std::path::{Path, PathBuf};
 
 use eyre::{Result, WrapErr};
 
-use crate::builtin_skills::BUILTIN_SKILLS;
-
 /// Crate-agnostic skill selection filter.
 ///
 /// This is the lowered form of the CLI's per-profile skill-selection layer
@@ -112,19 +110,11 @@ impl SkillsLoader {
         }
     }
 
-    /// List all skills (built-in system skills + installed workspace skills).
+    /// List all installed workspace skills.
     ///
-    /// Priority (highest first): first skills_dir, second skills_dir, ..., builtins.
+    /// Priority (highest first): first skills_dir, second skills_dir, ....
     pub async fn list_skills(&self) -> Result<Vec<SkillInfo>> {
         let mut skills = Vec::new();
-
-        // Load built-in system skills
-        for (name, content) in BUILTIN_SKILLS {
-            let path = PathBuf::from(format!("<builtin>/{name}/SKILL.md"));
-            if let Some(info) = parse_skill(&path, content, true) {
-                skills.push(info);
-            }
-        }
 
         // Load workspace skills from all directories (later dirs first so earlier
         // dirs can override them, since we use retain to remove duplicates).
@@ -171,8 +161,7 @@ impl SkillsLoader {
 
     /// Load a specific skill's full content (without frontmatter).
     ///
-    /// Checks skills directories in priority order (first added = highest priority),
-    /// then falls back to built-in system skills.
+    /// Checks skills directories in priority order (first added = highest priority).
     pub async fn load_skill(&self, name: &str) -> Result<Option<String>> {
         // Skill layering v1: a disabled skill is not loadable by name — its
         // content must never be injected into the prompt.
@@ -186,13 +175,6 @@ impl SkillsLoader {
                 Ok(content) => return Ok(Some(strip_frontmatter(&content))),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e).wrap_err_with(|| format!("failed to read skill: {name}")),
-            }
-        }
-
-        // Fall back to built-in system skills
-        for (builtin_name, content) in BUILTIN_SKILLS {
-            if *builtin_name == name {
-                return Ok(Some(strip_frontmatter(content)));
             }
         }
 
@@ -375,15 +357,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_empty_dir_has_builtins() {
+    async fn test_empty_dir_lists_no_skills() {
         let dir = tempfile::tempdir().unwrap();
         let loader = SkillsLoader::new(dir.path());
         let skills = loader.list_skills().await.unwrap();
-        // Empty workspace dir still has built-in system skills
-        assert!(skills.iter().all(|s| s.builtin));
-        assert!(skills.iter().any(|s| s.name == "cron"));
-        assert!(skills.iter().any(|s| s.name == "skill-store"));
-        assert!(skills.iter().any(|s| s.name == "skill-creator"));
+        // Built-in system skills are retired; an empty workspace dir lists nothing.
+        assert!(skills.is_empty());
     }
 
     #[tokio::test]
@@ -841,8 +820,8 @@ mod tests {
             .collect();
         assert!(names.contains(&"alpha".to_string()));
         assert!(!names.contains(&"beta".to_string()));
-        // AllowList also drops built-in skills that are not listed.
-        assert!(!names.iter().any(|n| n == "cron"));
+        // AllowList drops every skill that is not listed.
+        assert_eq!(names.len(), 1);
     }
 
     #[tokio::test]
@@ -857,7 +836,7 @@ mod tests {
         )
         .await
         .unwrap();
-        // No filter ⇒ identical to today: the installed skill AND builtins load.
+        // No filter ⇒ every installed skill loads.
         let loader = SkillsLoader::new(dir.path());
         let names: Vec<String> = loader
             .list_skills()
@@ -867,7 +846,7 @@ mod tests {
             .map(|s| s.name)
             .collect();
         assert!(names.contains(&"solo".to_string()));
-        assert!(names.iter().any(|n| n == "cron"));
+        assert_eq!(names.len(), 1);
     }
 
     #[tokio::test]

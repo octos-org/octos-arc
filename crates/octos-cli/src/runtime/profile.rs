@@ -14,7 +14,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use eyre::{Result, WrapErr};
 use octos_agent::{HookExecutor, SandboxConfig, ToolPolicy, ToolRegistry, create_sandbox};
-use octos_bus::CronService;
 use octos_llm::{AdaptiveRouter, LlmProvider, QosCatalog};
 use octos_memory::{EpisodeStore, MemoryStore};
 use tracing::{info, warn};
@@ -22,7 +21,6 @@ use tracing::{info, warn};
 use crate::commands::chat;
 use crate::commands::gateway::build_system_prompt;
 use crate::config::Config;
-use crate::cron_tool::CronTool;
 use crate::profiles::{UserProfile, config_from_profile};
 use crate::qos_catalog::{ExporterMode, build_adaptive_provider_chain};
 use crate::skills_scope::build_account_skills_loader;
@@ -36,20 +34,6 @@ pub(crate) fn enable_stdio_solo_lean_defaults() {
 fn stdio_solo_lean_defaults_enabled() -> bool {
     STDIO_SOLO_LEAN_DEFAULTS.load(Ordering::Acquire)
         || std::env::var("OCTOS_SKIP_BUNDLED_SKILLS").ok().as_deref() == Some("1")
-}
-
-/// Shared owner for profile services whose shutdown cannot be tied to one
-/// replaceable `ProfileRuntime` allocation.
-pub struct ProfileRuntimeLifecycle {
-    cron_service: Option<Arc<CronService>>,
-}
-
-impl Drop for ProfileRuntimeLifecycle {
-    fn drop(&mut self) {
-        if let Some(ref cron) = self.cron_service {
-            cron.shutdown_signal();
-        }
-    }
 }
 
 /// All long-lived state that belongs to a single profile within the
@@ -285,26 +269,6 @@ pub struct ProfileRuntime {
     /// Resolved `memory.refresh.enabled` — gates the capture-policy text in
     /// the memory segment and the per-turn refresh provider.
     pub memory_refresh_enabled: bool,
-
-    /// Profile-scope cron service (M11-F regression fix REG-2).
-    ///
-    /// Pre-M11-F `serve.rs::try_create_agent` constructed one
-    /// [`CronService`] per server, called `start()`, and registered a
-    /// [`CronTool`] backed by it. M11-F deleted that helper and never
-    /// re-instated the wiring, so `/api/chat` and the UI Protocol path
-    /// lost the `cron` tool entirely. We restore the registration at
-    /// the profile scope (the cron jobs persist to `cron.json` under
-    /// the profile's `data_dir`, matching the per-profile isolation
-    /// the rest of `ProfileRuntime` already enforces) and hold the
-    /// resulting `Arc<CronService>` here so the tokio timer task
-    /// `start()` spawns survives for the lifetime of the runtime.
-    /// Dropping the `Arc` would let the underlying service drop, which
-    /// would in turn drop the timer's `JoinHandle` and silently
-    /// terminate scheduled job execution.
-    pub cron_service: Option<Arc<CronService>>,
-
-    /// Shared shutdown owner retained across replacement runtimes.
-    pub runtime_lifecycle: Option<Arc<ProfileRuntimeLifecycle>>,
 
     /// Pre-built lifecycle hook executor (M11-F regression fix REG-3).
     ///
@@ -660,36 +624,6 @@ impl ProfileRuntime {
         // `"required tool(s) not available on this host: bg_research"`
         // — reproduced by mini1 `bg_research` round-7 soak (binary
         // `5cfd85f3`).
-        // M11-F regression fix REG-2: restore the CronTool registration.
-        //
-        // Pre-M11-F `serve.rs::try_create_agent` built one `CronService`
-        // per server rooted at `data_dir/cron.json`, called `start()`,
-        // and registered `CronTool::with_context(cron_service, "api",
-        // "")`. M11-F removed the helper without porting this wiring,
-        // so `/api/chat` and the UI Protocol WS path silently lost the
-        // `cron` tool. We restore it at the profile scope so cron jobs
-        // are per-profile-isolated, matching the persistent stores
-        // (`episodes.redb`, `memory.json`) that already live in
-        // `data_dir`.
-        //
-        // The `cron_tx` here is a dummy channel: serve mode does not
-        // route cron fires through the gateway-style inbound bus, so
-        // the timer-driven sends will fill the bounded channel and be
-        // dropped when the receiver is dropped at the end of this
-        // function. That preserves the pre-M11-F semantics — cron CRUD
-        // (`add` / `list` / `remove` / `enable` / `disable`) works in
-        // serve mode but actual firing only happens under `octos
-        // gateway`. We keep the `Arc<CronService>` alive by stashing it
-        // on `ProfileRuntime::cron_service`; without that field the
-        // tokio task `start()` spawned would be cancelled the moment
-        // this function returned.
-        let (cron_tx, _cron_rx) = tokio::sync::mpsc::channel(64);
-        let cron_service = Arc::new(CronService::new(data_dir.join("cron.json"), cron_tx));
-        cron_service.start();
-        tools.register(CronTool::with_context(cron_service.clone(), "api", ""));
-        let runtime_lifecycle = Some(Arc::new(ProfileRuntimeLifecycle {
-            cron_service: Some(cron_service.clone()),
-        }));
         // Step 17: re-apply tool policy AFTER plugin / memory-bank
         // registration so deny entries can target plugin-declared
         // tool names too (PR #688 follow-up — MEDIUM #4).
@@ -853,34 +787,12 @@ impl ProfileRuntime {
             memory,
             memory_store,
             embedder,
-            cron_service: Some(cron_service),
-            runtime_lifecycle,
             hook_executor,
             lane_routing: profile.config.lane_routing.clone(),
         }))
     }
 }
 
-/// Tear down the profile-scope cron service when the runtime drops.
-///
-/// `CronService::start` spawns a tokio timer task that re-arms via
-/// `Arc::clone(self)`, so the task self-holds an `Arc<CronService>`.
-/// Without a `Drop` signal that flips `running = false` and aborts the
-/// in-flight `tokio::time::sleep`, the timer task would survive
-/// `ProfileRuntime` drop until its next scheduled fire (potentially
-/// hours in the future), holding the service `Arc` alive past the
-/// runtime that owns the profile's filesystem layout. We call the
-/// synchronous [`CronService::shutdown_signal`] helper from `Drop` to
-/// flip the flag and best-effort abort the JoinHandle; once the
-/// running flag is `false` the reschedule chain in `on_timer` →
-/// `arm_timer` terminates on the next tick and the task drops its
-/// self-held `Arc`.
-///
-/// This is a code-quality fix (the cron task does no harm if it
-/// continues firing — `inbound_tx` is a dummy channel whose receiver
-/// is already dropped — but readers reasonably expect the runtime to
-/// own its background tasks). Codex flagged this on the M11-F serve
-/// regression bundle review.
 #[cfg(test)]
 mod tests {
 
@@ -1269,125 +1181,5 @@ mod tests {
             "bootstrap must preserve the typed lock cause through its own \
              wrap_err context; got: {err:?}",
         );
-    }
-
-    /// Set an env-var-backed fake API key with the supplied name for the
-    /// duration of the test. Drops the var on scope exit so tests do not
-    /// pollute the shared process environment.
-    struct ScopedEnvKey {
-        name: &'static str,
-    }
-    impl ScopedEnvKey {
-        #[allow(unsafe_code)]
-        fn set(name: &'static str) -> Self {
-            // SAFETY: each test passes a uniquely-named env var that no
-            // other test reads or writes; we also remove it on drop.
-            unsafe {
-                std::env::set_var(name, "test-key-sk-fake");
-            }
-            Self { name }
-        }
-    }
-    impl Drop for ScopedEnvKey {
-        #[allow(unsafe_code)]
-        fn drop(&mut self) {
-            // SAFETY: see set().
-            unsafe {
-                std::env::remove_var(self.name);
-            }
-        }
-    }
-
-    /// M11-F regression fix REG-2: `ProfileRuntime::bootstrap` must
-    /// register the `cron` tool so `/api/chat` and the UI Protocol WS
-    /// path see it under api mode, matching the pre-M11-F serve flow
-    /// (`serve.rs:1207`). The `Arc<CronService>` must also be retained
-    /// on the runtime so the tokio timer task `start()` spawned does
-    /// not get dropped when bootstrap returns.
-    #[tokio::test]
-    async fn profile_runtime_bootstrap_registers_cron_tool() {
-        let _key = ScopedEnvKey::set("OCTOS_M11F_REG2_KEY");
-        let tmp = tempfile::tempdir().unwrap();
-        let data_dir = tmp.path().join("profile-data");
-        std::fs::create_dir_all(&data_dir).unwrap();
-
-        let profile = fixture_profile("reg2", "OCTOS_M11F_REG2_KEY");
-        let rt = ProfileRuntime::bootstrap(&profile, &data_dir, None, BootstrapRole::Serve)
-            .await
-            .expect("bootstrap should succeed");
-
-        assert!(
-            rt.tool_specs.specs().iter().any(|s| s.name == "cron"),
-            "cron tool must be registered on the base ToolRegistry",
-        );
-        assert!(
-            rt.cron_service.is_some(),
-            "Arc<CronService> must be retained on ProfileRuntime so the \
-             timer task survives bootstrap",
-        );
-    }
-
-    #[tokio::test]
-    async fn profile_runtime_drop_signals_cron_shutdown() {
-        let _key = ScopedEnvKey::set("OCTOS_M11F_REG2_DROP_KEY");
-        let tmp = tempfile::tempdir().unwrap();
-        let data_dir = tmp.path().join("profile-data");
-        std::fs::create_dir_all(&data_dir).unwrap();
-
-        let profile = fixture_profile("reg2-drop", "OCTOS_M11F_REG2_DROP_KEY");
-        let rt = ProfileRuntime::bootstrap(&profile, &data_dir, None, BootstrapRole::Serve)
-            .await
-            .expect("bootstrap should succeed");
-
-        let cron = rt
-            .cron_service
-            .clone()
-            .expect("cron_service must be Some after bootstrap");
-        // Hold an extra Arc so we can inspect the service after the
-        // runtime drops.
-        drop(rt);
-
-        // After drop, the runtime's `Drop` impl signals shutdown — the
-        // running flag must be false, which causes the timer's next
-        // reschedule to terminate and the self-held Arc to release.
-        assert!(
-            !cron.is_running(),
-            "Drop must flip CronService::running to false",
-        );
-    }
-
-    /// Build a minimal profile that bootstraps successfully against a
-    /// stubbed env-var-backed API key. Used by the M11-F regression
-    /// fix tests below to keep their fixture identical.
-    fn fixture_profile(id: &str, key_env: &'static str) -> UserProfile {
-        UserProfile {
-            id: id.to_string(),
-            name: id.to_string(),
-            enabled: true,
-            data_dir: None,
-            parent_id: None,
-            public_subdomain: None,
-            config: ProfileConfig {
-                gateway: GatewaySettings::default(),
-                llm: Some(LlmProfileConfig {
-                    primary: Some(LlmModelSelectionConfig {
-                        family_id: Some("openai".to_string()),
-                        model_id: Some("gpt-4o-mini".to_string()),
-                        route: Some(LlmRouteConfig {
-                            route_id: None,
-                            label: None,
-                            base_url: None,
-                            api_key_env: Some(key_env.to_string()),
-                            api_type: None,
-                        }),
-                        ..Default::default()
-                    }),
-                    fallbacks: Vec::new(),
-                }),
-                ..Default::default()
-            },
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        }
     }
 }

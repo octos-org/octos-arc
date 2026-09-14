@@ -8,7 +8,6 @@
 //! process-wide [`EventBroadcaster`] over SSE (admin-only).
 
 pub(crate) mod coding_tool_contract;
-mod cron_panel;
 mod events;
 mod handlers;
 pub mod metrics;

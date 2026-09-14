@@ -339,10 +339,9 @@ fn test_skills_list() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    // Built-in skills should always be present
     assert!(
-        stdout.contains("cron") || stdout.contains("skill-store") || stdout.contains("Installed"),
-        "skills list should show installed or built-in skills"
+        stdout.contains("Installed") || stdout.contains("skill"),
+        "skills list should show installed skills"
     );
 }
 

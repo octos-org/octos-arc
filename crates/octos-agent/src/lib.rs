@@ -14,7 +14,6 @@ pub mod approval;
 pub mod arc_task;
 pub mod behaviour;
 pub mod bridge;
-pub mod builtin_skills;
 pub mod compaction;
 pub mod compaction_tiered;
 pub mod cost_ledger;

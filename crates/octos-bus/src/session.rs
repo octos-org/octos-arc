@@ -3431,8 +3431,7 @@ impl ActiveSessionStore {
             // the empty-plus-one store OVER the file and destroy every chat's
             // active topic and `/back` target permanently. Quarantine the
             // bytes aside (loudly) and start empty instead; the operator can
-            // recover the mappings from the preserved file. Twin of #2005
-            // (cron store).
+            // recover the mappings from the preserved file. Twin of #2005.
             let stored: StoredActiveSessions = match serde_json::from_str(&data) {
                 Ok(stored) => stored,
                 Err(error) => {
@@ -3521,8 +3520,7 @@ impl ActiveSessionStore {
         // AFTER: the rename was already atomic, but not DURABLE — a hard
         // power loss could leave a zero-length/truncated
         // `active_sessions.json`, exactly the input the corrupt-store branch
-        // in `open` then has to quarantine. Mirrors `write_cron_json_atomic`
-        // (#2005).
+        // in `open` then has to quarantine (#2005).
         let tmp = self.path.with_extension(format!(
             "json.{}-{}.tmp",
             std::process::id(),

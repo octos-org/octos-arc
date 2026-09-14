@@ -51,7 +51,6 @@ pub(crate) mod context_manager;
 // not of the code being unreachable (same rationale as `autonomy`).
 #[cfg_attr(not(feature = "api"), allow(dead_code))]
 pub(crate) mod contracts;
-pub mod cron_tool;
 #[cfg(feature = "api")]
 #[cfg_attr(not(feature = "api"), allow(dead_code))]
 pub(crate) mod obs_events;

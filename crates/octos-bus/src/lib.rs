@@ -1,14 +1,10 @@
-//! Session persistence, resume sanitization, file-handle resolution, and cron
-//! scheduling for the octos chat/serve runtime.
+//! Session persistence, resume sanitization, and file-handle resolution for
+//! the octos chat/serve runtime.
 
-pub mod cron_service;
-pub mod cron_types;
 pub mod file_handle;
 pub mod resume_policy;
 pub mod session;
 
-pub use cron_service::{CronService, write_cron_json_atomic};
-pub use cron_types::{CronJob, CronMode, CronOrigin, CronPayload, CronSchedule, CronStore};
 pub use resume_policy::{
     RESUME_MTIME_MARKER, ReplacementStateRef, ResumePolicy, RetryStateView, SanitizeError,
     SanitizeOutcome, SessionSanitizeReport, filter_orphaned_thinking_only_messages,

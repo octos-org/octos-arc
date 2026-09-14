@@ -1316,8 +1316,6 @@ tools = ["read_file"]
             embedder: None,
             memory_inject_tokens: 2500,
             memory_refresh_enabled: true,
-            cron_service: None,
-            runtime_lifecycle: None,
             hook_executor: None,
             lane_routing: None,
         })
@@ -2094,8 +2092,6 @@ tools = ["read_file"]
             embedder: None,
             memory_inject_tokens: 2500,
             memory_refresh_enabled: true,
-            cron_service: None,
-            runtime_lifecycle: None,
             hook_executor: Some(executor),
             lane_routing: None,
         })

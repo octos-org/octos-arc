@@ -1721,7 +1721,7 @@ fn should_not_emit_tool_progress_when_no_reporter_attached() {
     supervisor.mark_completed(&task_id, vec![]);
     // Nothing to assert beyond the absence of a panic — the reporter is
     // optional by design so the supervisor can be used outside the
-    // chat-progress pipeline (e.g. cron, tests).
+    // chat-progress pipeline (e.g. tests).
 }
 
 #[test]

@@ -29,16 +29,15 @@ use octos_core::ui_protocol::{
     ApprovalCommandDetails, ApprovalDecidedEvent, ApprovalDecision, ApprovalId,
     ApprovalRenderHints, ApprovalRequestedEvent, ApprovalTypedDetails, AttachmentOwnerV2,
     ContextCompactionCompletedEvent, ContextCompactionStartedEvent,
-    ContextNormalizationReportedEvent, CronListParams, CronToggleParams, EnvelopeTokenUsage,
-    EnvelopeV2, EnvelopeV2Notification, FileRef, HydratedMessage, HydratedTurn, InputItem,
-    MessageDeltaEvent, MessageMeta, OutputCursor, Payload, PayloadV2, ReplayLossyEvent, RpcError,
-    RpcErrorResponse, RpcRequest, RpcResponse, SESSION_HYDRATE_INCLUDE_MAX,
-    SESSION_MESSAGES_PAGE_DEFAULT_LIMIT, SESSION_MESSAGES_PAGE_MAX_LIMIT,
-    SESSION_MESSAGES_PAGE_MAX_OFFSET, SESSION_TITLE_SET_MAX_CHARS, SessionBtwParams,
-    SessionDeleteParams, SessionFilesListParams, SessionHydrateParams, SessionHydrateResult,
-    SessionListParams, SessionMessagesPageParams, SessionOpenParams, SessionOpenResult,
-    SessionOpened, SessionRollbackParams, SessionRollbackResult, SessionSnapshotParams,
-    SessionStatusGetParams, SessionTasksListParams, SessionTitleSetParams,
+    ContextNormalizationReportedEvent, EnvelopeTokenUsage, EnvelopeV2, EnvelopeV2Notification,
+    FileRef, HydratedMessage, HydratedTurn, InputItem, MessageDeltaEvent, MessageMeta,
+    OutputCursor, Payload, PayloadV2, ReplayLossyEvent, RpcError, RpcErrorResponse, RpcRequest,
+    RpcResponse, SESSION_HYDRATE_INCLUDE_MAX, SESSION_MESSAGES_PAGE_DEFAULT_LIMIT,
+    SESSION_MESSAGES_PAGE_MAX_LIMIT, SESSION_MESSAGES_PAGE_MAX_OFFSET, SESSION_TITLE_SET_MAX_CHARS,
+    SessionBtwParams, SessionDeleteParams, SessionFilesListParams, SessionHydrateParams,
+    SessionHydrateResult, SessionListParams, SessionMessagesPageParams, SessionOpenParams,
+    SessionOpenResult, SessionOpened, SessionRollbackParams, SessionRollbackResult,
+    SessionSnapshotParams, SessionStatusGetParams, SessionTasksListParams, SessionTitleSetParams,
     SessionWorkspaceGetParams, SystemStatusGetParams, TaskCancelParams, TaskCancelResult,
     TaskListEntry, TaskListParams, TaskListResult, TaskOutputDeltaEvent, TaskRestartFromNodeParams,
     TaskRestartFromNodeResult, TaskRuntimeState as UiTaskRuntimeState, ThreadGraphEntry,
@@ -302,12 +301,8 @@ const APPUI_EXTRA_METHODS: &[&str] = &[
     APPUI_METHOD_SESSION_COMPACT,
     APPUI_METHOD_SESSION_COMPACT_MODE_SET,
 ];
-const APPUI_STDIO_AUTH_BOUND_UNAVAILABLE_METHODS: &[&str] = &[
-    APPUI_METHOD_AUTH_ME,
-    APPUI_METHOD_AUTH_LOGOUT,
-    octos_core::ui_protocol::methods::CRON_LIST,
-    octos_core::ui_protocol::methods::CRON_TOGGLE,
-];
+const APPUI_STDIO_AUTH_BOUND_UNAVAILABLE_METHODS: &[&str] =
+    &[APPUI_METHOD_AUTH_ME, APPUI_METHOD_AUTH_LOGOUT];
 type WsSink = futures::stream::SplitSink<WebSocket, WsMessage>;
 type SharedActiveTurns = Arc<tokio::sync::Mutex<HashMap<SessionKey, ActiveTurn>>>;
 #[derive(Clone)]
@@ -5840,30 +5835,6 @@ async fn ui_protocol_connection(
             UiCommand::SystemStatusGet(params) => {
                 handle_system_status_get(&ws, &state, id, params).await;
             }
-            UiCommand::CronList(params) => {
-                handle_cron_list(
-                    &ws,
-                    &state,
-                    &connection_headers,
-                    connection_identity.as_ref(),
-                    true,
-                    id,
-                    params,
-                )
-                .await;
-            }
-            UiCommand::CronToggle(params) => {
-                handle_cron_toggle(
-                    &ws,
-                    &state,
-                    &connection_headers,
-                    connection_identity.as_ref(),
-                    true,
-                    id,
-                    params,
-                )
-                .await;
-            }
             UiCommand::RouterSetMode(params) => {
                 handle_router_set_mode(
                     &ws,
@@ -6487,14 +6458,6 @@ where
                 }
                 UiCommand::SystemStatusGet(params) => {
                     handle_system_status_get(&ws, &state, id, params).await;
-                }
-                UiCommand::CronList(params) => {
-                    handle_cron_list(&ws, &state, &connection_headers, None, false, id, params)
-                        .await;
-                }
-                UiCommand::CronToggle(params) => {
-                    handle_cron_toggle(&ws, &state, &connection_headers, None, false, id, params)
-                        .await;
                 }
                 UiCommand::RouterSetMode(params) => {
                     // stdio is a local single-user transport with no authenticated
@@ -10858,9 +10821,9 @@ fn route_rpc_command(
         | octos_core::ui_protocol::methods::SESSION_WORKSPACE_GET
         | octos_core::ui_protocol::methods::SESSION_TITLE_SET
         | octos_core::ui_protocol::methods::SESSION_DELETE
-        | octos_core::ui_protocol::methods::SYSTEM_STATUS_GET
-        | octos_core::ui_protocol::methods::CRON_LIST
-        | octos_core::ui_protocol::methods::CRON_TOGGLE => Some(features.auxiliary_rest_to_ws_v1),
+        | octos_core::ui_protocol::methods::SYSTEM_STATUS_GET => {
+            Some(features.auxiliary_rest_to_ws_v1)
+        }
         // UPCR-2026-023: `user_question/respond` is strict opt-in. A client
         // that did not negotiate `user_question.v1` never received a
         // `user_question/requested`, so it has nothing to answer; reject the
@@ -10968,8 +10931,6 @@ fn session_ingress_callable_method(method: &str) -> bool {
         APPUI_METHOD_PROFILE_LOCAL_CREATE
             | octos_core::ui_protocol::methods::SESSION_LIST
             | octos_core::ui_protocol::methods::SYSTEM_STATUS_GET
-            | octos_core::ui_protocol::methods::CRON_LIST
-            | octos_core::ui_protocol::methods::CRON_TOGGLE
             | octos_core::ui_protocol::methods::SESSION_FORK
     )
 }
@@ -10992,8 +10953,6 @@ fn validate_session_ingress_command_scope(
         | UiCommand::LaunchResolve(_)
         | UiCommand::SessionList(_)
         | UiCommand::SystemStatusGet(_)
-        | UiCommand::CronList(_)
-        | UiCommand::CronToggle(_)
         | UiCommand::SessionFork(_)
  => {
             return Err(RpcError::invalid_request(
@@ -17669,131 +17628,6 @@ async fn handle_system_status_get(
                 ws,
                 Some(id),
                 RpcError::internal_error(format!("{method}: serialize status failed: {error}")),
-            );
-        }
-    }
-}
-
-async fn handle_cron_list(
-    ws: &WsConnection,
-    state: &Arc<AppState>,
-    headers: &HeaderMap,
-    identity: Option<&AuthIdentity>,
-    close_on_auth_unavailable: bool,
-    id: String,
-    _params: CronListParams,
-) {
-    let method = octos_core::ui_protocol::methods::CRON_LIST;
-    let Some(identity) = identity.cloned() else {
-        // Web PR #114 contract: see `close_ws_with_code` doc-comment. Codex
-        // BLOCK (2026-05-13): close before error so it survives writer
-        // backpressure when the channel has just one free slot.
-        if close_on_auth_unavailable {
-            let _ = close_ws_with_code(ws, 1008, "auth_expired");
-        }
-        let _ = send_rpc_error(ws, Some(id), auth_unavailable_error(method));
-        return;
-    };
-    let result =
-        super::cron_panel::my_cron(State(state.clone()), headers.clone(), Extension(identity))
-            .await;
-    match result {
-        Ok(axum::Json(body)) => {
-            // The REST body is `{ ok, count, jobs, gateway_running }`;
-            // `ok` is dropped (envelope carries success), the rest is
-            // forwarded field-for-field per `CronListResult`.
-            let jobs = body.get("jobs").cloned().unwrap_or_else(|| json!([]));
-            let count = body.get("count").and_then(Value::as_u64).unwrap_or(0) as usize;
-            let gateway_running = body
-                .get("gateway_running")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            // Forward the truncation signal so a client can show "N of `count`"
-            // instead of silently seeing a short list (`cron/list` bounds the
-            // row set to keep the frame under budget).
-            let truncated = body
-                .get("truncated")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            send_aux_rpc_result(
-                ws,
-                id,
-                method,
-                json!({
-                    "jobs": jobs,
-                    "count": count,
-                    "gateway_running": gateway_running,
-                    "truncated": truncated,
-                }),
-            );
-        }
-        Err(status) => {
-            // Collection-style endpoint — no addressable id, no REST body.
-            let context = RestResourceContext::resource("cron", "");
-            let _ = send_rpc_error(
-                ws,
-                Some(id),
-                rest_status_to_rpc_error(method, status, None, &context),
-            );
-        }
-    }
-}
-
-async fn handle_cron_toggle(
-    ws: &WsConnection,
-    state: &Arc<AppState>,
-    headers: &HeaderMap,
-    identity: Option<&AuthIdentity>,
-    close_on_auth_unavailable: bool,
-    id: String,
-    params: CronToggleParams,
-) {
-    let method = octos_core::ui_protocol::methods::CRON_TOGGLE;
-    let Some(identity) = identity.cloned() else {
-        // Web PR #114 contract: see `close_ws_with_code` doc-comment. Codex
-        // BLOCK (2026-05-13): close before error so it survives writer
-        // backpressure when the channel has just one free slot.
-        if close_on_auth_unavailable {
-            let _ = close_ws_with_code(ws, 1008, "auth_expired");
-        }
-        let _ = send_rpc_error(ws, Some(id), auth_unavailable_error(method));
-        return;
-    };
-    let job_id = params.job_id.clone();
-    let result = super::cron_panel::set_my_cron_enabled(
-        State(state.clone()),
-        headers.clone(),
-        Extension(identity),
-        axum_path(params.job_id),
-        axum::Json(super::cron_panel::ToggleBody {
-            enabled: params.enabled,
-        }),
-    )
-    .await;
-    match result {
-        Ok(axum::Json(body)) => {
-            // REST success body is `{ ok: true, job }`; forward the job
-            // (rendered exactly as a `cron/list` entry) per
-            // `CronToggleResult`.
-            let job = body.get("job").cloned().unwrap_or_else(|| json!(null));
-            send_aux_rpc_result(ws, id, method, json!({ "job": job }));
-        }
-        Err((status, axum::Json(body))) => {
-            // The REST error body is `{ ok: false, reason }`. Forward
-            // `reason` as the error detail so clients can tell the
-            // gateway-owns-the-store refusal (`detail:
-            // "gateway_running"`, `rest_status: 409`) from a plain miss
-            // without string-matching messages.
-            let detail = body
-                .get("reason")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-                .unwrap_or_else(|| body.to_string());
-            let context = RestResourceContext::resource("cron_job", job_id);
-            let _ = send_rpc_error(
-                ws,
-                Some(id),
-                rest_status_to_rpc_error(method, status, Some(detail), &context),
             );
         }
     }

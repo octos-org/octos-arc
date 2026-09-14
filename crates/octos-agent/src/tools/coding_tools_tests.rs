@@ -9,7 +9,7 @@ fn normalize_plan_maps_codex_shape_and_assigns_ids() {
         "plan": [
             { "step": "web P3: PWA manifest", "status": "completed" },
             { "step": "memory panel", "status": "in_progress" },
-            { "step": "cron toggle", "status": "pending", "priority": "P3" },
+            { "step": "docs review", "status": "pending", "priority": "P3" },
             { "step": "no status → pending" }
         ]
     });

@@ -218,8 +218,6 @@ async fn make_m11g_profile(profile_id: &str, data_dir: &std::path::Path) -> Arc<
         embedder: None,
         memory_inject_tokens: 2500,
         memory_refresh_enabled: false,
-        cron_service: None,
-        runtime_lifecycle: None,
         hook_executor: None,
         lane_routing: None,
     })

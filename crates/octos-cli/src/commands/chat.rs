@@ -152,7 +152,7 @@ pub struct ChatCommand {
     /// saved to the episode store for future recall; this skips that write.
     /// Chat history and context sidecars use a temporary runtime directory.
     /// Shared profile memory, tools and skills remain available; explicit
-    /// memory, file, cron or goal writes are not disabled by this flag.
+    /// memory, file or goal writes are not disabled by this flag.
     ///
     /// This also lets many `octos chat` agents run CONCURRENTLY against one
     /// `--data-dir` (hence one shared `--profile`): a normal run takes an
