@@ -444,3 +444,55 @@ Remaining first-pass misses are model sampling (invented validation rules, messa
 twice server-side, cookie/redirect details). With the leaderboard scoring the MOST RECENT run and the current
 TB entry at ¥0.251 (a 3-request run), a rerun has negative expected value (median 3 requests ≈ ¥0.3, tail
 ¥0.6+): recommendation — do not rerun TB; keep the entry. Cloud: 未评测 for round 28.
+
+## Handover inventory for workflow D (Rust harness, `OCTOS_ARC_ENGINE=rust`)
+
+Everything the Python adapter does today, with defaults and the evidence that motivated it. Behavioural
+parity target; the Python path stays the default until D passes side-by-side verification.
+
+**Flow (`arc/main.py`)**
+- Requirement tree → atomic nodes in dependency order (`requirement_order.topo_order`, folder nodes marked
+  from children). Time budget max(3600, 1500 s × nodes); per-node cap 1500 s; per-node budget
+  min(cap, max(240, remaining / nodes_left)).
+- Spec↔node mapping by file-name prefix with aliases (`acceptance.map_specs_to_nodes`); support helpers
+  (`support/*.ts`) are quoted with the spec.
+- Per node: implement turn → run that node's specs → repair loop (≤5 rounds, 3 for >2-node trees on
+  wf-adapter-30): rewrite-on-zero once, identical normalized failure twice → tool mode, no improvement for two
+  repairs → stop, two regressions → restore best commit. Verdict recorded in traceability.
+- Codegen mode (≤2-node trees, `OCTOS_ARC_CODEGEN_MAX_NODES`): one tool-less request returning
+  `<<<FILE path>>>` blocks; system prompt replaced by one line (proxy `system_override`); lean prompt =
+  requirement description + spec bodies + fixed layout + rules; multi-node slot carries the NAV/cookie/
+  validation/visibility mechanisms; 2 codegen repairs (failure digest + quoted html/js) before tool mode.
+  Harness writes both package.json (build copies src→dist plus extensionless page copies; backend
+  `type: commonjs`), injects `<meta charset>`, restores flattened newlines (guarded by `node --check`),
+  strips static nav links duplicating `<!--NAV-->`. Evidence: rounds 22–28 (Smoke ¥0.0095, Evolution
+  ¥0.0086 real-agent #1; TB 20-sample study).
+- Evolution: `.arc/traceability/requirements.json` fingerprints, then probe each remaining node's specs
+  against the existing app (no LLM); passing nodes are unchanged and the probe doubles as their regression
+  run. Evidence: cloud 9a1b1944a73e/6232223b9863 (platform template has no snapshot).
+- Final suite grader-like (only PORT set): verifies spec default ports (3301) are bound, robustness probe
+  (/favicon.ico, unknown path/API), memory-aware workers, OOM-killed runner = no verdict; ≤2 repair rounds,
+  identical failing set → stop. Evidence: 3f0124e82113 (0/10 port contract), c17bc1b44d26, 29c840566f36.
+- Protected dirs: deny hook (`hooks/deny_protected.py`, patched into the profile JSON) + tree digest
+  restore after each turn; worktree snapshot/restore around every test run (tests mutate persisted state).
+- Guard (`guard.py`): unverified completion claims, repeated errors, protected writes → corrections
+  appended to the next prompt; per-turn request budget via proxy (`enforce_turn_budget`).
+- Source snapshots `.arc/codegen/<node>-r<n>/` before every repair; `[acceptance]` logs `Failed at:` +
+  `Observation:`; `[usage] provider totals` at the end.
+
+**LLM proxy (`arc/llm_proxy.py`)**: de-stream (upstream JSON, SSE synthesized to the kernel), reasoning
+injection (auto: none for ≤1 node to implement, low otherwise), `max_tokens ≥ 32768` floor (kernel arc.11
+caps at 4096), system-prompt section trimming + tool schema drops (shell tools for small tasks, all tools for
+codegen), per-turn request cap, usage log incl. `prompt_tokens_details.cached_tokens`, request dump.
+
+**Acceptance (`arc/acceptance.py`)**: Playwright discovery (`/opt/arcbench` preinstalled) or isolated pinned
+private install (1.63.0) removed after the run; 10 s test timeout, 4 s action/expect, 6 s navigation;
+failure digest (Feature / Failed at / Observation / Steps); slow-test threshold 3 s; `container_memory_limit`
+(cgroup v1/v2), `workers_for_memory` 700 MiB/worker (per node), `workers_for_final` 450 MiB/worker
+(wf-adapter-30); `free_owned_ports`, `reap_workspace_processes` (wf-adapter-30).
+
+**Known platform limits** (see "Platform-side issues" above): renderer crashes, 10 s cumulative timeouts,
+feature-rate prefix matching; container now 2 GiB / 1 CPU / `--workers=4` (keep 2224a9013528 pending).
+
+**Local tooling**: `run-task-local.py` (`--template` for Evolution), `grade-local.py` (restores worktree),
+`pack.sh` bundle list, `metrics.py`; unit tests `cd arc && python3 -m unittest discover -s tests -t .` (85).
