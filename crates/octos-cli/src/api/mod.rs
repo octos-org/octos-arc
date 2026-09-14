@@ -262,7 +262,6 @@ pub struct AppState {
     pub host_memory: Option<crate::config::MemoryConfig>,
     /// Solo-profile id/email ledger (multi-user accounts were removed with
     /// the dashboard; the store remains for `profile/local/create`).
-    pub user_store: Option<Arc<crate::user_store::UserStore>>,
     /// Optional path to the JSONL harness-event sink. When `Some`,
     /// typed harness events (e.g. `SwarmReviewDecision`) are appended
     /// to the file in addition to being broadcast live to harness
@@ -346,7 +345,6 @@ impl AppState {
             default_network_denied: false,
             llm_compaction: false,
             host_memory: None,
-            user_store: None,
             harness_event_sink_path: None,
             credential_pool: None,
             task_query_store: None,

@@ -114,10 +114,6 @@ pub struct ProfileConfig {
     /// (per-profile; see `docs/ROBRIX-PHASE4-APPROVAL-FLOW-ADR.md`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_policy: Option<crate::config::ApprovalPolicyConfig>,
-    /// Admin mode: when true, gateway registers only admin management tools
-    /// (no shell, file, web, browser tools). Used for the admin bot profile.
-    #[serde(default)]
-    pub admin_mode: bool,
     /// #1774: opt-in post-edit formatting (rustfmt/prettier/black/gofmt)
     /// after successful edit_file/write_file/diff_edit. Default OFF.
     #[serde(default)]
@@ -384,8 +380,6 @@ pub struct ProfileConfigPatch {
     #[serde(default)]
     pub hooks: Option<Vec<octos_agent::HookConfig>>,
     #[serde(default)]
-    pub admin_mode: Option<bool>,
-    #[serde(default)]
     pub sandbox: Option<octos_agent::SandboxConfig>,
     #[serde(default)]
     pub adaptive_routing: PatchField<crate::config::AdaptiveRoutingConfig>,
@@ -536,9 +530,6 @@ impl ProfileConfig {
         }
         if let Some(hooks) = patch.hooks {
             self.hooks = hooks;
-        }
-        if let Some(admin_mode) = patch.admin_mode {
-            self.admin_mode = admin_mode;
         }
         if let Some(sandbox) = patch.sandbox {
             self.sandbox = sandbox;
@@ -1745,9 +1736,6 @@ pub fn diff_profiles(old: &UserProfile, new: &UserProfile) -> ProfileChange {
     }
     if oc.hooks != nc.hooks {
         restart_fields.push("hooks".into());
-    }
-    if oc.admin_mode != nc.admin_mode {
-        restart_fields.push("admin_mode".into());
     }
     if oc.sandbox != nc.sandbox {
         restart_fields.push("sandbox".into());

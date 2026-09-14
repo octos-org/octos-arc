@@ -500,11 +500,6 @@ impl ServeCommand {
         let (http_listener, effective_serve_port) =
             bind_http_listener(self.stdio, &self.host, self.port).await?;
 
-        // Initialize user store and auth manager for multi-user support
-        let user_store = Arc::new(
-            crate::user_store::UserStore::open(&data_dir).wrap_err("failed to open user store")?,
-        );
-
         // Spawn auth cleanup task if auth manager is active
 
         // F-005: Wire the credential pool at startup. Absent config →
@@ -572,7 +567,6 @@ impl ServeCommand {
             auth_token,
             metrics_handle,
             profile_store: Some(profile_store.clone()),
-            user_store: Some(user_store),
             http_client: reqwest::Client::new(),
             // If a config file was loaded, admin edits target that exact file.
             // If none existed at startup, fall back to THIS serve's resolved

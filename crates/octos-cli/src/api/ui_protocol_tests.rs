@@ -495,7 +495,6 @@ fn local_profile_state(dir: &Path) -> AppState {
         profile_store: Some(Arc::new(
             crate::profiles::ProfileStore::open_unified(dir).unwrap(),
         )),
-        user_store: Some(Arc::new(crate::user_store::UserStore::open(dir).unwrap())),
         // Solo profile creation is opt-in; the TUI/WS tests exercise the
         // supported path, so enable it here.
         solo_login_enabled: true,
@@ -3559,7 +3558,7 @@ fn appui_loop_self_paced_picker_falls_back_to_history_when_capture_missing() {
 }
 
 #[test]
-fn profile_local_create_creates_user_and_profile_without_otp() {
+fn profile_local_create_creates_profile_without_otp() {
     let dir = tempfile::tempdir().unwrap();
     let state = local_profile_state(dir.path());
 
@@ -3571,20 +3570,11 @@ fn profile_local_create_creates_user_and_profile_without_otp() {
 
     assert_eq!(result.profile_id, "ada");
     assert_eq!(result.user_id, "ada");
-    assert_eq!(result.email, "ada@example.com");
+    // Single-identity model: the wire email is a synthesized placeholder,
+    // the legacy client-provided email is not persisted anywhere.
+    assert_eq!(result.email, "ada@solo.local");
     assert!(result.created);
     assert_eq!(result.runtime_mode, "solo");
-
-    let user = state
-        .user_store
-        .as_ref()
-        .unwrap()
-        .get("ada")
-        .unwrap()
-        .expect("user");
-    assert_eq!(user.name, "Ada Lovelace");
-    assert_eq!(user.email, "ada@example.com");
-    assert_eq!(user.role, crate::user_store::UserRole::Admin);
 
     let profile = state
         .profile_store
@@ -3601,7 +3591,6 @@ fn profile_local_create_creates_user_and_profile_without_otp() {
     )
     .unwrap();
     assert_eq!(profile_json["username"], json!("ada"));
-    assert_eq!(profile_json["email"], json!("ada@example.com"));
 }
 
 #[test]
@@ -3616,7 +3605,6 @@ fn profile_local_create_is_idempotent_for_same_local_owner() {
     assert!(first.created);
     assert!(!second.created);
     assert_eq!(second.profile_id, "ada");
-    assert_eq!(state.user_store.as_ref().unwrap().list().unwrap().len(), 1);
     assert_eq!(
         state.profile_store.as_ref().unwrap().list().unwrap().len(),
         1
@@ -3655,15 +3643,6 @@ fn should_honor_requested_id_when_present_without_username_or_email() {
             .unwrap()
             .is_some(),
         "a profile file should exist under the requested id"
-    );
-    assert!(
-        state
-            .user_store
-            .as_ref()
-            .unwrap()
-            .get("glm")
-            .unwrap()
-            .is_some()
     );
 }
 
@@ -3868,174 +3847,6 @@ fn should_reserve_requested_id_atomically_under_concurrency() {
         n,
         "no concurrent create overwrote another profile"
     );
-    assert_eq!(
-        state.user_store.as_ref().unwrap().list().unwrap().len(),
-        n,
-        "no concurrent create overwrote another user"
-    );
-}
-
-#[test]
-fn should_disambiguate_synthesized_email_on_collision() {
-    // P2: a no-email create synthesizes `<id>@solo.local`. If some other
-    // user EXPLICITLY claimed that exact address, reusing it would create a
-    // duplicate top-level email (ambiguous OTP login). The id and its
-    // synthesized email are chosen TOGETHER, so the id bumps to `glm-2`
-    // (keeping id == email local-part) rather than issuing a mismatched
-    // email — leaving the explicit address intact.
-    let dir = tempfile::tempdir().unwrap();
-    let state = local_profile_state(dir.path());
-
-    // A different profile already holds glm@solo.local explicitly.
-    state
-        .user_store
-        .as_ref()
-        .unwrap()
-        .save(&crate::user_store::User {
-            id: "zai".into(),
-            email: "glm@solo.local".into(),
-            name: "Zai".into(),
-            role: crate::user_store::UserRole::Admin,
-            created_at: chrono::Utc::now(),
-            last_login_at: None,
-        })
-        .unwrap();
-
-    let result = create_or_get_local_solo_profile(
-        &state,
-        octos_core::ui_protocol::ProfileLocalCreateParams {
-            requested_id: Some("glm".into()),
-            ..Default::default()
-        },
-    )
-    .expect("create with a colliding synthesized email");
-
-    // Id and email move together: the claimed glm@solo.local pushes the id
-    // to glm-2, whose email glm-2@solo.local is free.
-    assert_eq!(result.profile_id, "glm-2");
-    assert_eq!(result.email, "glm-2@solo.local");
-    assert_eq!(
-        result.email,
-        format!("{}@solo.local", result.profile_id),
-        "synthesized email local-part must equal the assigned id"
-    );
-
-    let users = state.user_store.as_ref().unwrap().list().unwrap();
-    assert_eq!(
-        users.iter().filter(|u| u.email == result.email).count(),
-        1,
-        "the synthesized email must be unique among top-level users"
-    );
-    assert_eq!(
-        users.iter().filter(|u| u.email == "glm@solo.local").count(),
-        1,
-        "the pre-existing explicit email must be untouched"
-    );
-}
-
-#[test]
-fn should_keep_synthesized_email_local_part_within_64_bytes() {
-    // P2 (length): a max-length (64-char) slug whose `<slug>@solo.local` is
-    // already claimed must NOT produce a 66-byte local part by suffixing the
-    // email separately (`<slug>-2@…` > lettre's 64-byte limit). Choosing the
-    // id and email together instead bumps the ID within the 64-char budget,
-    // so the local part (= the id) stays ≤64.
-    let dir = tempfile::tempdir().unwrap();
-    let state = local_profile_state(dir.path());
-
-    let base = "a".repeat(LOCAL_PROFILE_ID_MAX_LEN); // 64-char slug
-    // Force the synthesized-email collision: a different user explicitly
-    // holds <base>@solo.local.
-    state
-        .user_store
-        .as_ref()
-        .unwrap()
-        .save(&crate::user_store::User {
-            id: "other".into(),
-            email: format!("{base}@solo.local"),
-            name: "Other".into(),
-            role: crate::user_store::UserRole::Admin,
-            created_at: chrono::Utc::now(),
-            last_login_at: None,
-        })
-        .unwrap();
-
-    let result = create_or_get_local_solo_profile(
-        &state,
-        octos_core::ui_protocol::ProfileLocalCreateParams {
-            requested_id: Some(base.clone()),
-            ..Default::default()
-        },
-    )
-    .expect("create with a max-length slug and colliding synthesized email");
-
-    let local_part = result
-        .email
-        .strip_suffix("@solo.local")
-        .expect("synthesized @solo.local email");
-    assert!(
-        local_part.len() <= LOCAL_PROFILE_ID_MAX_LEN,
-        "email local part is {} bytes, exceeds the 64-byte limit",
-        local_part.len()
-    );
-    assert_eq!(
-        local_part, result.profile_id,
-        "email local-part must equal the assigned id"
-    );
-    assert!(result.profile_id.len() <= LOCAL_PROFILE_ID_MAX_LEN);
-    assert_ne!(
-        result.email,
-        format!("{base}@solo.local"),
-        "must not reuse the explicitly-claimed email"
-    );
-}
-
-#[test]
-fn should_reject_when_provided_email_belongs_to_another_user() {
-    // The pre-save email-uniqueness gate (which also closes the cross-writer
-    // race window) rejects a create whose CLIENT-PROVIDED email is already
-    // held by a different user.
-    let dir = tempfile::tempdir().unwrap();
-    let state = local_profile_state(dir.path());
-
-    state
-        .user_store
-        .as_ref()
-        .unwrap()
-        .save(&crate::user_store::User {
-            id: "zai".into(),
-            email: "taken@example.com".into(),
-            name: "Zai".into(),
-            role: crate::user_store::UserRole::Admin,
-            created_at: chrono::Utc::now(),
-            last_login_at: None,
-        })
-        .unwrap();
-
-    let err = create_or_get_local_solo_profile(
-        &state,
-        octos_core::ui_protocol::ProfileLocalCreateParams {
-            requested_id: Some("glm".into()),
-            email: "taken@example.com".into(),
-            ..Default::default()
-        },
-    )
-    .expect_err("a provided email held by another user must be rejected");
-    assert_eq!(err.code, rpc_error_codes::INVALID_PARAMS);
-    assert_eq!(
-        err.data.as_ref().and_then(|data| data.get("kind")),
-        Some(&json!("profile_local_collision"))
-    );
-    // No half-written profile: the create was rejected before persistence.
-    assert!(
-        state
-            .profile_store
-            .as_ref()
-            .unwrap()
-            .get("glm")
-            .unwrap()
-            .is_none()
-    );
 }
 
 #[test]
@@ -4054,16 +3865,6 @@ fn profile_local_create_rejects_username_collision_with_different_metadata() {
     )
     .expect_err("collision rejected");
     assert_eq!(error.code, rpc_error_codes::INVALID_PARAMS);
-    assert_eq!(
-        error.data.as_ref().and_then(|data| data.get("kind")),
-        Some(&json!("profile_local_collision"))
-    );
-
-    let error = create_or_get_local_solo_profile(
-        &state,
-        local_profile_params("Ada Lovelace", "ada", "other@example.com"),
-    )
-    .expect_err("email collision rejected");
     assert_eq!(
         error.data.as_ref().and_then(|data| data.get("kind")),
         Some(&json!("profile_local_collision"))
@@ -4100,15 +3901,19 @@ fn profile_local_create_returns_typed_errors_for_invalid_or_nonlocal_requests() 
         reserved.data.as_ref().and_then(|data| data.get("kind")),
         Some(&json!("profile_local_invalid_username"))
     );
-    let users = state.user_store.as_ref().expect("user store");
     assert!(
-        users.get("api").unwrap().is_none(),
-        "no user record may persist for a rejected reserved username"
+        state
+            .profile_store
+            .as_ref()
+            .unwrap()
+            .get("api")
+            .unwrap()
+            .is_none(),
+        "no profile may persist for a rejected reserved username"
     );
 
     let tenant_state = AppState {
         profile_store: state.profile_store.clone(),
-        user_store: state.user_store.clone(),
         ..AppState::empty_for_tests()
     };
     let unsupported = create_or_get_local_solo_profile(
@@ -4315,7 +4120,6 @@ fn workspace_probe_capability_is_local_solo_only() {
 
     let tenant = AppState {
         profile_store: local.profile_store.clone(),
-        user_store: local.user_store.clone(),
         ..AppState::empty_for_tests()
     };
     let tenant_capabilities = ConnectionUiFeatures::default().advertised_capabilities(&tenant);
@@ -5205,7 +5009,6 @@ fn capabilities_advertise_local_solo_profile_create_only_when_supported() {
 
     let tenant = AppState {
         profile_store: local.profile_store.clone(),
-        user_store: local.user_store.clone(),
         ..AppState::empty_for_tests()
     };
     let tenant_capabilities = ConnectionUiFeatures::default().advertised_capabilities(&tenant);

@@ -75,13 +75,10 @@ fn host_scoped_profile_id(state: &AppState, headers: &HeaderMap) -> Option<Strin
 ///
 /// Authorization rules:
 /// - Admin token can act as any profile.
-/// - A user session with `UserRole::Admin` can act as any profile
-///   (matches the rest of the router which treats admin email sessions
-///   as full admins for `/api/admin/*`). Without this carve-out, an
-///   admin who logs in via OTP would 403 on tenant subdomains while
-///   the bootstrap admin token would not — codex P2 (PR #958 review).
-/// - A user can act as their own profile.
-/// - A user (top-level account) can also act as any sub-account they own.
+/// - A scoped user identity can act as its own profile.
+/// - A user (top-level account) can also act as any sub-account they own
+///   (ownership comes from the profile store's `parent_id`, not any user
+///   registry — the multi-tenant user system was removed).
 /// - Everyone else is denied (returns `false`).
 pub(crate) fn is_authorized_for_profile(
     state: &AppState,

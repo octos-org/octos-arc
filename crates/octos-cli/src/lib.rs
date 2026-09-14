@@ -71,4 +71,3 @@ pub mod stream_reporter;
 pub mod tools;
 #[cfg(feature = "api")]
 pub mod usage_ledger;
-pub mod user_store;
