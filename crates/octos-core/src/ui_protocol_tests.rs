@@ -2,11 +2,6 @@ use super::*;
 use serde_json::json;
 
 #[test]
-fn skill_action_job_updated_notification_method_is_registered() {
-    assert!(UI_PROTOCOL_NOTIFICATION_METHODS.contains(&methods::SKILL_ACTION_JOB_UPDATED));
-}
-
-#[test]
 fn compare_protocol_compatible_for_full_protocol_with_known_features() {
     // The full-protocol capabilities advertise every known feature, so any
     // subset (here: the whole known registry) is satisfied.
@@ -809,7 +804,6 @@ fn ui_protocol_v1_wire_contract_is_golden() {
             "protocol/replay_lossy",
             "turn/spawn_complete",
             "file/attached",
-            "skill/action/job/updated",
             "projection/envelope",
             "session/event",
             "router/status",
@@ -986,7 +980,6 @@ fn ui_protocol_v1_representative_wire_payloads_are_golden() {
                 "protocol/replay_lossy",
                 "turn/spawn_complete",
                 "file/attached",
-                                "skill/action/job/updated",
                     "projection/envelope",
                 "session/event",
                 "router/status",

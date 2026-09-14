@@ -1108,9 +1108,6 @@ pub mod methods {
     /// event mirroring the SSE `file:` frame from `files_to_send` tool
     /// surfaces.
     pub const FILE_ATTACHED: &str = "file/attached";
-    /// UPCR-2026-027 `skill/action/job/updated` — latest persisted snapshot
-    /// for a manifest-declared background skill action job.
-    pub const SKILL_ACTION_JOB_UPDATED: &str = "skill/action/job/updated";
     /// UPCR-2026-014 (M9-γ) `projection/envelope` — canonical projection
     /// envelope notification (spec § 14). γ-1 reserves the method name
     /// in the notification methods list as part of capability negotiation
@@ -1302,7 +1299,6 @@ pub const UI_PROTOCOL_NOTIFICATION_METHODS: &[&str] = &[
     methods::REPLAY_LOSSY,
     methods::TURN_SPAWN_COMPLETE,
     methods::FILE_ATTACHED,
-    methods::SKILL_ACTION_JOB_UPDATED,
     methods::PROJECTION_ENVELOPE,
     methods::SESSION_EVENT,
     methods::ROUTER_STATUS,
@@ -5874,17 +5870,6 @@ pub struct QueueStateEvent {
     pub head_client_message_id: Option<String>,
 }
 
-/// UPCR-2026-027 — latest background skill action job snapshot.
-///
-/// `job` is intentionally a generic JSON object at the core protocol layer so
-/// octos-core does not depend on a specific host-side job store type.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SkillActionJobUpdatedEvent {
-    pub profile_id: String,
-    pub session_id: SessionKey,
-    pub job: Value,
-}
-
 /// #2019 — one background event surfaced to the HUMAN.
 ///
 /// Background events (a monitor's filtered stdout line, a claimed fleet outbox
@@ -5947,8 +5932,6 @@ pub enum UiNotification {
     TurnStarted(TurnStartedEvent),
     MessageDelta(MessageDeltaEvent),
     ReasoningDelta(ReasoningDeltaEvent),
-    /// UPCR-2026-027: latest background skill action job snapshot.
-    SkillActionJobUpdated(SkillActionJobUpdatedEvent),
     ToolStarted(ToolStartedEvent),
     ToolProgress(ToolProgressEvent),
     ToolCompleted(ToolCompletedEvent),
@@ -6056,7 +6039,6 @@ impl UiNotification {
             Self::TurnStarted(_) => methods::TURN_STARTED,
             Self::MessageDelta(_) => methods::MESSAGE_DELTA,
             Self::ReasoningDelta(_) => methods::MESSAGE_REASONING_DELTA,
-            Self::SkillActionJobUpdated(_) => methods::SKILL_ACTION_JOB_UPDATED,
             Self::ToolStarted(_) => methods::TOOL_STARTED,
             Self::ToolProgress(_) => methods::TOOL_PROGRESS,
             Self::ToolCompleted(_) => methods::TOOL_COMPLETED,
@@ -6105,7 +6087,6 @@ impl UiNotification {
             Self::TurnStarted(event) => &event.session_id,
             Self::MessageDelta(event) => &event.session_id,
             Self::ReasoningDelta(event) => &event.session_id,
-            Self::SkillActionJobUpdated(event) => &event.session_id,
             Self::ToolStarted(event) => &event.session_id,
             Self::ToolProgress(event) => &event.session_id,
             Self::ToolCompleted(event) => &event.session_id,
@@ -6245,7 +6226,6 @@ impl UiNotification {
             Self::TurnStarted(params) => serde_json::to_value(params),
             Self::MessageDelta(params) => serde_json::to_value(params),
             Self::ReasoningDelta(params) => serde_json::to_value(params),
-            Self::SkillActionJobUpdated(params) => serde_json::to_value(params),
             Self::ToolStarted(params) => serde_json::to_value(params),
             Self::ToolProgress(params) => serde_json::to_value(params),
             Self::ToolCompleted(params) => serde_json::to_value(params),
@@ -6364,9 +6344,6 @@ impl UiNotification {
             methods::MESSAGE_DELTA => Ok(Self::MessageDelta(decode_params(method, params)?)),
             methods::MESSAGE_REASONING_DELTA => {
                 Ok(Self::ReasoningDelta(decode_params(method, params)?))
-            }
-            methods::SKILL_ACTION_JOB_UPDATED => {
-                Ok(Self::SkillActionJobUpdated(decode_params(method, params)?))
             }
             methods::TOOL_STARTED => Ok(Self::ToolStarted(decode_params(method, params)?)),
             methods::TOOL_PROGRESS => Ok(Self::ToolProgress(decode_params(method, params)?)),

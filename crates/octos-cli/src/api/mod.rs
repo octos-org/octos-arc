@@ -15,7 +15,6 @@ pub mod metrics;
 pub mod profile_scope;
 mod router;
 pub(crate) mod session_ingress;
-pub(crate) mod skill_action_jobs;
 mod ui_protocol_alpha2_bridge;
 mod ui_protocol_alpha9_bridge;
 // Relocated to crate::contracts (Phase 3 of goal-in-chat) so `octos chat

@@ -459,16 +459,11 @@ impl ServeCommand {
             // behavior change).
             let profile = profile_store.resolve_runtime_profile(profile);
             let profile = &profile;
-            // Section B (codex review round-3): thread the host's
-            // strict-signing policy so the per-profile plugin load honors
-            // `plugins.require_signed = true` from the top-level config
-            // even when individual profile JSONs omit the field.
-            match crate::runtime::ProfileRuntime::bootstrap_with_host_plugins(
+            match crate::runtime::ProfileRuntime::bootstrap_with_host_memory(
                 profile,
                 &profile_data_dir,
                 Some(&data_dir),
                 crate::runtime::BootstrapRole::Serve,
-                Some(&config.plugins),
                 config.memory.as_ref(),
             )
             .await

@@ -146,13 +146,6 @@ pub struct ProfileConfig {
     /// tokens with persistent cooldowns and rotation strategies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_pool: Option<CredentialPoolConfig>,
-    /// Plugin loader policy. Mirrors the top-level `plugins` block in
-    /// `config.json` so per-profile gateways can opt into strict signature
-    /// enforcement independently of the host-level setting. Default
-    /// (`PluginsConfig::default()`) preserves backward compatibility —
-    /// unsigned plugins still load with a warning.
-    #[serde(default)]
-    pub plugins: crate::config::PluginsConfig,
     /// RFC-3 (#1292) — per-topic model lane routing. When set, the
     /// session-actor and the WS turn handler resolve the session's
     /// `topic()` to a [`octos_llm::Lane`] using these overrides on
@@ -401,8 +394,6 @@ pub struct ProfileConfigPatch {
     #[serde(default)]
     pub credential_pool: PatchField<CredentialPoolConfig>,
     #[serde(default)]
-    pub plugins: Option<crate::config::PluginsConfig>,
-    #[serde(default)]
     pub lane_routing: PatchField<octos_llm::LaneRoutingConfig>,
 }
 
@@ -566,9 +557,6 @@ impl ProfileConfig {
             PatchField::Absent => {}
             PatchField::Clear => self.credential_pool = None,
             PatchField::Value(credential_pool) => self.credential_pool = Some(credential_pool),
-        }
-        if let Some(plugins) = patch.plugins {
-            self.plugins = plugins;
         }
         match patch.lane_routing {
             PatchField::Absent => {}
@@ -1284,8 +1272,7 @@ pub(crate) fn merge_profile_defaults(
     env_vars.extend(std::mem::take(&mut effective.env_vars));
     effective.env_vars = env_vars;
 
-    // plugins / sandbox: presence-aware field merge + security floors.
-    effective.plugins = merge_plugins_defaults(&base.plugins, &defaults.plugins);
+    // sandbox: presence-aware field merge + security floors.
     effective.sandbox = merge_sandbox_defaults(&base.sandbox, &defaults.sandbox);
 
     // skills: inherited selection layer (union of rules, last-wins per id).
@@ -1344,22 +1331,6 @@ pub(crate) fn merge_skills(
                 rules,
             })
         }
-    }
-}
-
-/// Presence-aware merge of `plugins` with a security floor on `require_signed`.
-///
-/// `require_signed` is a one-way ratchet: a profile can turn signing ON, and a
-/// `defaults.require_signed = true` forces it on even when the profile omits or
-/// explicitly disables it (logical OR). The merge (profile-if-set) and the
-/// floor (a required signing can't be disabled) collapse to a single OR, so a
-/// profile can only tighten the operator's signing policy, never loosen it.
-fn merge_plugins_defaults(
-    base: &crate::config::PluginsConfig,
-    defaults: &crate::config::PluginsConfig,
-) -> crate::config::PluginsConfig {
-    crate::config::PluginsConfig {
-        require_signed: base.require_signed || defaults.require_signed,
     }
 }
 
@@ -1733,12 +1704,6 @@ pub(crate) fn config_from_profile(profile: &UserProfile) -> Config {
         // permanently OFF while chat/gateway/acp worked).
         format_after_edit: profile.config.format_after_edit,
         appui: Default::default(),
-        // Carry the profile-declared plugin loader policy through to the
-        // flattened `Config` so callers reading
-        // `config.plugins.require_signed` see the same value the profile
-        // JSON declared. Defaults to permissive when the profile omits
-        // the field.
-        plugins: profile.config.plugins.clone(),
         // Startup CLI-flag defaults are not sourced from profile JSON — a
         // flattened profile Config always starts with an empty `cli` block.
         cli: Default::default(),
@@ -1797,12 +1762,9 @@ pub fn diff_profiles(old: &UserProfile, new: &UserProfile) -> ProfileChange {
         restart_fields.push("credential_pool".into());
     }
     // Section B (codex review round-6): plugin loader policy changes
-    // (e.g. flipping `plugins.require_signed`) only take effect during
+    // (e.g. flipping a plugin-independent setting) only take effect during
     // bootstrap, so a toggle must trigger a gateway restart to flush
     // the stale plugin registry and apply the new gate.
-    if oc.plugins != nc.plugins {
-        restart_fields.push("plugins".into());
-    }
     if oc.lane_routing != nc.lane_routing {
         restart_fields.push("lane_routing".into());
     }
@@ -2399,14 +2361,10 @@ mod tests {
             .insert("code".into(), octos_llm::Lane::CodeCapable);
 
         config.apply_patch(ProfileConfigPatch {
-            plugins: Some(crate::config::PluginsConfig {
-                require_signed: true,
-            }),
             lane_routing: PatchField::Value(lane_routing.clone()),
             ..Default::default()
         });
 
-        assert!(config.plugins.require_signed);
         assert_eq!(config.lane_routing.as_ref(), Some(&lane_routing));
 
         config.apply_patch(ProfileConfigPatch {
@@ -3133,11 +3091,8 @@ mod tests {
             refresh: None,
         });
         profile.config.approval_policy = None; // will inherit
-        // The profile sets ONE sandbox field (allow_network) and turns signing
-        // on, but omits workspace_write.
-        profile.config.plugins = crate::config::PluginsConfig {
-            require_signed: true,
-        };
+        // The profile sets ONE sandbox field (allow_network) but omits
+        // workspace_write.
         profile.config.sandbox = octos_agent::SandboxConfig {
             allow_network: true,
             ..Default::default()
@@ -3149,8 +3104,6 @@ mod tests {
         assert_eq!(eff.memory.as_ref().unwrap().max_inject_tokens, Some(999));
         // approval_policy: None → inherits the defaults'.
         assert!(eff.approval_policy.is_some());
-        // plugins: profile turned signing on; it stays on.
-        assert!(eff.plugins.require_signed);
         // sandbox is now a FIELD-BY-FIELD merge, not whole-struct replace:
         // the profile's explicitly-set allow_network stays true, ...
         assert!(eff.sandbox.allow_network);
@@ -3176,9 +3129,6 @@ mod tests {
             .config
             .env_vars
             .insert("K".to_string(), "v".to_string());
-        profile.config.plugins = crate::config::PluginsConfig {
-            require_signed: true,
-        };
 
         // No `profile-defaults.json` ⇒ byte-identical clone (backward compat).
         assert_eq!(store.effective_config(&profile), profile.config);
@@ -3492,35 +3442,6 @@ mod tests {
         let skills = cfg.skills.unwrap();
         assert_eq!(skills.mode, Some(SkillSelectionMode::AllowList));
         assert_eq!(skills.rules, vec![skill_rule("news", true)]);
-    }
-
-    #[test]
-    fn require_signed_floor_cannot_be_disabled_by_profile() {
-        // FIX 1b: `plugins.require_signed` is a one-way ratchet — a defaults
-        // `require_signed = true` cannot be turned off by a profile.
-        let registry_root = tempfile::tempdir().unwrap();
-        let data_root = tempfile::tempdir().unwrap();
-
-        let defaults = ProfileConfig {
-            plugins: crate::config::PluginsConfig {
-                require_signed: true,
-            },
-            ..Default::default()
-        };
-        write_profile_defaults(registry_root.path(), &defaults);
-        let store = ProfileStore::open(registry_root.path(), data_root.path()).unwrap();
-
-        let mut profile = inheritance_profile("heidi");
-        // Profile explicitly tries to disable signing.
-        profile.config.plugins = crate::config::PluginsConfig {
-            require_signed: false,
-        };
-
-        let eff = store.effective_config(&profile);
-        assert!(
-            eff.plugins.require_signed,
-            "a profile must not be able to disable a defaults-mandated signing floor"
-        );
     }
 
     #[test]

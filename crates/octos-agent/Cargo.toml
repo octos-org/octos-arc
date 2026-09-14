@@ -11,7 +11,6 @@ octos-core = { workspace = true }
 octos-bus = { workspace = true }
 octos-memory = { workspace = true }
 octos-llm = { workspace = true }
-octos-plugin = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

@@ -1086,15 +1086,6 @@ pub struct SpawnTool {
     hooks: Option<Arc<HookExecutor>>,
     /// Template used to stamp parent/child session hook context.
     hook_context_template: Option<HookContext>,
-    /// Plugin directories to load into subagent registries.
-    /// Subagents can use plugin tools (fm_tts, etc.) when listed in allowed_tools.
-    plugin_dirs: Vec<PathBuf>,
-    /// Extra environment variables for plugin processes.
-    plugin_extra_env: Vec<(String, String)>,
-    /// Section B (codex review P1.1): inherit the parent's strict-signing
-    /// policy so subagents enforce the same integrity gate when loading
-    /// plugin tools. Defaults to `false` (legacy permissive path).
-    plugin_require_signed: bool,
     /// Additional per-child tools that cannot live in octos-agent builtins.
     child_tool_factories: Vec<ChildToolFactory>,
     /// Shared task supervisor so background subagents show up in task tracking.
@@ -1206,9 +1197,6 @@ impl SpawnTool {
             child_session_sender: None,
             hooks: None,
             hook_context_template: None,
-            plugin_dirs: Vec::new(),
-            plugin_extra_env: Vec::new(),
-            plugin_require_signed: false,
             child_tool_factories: Vec::new(),
             task_supervisor: None,
             session_key: None,
@@ -1253,9 +1241,6 @@ impl SpawnTool {
             child_session_sender: None,
             hooks: None,
             hook_context_template: None,
-            plugin_dirs: Vec::new(),
-            plugin_extra_env: Vec::new(),
-            plugin_require_signed: false,
             child_tool_factories: Vec::new(),
             task_supervisor: None,
             session_key: None,
@@ -1314,9 +1299,6 @@ impl SpawnTool {
             child_session_sender: self.child_session_sender.clone(),
             hooks: self.hooks.clone(),
             hook_context_template: self.hook_context_template.clone(),
-            plugin_dirs: self.plugin_dirs.clone(),
-            plugin_extra_env: self.plugin_extra_env.clone(),
-            plugin_require_signed: self.plugin_require_signed,
             child_tool_factories: self.child_tool_factories.clone(),
             task_supervisor: self.task_supervisor.clone(),
             session_key: self.session_key.clone(),
@@ -1445,25 +1427,6 @@ impl SpawnTool {
     /// Set a default worker prompt for sub-agents (overrides compiled-in worker.txt).
     pub fn with_worker_prompt(mut self, prompt: String) -> Self {
         self.worker_prompt = Some(prompt);
-        self
-    }
-
-    /// Set plugin directories and env vars so subagents can use plugin tools.
-    pub fn with_plugin_dirs(
-        mut self,
-        dirs: Vec<PathBuf>,
-        extra_env: Vec<(String, String)>,
-    ) -> Self {
-        self.plugin_dirs = dirs;
-        self.plugin_extra_env = extra_env;
-        self
-    }
-
-    /// Section B (codex review P1.1): inherit the parent's strict-signing
-    /// policy. When `true`, subagent plugin loads honour the same
-    /// `plugins.require_signed` gate as the parent.
-    pub fn with_plugin_require_signed(mut self, require_signed: bool) -> Self {
-        self.plugin_require_signed = require_signed;
         self
     }
 
@@ -3498,23 +3461,6 @@ impl Tool for SpawnTool {
                 &child_working_dir,
                 create_sandbox(&self.sandbox),
             );
-            // Load plugin tools so subagents can use fm_tts, etc.
-            // Section B (codex review P1.1): honour the parent's
-            // require_signed policy so unsigned plugins are rejected here
-            // when strict mode is on.
-            if !self.plugin_dirs.is_empty() {
-                let _ = crate::plugins::PluginLoader::load_into_with_options(
-                    &mut tools,
-                    &self.plugin_dirs,
-                    &self.plugin_extra_env,
-                    crate::plugins::PluginLoadOptions {
-                        work_dir: Some(&child_working_dir),
-                        synthesis_config: None,
-                        require_signed: self.plugin_require_signed,
-                        verified_cache_dir: None,
-                    },
-                );
-            }
             for factory in &self.child_tool_factories {
                 tools.register_arc(factory());
             }
@@ -3882,9 +3828,6 @@ impl Tool for SpawnTool {
             let bg_sender = self.background_result_sender.clone();
             let child_session_sender = self.child_session_sender.clone();
             let task_label = label.clone();
-            let plugin_dirs = self.plugin_dirs.clone();
-            let plugin_extra_env = self.plugin_extra_env.clone();
-            let plugin_require_signed = self.plugin_require_signed;
             let child_tool_factories = self.child_tool_factories.clone();
             // Detached path: `self` is not available inside the `tokio::spawn`
             // closure below, so pre-build the child's native `spawn` delegate
@@ -4084,22 +4027,6 @@ impl Tool for SpawnTool {
                     &working_dir,
                     create_sandbox(&child_sandbox),
                 );
-                // Load plugin tools so subagents can use fm_tts, etc.
-                // Section B (codex review P1.1): inherit the parent's
-                // require_signed gate.
-                if !plugin_dirs.is_empty() {
-                    let _ = crate::plugins::PluginLoader::load_into_with_options(
-                        &mut tools,
-                        &plugin_dirs,
-                        &plugin_extra_env,
-                        crate::plugins::PluginLoadOptions {
-                            work_dir: Some(&working_dir),
-                            synthesis_config: None,
-                            require_signed: plugin_require_signed,
-                            verified_cache_dir: None,
-                        },
-                    );
-                }
                 for factory in &child_tool_factories {
                     tools.register_arc(factory());
                 }

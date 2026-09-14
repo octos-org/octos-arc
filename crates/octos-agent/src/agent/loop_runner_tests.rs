@@ -67,7 +67,6 @@ use octos_llm::{
 use octos_memory::EpisodeStore;
 
 #[cfg(unix)]
-use crate::plugins::PluginTool;
 use crate::{AgentConfig, AgentVerifierConfig};
 
 fn tool_use(tool_calls: Vec<ToolCall>, input_tokens: u32, output_tokens: u32) -> ChatResponse {
@@ -1723,13 +1722,9 @@ impl LlmProvider for GateVerifier {
         "mock-verifier"
     }
 }
-#[cfg(unix)]
-use crate::plugins::manifest::PluginToolDef;
 use crate::prompt_context::{
     PromptContextManager, PromptContextPhase, PromptContextReport, PromptContextRequest,
 };
-#[cfg(unix)]
-use crate::tools::TurnAttachmentContext;
 use crate::tools::{Tool, ToolRegistry, ToolResult};
 
 struct FilesToSendOnlyTool {
@@ -2244,89 +2239,6 @@ impl LlmProvider for PodcastGenerateTwiceProvider {
     }
 }
 
-#[cfg(unix)]
-struct ConsecutiveVoiceSaveProvider {
-    calls: AtomicUsize,
-}
-
-#[cfg(unix)]
-#[async_trait]
-impl LlmProvider for ConsecutiveVoiceSaveProvider {
-    async fn chat(
-        &self,
-        _messages: &[Message],
-        _tools: &[octos_llm::ToolSpec],
-        _config: &octos_llm::ChatConfig,
-    ) -> Result<ChatResponse> {
-        let call = self.calls.fetch_add(1, AtomicOrdering::SeqCst);
-        let response = match call {
-            0 => ChatResponse {
-                content: None,
-                reasoning_content: None,
-                tool_calls: vec![ToolCall {
-                    id: "call_save_yangmi".to_string(),
-                    name: "fm_voice_save".to_string(),
-                    arguments: serde_json::json!({"name": "yangmi"}),
-                    metadata: None,
-                }],
-                stop_reason: StopReason::ToolUse,
-                usage: LlmTokenUsage::default(),
-                provider_index: None,
-            },
-            1 => ChatResponse {
-                content: Some("yangmi saved".to_string()),
-                reasoning_content: None,
-                tool_calls: vec![],
-                stop_reason: StopReason::EndTurn,
-                usage: LlmTokenUsage::default(),
-                provider_index: None,
-            },
-            2 => ChatResponse {
-                content: None,
-                reasoning_content: None,
-                tool_calls: vec![ToolCall {
-                    id: "call_save_douwentao".to_string(),
-                    name: "fm_voice_save".to_string(),
-                    arguments: serde_json::json!({"name": "douwentao"}),
-                    metadata: None,
-                }],
-                stop_reason: StopReason::ToolUse,
-                usage: LlmTokenUsage::default(),
-                provider_index: None,
-            },
-            _ => ChatResponse {
-                content: Some("douwentao saved".to_string()),
-                reasoning_content: None,
-                tool_calls: vec![],
-                stop_reason: StopReason::EndTurn,
-                usage: LlmTokenUsage::default(),
-                provider_index: None,
-            },
-        };
-        Ok(response)
-    }
-
-    fn model_id(&self) -> &str {
-        "mock"
-    }
-
-    fn provider_name(&self) -> &str {
-        "mock"
-    }
-}
-
-#[cfg(unix)]
-fn write_test_script(path: &std::path::Path, content: &str) {
-    use std::io::Write;
-    use std::os::unix::fs::PermissionsExt;
-
-    let mut file = std::fs::File::create(path).unwrap();
-    file.write_all(content.as_bytes()).unwrap();
-    file.sync_all().unwrap();
-    drop(file);
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-}
-
 #[tokio::test]
 async fn run_task_collects_files_to_send_without_file_modified() {
     let dir = tempfile::tempdir().unwrap();
@@ -2586,107 +2498,6 @@ async fn terminal_tool_failure_blocks_a_rewritten_retry_in_the_same_turn() {
         1,
         "the rewritten second call must be stopped before it creates another tool result",
     );
-}
-
-#[tokio::test]
-#[cfg(unix)]
-async fn process_message_injects_distinct_audio_attachments_for_consecutive_voice_saves() {
-    let dir = tempfile::tempdir().unwrap();
-    let input_log = dir.path().join("plugin-inputs.jsonl");
-    let script_path = dir.path().join("mofa-fm-test.sh");
-    write_test_script(
-        &script_path,
-        r#"#!/bin/sh
-INPUT=$(cat)
-printf '%s\n' "$INPUT" >> "$INPUT_LOG"
-printf '{"output":"voice saved","success":true}\n'
-"#,
-    );
-
-    let first_audio = dir.path().join("yangmi_ref2.wav");
-    let second_audio = dir.path().join("douwentao.wav");
-    std::fs::write(&first_audio, b"fake wav 1").unwrap();
-    std::fs::write(&second_audio, b"fake wav 2").unwrap();
-    let first_audio = first_audio.to_string_lossy().into_owned();
-    let second_audio = second_audio.to_string_lossy().into_owned();
-
-    let def = PluginToolDef {
-        name: "fm_voice_save".to_string(),
-        description: "Save a cloned voice".to_string(),
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "name": {"type": "string"},
-                "audio_path": {"type": "string"}
-            },
-            "required": ["name", "audio_path"]
-        }),
-        contexts: vec![],
-        spawn_only: false,
-        env: vec![],
-        risk: None,
-        spawn_only_message: None,
-        concurrency_class: None,
-    };
-    let plugin = PluginTool::new("mofa-fm".into(), def, script_path).with_extra_env(vec![(
-        "INPUT_LOG".into(),
-        input_log.to_string_lossy().into_owned(),
-    )]);
-
-    let mut tools = ToolRegistry::new();
-    tools.register(plugin);
-
-    let provider: Arc<dyn LlmProvider> = Arc::new(ConsecutiveVoiceSaveProvider {
-        calls: AtomicUsize::new(0),
-    });
-    let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
-    let agent = Agent::new(AgentId::new("test-agent"), provider, tools, memory);
-
-    let first = agent
-        .process_message_with_attachments(
-            "克隆 yangmi 语音",
-            &[],
-            vec![],
-            TurnAttachmentContext {
-                attachment_paths: vec![first_audio.clone()],
-                audio_attachment_paths: vec![first_audio.clone()],
-                file_attachment_paths: vec![],
-                prompt_summary: Some("[Attached audio files]\n- yangmi_ref2.wav".to_string()),
-                live_video: false,
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(first.content, "yangmi saved");
-
-    let second = agent
-        .process_message_with_attachments(
-            "克隆窦文涛语音",
-            &first.messages,
-            vec![],
-            TurnAttachmentContext {
-                attachment_paths: vec![second_audio.clone()],
-                audio_attachment_paths: vec![second_audio.clone()],
-                file_attachment_paths: vec![],
-                prompt_summary: Some("[Attached audio files]\n- douwentao.wav".to_string()),
-                live_video: false,
-            },
-        )
-        .await
-        .unwrap();
-    assert_eq!(second.content, "douwentao saved");
-
-    let log = std::fs::read_to_string(&input_log).unwrap();
-    let inputs = log
-        .lines()
-        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-        .collect::<Vec<_>>();
-
-    assert_eq!(inputs.len(), 2);
-    assert_eq!(inputs[0]["name"], "yangmi");
-    assert_eq!(inputs[0]["audio_path"], first_audio);
-    assert_eq!(inputs[1]["name"], "douwentao");
-    assert_eq!(inputs[1]["audio_path"], second_audio);
 }
 
 #[test]

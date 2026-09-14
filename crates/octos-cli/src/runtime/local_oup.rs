@@ -290,7 +290,11 @@ mod tests {
         }"#,
         )
         .unwrap();
-        std::fs::write(skill.join("SKILL.md"), "SHARED-PROFILE-SKILL-CONTEXT").unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: ephemeral-context-fixture\ndescription: test\nalways: true\n---\n\nSHARED-PROFILE-SKILL-CONTEXT",
+        )
+        .unwrap();
         let model = Arc::new(ContextModel::default());
         let state = bootstrap_ephemeral(
             options(transient.path(), home.path(), model.clone()),
@@ -396,14 +400,8 @@ mod tests {
             "no workspace transcript writes"
         );
 
-        let rebuilt = profile.rebuild_plugin_layer().await.unwrap();
-        assert_eq!(rebuilt.data_dir, shared);
-        assert_eq!(
-            rebuilt.session_store_root.as_deref(),
-            Some(transient.path())
-        );
         assert!(
-            rebuilt
+            profile
                 .system_prompt
                 .contains("SHARED-PROFILE-SKILL-CONTEXT")
         );

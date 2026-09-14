@@ -3234,7 +3234,6 @@ dependencies = [
  "octos-core",
  "octos-llm",
  "octos-memory",
- "octos-plugin",
  "pdf-extract",
  "redb",
  "regex",
@@ -3334,7 +3333,6 @@ dependencies = [
  "octos-core",
  "octos-llm",
  "octos-memory",
- "octos-plugin",
  "open",
  "percent-encoding",
  "quick-xml",
@@ -3426,22 +3424,6 @@ dependencies = [
  "tokio-test",
  "tracing",
  "uuid",
-]
-
-[[package]]
-name = "octos-plugin"
-version = "2.0.3-rc.11"
-dependencies = [
- "eyre",
- "metrics",
- "octos-core",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-test",
- "tracing",
- "which",
 ]
 
 [[package]]

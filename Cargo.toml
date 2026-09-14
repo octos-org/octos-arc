@@ -8,7 +8,6 @@ members = [
     "crates/octos-bus",
     "crates/octos-cli",
     "crates/octos-arc",
-    "crates/octos-plugin",
 ]
 [workspace.package]
 version = "2.0.3-rc.11"
@@ -29,7 +28,6 @@ octos-llm = { path = "crates/octos-llm" }
 octos-agent = { path = "crates/octos-agent" }
 octos-arc = { path = "crates/octos-arc" }
 octos-bus = { path = "crates/octos-bus" }
-octos-plugin = { path = "crates/octos-plugin" }
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"

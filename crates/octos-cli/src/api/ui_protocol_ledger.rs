@@ -3690,7 +3690,6 @@ fn notification_session_id(notification: &UiNotification) -> &SessionKey {
         UiNotification::PlanUpdated(event) => &event.session_id,
         UiNotification::MessageDelta(event) => &event.session_id,
         UiNotification::ReasoningDelta(event) => &event.session_id,
-        UiNotification::SkillActionJobUpdated(event) => &event.session_id,
         UiNotification::ToolStarted(event) => &event.session_id,
         UiNotification::ToolProgress(event) => &event.session_id,
         UiNotification::ToolCompleted(event) => &event.session_id,

@@ -160,9 +160,7 @@ impl ConfigWatcher {
             if let Some(defaults) = defaults {
                 profile.config = merge_profile_defaults(&profile.config, defaults);
             }
-            let mut c = crate::profiles::config_from_profile(&profile);
-            crate::config::merge_env_plugin_policy_pub(&mut c);
-            c
+            crate::profiles::config_from_profile(&profile)
         };
         // Discrimination: a UserProfile JSON has top-level "id" + "config"
         // keys; a top-level Config does not. Try UserProfile first when the
@@ -188,8 +186,7 @@ impl ConfigWatcher {
             }
         }
         // Try Config format
-        if let Ok(mut c) = serde_json::from_slice::<Config>(bytes) {
-            crate::config::merge_env_plugin_policy_pub(&mut c);
+        if let Ok(c) = serde_json::from_slice::<Config>(bytes) {
             return Some(c);
         }
         // Last-chance: try UserProfile even on non-profile-shaped JSON to
@@ -269,14 +266,6 @@ impl ConfigWatcher {
         if old.format_after_edit != new.format_after_edit {
             restart_fields.push("format_after_edit".into());
         }
-        // Section B (codex review round-6 P2): plugin loader policy
-        // (`plugins.require_signed`) is consumed only during plugin
-        // load. A toggle in a running gateway must trigger a restart
-        // so the stale registry is flushed and the new gate applies.
-        if old.plugins != new.plugins {
-            restart_fields.push("plugins".into());
-        }
-
         // Queue mode change requires restart (affects message processing loop)
         let old_queue_mode = old.gateway.as_ref().map(|g| &g.queue_mode);
         let new_queue_mode = new.gateway.as_ref().map(|g| &g.queue_mode);

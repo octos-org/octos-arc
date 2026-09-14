@@ -198,14 +198,6 @@ pub struct Config {
     #[serde(default)]
     pub appui: AppUiConfig,
 
-    /// Plugin loader policy. When `plugins.require_signed = true`, plugins
-    /// without a `manifest.sha256` declaration are rejected at load time
-    /// (instead of the legacy "warn and proceed" path). Default: false
-    /// (backward compatible). Production fleets should turn this on after
-    /// ensuring every shipped skill declares `sha256` in `manifest.json`.
-    #[serde(default)]
-    pub plugins: PluginsConfig,
-
     /// Per-subcommand CLI-flag defaults — the "initial startup config".
     ///
     /// Keys are subcommand names (`serve`, `gateway`, `chat`); each value is a
@@ -220,39 +212,6 @@ pub struct Config {
     /// byte-identical.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub cli: std::collections::BTreeMap<String, serde_json::Value>,
-}
-
-/// Plugin loader policy.
-///
-/// All fields default to backward-compatible values so existing configs
-/// continue to load plugins exactly as they did before this struct was
-/// introduced. Set `require_signed = true` to enforce strict signature
-/// verification — plugins without `manifest.sha256` will be rejected at
-/// load time and re-hash gates apply on every invocation.
-///
-/// # Bundled / first-party skills caveat
-///
-/// First-party skills shipped under `crates/app-skills/*/manifest.json` and
-/// `crates/platform-skills/*/manifest.json` currently do NOT declare
-/// `sha256`. Enabling `require_signed = true` on a clean install will
-/// therefore drop those tools (deep-search, weather, send-email, voice,
-/// etc.) until the manifests are populated with the binaries' digests as
-/// part of the release process. Production deployments that depend on
-/// first-party skills should defer enabling this flag until the bundled
-/// manifests ship `sha256`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct PluginsConfig {
-    /// When `true`, plugins must declare a `sha256` in their `manifest.json`
-    /// and that hash must match the bytes on disk both at load time and
-    /// before every invocation (pre-spawn re-hash closes the load→exec
-    /// TOCTOU window). When `false` (default), unsigned plugins still load
-    /// with a warning to preserve backward compatibility.
-    ///
-    /// See the [`PluginsConfig`] struct docs for a note on bundled
-    /// first-party skills that ship without `sha256` today.
-    #[serde(default)]
-    pub require_signed: bool,
 }
 
 /// AppUi session defaults applied by `octos serve`'s API agent.
@@ -965,78 +924,6 @@ fn default_weight_cost() -> f64 {
     0.2
 }
 
-impl Config {
-    /// Directories to scan for plugins and skill packages with tools.
-    ///
-    /// Scans deployment-scoped dirs under `project_dir` (typically `octos_home`)
-    /// plus dirs added via `OCTOS_SKILLS_PATH`. The legacy HOME-rooted globals
-    /// (`~/.octos/skills`, `~/.octos/plugins`) are NO LONGER scanned — installs
-    /// are per-profile only under `<data_dir>/skills/`. The bundled platform
-    /// skills (`<octos_home>/platform-skills/`, admin-only) are loaded explicitly
-    /// in serve.rs.
-    ///
-    /// When this function detects that the legacy `~/.octos/skills` directory
-    /// still exists on disk it emits a one-shot `tracing::warn!` so operators
-    /// migrating from older deployments see a clear migration prompt.
-    ///
-    /// The `project_dir` is typically `octos_home` (for managed gateways) or
-    /// `cwd/.octos` (for standalone `octos chat`). This is intentionally decoupled
-    /// from the agent's working directory (`cwd`) to support per-profile file
-    /// isolation where `cwd` is narrowed to the profile's data directory.
-    pub fn plugin_dirs_from_project(project_dir: &Path) -> Vec<PathBuf> {
-        let mut dirs = Vec::new();
-        let local_plugins = project_dir.join("plugins");
-        if local_plugins.exists() {
-            dirs.push(local_plugins);
-        }
-        let local_skills = project_dir.join("skills");
-        if local_skills.exists() {
-            dirs.push(local_skills);
-        }
-        // Layered skill dirs
-        let bundled = project_dir.join(octos_agent::bootstrap::BUNDLED_APP_SKILLS_DIR);
-        if bundled.exists() {
-            dirs.push(bundled);
-        }
-        // Note: platform-skills/ (voice, etc.) are admin-only — loaded explicitly in serve.rs
-        // Legacy HOME-rooted globals (`~/.octos/skills`, `~/.octos/plugins`) are
-        // deprecated: all skill installs now live under `<data_dir>/skills/` for
-        // per-profile isolation. We still warn ONCE per process if the directory
-        // is present so operators migrating from older deployments notice it.
-        warn_once_if_legacy_global_skills_exist();
-        // Extra dirs from OCTOS_SKILLS_PATH env var (colon-separated)
-        if let Ok(extra) = std::env::var("OCTOS_SKILLS_PATH") {
-            for p in extra.split(':') {
-                let p = p.trim();
-                if !p.is_empty() {
-                    let path = PathBuf::from(p);
-                    if path.exists() {
-                        dirs.push(path);
-                    }
-                }
-            }
-        }
-        dirs.dedup();
-        dirs
-    }
-}
-
-/// Section B (codex review round-5 P1.2): OR-merge
-/// `OCTOS_PLUGINS_REQUIRE_SIGNED` (set by `ProcessManager` when the parent
-/// serve enabled strict signing) onto the loaded Config. Spawned gateway
-/// processes pick up the policy via env, even when the profile JSON they
-/// load omits the new `plugins` block.
-pub(crate) fn merge_env_plugin_policy_pub(config: &mut Config) {
-    merge_env_plugin_policy(config);
-    merge_env_memory_policy(config);
-}
-
-/// Fill `memory.max_inject_tokens` from `OCTOS_MEMORY_MAX_INJECT_TOKENS`
-/// (set by `ProcessManager` from the host config.json) when the loaded
-/// config leaves it unset. Field-level merge: an explicit value in the
-/// loaded config always wins; the env var only fills the gap, so spawned
-/// gateways inherit the host budget even when their profile JSON omits it
-/// (or serializes an empty `memory: {}` block).
 fn merge_env_memory_policy(config: &mut Config) {
     if config
         .memory
@@ -1053,13 +940,6 @@ fn merge_env_memory_policy(config: &mut Config) {
             }
         }
     }
-    // Same field-level rule for the refresh switch: the env only fills the
-    // gap when the loaded config says nothing about `memory.refresh.enabled`
-    // (block absent OR the tri-state left unset). With the DEFAULT-ON
-    // semantics the OFF direction matters most: a host that disabled
-    // memory mirrors `OCTOS_MEMORY_REFRESH_ENABLED=0` to spawned
-    // subprocesses, and that must beat the child's default-on. An explicit
-    // `enabled` in the config file still wins over the env.
     if config
         .memory
         .as_ref()
@@ -1068,9 +948,6 @@ fn merge_env_memory_policy(config: &mut Config) {
         .is_none()
     {
         if let Ok(v) = std::env::var("OCTOS_MEMORY_REFRESH_ENABLED") {
-            // Recognized values only — an empty or misspelled variable
-            // (easy in shell/Docker) must not silently opt out of the
-            // default-on behavior.
             let parsed = match v.trim().to_ascii_lowercase().as_str() {
                 "1" | "true" | "yes" | "on" => Some(true),
                 "0" | "false" | "no" | "off" => Some(false),
@@ -1094,44 +971,6 @@ fn merge_env_memory_policy(config: &mut Config) {
             }
         }
     }
-}
-
-fn merge_env_plugin_policy(config: &mut Config) {
-    if let Ok(v) = std::env::var("OCTOS_PLUGINS_REQUIRE_SIGNED") {
-        let on = matches!(
-            v.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        );
-        if on {
-            config.plugins.require_signed = true;
-        }
-    }
-}
-
-/// One-shot warning when `~/.octos/skills` still exists on disk after we
-/// stopped scanning it. Emitted at most once per process so operators see
-/// a single migration hint rather than spamming every profile bootstrap.
-fn warn_once_if_legacy_global_skills_exist() {
-    use std::sync::Once;
-    static WARN_ONCE: Once = Once::new();
-    WARN_ONCE.call_once(|| {
-        let Some(home) = dirs::home_dir() else {
-            return;
-        };
-        let legacy_skills = home.join(".octos").join("skills");
-        let legacy_plugins = home.join(".octos").join("plugins");
-        for legacy in [&legacy_skills, &legacy_plugins] {
-            if legacy.exists() {
-                tracing::warn!(
-                    path = %legacy.display(),
-                    "legacy global skill directory is no longer scanned; \
-                     migrate contents into your profile's `<data_dir>/skills/` \
-                     (e.g. `~/.octos/profiles/<id>/data/skills/`) — installs \
-                     are per-profile only"
-                );
-            }
-        }
-    });
 }
 
 /// Message queue mode for handling messages arriving during active agent runs.
@@ -1432,12 +1271,9 @@ impl Config {
             }
         }
 
-        // 4. No config found, use defaults. Even on the no-file path, honour
-        // `OCTOS_PLUGINS_REQUIRE_SIGNED` so spawned gateways without a
-        // config.json still inherit the host's strict-signing policy.
+        // 4. No config found, use defaults.
         tracing::info!("no config.json found, using defaults");
         let mut config = Self::default();
-        merge_env_plugin_policy(&mut config);
         merge_env_memory_policy(&mut config);
         Ok((config, None))
     }
@@ -1460,15 +1296,6 @@ impl Config {
         config.expand_env_vars();
         config.validate_approval_policy()?;
 
-        // Section B (codex review round-5 P1.2): the host's
-        // `plugins.require_signed` policy must reach spawned gateway
-        // processes too. `ProcessManager` sets `OCTOS_PLUGINS_REQUIRE_SIGNED=1`
-        // when the parent serve was launched with strict signing; we
-        // OR-merge that into every Config so a profile JSON that omits
-        // the new block still inherits the strict policy. The host memory
-        // budget rides the same mechanism via
-        // `OCTOS_MEMORY_MAX_INJECT_TOKENS`.
-        merge_env_plugin_policy(&mut config);
         merge_env_memory_policy(&mut config);
 
         // Log if migration changed something (don't silently rewrite user's config)
@@ -2643,111 +2470,6 @@ mod tests {
         let json = r#"{"provider": "anthropic", "format_after_edit": true}"#;
         let config: Config = serde_json::from_str(json).unwrap();
         assert!(config.format_after_edit);
-    }
-
-    /// Section A of the per-profile-skills migration: the legacy HOME-rooted
-    /// globals (`~/.octos/skills`, `~/.octos/plugins`) MUST NOT appear in the
-    /// scan list anymore. Installs live under `<data_dir>/skills/` for
-    /// per-profile isolation; HOME-rooted globals are deprecated.
-    ///
-    /// This test pivots `HOME` to a temp dir so it works on CI hosts where
-    /// the real `$HOME/.octos/skills` may or may not exist. The function
-    /// must NOT include those paths in its result, regardless of whether
-    /// the directories exist on disk.
-    #[test]
-    #[allow(unsafe_code)]
-    fn plugin_dirs_from_project_drops_legacy_home_rooted_globals() {
-        // Serialize env mutation so parallel tests don't fight over HOME.
-        let _g = HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-        let tmp = tempfile::tempdir().unwrap();
-        let fake_home = tmp.path();
-        let project_dir = fake_home.join("octos-home");
-        std::fs::create_dir_all(&project_dir).unwrap();
-
-        // Plant legacy HOME-rooted globals that the OLD scan list would have
-        // included. The new scan list MUST NOT include them.
-        let legacy_skills = fake_home.join(".octos").join("skills");
-        let legacy_plugins = fake_home.join(".octos").join("plugins");
-        std::fs::create_dir_all(&legacy_skills).unwrap();
-        std::fs::create_dir_all(&legacy_plugins).unwrap();
-
-        // Pivot HOME for the duration of this assertion. dirs::home_dir()
-        // honors HOME on Unix; we restore the original after the check.
-        let original_home = std::env::var_os("HOME");
-        // SAFETY: serialized by HOME_ENV_LOCK above; restored on both the
-        // success and panic-unwind paths below.
-        unsafe { std::env::set_var("HOME", fake_home) };
-
-        let scan = Config::plugin_dirs_from_project(&project_dir);
-
-        // Restore HOME before assertions so a panic doesn't leak the override.
-        // SAFETY: see above.
-        match original_home {
-            Some(v) => unsafe { std::env::set_var("HOME", v) },
-            None => unsafe { std::env::remove_var("HOME") },
-        }
-
-        assert!(
-            !scan.contains(&legacy_skills),
-            "`~/.octos/skills` must no longer be scanned; got: {scan:?}"
-        );
-        assert!(
-            !scan.contains(&legacy_plugins),
-            "`~/.octos/plugins` must no longer be scanned; got: {scan:?}"
-        );
-    }
-
-    /// Section B: `plugins.require_signed` deserializes from the new
-    /// `[plugins]` config block. Default is `false` (backward compatible).
-    #[test]
-    fn plugins_require_signed_deserialize_explicit_true() {
-        let json = r#"{"plugins": {"require_signed": true}}"#;
-        let config: Config = serde_json::from_str(json).unwrap();
-        assert!(config.plugins.require_signed);
-    }
-
-    #[test]
-    fn plugins_require_signed_defaults_to_false_when_absent() {
-        let json = r#"{"provider": "anthropic"}"#;
-        let config: Config = serde_json::from_str(json).unwrap();
-        assert!(
-            !config.plugins.require_signed,
-            "missing `plugins` block must default to `require_signed = false` \
-             (backward compat)"
-        );
-    }
-
-    #[test]
-    fn plugins_require_signed_defaults_to_false_when_block_empty() {
-        let json = r#"{"plugins": {}}"#;
-        let config: Config = serde_json::from_str(json).unwrap();
-        assert!(!config.plugins.require_signed);
-    }
-
-    /// Section A: `<octos_home>/plugins` and `<octos_home>/skills`
-    /// (deployment-scoped, not HOME-rooted) MUST still be scanned. M11-F
-    /// REG-5 added them so admin-installed plugins are visible to every
-    /// profile.
-    #[test]
-    fn plugin_dirs_from_project_keeps_deployment_scoped_dirs() {
-        let tmp = tempfile::tempdir().unwrap();
-        let project_dir = tmp.path().join("octos-home");
-        let project_plugins = project_dir.join("plugins");
-        let project_skills = project_dir.join("skills");
-        std::fs::create_dir_all(&project_plugins).unwrap();
-        std::fs::create_dir_all(&project_skills).unwrap();
-
-        let scan = Config::plugin_dirs_from_project(&project_dir);
-
-        assert!(
-            scan.contains(&project_plugins),
-            "`<octos_home>/plugins` must still be scanned; got: {scan:?}"
-        );
-        assert!(
-            scan.contains(&project_skills),
-            "`<octos_home>/skills` must still be scanned; got: {scan:?}"
-        );
     }
 
     #[test]

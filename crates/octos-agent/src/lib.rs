@@ -34,7 +34,6 @@ pub mod mcp_auth;
 pub mod mcp_server;
 pub mod memory_segment;
 pub mod permissions;
-pub mod plugins;
 pub mod policy;
 pub mod profile;
 pub mod progress;
@@ -143,9 +142,6 @@ pub use memory_segment::{
     stable_memory_instructions, volatile_memory_content,
 };
 pub use permissions::{InvalidSafetyTier, SafetyTier};
-pub use plugins::{
-    PluginLoadError, PluginLoadOptions, PluginLoadResult, PluginLoader, SynthesisConfig,
-};
 pub use policy::{
     ApprovalPolicy, EffectivePermissions, FileAccessMode, FilesystemScope, NetworkPolicy,
     PermissionProfile, PermissionProfileError, RuntimeMode,

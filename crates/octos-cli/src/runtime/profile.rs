@@ -13,11 +13,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use eyre::{Result, WrapErr};
-use octos_agent::plugins::LoadedSkillAction;
-use octos_agent::{
-    HookExecutor, PluginLoadOptions, PluginLoadResult, PluginLoader, SandboxConfig, ToolPolicy,
-    ToolRegistry, create_sandbox,
-};
+use octos_agent::{HookExecutor, SandboxConfig, ToolPolicy, ToolRegistry, create_sandbox};
 use octos_bus::CronService;
 use octos_llm::{AdaptiveRouter, LlmProvider, QosCatalog};
 use octos_memory::{EpisodeStore, MemoryStore};
@@ -25,14 +21,11 @@ use tracing::{info, warn};
 
 use crate::commands::chat;
 use crate::commands::gateway::build_system_prompt;
-use crate::commands::gateway::profile_factory::profile_plugin_env;
 use crate::config::Config;
 use crate::cron_tool::CronTool;
 use crate::profiles::{UserProfile, config_from_profile};
 use crate::qos_catalog::{ExporterMode, build_adaptive_provider_chain};
-use crate::skills_scope::{
-    build_account_skills_loader, discover_ominix_url, push_runtime_plugin_env,
-};
+use crate::skills_scope::build_account_skills_loader;
 
 static STDIO_SOLO_LEAN_DEFAULTS: AtomicBool = AtomicBool::new(false);
 
@@ -43,33 +36,6 @@ pub(crate) fn enable_stdio_solo_lean_defaults() {
 fn stdio_solo_lean_defaults_enabled() -> bool {
     STDIO_SOLO_LEAN_DEFAULTS.load(Ordering::Acquire)
         || std::env::var("OCTOS_SKIP_BUNDLED_SKILLS").ok().as_deref() == Some("1")
-}
-
-fn is_bundled_skill_directory(path: &Path) -> bool {
-    matches!(
-        path.file_name().and_then(|name| name.to_str()),
-        Some(octos_agent::bootstrap::BUNDLED_APP_SKILLS_DIR)
-            | Some(octos_agent::bootstrap::PLATFORM_SKILLS_DIR)
-    )
-}
-
-/// Immutable inputs needed to rebuild only a profile's plugin-derived layer.
-/// Long-lived stores, providers, schedulers, and profile services are reused
-/// from the existing [`ProfileRuntime`].
-#[derive(Clone)]
-pub struct ProfilePluginReloadConfig {
-    base_tools: Arc<ToolRegistry>,
-    plugin_dirs: Vec<PathBuf>,
-    plugin_env: Vec<(String, String)>,
-    work_dir: PathBuf,
-    synthesis_config: Option<octos_agent::plugins::SynthesisConfig>,
-    require_signed: bool,
-    verified_cache_dir: PathBuf,
-    tool_policy: Option<ToolPolicy>,
-    context_filter: Vec<String>,
-    host_hooks: Vec<octos_agent::HookConfig>,
-    gateway_system_prompt: Option<String>,
-    skill_filter: Option<octos_agent::SkillFilter>,
 }
 
 /// Shared owner for profile services whose shutdown cannot be tied to one
@@ -229,10 +195,6 @@ pub struct ProfileRuntime {
     /// dashboard-installed skills.
     pub skills_dir: Option<PathBuf>,
 
-    /// Env-var pairs every plugin spawn for this profile should
-    /// inherit (`OCTOS_PROFILE_ID`, `OCTOS_VOICE_DIR`, etc.).
-    pub plugin_env_template: Vec<(String, String)>,
-
     /// The profile's tool policy (allow/deny lists, named groups,
     /// per-provider overrides). `None` means "no profile-level policy"
     /// — the agent's default permissions apply.
@@ -274,29 +236,6 @@ pub struct ProfileRuntime {
     /// a workspace-bound registry.
     pub tool_specs: Arc<ToolRegistry>,
 
-    /// Tool names contributed by loaded plugins. Useful for gateway's
-    /// pin-as-base step (so plugin tools never get LRU-evicted) and
-    /// for diagnostics. Populated from `PluginLoadResult::tool_names`.
-    pub plugin_tool_names: Vec<String>,
-
-    /// UI-callable actions accepted by the same canonical load that registered
-    /// their owning plugin tools.
-    pub skill_actions: Vec<LoadedSkillAction>,
-
-    /// Immutable source for mutation-time plugin-layer replacement.
-    pub plugin_reload: Option<Arc<ProfilePluginReloadConfig>>,
-
-    /// Plugin source directories actually scanned at bootstrap time.
-    /// Gateway threads this into the pipeline tool factory so spawned
-    /// sub-agents inherit the same skill catalog.
-    pub plugin_dirs: Vec<PathBuf>,
-
-    /// System-prompt fragments contributed by loaded plugins
-    /// (skill SKILL.md auto-injection). Gateway appends these to the
-    /// gateway-built system prompt; serve appends them to the per-
-    /// session agent.
-    pub plugin_prompt_fragments: Vec<String>,
-
     /// Fully pre-assembled system prompt for this profile. Built once
     /// at bootstrap by calling [`build_system_prompt`] (the gateway's
     /// canonical assembler) and then appending every fragment in
@@ -319,15 +258,6 @@ pub struct ProfileRuntime {
     /// compose `pre → [memory segment] → post` to keep the pre-refactor
     /// precedence (memory before skills/tool guidance).
     pub prompt_parts: crate::commands::gateway::prompt::GatewayPromptParts,
-
-    /// Hook configurations contributed by loaded plugins (skill
-    /// manifests can declare `before_tool_call` / `after_tool_call` /
-    /// `before_llm_call` / `after_llm_call` hooks). Gateway merges
-    /// these with `config.hooks` to build its `HookExecutor`. Captured
-    /// alongside `plugin_tool_names` / `plugin_prompt_fragments` so
-    /// gateway can reuse the bootstrap's `PluginLoadResult` without
-    /// re-running plugin discovery.
-    pub plugin_hooks: Vec<octos_agent::HookConfig>,
 
     /// Phase 4 (docs/ROBRIX-PHASE4-APPROVAL-FLOW-ADR.md): per-profile
     /// human-approval rules, converted once at bootstrap and inherited by
@@ -431,91 +361,7 @@ pub enum BootstrapRole {
     Gateway,
 }
 
-async fn build_profile_plugin_layer(
-    profile_id: &str,
-    reload: &ProfilePluginReloadConfig,
-    fail_on_loader_error: bool,
-) -> Result<(ToolRegistry, PluginLoadResult)> {
-    let mut tools = reload.base_tools.snapshot_excluding(&[]);
-    let mut plugin_result = PluginLoadResult::default();
-    if !reload.plugin_dirs.is_empty() {
-        let load_result = PluginLoader::load_into_with_options_and_filter(
-            &mut tools,
-            &reload.plugin_dirs,
-            &reload.plugin_env,
-            PluginLoadOptions {
-                work_dir: Some(&reload.work_dir),
-                synthesis_config: reload.synthesis_config.clone(),
-                require_signed: reload.require_signed,
-                verified_cache_dir: Some(reload.verified_cache_dir.clone()),
-            },
-            reload.skill_filter.as_ref(),
-        );
-        match load_result {
-            Ok(result) if fail_on_loader_error && !result.plugin_errors.is_empty() => {
-                let details = result
-                    .plugin_errors
-                    .iter()
-                    .map(|error| format!("{}: {}", error.plugin_dir.display(), error.message))
-                    .collect::<Vec<_>>()
-                    .join("; ");
-                return Err(eyre::eyre!(
-                    "plugin loading failed during profile {profile_id} reload: {details}"
-                ));
-            }
-            Ok(result) => plugin_result = result,
-            Err(error) if fail_on_loader_error => {
-                return Err(error).wrap_err_with(|| {
-                    format!("plugin loading failed during profile {profile_id} reload")
-                });
-            }
-            Err(error) => warn!(profile_id, %error, "plugin loading failed"),
-        };
-    }
-
-    if !plugin_result.mcp_servers.is_empty() {
-        match octos_agent::McpClient::start(&plugin_result.mcp_servers).await {
-            Ok(client) => client.register_tools(&mut tools),
-            Err(error) => warn!(
-                profile_id,
-                %error,
-                "skill MCP initialization failed"
-            ),
-        }
-    }
-    if let Some(ref policy) = reload.tool_policy {
-        tools.apply_policy(policy);
-    }
-    if !reload.context_filter.is_empty() {
-        tools.set_context_filter(reload.context_filter.clone());
-    }
-    Ok((tools, plugin_result))
-}
-
 impl ProfileRuntime {
-    /// Bind project plugins at session scope. Local adapters may open multiple
-    /// cwds on one profile; none may inherit another project's executables.
-    pub(crate) async fn for_workspace(self: &Arc<Self>, workspace: &Path) -> Result<Arc<Self>> {
-        if self.session_defaults.is_none() {
-            return Ok(self.clone());
-        }
-        let Some(reload) = &self.plugin_reload else {
-            return Ok(self.clone());
-        };
-        let mut dirs = Config::plugin_dirs_from_project(&workspace.join(".octos"));
-        if dirs.is_empty() {
-            return Ok(self.clone());
-        }
-        for dir in &reload.plugin_dirs {
-            if !dirs.contains(dir) {
-                dirs.push(dir.clone());
-            }
-        }
-        let mut reload = (**reload).clone();
-        reload.plugin_dirs = dirs;
-        self.rebuild_plugin_layer_using(&Arc::new(reload)).await
-    }
-
     /// Reapply the effective envelope after cwd rebinding or dynamic tool
     /// registration. A cloned registry must never resurrect excluded tools.
     pub(crate) fn apply_tool_envelope(&self, tools: &mut ToolRegistry) {
@@ -525,134 +371,6 @@ impl ProfileRuntime {
         if let Some(profile) = &self.agent_profile {
             tools.filter_by_profile(&profile.tools);
         }
-    }
-
-    /// Rebuild plugin-derived tools, trusted actions, prompt fragments, and
-    /// hooks while sharing all long-lived profile resources with `self`.
-    pub async fn rebuild_plugin_layer(self: &Arc<Self>) -> Result<Arc<Self>> {
-        let reload = self.plugin_reload.as_ref().ok_or_else(|| {
-            eyre::eyre!(
-                "profile '{}' does not retain plugin reload inputs",
-                self.profile_id
-            )
-        })?;
-        self.rebuild_plugin_layer_using(reload).await
-    }
-
-    async fn rebuild_plugin_layer_using(
-        self: &Arc<Self>,
-        reload: &Arc<ProfilePluginReloadConfig>,
-    ) -> Result<Arc<Self>> {
-        let (mut tools, plugin_result) =
-            build_profile_plugin_layer(&self.profile_id, reload, true).await?;
-
-        tools.register(octos_agent::RecallMemoryTool::new(
-            self.memory_store.clone(),
-        ));
-        tools.register(octos_agent::SaveMemoryTool::new(self.memory_store.clone()));
-        tools.register(octos_agent::RecordMemoryUseTool::new(
-            self.memory_store.clone(),
-        ));
-        if self.memory_refresh_enabled {
-            tools.register(octos_agent::MemoryNoteTool::new(self.memory_store.clone()));
-        }
-        if let Some(cron) = self.tool_specs.get("cron") {
-            tools.register_arc(cron.clone());
-        }
-        if let Some(ref policy) = reload.tool_policy {
-            tools.apply_policy(policy);
-        }
-
-        self.apply_tool_envelope(&mut tools);
-        let skills_loader = build_account_skills_loader(&self.data_dir)
-            .with_skill_filter(reload.skill_filter.clone());
-        let mut prompt_parts = build_system_prompt(
-            reload.gateway_system_prompt.as_deref(),
-            &self.data_dir,
-            &self.data_dir,
-            &skills_loader,
-        )
-        .await;
-        for fragment in &plugin_result.prompt_fragments {
-            prompt_parts.post_memory.push_str("\n\n");
-            prompt_parts.post_memory.push_str(fragment);
-        }
-        if let Some(profile) = &self.agent_profile
-            && let Some(template) = &profile.system_prompt_template
-            && let Some(template) =
-                crate::commands::load_profile_prompt_template(&profile.name, template)
-        {
-            prompt_parts.pre_memory = template;
-        }
-        let system_prompt = prompt_parts.joined();
-
-        // #2129: the coding default hooks (cargo check / eslint / ruff after
-        // edits) merge at THIS shared assembly point so every host —
-        // bootstrap sessions, WS per-turn rebuilds, chat, gateway — gets
-        // them, not just one consumer. They are SELF-GATING: each declares a
-        // path_filter (fires only on matching source edits) and requires_bin
-        // (skips when the checker is absent), so a podcast workspace never
-        // runs cargo. Defaults first, operator hooks after, per the
-        // coding_default_hooks contract. The hook child's working directory
-        // comes from the per-turn payload cwd (the workspace root), not the
-        // executor, so one profile-level executor serves every session.
-        let mut all_hooks = octos_agent::workspace_policy::coding_default_hooks();
-        all_hooks.extend(reload.host_hooks.clone());
-        all_hooks.extend(plugin_result.hooks.clone());
-        // #2153 finding 2: coalesce a burst of edits so a whole-project
-        // `cargo check` (up to its 60s timeout) does not run once per edit.
-        // The window is measured from the previous check's completion, so
-        // several `edit_file` calls in one assistant turn collapse to a single
-        // check while a later edit (a new thinking step) still gets a fresh
-        // one. Breaker + debounce state are per session (see HookExecutor).
-        let hook_executor = Some(Arc::new(
-            HookExecutor::new(all_hooks)
-                .with_after_event_debounce(std::time::Duration::from_millis(2000)),
-        ));
-        let skills_dir_candidate = self.data_dir.join("skills");
-
-        Ok(Arc::new(Self {
-            profile_id: self.profile_id.clone(),
-            data_dir: self.data_dir.clone(),
-            session_store_root: self.session_store_root.clone(),
-            config: self.config.clone(),
-            llm: self.llm.clone(),
-            adaptive_router: self.adaptive_router.clone(),
-            runtime_qos_catalog: self.runtime_qos_catalog.clone(),
-            primary_model_id: self.primary_model_id.clone(),
-            provider_name: self.provider_name.clone(),
-            credentials: self.credentials.clone(),
-            skills_dir: skills_dir_candidate
-                .exists()
-                .then_some(skills_dir_candidate),
-            plugin_env_template: self.plugin_env_template.clone(),
-            tool_policy: self.tool_policy.clone(),
-            default_sandbox: self.default_sandbox.clone(),
-            max_iterations: self.max_iterations,
-            session_defaults: self.session_defaults.clone(),
-            agent_profile: self.agent_profile.clone(),
-            format_after_edit: self.format_after_edit,
-            snapshots: self.snapshots.clone(),
-            tool_specs: Arc::new(tools),
-            plugin_tool_names: plugin_result.tool_names.clone(),
-            skill_actions: plugin_result.loaded_actions.clone(),
-            plugin_reload: Some(reload.clone()),
-            plugin_dirs: reload.plugin_dirs.clone(),
-            plugin_prompt_fragments: plugin_result.prompt_fragments.clone(),
-            plugin_hooks: plugin_result.hooks.clone(),
-            human_approval_rules: self.human_approval_rules.clone(),
-            system_prompt,
-            prompt_parts,
-            memory: self.memory.clone(),
-            memory_store: self.memory_store.clone(),
-            embedder: self.embedder.clone(),
-            memory_inject_tokens: self.memory_inject_tokens,
-            memory_refresh_enabled: self.memory_refresh_enabled,
-            cron_service: self.cron_service.clone(),
-            runtime_lifecycle: self.runtime_lifecycle.clone(),
-            hook_executor,
-            lane_routing: self.lane_routing.clone(),
-        }))
     }
 
     /// Build a fully populated [`ProfileRuntime`] from a parsed
@@ -697,37 +415,21 @@ impl ProfileRuntime {
         octos_home: Option<&Path>,
         role: BootstrapRole,
     ) -> Result<Arc<Self>> {
-        Self::bootstrap_with_host_plugins(profile, data_dir, octos_home, role, None, None).await
+        Self::bootstrap_with_host_memory(profile, data_dir, octos_home, role, None).await
     }
 
-    /// Section B (codex review round-3): bootstrap a profile runtime while
-    /// honouring the host-level `plugins.require_signed` policy. When the
-    /// caller (e.g. `octos serve`) has the top-level [`Config`] in scope,
-    /// it passes the host plugin policy here so the per-profile plugin
-    /// load enforces strict signing even when the profile JSON doesn't
-    /// repeat the setting. Profile-level `plugins.require_signed` is OR'd
-    /// with the host setting — neither side can silently relax the other.
-    pub async fn bootstrap_with_host_plugins(
+    /// Bootstrap a profile runtime while letting the host merge its
+    /// memory settings. Host memory settings apply field-by-field when
+    /// the profile doesn't override them. A profile serialized with an
+    /// empty `memory: {}` block must still inherit the host budget.
+    pub async fn bootstrap_with_host_memory(
         profile: &UserProfile,
         data_dir: &Path,
         octos_home: Option<&Path>,
         role: BootstrapRole,
-        host_plugins: Option<&crate::config::PluginsConfig>,
         host_memory: Option<&crate::config::MemoryConfig>,
     ) -> Result<Arc<Self>> {
-        // Step 1: derive the per-profile Config. Apply the host plugin
-        // policy on top of the profile-derived one before any downstream
-        // step inspects `config.plugins.require_signed`.
         let mut config = config_from_profile(profile);
-        if let Some(host) = host_plugins {
-            if host.require_signed {
-                config.plugins.require_signed = true;
-            }
-        }
-        // Host memory settings apply field-by-field when the profile doesn't
-        // override them (same host-default pattern as plugins). A
-        // profile serialized with an empty `memory: {}` block must still
-        // inherit the host budget.
         crate::config::merge_host_memory_into_profile(&mut config.memory, host_memory);
 
         Self::bootstrap_resolved(profile, data_dir, octos_home, role, config, false, None).await
@@ -829,23 +531,9 @@ impl ProfileRuntime {
             .exists()
             .then_some(skills_dir_candidate);
 
-        // Step 8: build the plugin env template — `OCTOS_DATA_DIR`,
-        // `OCTOS_HOME`, `OCTOS_PROFILE_ID`, `OCTOS_VOICE_DIR`, and
-        // (when discoverable) `OMINIX_API_URL` — plus the profile's
-        // search provider keys and any first-party skill env vars
-        // (`OPENAI_API_KEY`, `GEMINI_API_KEY`, ...).
-        let ominix_url = discover_ominix_url();
         let effective_octos_home = octos_home
             .map(Path::to_path_buf)
             .unwrap_or_else(|| data_dir.to_path_buf());
-        let mut plugin_env_template = profile_plugin_env(profile);
-        push_runtime_plugin_env(
-            &mut plugin_env_template,
-            data_dir,
-            &effective_octos_home,
-            Some(profile.id.as_str()),
-            ominix_url.as_deref(),
-        );
 
         // Step 9: build the base ToolRegistry.
         //
@@ -876,37 +564,6 @@ impl ProfileRuntime {
                 Err(e) => warn!(profile_id = %profile.id, error = %e, "MCP initialization failed"),
             }
         }
-        let plugin_base_tools = Arc::new(tools.snapshot_excluding(&[]));
-
-        // Step 13: plugin loading.
-        //
-        // M11-F regression fix REG-5: replace the hand-rolled
-        // per-profile-only assembly with `Config::plugin_dirs_from_project`
-        // (the canonical helper pre-M11-F serve.rs used) so the resulting
-        // set includes the deployment-scoped `<octos_home>/plugins`,
-        // `<octos_home>/skills`, the colon-separated `OCTOS_SKILLS_PATH`
-        // env var, and the already-scanned `<octos_home>/bundled-app-skills/`.
-        // Platform skills (`<octos_home>/platform-skills/`, admin-only) and
-        // the per-profile `data_dir/skills/` are layered on top so the
-        // gateway behaviour is matched 1:1.
-        //
-        // Legacy HOME-rooted globals (`~/.octos/plugins`, `~/.octos/skills`)
-        // are NO LONGER scanned — `Config::plugin_dirs_from_project` emits a
-        // one-shot migration warning on first detection.
-        let plugin_work_dir = data_dir.join("skill-output");
-        let _ = std::fs::create_dir_all(&plugin_work_dir);
-        let mut plugin_dirs = Config::plugin_dirs_from_project(&effective_octos_home);
-        let platform_dir = effective_octos_home.join(octos_agent::bootstrap::PLATFORM_SKILLS_DIR);
-        if platform_dir.exists() && !plugin_dirs.contains(&platform_dir) {
-            plugin_dirs.push(platform_dir);
-        }
-        if stdio_solo_lean_defaults_enabled() {
-            plugin_dirs.retain(|path| !is_bundled_skill_directory(path));
-        }
-        let profile_skills_dir = data_dir.join("skills");
-        if !plugin_dirs.contains(&profile_skills_dir) {
-            plugin_dirs.push(profile_skills_dir);
-        }
         // --- Skill layering v1 ---
         // Resolve the profile's inherited skill-selection layer (parent +
         // global defaults already merged by `resolve_runtime_profile`) into a
@@ -931,24 +588,6 @@ impl ProfileRuntime {
                 );
             }
         }
-        let plugin_reload = Arc::new(ProfilePluginReloadConfig {
-            base_tools: plugin_base_tools,
-            plugin_dirs: plugin_dirs.clone(),
-            plugin_env: plugin_env_template.clone(),
-            work_dir: plugin_work_dir,
-            synthesis_config: None,
-            require_signed: config.plugins.require_signed,
-            verified_cache_dir: effective_octos_home.join("cache").join("verified"),
-            tool_policy: config.tool_policy.clone(),
-            context_filter: config.context_filter.clone(),
-            host_hooks: config.hooks.clone(),
-            gateway_system_prompt: profile.config.gateway.system_prompt.clone(),
-            skill_filter: skill_filter.clone(),
-        });
-        let (rebuilt_tools, plugin_result) =
-            build_profile_plugin_layer(&profile.id, &plugin_reload, false).await?;
-        tools = rebuilt_tools;
-
         // RFC-0 (#1289): LRU tool deferral was removed — the base-tool pin
         // list is no longer needed; every enabled tool is emitted every turn.
 
@@ -1106,17 +745,13 @@ impl ProfileRuntime {
             crate::config::MemoryConfig::effective_max_inject_tokens(config.memory.as_ref());
         let memory_refresh_enabled =
             crate::config::MemoryConfig::refresh_enabled(config.memory.as_ref());
-        let mut prompt_parts = build_system_prompt(
+        let prompt_parts = build_system_prompt(
             profile.config.gateway.system_prompt.as_deref(),
             data_dir,
             data_dir,
             &skills_loader,
         )
         .await;
-        for fragment in &plugin_result.prompt_fragments {
-            prompt_parts.post_memory.push_str("\n\n");
-            prompt_parts.post_memory.push_str(fragment);
-        }
         let system_prompt = prompt_parts.joined();
         let prompt_parts_for_runtime = prompt_parts.clone();
 
@@ -1152,7 +787,6 @@ impl ProfileRuntime {
         // executor, so one profile-level executor serves every session.
         let mut all_hooks = octos_agent::workspace_policy::coding_default_hooks();
         all_hooks.extend(config.hooks.clone());
-        all_hooks.extend(plugin_result.hooks.clone());
         // #2153 finding 2: coalesce a burst of edits so a whole-project
         // `cargo check` (up to its 60s timeout) does not run once per edit.
         // The window is measured from the previous check's completion, so
@@ -1168,10 +802,8 @@ impl ProfileRuntime {
             profile_id = %profile.id,
             provider = %provider_name,
             model = %primary_model_id,
-            plugin_count = plugin_result.tool_names.len(),
             tool_count = tools.specs().len(),
             system_prompt_len = system_prompt.len(),
-            prompt_fragment_count = plugin_result.prompt_fragments.len(),
             hook_count = hook_executor.is_some() as u8,
             "ProfileRuntime: bootstrapped"
         );
@@ -1201,7 +833,6 @@ impl ProfileRuntime {
             provider_name,
             credentials,
             skills_dir,
-            plugin_env_template,
             tool_policy: config.tool_policy.clone(),
             default_sandbox,
             max_iterations: config.max_iterations,
@@ -1210,12 +841,6 @@ impl ProfileRuntime {
             format_after_edit: config.format_after_edit,
             snapshots: config.snapshots.clone(),
             tool_specs: Arc::new(tools),
-            plugin_tool_names: plugin_result.tool_names.clone(),
-            skill_actions: plugin_result.loaded_actions.clone(),
-            plugin_reload: Some(plugin_reload),
-            plugin_dirs,
-            plugin_prompt_fragments: plugin_result.prompt_fragments.clone(),
-            plugin_hooks: plugin_result.hooks.clone(),
             human_approval_rules: profile
                 .config
                 .approval_policy
@@ -1263,21 +888,9 @@ mod tests {
     use crate::profiles::{
         GatewaySettings, LlmModelSelectionConfig, LlmProfileConfig, LlmRouteConfig, ProfileConfig,
     };
-    #[cfg(unix)]
-    use crate::runtime::SessionRuntime;
     use chrono::Utc;
     use octos_agent::SandboxConfig;
-    #[cfg(unix)]
-    use octos_core::SessionKey;
     use std::collections::HashMap;
-
-    #[test]
-    fn stdio_lean_defaults_exclude_only_bundled_skill_layers() {
-        assert!(is_bundled_skill_directory(Path::new("bundled-app-skills")));
-        assert!(is_bundled_skill_directory(Path::new("platform-skills")));
-        assert!(!is_bundled_skill_directory(Path::new("skills")));
-        assert!(!is_bundled_skill_directory(Path::new("plugins")));
-    }
 
     /// Build a minimal `UserProfile` with no LLM contract. M11-D
     /// bootstrap must reject this with a clear error, not panic.
@@ -1407,9 +1020,12 @@ mod tests {
             }"#,
         )
         .unwrap();
+        // Binary plugin retirement: prompt injection now flows exclusively
+        // through the SKILL.md `always: true` frontmatter (skills.rs loader)
+        // instead of manifest `prompts.include` fragments.
         std::fs::write(
             skills_dir.join("SKILL.md"),
-            "## Test Fragment Skill\n\nMARKER-FRAGMENT-XYZ — call fm_tts directly.\n",
+            "---\nname: test-fragment-skill\ndescription: test\nalways: true\n---\n\n## Test Fragment Skill\n\nMARKER-FRAGMENT-XYZ — call fm_tts directly.\n",
         )
         .unwrap();
 
@@ -1459,14 +1075,6 @@ mod tests {
             rt.system_prompt.contains("Current date:"),
             "system_prompt should also contain the base prompt body; got: {}",
             rt.system_prompt
-        );
-        // The plugin_prompt_fragments field also still carries the
-        // raw fragment (gateway path consumers depend on it).
-        assert!(
-            rt.plugin_prompt_fragments
-                .iter()
-                .any(|f| f.contains("MARKER-FRAGMENT-XYZ")),
-            "plugin_prompt_fragments should still surface the fragment for gateway",
         );
     }
 
@@ -1719,397 +1327,6 @@ mod tests {
         );
     }
 
-    /// M11-F regression fix REG-5: bootstrap's plugin_dirs must include
-    /// the *global* `~/.octos/plugins` and `~/.octos/skills` (via
-    /// `Config::plugin_dirs_from_project`) so admin-installed skills
-    /// are visible to every profile, matching the pre-M11-F serve
-    /// behaviour at `serve.rs:1224`.
-    ///
-    /// We construct an `octos_home` override and plant a fake skill
-    /// under `<octos_home>/plugins/`, then assert the resulting
-    /// `plugin_dirs` set includes that directory. We do not require
-    /// the skill to load (loaders gate on a manifest); we only assert
-    /// the dir was *scanned*.
-    #[tokio::test]
-    async fn profile_runtime_bootstrap_includes_global_plugin_dirs() {
-        let _key = ScopedEnvKey::set("OCTOS_M11F_REG5_KEY");
-        let tmp = tempfile::tempdir().unwrap();
-        let octos_home = tmp.path().join("octos-home");
-        let data_dir = octos_home.join("profiles").join("reg5").join("data");
-        std::fs::create_dir_all(&data_dir).unwrap();
-
-        // Plant the global "<octos_home>/plugins" dir so
-        // `Config::plugin_dirs_from_project` picks it up.
-        let global_plugins = octos_home.join("plugins");
-        std::fs::create_dir_all(&global_plugins).unwrap();
-
-        let profile = fixture_profile("reg5", "OCTOS_M11F_REG5_KEY");
-        let rt =
-            ProfileRuntime::bootstrap(&profile, &data_dir, Some(&octos_home), BootstrapRole::Serve)
-                .await
-                .expect("bootstrap should succeed");
-
-        assert!(
-            rt.plugin_dirs.contains(&global_plugins),
-            "plugin_dirs should include `<octos_home>/plugins`; got: {:?}",
-            rt.plugin_dirs
-        );
-    }
-
-    /// Issue #87: sub-account profile skill loading must not strand the
-    /// runtime without `shell`. The original report showed a sub-account bot
-    /// that had loaded skills but could not call any tool.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn subaccount_skill_loading_preserves_shell() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let _key = ScopedEnvKey::set("OCTOS_ISSUE_87_SUBACCOUNT_KEY");
-        let tmp = tempfile::tempdir().unwrap();
-        let octos_home = tmp.path().join("octos-home");
-        let data_dir = octos_home.join("profiles").join("mofa-child").join("data");
-        let skill_dir = data_dir.join("skills").join("issue-87-probe");
-        std::fs::create_dir_all(&skill_dir).unwrap();
-
-        std::fs::write(
-            skill_dir.join("manifest.json"),
-            r#"{
-                "name": "issue-87-probe",
-                "version": "1.0",
-                "tools": [
-                    {
-                        "name": "issue_87_probe",
-                        "description": "Issue #87 profile skill probe",
-                        "input_schema": {"type": "object", "properties": {}}
-                    }
-                ]
-            }"#,
-        )
-        .unwrap();
-        let exec_path = skill_dir.join("issue-87-probe");
-        std::fs::write(
-            &exec_path,
-            "#!/bin/sh\necho '{\"output\":\"ok\",\"success\":true}'\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&exec_path, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        let mut profile = fixture_profile("mofa-child", "OCTOS_ISSUE_87_SUBACCOUNT_KEY");
-        profile.parent_id = Some("mofa-parent".to_string());
-        profile.public_subdomain = Some("mofa-child-public".to_string());
-
-        let rt =
-            ProfileRuntime::bootstrap(&profile, &data_dir, Some(&octos_home), BootstrapRole::Serve)
-                .await
-                .expect("sub-account profile bootstrap should succeed");
-
-        assert!(
-            rt.tool_specs.get("issue_87_probe").is_some(),
-            "per-profile skill tool must load for sub-account profiles; plugin_dirs={:?}; plugin_tool_names={:?}; registered_tools={:?}",
-            rt.plugin_dirs,
-            rt.plugin_tool_names,
-            rt.tool_specs
-                .specs()
-                .into_iter()
-                .map(|spec| spec.name)
-                .collect::<Vec<_>>(),
-        );
-        assert!(
-            rt.tool_specs.get("shell").is_some(),
-            "sub-account skill loading must not drop the shell tool"
-        );
-        // RFC-0 (#1289): `shell` is emitted every turn — no activate_tools
-        // round-trip needed. Verify it stays visible after workspace rebind.
-        assert!(
-            rt.tool_specs.specs().iter().any(|s| s.name == "shell"),
-            "shell must be visible in specs"
-        );
-
-        let profile_runtime = Arc::new(rt);
-        let session_a =
-            SessionRuntime::bootstrap(&profile_runtime, SessionKey::new("api", "issue-87-a"), None)
-                .await
-                .expect("session A bootstrap");
-        let session_b =
-            SessionRuntime::bootstrap(&profile_runtime, SessionKey::new("api", "issue-87-b"), None)
-                .await
-                .expect("session B bootstrap");
-
-        for session in [&session_a, &session_b] {
-            assert!(
-                session.tools.get("shell").is_some(),
-                "session {} must retain shell after workspace rebind",
-                session.session_key
-            );
-            assert!(
-                session.tools.specs().iter().any(|s| s.name == "shell"),
-                "session {} must expose shell in specs",
-                session.session_key
-            );
-        }
-    }
-
-    /// Section B (codex review round-3): the host's `plugins.require_signed`
-    /// policy must reach the per-profile bootstrap so an unsigned skill
-    /// installed under `<data_dir>/skills/` is rejected even when the
-    /// profile JSON omits the flag. We plant an unsigned skill and assert
-    /// it does NOT load when `bootstrap_with_host_plugins` is invoked
-    /// with `host_plugins.require_signed = true`.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn profile_runtime_bootstrap_honours_host_require_signed() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let _key = ScopedEnvKey::set("OCTOS_HOST_SIGN_KEY");
-        let tmp = tempfile::tempdir().unwrap();
-        let octos_home = tmp.path().join("octos-home");
-        let data_dir = octos_home.join("profiles").join("sigtest").join("data");
-        let skills_dir = data_dir.join("skills");
-        std::fs::create_dir_all(&skills_dir).unwrap();
-
-        // Plant an unsigned per-profile skill — manifest omits sha256.
-        let plugin_dir = skills_dir.join("unsigned-skill");
-        std::fs::create_dir(&plugin_dir).unwrap();
-        std::fs::write(
-            plugin_dir.join("manifest.json"),
-            r#"{
-                "name": "unsigned-skill",
-                "version": "1.0",
-                "tools": [{"name": "ut", "description": "d"}]
-            }"#,
-        )
-        .unwrap();
-        let exec_path = plugin_dir.join("unsigned-skill");
-        std::fs::write(&exec_path, b"#!/bin/sh\necho unsigned").unwrap();
-        std::fs::set_permissions(&exec_path, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        let profile = fixture_profile("sigtest", "OCTOS_HOST_SIGN_KEY");
-        let host_plugins = crate::config::PluginsConfig {
-            require_signed: true,
-        };
-
-        let rt = ProfileRuntime::bootstrap_with_host_plugins(
-            &profile,
-            &data_dir,
-            Some(&octos_home),
-            BootstrapRole::Serve,
-            Some(&host_plugins),
-            None,
-        )
-        .await
-        .expect("bootstrap should succeed (the rejection only suppresses the plugin)");
-
-        let specs = rt.tool_specs.specs();
-        let registered: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
-        assert!(
-            !registered.iter().any(|n| n == &"ut"),
-            "unsigned skill tool `ut` must NOT load when host strict policy is on; \
-             registered: {registered:?}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn should_rebuild_plugin_layer_without_reopening_long_lived_stores() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let _key = ScopedEnvKey::set("OCTOS_PLUGIN_RELOAD_KEY");
-        let tmp = tempfile::tempdir().unwrap();
-        let octos_home = tmp.path().join("octos-home");
-        let data_dir = octos_home.join("profiles").join("reload").join("data");
-        let profile = fixture_profile("reload", "OCTOS_PLUGIN_RELOAD_KEY");
-        let original =
-            ProfileRuntime::bootstrap(&profile, &data_dir, Some(&octos_home), BootstrapRole::Serve)
-                .await
-                .unwrap();
-        assert!(original.tool_specs.get("reload_action_tool").is_none());
-
-        let plugin_dir = data_dir.join("skills").join("reload-action");
-        std::fs::create_dir_all(&plugin_dir).unwrap();
-        std::fs::write(
-            plugin_dir.join("manifest.json"),
-            r#"{
-                "name": "reload-action",
-                "version": "1.0.0",
-                "tools": [{
-                    "name": "reload_action_tool",
-                    "description": "Reload action tool",
-                    "input_schema": {"type": "object", "properties": {}}
-                }],
-                "actions": [{
-                    "id": "document.reload",
-                    "label": "Reload document",
-                    "binding": {"type": "tool", "tool": "reload_action_tool"}
-                }]
-            }"#,
-        )
-        .unwrap();
-        let executable = plugin_dir.join("reload-action");
-        std::fs::write(
-            &executable,
-            "#!/bin/sh\necho '{\"success\":true,\"output\":\"new\"}'",
-        )
-        .unwrap();
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        let replacement = original.rebuild_plugin_layer().await.unwrap();
-
-        assert!(!Arc::ptr_eq(&original, &replacement));
-        assert!(Arc::ptr_eq(&original.llm, &replacement.llm));
-        assert!(Arc::ptr_eq(&original.memory, &replacement.memory));
-        assert!(Arc::ptr_eq(
-            &original.memory_store,
-            &replacement.memory_store
-        ));
-        assert!(replacement.tool_specs.get("reload_action_tool").is_some());
-        assert!(
-            replacement.tool_specs.get("record_memory_use").is_some(),
-            "plugin-layer rebuild must retain the memory usage feedback tool"
-        );
-        assert_eq!(replacement.skill_actions.len(), 1);
-        assert_eq!(
-            replacement.skill_actions[0].definition.id,
-            "document.reload"
-        );
-    }
-
-    #[tokio::test]
-    async fn should_keep_startup_best_effort_but_reject_rebuild_after_discovery_rejection() {
-        let _key = ScopedEnvKey::set("OCTOS_PLUGIN_RELOAD_DISCOVERY_KEY");
-        let tmp = tempfile::tempdir().unwrap();
-        let data_dir = tmp.path().join("profile-data");
-        let plugin_dir = data_dir.join("skills").join("invalid-discovery-plugin");
-        std::fs::create_dir_all(&plugin_dir).unwrap();
-        std::fs::write(
-            plugin_dir.join("manifest.json"),
-            r#"{
-                "id": "invalid-discovery-plugin",
-                "version": "1.0.0",
-                "tools": [{
-                    "name": "invalid_schema_tool",
-                    "description": "Invalid schema",
-                    "input_schema": {"type": "array"}
-                }]
-            }"#,
-        )
-        .unwrap();
-        let profile = fixture_profile("reload-discovery", "OCTOS_PLUGIN_RELOAD_DISCOVERY_KEY");
-
-        let original = ProfileRuntime::bootstrap(&profile, &data_dir, None, BootstrapRole::Serve)
-            .await
-            .expect("startup must retain legacy best-effort plugin loading");
-        assert!(original.tool_specs.get("invalid_schema_tool").is_none());
-
-        let error = match original.rebuild_plugin_layer().await {
-            Ok(_) => panic!("mutation rebuild must reject a discovery-time plugin rejection"),
-            Err(error) => error,
-        };
-        assert!(
-            error
-                .to_string()
-                .contains("plugin loading failed during profile reload-discovery reload"),
-            "unexpected rebuild error: {error}"
-        );
-    }
-
-    #[tokio::test]
-    async fn should_keep_shared_cron_alive_until_replacement_runtime_drops() {
-        let _key = ScopedEnvKey::set("OCTOS_PLUGIN_RELOAD_CRON_KEY");
-        let tmp = tempfile::tempdir().unwrap();
-        let data_dir = tmp.path().join("profile-data");
-        let profile = fixture_profile("reload-cron", "OCTOS_PLUGIN_RELOAD_CRON_KEY");
-        let original = ProfileRuntime::bootstrap(&profile, &data_dir, None, BootstrapRole::Serve)
-            .await
-            .unwrap();
-        let cron = original
-            .cron_service
-            .clone()
-            .expect("bootstrap must create the cron service");
-
-        let replacement = original.rebuild_plugin_layer().await.unwrap();
-        drop(original);
-        assert!(
-            cron.is_running(),
-            "dropping the old runtime must not stop services shared with its replacement"
-        );
-
-        drop(replacement);
-        assert!(
-            !cron.is_running(),
-            "the final replacement owner must signal cron shutdown"
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn should_reject_unsigned_plugins_when_rebuilding_under_host_strict_signing() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let _key = ScopedEnvKey::set("OCTOS_PLUGIN_RELOAD_SIGN_KEY");
-        let tmp = tempfile::tempdir().unwrap();
-        let octos_home = tmp.path().join("octos-home");
-        let data_dir = octos_home
-            .join("profiles")
-            .join("reload-signed")
-            .join("data");
-        let profile = fixture_profile("reload-signed", "OCTOS_PLUGIN_RELOAD_SIGN_KEY");
-        let strict = crate::config::PluginsConfig {
-            require_signed: true,
-        };
-        let original = ProfileRuntime::bootstrap_with_host_plugins(
-            &profile,
-            &data_dir,
-            Some(&octos_home),
-            BootstrapRole::Serve,
-            Some(&strict),
-            None,
-        )
-        .await
-        .unwrap();
-
-        let plugin_dir = data_dir.join("skills").join("unsigned-reload");
-        std::fs::create_dir_all(&plugin_dir).unwrap();
-        std::fs::write(
-            plugin_dir.join("manifest.json"),
-            r#"{
-                "name": "unsigned-reload",
-                "version": "1.0.0",
-                "tools": [{
-                    "name": "unsigned_reload_tool",
-                    "description": "must remain rejected",
-                    "input_schema": {"type": "object", "properties": {}}
-                }]
-            }"#,
-        )
-        .unwrap();
-        let executable = plugin_dir.join("unsigned-reload");
-        std::fs::write(&executable, "#!/bin/sh\necho unsigned").unwrap();
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        let error = match original.rebuild_plugin_layer().await {
-            Ok(_) => panic!("strict signing must reject an unsigned plugin during reload"),
-            Err(error) => error,
-        };
-        assert!(
-            error.to_string().contains("plugins.require_signed"),
-            "unexpected reload error: {error}"
-        );
-    }
-
-    /// M11-F regression fix REG-2 follow-up (codex review): when the
-    /// `ProfileRuntime` drops, the cron service must observe a
-    /// shutdown signal so the self-armed timer task does not survive
-    /// the runtime owning its filesystem layout. The signal is
-    /// synchronous (we call it from `Drop`) and flips
-    /// `CronService::running` to false; the next reschedule tick
-    /// inside `on_timer` → `arm_timer` then short-circuits and the
-    /// timer task drops its self-held `Arc<CronService>`.
-    ///
-    /// We assert by holding a weak reference to the inner
-    /// `Arc<CronService>` after dropping the `ProfileRuntime` and
-    /// checking that `running` flipped. The strong-count check (i.e.
-    /// "service deallocated") would race with the in-flight timer
-    /// task, so we settle for the durable observable (`running` flag).
     #[tokio::test]
     async fn profile_runtime_drop_signals_cron_shutdown() {
         let _key = ScopedEnvKey::set("OCTOS_M11F_REG2_DROP_KEY");

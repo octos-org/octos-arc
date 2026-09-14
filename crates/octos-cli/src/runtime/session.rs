@@ -286,8 +286,6 @@ impl SessionRuntime {
         // workspace path.
         let had_workspace_hint = workspace_hint.is_some();
         let workspace_root = resolve_workspace_root(profile, &session_key, workspace_hint)?;
-        let workspace_profile = profile.for_workspace(&workspace_root).await?;
-        let profile = &workspace_profile;
         std::fs::create_dir_all(&workspace_root).wrap_err_with(|| {
             format!("create workspace root failed: {}", workspace_root.display())
         })?;
@@ -355,11 +353,6 @@ impl SessionRuntime {
             permissions,
         );
         tools.set_output_dir_hint(plugin_work_dir.to_string_lossy().into_owned());
-        tools.rebind_plugin_work_dirs(if profile.session_defaults.is_some() {
-            &workspace_root
-        } else {
-            &plugin_work_dir
-        });
         // #1607 (codex round 4): `bg_research` is NOT a CWD-bound tool, so the
         // `rebind_cwd_with_permissions` snapshot above carried the PROFILE-time
         // `bg_research` instance — which baked in the profile default sandbox.
@@ -522,8 +515,7 @@ impl SessionRuntime {
                     // dirs that fail canonicalize (fail-closed) — a raw path
                     // later replaced by a symlink to `/etc` would otherwise be
                     // legitimised as `InSkillDir`.
-                    let skill_dirs =
-                        octos_core::canonicalize_skill_read_zones(&profile.plugin_dirs);
+                    let skill_dirs = octos_core::canonicalize_skill_read_zones(&Vec::new());
                     let scope = scope.with_skill_read_zones(skill_dirs).unwrap_or_else(|err| {
                         tracing::warn!(
                             profile_id = %profile.profile_id,
@@ -1305,7 +1297,6 @@ tools = ["read_file"]
             provider_name: "stub".to_string(),
             credentials: HashMap::new(),
             skills_dir: None,
-            plugin_env_template: Vec::new(),
             tool_policy: None,
             default_sandbox: sandbox,
             max_iterations: None,
@@ -1314,12 +1305,6 @@ tools = ["read_file"]
             format_after_edit: false,
             snapshots: None,
             tool_specs: Arc::new(base_tools),
-            plugin_tool_names: Vec::new(),
-            skill_actions: Vec::new(),
-            plugin_reload: None,
-            plugin_dirs: Vec::new(),
-            plugin_prompt_fragments: Vec::new(),
-            plugin_hooks: Vec::new(),
             human_approval_rules: None,
             prompt_parts: crate::commands::gateway::prompt::GatewayPromptParts {
                 pre_memory: system_prompt.clone(),
@@ -2090,7 +2075,6 @@ tools = ["read_file"]
             provider_name: "stub".to_string(),
             credentials: HashMap::new(),
             skills_dir: None,
-            plugin_env_template: Vec::new(),
             tool_policy: None,
             default_sandbox: sandbox,
             max_iterations: None,
@@ -2099,12 +2083,6 @@ tools = ["read_file"]
             agent_profile: None,
             snapshots: None,
             tool_specs: Arc::new(base_tools),
-            plugin_tool_names: Vec::new(),
-            skill_actions: Vec::new(),
-            plugin_reload: None,
-            plugin_dirs: Vec::new(),
-            plugin_prompt_fragments: Vec::new(),
-            plugin_hooks: Vec::new(),
             human_approval_rules: None,
             system_prompt: "test-system-prompt".to_string(),
             prompt_parts: crate::commands::gateway::prompt::GatewayPromptParts {
