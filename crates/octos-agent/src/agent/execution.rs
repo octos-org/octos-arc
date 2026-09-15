@@ -466,7 +466,6 @@ impl Agent {
             subagent_summary_generator: self.subagent_summary_generator.clone(),
             llm_provider: self.llm.clone(),
             task_supervisor: Some(self.tools.supervisor()),
-            cost_accountant: self.cost_accountant.clone(),
             parent_session_key: self.parent_session_key.clone(),
             spawn_depth: self.spawn_depth,
             session_scope: self.session_scope.clone(),
@@ -609,10 +608,9 @@ impl Agent {
         // tasks (not only test fixtures).
         let subagent_output_router = self.subagent_output_router.clone();
         let subagent_summary_generator = self.subagent_summary_generator.clone();
-        // M8 parity (W1.A4): clone the agent's cost accountant and
-        // parent session key so they propagate to every sub-agent built
-        // off this turn's TOOL_CTX (pipeline workers, spawn children).
-        let cost_accountant = self.cost_accountant.clone();
+        // M8 parity (W1.A4): clone the agent's parent session key so it
+        // propagates to every sub-agent built off this turn's TOOL_CTX
+        // (pipeline workers, spawn children).
         let parent_session_key = self.parent_session_key.clone();
         // Guard C (issue #607): inherit the agent's spawn nesting depth
         // so the foreground and spawn_only `ToolContext` builders below
@@ -966,13 +964,12 @@ impl Agent {
                 let bg_output_router = subagent_output_router.clone();
                 let bg_summary_generator = subagent_summary_generator.clone();
                 // M8 parity (W1.A1/A4): clone the optional router/generator/
-                // supervisor/cost-accountant so the make_ctx closure below
-                // can thread them onto every sub-agent that runs in the
-                // spawn_only branch (pipelines, recursive spawns).
+                // supervisor so the make_ctx closure below can thread them
+                // onto every sub-agent that runs in the spawn_only branch
+                // (pipelines, recursive spawns).
                 let bg_subagent_output_router = subagent_output_router.clone();
                 let bg_subagent_summary_generator = subagent_summary_generator.clone();
                 let bg_task_supervisor = Some(bg_supervisor.clone());
-                let bg_cost_accountant = cost_accountant.clone();
                 let bg_parent_session_key = parent_session_key.clone();
                 // Guard C (issue #607): clone the agent's spawn nesting
                 // depth into the spawn_only TOOL_CTX builder.
@@ -1057,15 +1054,13 @@ impl Agent {
                         // foreground branch enforces.
                         permissions: bg_permissions.clone(),
                         // M8 parity (W1.A1): thread the shared router /
-                        // summary generator / supervisor / cost
-                        // accountant into the spawn_only TOOL_CTX so
-                        // sub-agents downstream (pipeline workers,
-                        // recursive spawns) inherit them via the
-                        // task-local read path.
+                        // summary generator / supervisor into the
+                        // spawn_only TOOL_CTX so sub-agents downstream
+                        // (pipeline workers, recursive spawns) inherit
+                        // them via the task-local read path.
                         subagent_output_router: bg_subagent_output_router.clone(),
                         subagent_summary_generator: bg_subagent_summary_generator.clone(),
                         task_supervisor: bg_task_supervisor.clone(),
-                        cost_accountant: bg_cost_accountant.clone(),
                         parent_session_key: bg_parent_session_key.clone(),
                         // Guard C (issue #607): inherit the parent
                         // agent's spawn nesting depth so spawn-only
@@ -2009,14 +2004,13 @@ impl Agent {
                 // ctx.permissions.is_tool_allowed).
                 permissions: permissions.clone(),
                 // M8 parity (W1.A1/A3/A4): thread the shared router /
-                // summary generator / task supervisor / cost accountant
-                // through to foreground tool calls so bg_research (and
-                // the spawn tool) can pick them up via TOOL_CTX and
-                // hand them down to background workers.
+                // summary generator / task supervisor through to
+                // foreground tool calls so bg_research (and the spawn
+                // tool) can pick them up via TOOL_CTX and hand them
+                // down to background workers.
                 subagent_output_router: subagent_output_router.clone(),
                 subagent_summary_generator: subagent_summary_generator.clone(),
                 task_supervisor: Some(tools.supervisor()),
-                cost_accountant: cost_accountant.clone(),
                 parent_session_key: parent_session_key.clone(),
                 // Guard C (issue #607): stamp the agent's spawn
                 // nesting depth onto every foreground tool's

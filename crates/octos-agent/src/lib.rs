@@ -14,7 +14,6 @@ pub mod approval;
 pub mod behaviour;
 pub mod compaction;
 pub mod compaction_tiered;
-pub mod cost_ledger;
 pub mod dispatch_policy;
 pub mod file_state_cache;
 pub mod format;
@@ -58,9 +57,9 @@ pub const MALFORMED_TOOLCALL_EXHAUSTED_MARKER: &str =
     "malformed tool-call feedback budget exhausted";
 
 pub use abi_schema::{
-    COMPACTION_POLICY_SCHEMA_VERSION, COST_ATTRIBUTION_SCHEMA_VERSION,
-    HARNESS_ERROR_SCHEMA_VERSION, HARNESS_PROGRESS_EVENT_SCHEMA_VERSION,
-    HOOK_PAYLOAD_SCHEMA_VERSION, PROGRESS_EVENT_SCHEMA_VERSION, SESSION_SUMMARY_SCHEMA_VERSION,
+    COMPACTION_POLICY_SCHEMA_VERSION, HARNESS_ERROR_SCHEMA_VERSION,
+    HARNESS_PROGRESS_EVENT_SCHEMA_VERSION, HOOK_PAYLOAD_SCHEMA_VERSION,
+    PROGRESS_EVENT_SCHEMA_VERSION, SESSION_SUMMARY_SCHEMA_VERSION,
     SUB_AGENT_DISPATCH_SCHEMA_VERSION, TASK_RESULT_SCHEMA_VERSION, UnsupportedSchemaVersionError,
     WORKSPACE_POLICY_SCHEMA_VERSION, check_supported,
 };
@@ -91,11 +90,6 @@ pub use compaction_tiered::{
     DEFAULT_TIER2_KEEP_LAST_N_TURNS, FullCompactor, MicroCompactionPolicy, Tier1Report,
     Tier3Report, TieredCompactionRunner, is_anthropic_provider,
 };
-pub use cost_ledger::{
-    BudgetProjection, BudgetRejectionReason, COST_ATTRIBUTION_COUNTER, COST_LEDGER_FILE,
-    COST_USD_HISTOGRAM, ContractCostRollup, CostAccountant, CostAttributionEvent, CostBudgetPolicy,
-    CostLedger, PersistentCostLedger, project_cost_usd,
-};
 pub use dispatch_policy::{
     DispatchBackendMetadata, DispatchPolicy, DispatchTarget, GateDenial, enforce_dispatch_gates,
     enforce_dispatch_gates_for_backend,
@@ -107,10 +101,10 @@ pub use file_state_cache::{
 };
 pub use harness_errors::{HarnessError, HarnessErrorEvent, OCTOS_LOOP_ERROR_TOTAL, RecoveryHint};
 pub use harness_events::{
-    HARNESS_EVENT_SCHEMA_V1, HarnessCostAttributionEvent, HarnessEvent, HarnessEventError,
-    HarnessEventPayload, HarnessEventSink, HarnessFailureEvent, HarnessPhaseEvent,
-    HarnessProgressEvent, HarnessRetryEvent, HarnessSubAgentDispatchEvent,
-    HarnessSubagentProgressEvent, MAX_HARNESS_EVENT_LINE_BYTES,
+    HARNESS_EVENT_SCHEMA_V1, HarnessEvent, HarnessEventError, HarnessEventPayload,
+    HarnessEventSink, HarnessFailureEvent, HarnessPhaseEvent, HarnessProgressEvent,
+    HarnessRetryEvent, HarnessSubAgentDispatchEvent, HarnessSubagentProgressEvent,
+    MAX_HARNESS_EVENT_LINE_BYTES,
 };
 pub use hooks::{
     HookConfig, HookContext, HookDeniedError, HookEvent, HookExecutor, HookPayload,

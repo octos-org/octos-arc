@@ -1,5 +1,6 @@
 //! Session management with JSONL persistence and LRU eviction.
 
+use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -509,12 +510,78 @@ fn fold_session_timeline(timeline: Vec<SessionTimelineItem>) -> Vec<Message> {
             SessionTimelineItem::Message(message) => messages.push(*message),
             SessionTimelineItem::Rollback { num_turns, .. } => {
                 synthesize_thread_ids(&mut messages);
-                crate::resume_policy::drop_last_n_user_turns(&mut messages, num_turns);
+                drop_last_n_user_turns(&mut messages, num_turns);
             }
         }
     }
     synthesize_thread_ids(&mut messages);
     messages
+}
+
+/// Count the number of distinct user turns in `messages`.
+///
+/// A "user turn" is the message group sharing one `User` message's
+/// [`Message::thread_id`]. System messages and the assistant/tool replies
+/// that inherit a turn's thread_id never start a new turn, so the count
+/// equals the number of distinct thread_ids rooted by a `User` message.
+fn count_user_turns(messages: &[Message]) -> u32 {
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut count = 0_u32;
+    for msg in messages {
+        if matches!(msg.role, MessageRole::User) {
+            if let Some(tid) = msg.thread_id.as_deref() {
+                if seen.insert(tid) {
+                    count = count.saturating_add(1);
+                }
+            }
+        }
+    }
+    count
+}
+
+/// Drop the last `n` user turns from `messages` in place, returning the number
+/// of turns actually removed (clamped to the transcript's turn count).
+///
+/// A user turn is the set of messages sharing one `User` message's
+/// [`Message::thread_id`]. Removing the last `n` turns deletes those groups'
+/// user + assistant + tool messages — i.e. everything from the `n`-from-last
+/// user message onward. Leading `System` messages and any compaction-summary
+/// `System` message carry `thread_id == None`, are never part of a user turn,
+/// and always survive; dropping every user turn therefore returns the
+/// transcript to its pre-first-user state.
+///
+/// Deterministic and idempotent when driven by the append-only rollback
+/// marker: applied at the marker's position in the JSONL log, replaying the
+/// same log always yields the same trimmed transcript. `n == 0` is a no-op.
+fn drop_last_n_user_turns(messages: &mut Vec<Message>, n: u32) -> u32 {
+    if n == 0 {
+        return 0;
+    }
+    // Ordered, distinct thread_ids rooted by a `User` message.
+    let mut user_threads: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for msg in messages.iter() {
+        if matches!(msg.role, MessageRole::User) {
+            if let Some(tid) = msg.thread_id.clone() {
+                if seen.insert(tid.clone()) {
+                    user_threads.push(tid);
+                }
+            }
+        }
+    }
+    let drop_count = (n as usize).min(user_threads.len());
+    if drop_count == 0 {
+        return 0;
+    }
+    let to_drop: HashSet<String> = user_threads
+        .split_off(user_threads.len() - drop_count)
+        .into_iter()
+        .collect();
+    messages.retain(|msg| match msg.thread_id.as_deref() {
+        Some(tid) => !to_drop.contains(tid),
+        None => true,
+    });
+    drop_count as u32
 }
 
 /// Assemble the ordered `Message` list from a session JSONL's post-meta lines,
@@ -2240,7 +2307,7 @@ impl SessionManager {
                 .cache
                 .peek(&key.0)
                 .ok_or_else(|| eyre::eyre!("session not in cache after get_or_create: {key}"))?;
-            num_turns.min(crate::resume_policy::count_user_turns(&session.messages))
+            num_turns.min(count_user_turns(&session.messages))
         };
         if dropped == 0 {
             return Ok(0);
@@ -2252,7 +2319,7 @@ impl SessionManager {
         // Trim the in-memory mirror to match the persisted state so the next
         // turn continues from the trimmed transcript.
         if let Some(session) = self.cache.get_mut(&key.0) {
-            crate::resume_policy::drop_last_n_user_turns(&mut session.messages, num_turns);
+            drop_last_n_user_turns(&mut session.messages, num_turns);
             session.updated_at = Utc::now();
         }
         Ok(dropped)
@@ -2729,24 +2796,6 @@ impl SessionHandle {
         &mut self.session
     }
 
-    /// Returns `true` when this session has a recorded parent (i.e. a
-    /// background/child session forked from a top-level chat). Used by the
-    /// session actor (M8.6 fix-first item 3) to distinguish top-level
-    /// resume refusals (start fresh) from child resume refusals (mark task
-    /// failed).
-    pub fn is_child_session(&self) -> bool {
-        self.session.parent_key.is_some()
-    }
-
-    /// Drop all in-memory messages without persisting. Used by the session
-    /// actor (M8.6 fix-first item 3) on a top-level worktree-missing
-    /// refusal: the unsafe transcript must not flow into the first LLM
-    /// call. Caller is expected to follow up with a fresh
-    /// [`Self::rewrite`] if it wants the empty state to survive on disk.
-    pub fn clear_messages_for_unsafe_resume(&mut self) {
-        self.session.messages.clear();
-    }
-
     /// Get the most recent N messages from history.
     pub fn get_history(&self, max: usize) -> &[Message] {
         self.session.get_history(max)
@@ -2755,50 +2804,6 @@ impl SessionHandle {
     /// Get or initialize the session (always returns a reference).
     pub fn get_or_create(&mut self) -> &mut Session {
         &mut self.session
-    }
-
-    /// Sanitize the loaded transcript via [`crate::ResumePolicy`] (M8.6).
-    ///
-    /// Runs the four filter passes described in `resume_policy`, replaces
-    /// `self.session.messages` with the sanitized list, and returns the
-    /// typed report so callers can log it or forward it to a harness event
-    /// sink. A missing worktree is reported via
-    /// [`crate::SanitizeError::WorktreeMissing`] — the session's in-memory
-    /// messages are NOT mutated in that case so callers retain the
-    /// original transcript for operator inspection.
-    ///
-    /// NOTE: this does not persist the sanitized transcript to disk. Call
-    /// [`Self::rewrite`] afterward if the caller wants the sanitized
-    /// version to survive a subsequent reload.
-    pub fn sanitize_loaded_messages(
-        &mut self,
-        retry_state: Option<&dyn crate::RetryStateView>,
-        workspace_root: Option<&Path>,
-    ) -> Result<
-        (
-            crate::SessionSanitizeReport,
-            Vec<crate::ReplacementStateRef>,
-        ),
-        crate::SanitizeError,
-    > {
-        // Clone so we can restore the original on the worktree-missing
-        // path without a partial-move hazard.
-        let messages = self.session.messages.clone();
-        match crate::ResumePolicy::sanitize(messages, retry_state, workspace_root) {
-            Ok(outcome) => {
-                self.session.messages = outcome.messages;
-                Ok((outcome.report, outcome.content_replacements))
-            }
-            Err(error) => {
-                let crate::SanitizeError::WorktreeMissing { report, .. } = &error;
-                warn!(
-                    key = %self.session.key,
-                    report = %report,
-                    "resume sanitize refused: worktree missing"
-                );
-                Err(error)
-            }
-        }
     }
 
     /// Add a message to the session and persist it.

@@ -642,9 +642,9 @@ impl Agent {
         });
         // Session figures = completed-runs base + this turn so far.
         //
-        // The base comes from the shared session-usage handle (seeded from
-        // the usage ledger and folded per completed run by the session
-        // actor — each run priced at the model that ran it), so the wire's
+        // The base comes from the shared session-usage handle (folded per
+        // completed run by the session actor — each run priced at the
+        // model that ran it), so the wire's
         // `session_*` fields survive per-turn resets and the runtime
         // rebuild a `profile/llm/select` switch triggers. The turn part
         // uses `LoopTurnState`'s per-response spend, NOT

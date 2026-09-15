@@ -127,11 +127,6 @@ pub struct ProfileConfig {
     /// Sandbox configuration for tool isolation.
     #[serde(default)]
     pub sandbox: octos_agent::SandboxConfig,
-    /// Optional cost / provenance budget policy for swarm dispatches
-    /// (M7.4). Absent or empty => no enforcement; the ledger still
-    /// records attributions so operators can audit spend retroactively.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cost_budget: Option<octos_agent::CostBudgetPolicy>,
     /// Skill-layering (v1) selection layer. Merged through
     /// [`ProfileStore::effective_config`] alongside hooks / env / sandbox /
     /// plugins so a profile inherits the operator's default skill selection
@@ -282,8 +277,6 @@ pub struct ProfileConfigPatch {
     pub hooks: Option<Vec<octos_agent::HookConfig>>,
     #[serde(default)]
     pub sandbox: Option<octos_agent::SandboxConfig>,
-    #[serde(default)]
-    pub cost_budget: PatchField<octos_agent::CostBudgetPolicy>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -429,12 +422,6 @@ impl ProfileConfig {
         if let Some(sandbox) = patch.sandbox {
             self.sandbox = sandbox;
         }
-        match patch.cost_budget {
-            PatchField::Absent => {}
-            PatchField::Clear => self.cost_budget = None,
-            PatchField::Value(cost_budget) => self.cost_budget = Some(cost_budget),
-        }
-
         self.normalize_llm_contract();
     }
 
@@ -1060,7 +1047,7 @@ fn preserve_local_owner_metadata(path: &Path, serialized: &mut serde_json::Value
 ///   tenant's secrets in the defaults expecting another tenant not to receive
 ///   them; per-tenant credentials belong on each profile's own `env_vars`.
 /// * `plugins`, `sandbox` — presence-aware, field-by-field (see below).
-/// * `memory`, `approval_policy`, `cost_budget` — `Option` fallback: the
+/// * `memory`, `approval_policy` — `Option` fallback: the
 ///   profile's value wins; a `None` falls back to the defaults'.
 ///
 /// # Presence-aware merge for `sandbox` / `plugins`
@@ -1123,15 +1110,12 @@ pub(crate) fn merge_profile_defaults(
     // skills: inherited selection layer (union of rules, last-wins per id).
     effective.skills = merge_skills(&defaults.skills, &base.skills);
 
-    // memory / approval_policy / cost_budget: profile wins, else defaults.
+    // memory / approval_policy: profile wins, else defaults.
     if effective.memory.is_none() {
         effective.memory = defaults.memory.clone();
     }
     if effective.approval_policy.is_none() {
         effective.approval_policy = defaults.approval_policy.clone();
-    }
-    if effective.cost_budget.is_none() {
-        effective.cost_budget = defaults.cost_budget.clone();
     }
     // #2168: tool_policy inherits like its sibling Option fields — the
     // profile's own wins, else the operator default applies.
@@ -1585,9 +1569,6 @@ pub fn diff_profiles(old: &UserProfile, new: &UserProfile) -> ProfileChange {
     }
     if oc.sandbox != nc.sandbox {
         restart_fields.push("sandbox".into());
-    }
-    if oc.cost_budget != nc.cost_budget {
-        restart_fields.push("cost_budget".into());
     }
 
     if !restart_fields.is_empty() {

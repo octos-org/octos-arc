@@ -54,7 +54,6 @@ use octos_core::ui_protocol::{
 use octos_core::{
     AgentId, InboundMessage, MAIN_PROFILE_ID, Message, MessageRole, SessionKey, TaskId,
 };
-use octos_llm::pricing::model_pricing;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter};
@@ -115,9 +114,6 @@ use crate::context_manager::{
     ContextCompactionStatus, ContextEventKind, ContextManager, ForkPolicy, PromptBuildPolicy,
     PromptFrame, load_context_manager_snapshot, load_or_rebuild_context_manager,
     persist_context_manager_snapshot,
-};
-use crate::usage_ledger::{
-    PersistentUsageLedger, USAGE_LEDGER_FILE, UsageCostSource, UsageEvent, UsageTotals,
 };
 
 const MAX_DIFF_PREVIEW_BYTES: usize = 256 * 1024;
@@ -7398,84 +7394,6 @@ fn raw_catalog_result(_state: &AppState, _profile_id: Option<&str>) -> Result<Va
     Ok(json!({ "families": Value::Object(families) }))
 }
 
-/// Cumulative token usage for one session, for the `usage` field of
-/// `session/status/read`.
-///
-/// This used to be a hardcoded `{}`, so every field of octoscode's
-/// `SessionUsageStatus` decoded to `None` on every read — the whole usage
-/// readout was dead, and `cached_input_tokens` in particular meant operators
-/// had no way to tell whether prompt caching (the largest cost lever, on by
-/// default) was working at all.
-///
-/// Sourced from the persistent usage ledger so the figures survive runtime
-/// rebuilds and restarts, matching the REST endpoints in `api::usage`. Reads
-/// are best-effort: a missing or unreadable ledger yields `{}` exactly as
-/// before rather than failing the whole status read, which also keeps
-/// deployments with no ledger configured working unchanged.
-///
-/// `session/status/read` is event-driven and deduped client-side
-/// (`enqueue_session_status_probe`), not interval-polled, so opening the
-/// ledger here costs roughly what the existing `/api/usage` handlers already
-/// pay per request.
-async fn session_usage_status(state: &Arc<AppState>, profile_id: &str, session_id: &str) -> Value {
-    let Some(store) = state.profile_store.as_ref() else {
-        return json!({});
-    };
-    let Ok(Some(profile)) = store.get(profile_id) else {
-        return json!({});
-    };
-    let data_dir = store.resolve_data_dir(&profile);
-    let ledger = match PersistentUsageLedger::open(&data_dir).await {
-        Ok(ledger) => ledger,
-        Err(error) => {
-            debug!(
-                data_dir = %data_dir.display(),
-                error = %error,
-                "usage ledger unavailable for session status; reporting empty usage"
-            );
-            return json!({});
-        }
-    };
-    let totals = match ledger.session_totals(session_id).await {
-        Ok(totals) => totals,
-        Err(error) => {
-            debug!(
-                session = %session_id,
-                error = %error,
-                "failed to read session usage totals; reporting empty usage"
-            );
-            return json!({});
-        }
-    };
-    usage_status_json(&totals)
-}
-
-/// Shape [`UsageTotals`] into the `usage` object octoscode's
-/// `SessionUsageStatus` decodes. Split out from [`session_usage_status`] so
-/// the field mapping is testable without standing up an `AppState`.
-fn usage_status_json(totals: &UsageTotals) -> Value {
-    // A session with no recorded runs reports `{}` rather than a row of
-    // zeroes: octoscode renders each field only when present, and zeroes
-    // would claim "0 tokens used" for a session whose usage simply has not
-    // been written yet.
-    if totals.run_count == 0 {
-        return json!({});
-    }
-    let mut usage = json!({
-        "input_tokens": totals.input_tokens,
-        "output_tokens": totals.output_tokens,
-        "cached_input_tokens": totals.cache_read_tokens,
-    });
-    // Only emit a cost when the ledger actually priced something. A session
-    // whose model has no catalog pricing accumulates tokens but no spend, and
-    // reporting a confident `$0.0000` there is worse than reporting nothing.
-    if totals.estimated_cost_usd > 0.0 {
-        usage["estimated_cost_micros_usd"] =
-            json!((totals.estimated_cost_usd * 1_000_000.0).round() as u64);
-    }
-    usage
-}
-
 async fn raw_session_status_result(
     state: &Arc<AppState>,
     request: &RpcRequest<Value>,
@@ -7537,10 +7455,9 @@ async fn raw_session_status_result(
         "health": { "status": "ok" },
         "mcp_summary": { "connected": 0, "connecting": 0, "failed": 0, "disabled": 0 },
         "tool_summary": { "visible": 0, "enabled": 0, "denied": 0, "policy_id": "profile" },
-        // The ledger keys sessions by the `SessionKey`'s string form (see
-        // `SessionActor::record_usage_event`); match it exactly or every
-        // lookup silently returns zero totals.
-        "usage": session_usage_status(state, &profile_id, &session_id.to_string()).await,
+        // The persistent usage ledger has been retired; usage readouts are
+        // permanently empty (decoded to `None` fields client-side).
+        "usage": json!({}),
         "cursor": { "healthy": true, "replay_supported": true },
         "capabilities": features.advertised_capabilities(state),
     });
@@ -14364,9 +14281,8 @@ async fn handle_session_btw(
             .unwrap_or_default();
 
         // The profile's shared provider chain — same profile the transcript
-        // came from. `profile_runtime` also carries the data dir for the
-        // usage ledger; the test override provides a bare provider only.
-        let (llm, profile_runtime): (
+        // came from. The test override provides a bare provider only.
+        let (llm, _profile_runtime): (
             Arc<dyn octos_llm::LlmProvider>,
             Option<Arc<crate::runtime::ProfileRuntime>>,
         ) = match btw_test_provider() {
@@ -14432,63 +14348,6 @@ async fn handle_session_btw(
         // retry/failover chain, so re-asking `model_id()` after the fact can
         // name the primary lane rather than the fallback that answered.
         let metadata = llm.provider_metadata_for_index(response.provider_index);
-
-        // Paid aside → usage ledger (codex round-1 P2), same shape as AppUI
-        // turns but on an aside-specific channel so analytics can split them.
-        if let Some(runtime) = profile_runtime.as_ref() {
-            match PersistentUsageLedger::open(&runtime.data_dir).await {
-                Ok(usage_ledger) => {
-                    let model = (!metadata.model.is_empty()).then(|| metadata.model.clone());
-                    let estimated_cost_usd =
-                        model.as_deref().and_then(model_pricing).map(|pricing| {
-                            pricing.cost_with_cache_for_metadata(
-                                &metadata,
-                                response.usage.input_tokens,
-                                response.usage.output_tokens,
-                                response.usage.cache_read_tokens,
-                                response.usage.cache_write_tokens,
-                            )
-                        });
-                    let cost_source = if estimated_cost_usd.is_some() {
-                        UsageCostSource::CatalogEstimate
-                    } else {
-                        UsageCostSource::Unavailable
-                    };
-                    let event = UsageEvent::completed_run(
-                        active_profile_id
-                            .clone()
-                            .unwrap_or_else(|| MAIN_PROFILE_ID.to_owned()),
-                        session_id.0.clone(),
-                        format!("btw-{id}"),
-                        (!metadata.provider.is_empty()).then(|| metadata.provider.clone()),
-                        model,
-                        metadata.endpoint.clone(),
-                        u64::from(response.usage.input_tokens),
-                        u64::from(response.usage.output_tokens),
-                        estimated_cost_usd,
-                        cost_source,
-                        "appui_btw",
-                        None,
-                    )
-                    .with_cache_read_tokens(u64::from(response.usage.cache_read_tokens))
-                    .with_cache_write_tokens(u64::from(response.usage.cache_write_tokens));
-                    if let Err(error) = usage_ledger.record(event).await {
-                        warn!(
-                            session = %session_id.0,
-                            error = %error,
-                            "failed to record btw aside usage event"
-                        );
-                    }
-                }
-                Err(error) => {
-                    warn!(
-                        session = %session_id.0,
-                        error = %error,
-                        "usage ledger unavailable; btw aside not recorded"
-                    );
-                }
-            }
-        }
 
         let answer = response
             .content
@@ -15255,56 +15114,10 @@ async fn run_standalone_turn(
     // idempotent no-op that also covers turns whose runtime re-materialized
     // (e.g. after cache eviction) without a fresh open.
     register_session_ledger_scope(&state, &ledger, &session_runtime);
-    let usage_profile_id = active_profile_id
-        .clone()
-        .or_else(|| session_id.profile_id().map(ToOwned::to_owned))
-        .unwrap_or_else(|| profile_runtime.profile_id.clone());
-    let usage_ledger = match PersistentUsageLedger::open(&session_runtime.profile.data_dir).await {
-        Ok(ledger) => Some(Arc::new(ledger)),
-        Err(error) => {
-            warn!(
-                session = %session_id.0,
-                profile_id = %usage_profile_id,
-                path = %session_runtime.profile.data_dir.join(USAGE_LEDGER_FILE).display(),
-                error = %error,
-                "usage ledger unavailable; continuing turn without durable usage record"
-            );
-            None
-        }
-    };
-    // Session-cumulative usage base for cost emissions (codex #1632 P1):
-    // this path builds a FRESH agent per turn, so without a seeded base
-    // every `cost_update` reported turn-only "session" figures. Hydrate
-    // from the ledger this same path writes each completed run to —
-    // making the emitted `session_*` figures cover the whole session
-    // across turns, reconnects, and the per-turn agent rebuild. The
-    // completed-run write below lands before the client can start the
-    // next turn on this session, so the next hydration includes it.
+    // Session-cumulative usage base for cost emissions: starts empty now
+    // that the persistent usage ledger is retired, so emitted `session_*`
+    // figures cover the live turn only.
     let session_usage_base = octos_agent::SharedSessionUsage::default();
-    if let Some(ledger) = usage_ledger.as_ref() {
-        match ledger.session_totals(&session_id.to_string()).await {
-            Ok(totals) if totals.run_count > 0 => {
-                session_usage_base.seed(octos_agent::SessionUsageSnapshot {
-                    input_tokens: totals.input_tokens,
-                    output_tokens: totals.output_tokens,
-                    spend_usd: totals.estimated_cost_usd,
-                    priced_runs: if totals.estimated_cost_usd > 0.0 {
-                        totals.run_count
-                    } else {
-                        0
-                    },
-                });
-            }
-            Ok(_) => {}
-            Err(error) => {
-                warn!(
-                    session = %session_id.0,
-                    error = %error,
-                    "failed to hydrate session usage base from ledger"
-                );
-            }
-        }
-    }
 
     // Source the per-session primitives from the SessionRuntime.
     //
@@ -16381,10 +16194,6 @@ async fn run_standalone_turn(
             .with_steer_buffer(buffer)
             .with_steer_drained_callback(drained_callback);
     }
-    let usage_ledger_for_result = usage_ledger.clone();
-    let usage_profile_id_for_result = usage_profile_id.clone();
-    let usage_session_id_for_result = session_id.to_string();
-    let usage_run_id_for_result = turn_id.0.to_string();
     // UPCR-2026-015 (M9-β-1): pull the pre-uploaded media paths off
     // the params and feed them to the agent loop. `process_message`
     // already accepts a `Vec<String>` of paths (used by the
@@ -16979,70 +16788,6 @@ async fn run_standalone_turn(
                     None
                 };
                 let _ = final_reply_tx.send(final_send);
-                if let Some(usage_ledger) = usage_ledger_for_result.as_ref() {
-                    let provider_metadata = response.provider_metadata.clone();
-                    let provider = provider_metadata
-                        .as_ref()
-                        .map(|meta| meta.provider.clone())
-                        .or_else(|| {
-                            let provider = request_agent.provider_name();
-                            (!provider.is_empty()).then(|| provider.to_string())
-                        });
-                    let model = provider_metadata
-                        .as_ref()
-                        .map(|meta| meta.model.clone())
-                        .or_else(|| {
-                            let model = request_agent.model_id();
-                            (!model.is_empty()).then(|| model.to_string())
-                        });
-                    // Attributed by the agent loop: each response priced at
-                    // the model that produced it. Re-pricing the turn total
-                    // at the final model mispriced cross-model turns (codex
-                    // #1632 P1); the reprice fallback covers legacy paths.
-                    let estimated_cost_usd = response.estimated_spend_usd.or_else(|| {
-                        model.as_deref().and_then(model_pricing).map(|pricing| {
-                            pricing.cost_with_cache_for_provider(
-                                provider.as_deref().unwrap_or(""),
-                                model.as_deref().unwrap_or(""),
-                                response.token_usage.input_tokens,
-                                response.token_usage.output_tokens,
-                                response.token_usage.cache_read_tokens,
-                                response.token_usage.cache_write_tokens,
-                            )
-                        })
-                    });
-                    let cost_source = if estimated_cost_usd.is_some() {
-                        UsageCostSource::CatalogEstimate
-                    } else {
-                        UsageCostSource::Unavailable
-                    };
-                    let event = UsageEvent::completed_run(
-                        usage_profile_id_for_result.clone(),
-                        usage_session_id_for_result.clone(),
-                        usage_run_id_for_result.clone(),
-                        provider,
-                        model,
-                        provider_metadata
-                            .as_ref()
-                            .and_then(|meta| meta.endpoint.clone()),
-                        u64::from(response.token_usage.input_tokens),
-                        u64::from(response.token_usage.output_tokens),
-                        estimated_cost_usd,
-                        cost_source,
-                        "appui",
-                        None,
-                    )
-                    .with_cache_read_tokens(u64::from(response.token_usage.cache_read_tokens))
-                    .with_cache_write_tokens(u64::from(response.token_usage.cache_write_tokens));
-                    if let Err(error) = usage_ledger.record(event).await {
-                        warn!(
-                            session = %usage_session_id_for_result,
-                            run = %usage_run_id_for_result,
-                            error = %error,
-                            "failed to record AppUI usage event"
-                        );
-                    }
-                }
                 // Issue #1332: include `message_id` so the consumer
                 // can build `TurnSessionResult` for the
                 // `turn/completed` lifecycle envelope. Absent when no

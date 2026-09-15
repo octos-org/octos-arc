@@ -302,11 +302,6 @@ pub struct ToolContext {
     /// dashboard sees the substructure under the parent bg_research
     /// invocation.
     pub task_supervisor: Option<Arc<crate::task_supervisor::TaskSupervisor>>,
-    /// M8 parity (W1.A4): shared cost accountant. Pipeline workers
-    /// open a per-node `CostReservationHandle` against the same
-    /// accountant the session uses so spend is unified under the
-    /// parent contract.
-    pub cost_accountant: Option<Arc<crate::cost_ledger::CostAccountant>>,
     /// M8 parity: parent session key when the tool is invoked from a
     /// session actor. Pipeline workers and spawn children carry this so
     /// background-task registration links to the owning session.
@@ -394,7 +389,6 @@ impl ToolContext {
             subagent_summary_generator: None,
             llm_provider: Arc::new(NoopProvider),
             task_supervisor: None,
-            cost_accountant: None,
             parent_session_key: None,
             spawn_depth: 0,
             session_scope: None,

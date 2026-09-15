@@ -436,15 +436,10 @@ pub struct Agent {
     /// it on terminal completion. `None` keeps pre-M8.7 behaviour.
     pub(super) subagent_summary_generator:
         Option<Arc<crate::subagent_summary::AgentSummaryGenerator>>,
-    /// M8 parity (W1.A4): optional shared cost accountant. When set,
-    /// the agent threads it onto every `ToolContext` so background
-    /// sub-agents (pipeline workers, spawn children) reserve and commit
-    /// against the same ledger as the parent session.
-    pub(super) cost_accountant: Option<Arc<crate::cost_ledger::CostAccountant>>,
     /// Session-cumulative usage base shared with the owning session
-    /// actor. The actor seeds it from the persistent usage ledger and
-    /// folds each completed run back in (priced at the model that ran
-    /// it); `emit_cost_update` READS it so the `session_*` figures on
+    /// actor. The actor folds each completed run back in (priced at the
+    /// model that ran it); `emit_cost_update` READS it so the `session_*`
+    /// figures on
     /// `ProgressEvent::CostUpdate` cover the whole session — surviving
     /// per-turn resets, provider failover, and the runtime-cache
     /// eviction a `profile/llm/select` model switch triggers. `None`
@@ -574,7 +569,6 @@ impl Agent {
             append_only_audit: Default::default(),
             subagent_output_router: None,
             subagent_summary_generator: None,
-            cost_accountant: None,
             session_usage_base: None,
             parent_session_key: None,
             prompt_cache_epoch_id: None,
@@ -631,7 +625,6 @@ impl Agent {
             append_only_audit: Default::default(),
             subagent_output_router: None,
             subagent_summary_generator: None,
-            cost_accountant: None,
             session_usage_base: None,
             parent_session_key: None,
             prompt_cache_epoch_id: None,
@@ -835,25 +828,8 @@ impl Agent {
         self.subagent_summary_generator.as_ref()
     }
 
-    /// Wire a shared [`crate::cost_ledger::CostAccountant`] onto the
-    /// agent so background sub-agents (pipeline workers, spawn
-    /// children) inherit the same accountant via `TOOL_CTX` and commit
-    /// per-node spend to the same ledger. M8 parity (W1.A4).
-    pub fn with_cost_accountant(
-        mut self,
-        accountant: Arc<crate::cost_ledger::CostAccountant>,
-    ) -> Self {
-        self.cost_accountant = Some(accountant);
-        self
-    }
-
-    /// Access the configured cost accountant, if any.
-    pub fn cost_accountant(&self) -> Option<&Arc<crate::cost_ledger::CostAccountant>> {
-        self.cost_accountant.as_ref()
-    }
-
     /// Share a session-cumulative usage base with this agent. The owner
-    /// (session actor) seeds it from the usage ledger and folds completed
+    /// (session actor) folds completed
     /// runs; the agent only reads it when emitting cost updates, so the
     /// wire's `session_*` figures cover the whole session instead of
     /// resetting every turn. See [`crate::session_usage`].

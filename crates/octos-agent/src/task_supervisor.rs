@@ -3179,18 +3179,6 @@ impl TaskSupervisor {
                     Some(runtime_detail.to_string()),
                 );
             }
-            HarnessEventPayload::CostAttribution { .. } => {
-                // Cost attributions are purely observational — they are
-                // committed after a sub-agent dispatch succeeds and do
-                // not move the task's lifecycle. Attach the structured
-                // detail so operators see the spend breakdown on the
-                // same task row as the dispatch.
-                self.mark_runtime_state(
-                    task_id,
-                    TaskRuntimeState::ExecutingTool,
-                    Some(runtime_detail.to_string()),
-                );
-            }
             HarnessEventPayload::SubagentProgress { .. } => {
                 // Sub-agent progress is a periodic textual summary generated
                 // by `AgentSummaryGenerator`. It does not change the

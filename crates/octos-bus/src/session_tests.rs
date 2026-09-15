@@ -368,51 +368,6 @@ async fn test_update_summary() {
     assert_eq!(session.summary.as_deref(), Some("A test session"));
 }
 
-// ----------------------------------------------------------------------
-// Item 3 of OCTOS_M8_FIX_FIRST_CHECKLIST_2026-04-24:
-// worktree-missing must be a hard resume refusal. The session actor
-// calls `clear_messages_for_unsafe_resume()` on Err so the in-memory
-// transcript cannot be silently consumed by the first LLM call.
-// ----------------------------------------------------------------------
-
-#[test]
-fn session_actor_refuses_resume_when_worktree_missing() {
-    // Top-level session whose worktree was cleaned up. After the actor
-    // clears the in-memory transcript, the handle must look like a
-    // fresh session.
-    let tmp = TempDir::new().unwrap();
-    let key = SessionKey::new("api", "top-level-refusal");
-    let mut handle = SessionHandle::open(tmp.path(), &key);
-    handle
-        .session
-        .messages
-        .push(make_message(MessageRole::User, "do thing"));
-    handle.session.messages.push(make_message(
-        MessageRole::Assistant,
-        "I'll start working on it",
-    ));
-
-    // Step 1: sanitize sees a missing worktree and returns Err.
-    let gone = tmp.path().join("ghost-worktree");
-    let outcome = handle.sanitize_loaded_messages(None, Some(&gone));
-    assert!(matches!(
-        outcome,
-        Err(crate::SanitizeError::WorktreeMissing { .. })
-    ));
-
-    // Step 2: session_actor responds with a hard refusal.
-    assert!(
-        !handle.is_child_session(),
-        "test fixture is top-level (no parent_key)"
-    );
-    handle.clear_messages_for_unsafe_resume();
-    assert_eq!(
-        handle.session.messages.len(),
-        0,
-        "top-level worktree-missing refusal must drop the in-memory transcript"
-    );
-}
-
 // ---- M8.10 PR #1: thread_id persistence + legacy synthesis ---------------
 
 /// Build a Message with a specific role and `client_message_id` for tests.

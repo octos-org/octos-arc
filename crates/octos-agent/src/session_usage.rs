@@ -10,9 +10,8 @@
 //! each turn's spend vanished from the display when the next turn began.
 //!
 //! `SessionUsageHandle` is the cross-turn base. The embedder that owns the
-//! session (the gateway/serve session actor) creates one per session, seeds
-//! it from the persistent usage ledger so it survives agent rebuilds and
-//! process restarts, injects it via [`Agent::with_session_usage`], and folds
+//! session (the gateway/serve session actor) creates one per session, injects
+//! it via [`Agent::with_session_usage`], and folds
 //! each completed run back in — priced at the model that ran it. The agent
 //! only ever READS it (`snapshot`) when emitting cost updates: emission =
 //! base (completed runs, per-model priced) + live turn (per-response
@@ -51,7 +50,7 @@ impl SessionUsageHandle {
     }
 
     /// Replace the accumulated state wholesale — used once at session
-    /// start to hydrate from the persistent usage ledger.
+    /// start to hydrate from a previously persisted snapshot.
     pub fn seed(&self, snapshot: SessionUsageSnapshot) {
         *self.inner.write().unwrap_or_else(|e| e.into_inner()) = snapshot;
     }
