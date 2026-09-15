@@ -79,7 +79,7 @@ pub enum Command {
     Cache(CacheCommand),
     /// Inspect the saved startup config (`show` / `path`); read-only.
     Config(ConfigCommand),
-    /// Start the REST API server (requires --features api).
+    /// Start the stdio JSON-RPC server (requires --features api).
     #[cfg(feature = "api")]
     Serve(ServeCommand),
 
@@ -90,10 +90,8 @@ pub enum Command {
 /// Whether stdout is reserved for protocol or assistant output, so tracing
 /// must use stderr instead of interleaving log lines with that output.
 ///
-/// * `acp` speaks ACP JSON-RPC on stdout (one stray log line → a `-32700`
-///   parse error at strict clients like Zed);
-/// * `profile` emits payloads meant for `$(...)` capture / piping;
-/// * `chat` streams assistant text (or one `--json` result) on stdout.
+/// * `chat` streams assistant text (or one `--json` result) on stdout;
+/// * `arc` drives `chat` sub-processes and captures their stdout.
 ///
 /// Every other command keeps its historical stdout console routing untouched.
 pub fn reserve_stdout(command: &Command) -> bool {

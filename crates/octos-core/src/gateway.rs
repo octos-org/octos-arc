@@ -41,7 +41,7 @@ pub struct InboundMessage {
     pub media: Vec<String>,
     #[serde(default = "default_metadata")]
     pub metadata: serde_json::Value,
-    /// Platform message ID (e.g. Telegram msg.id) for threading replies.
+    /// Platform message ID for threading replies.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_id: Option<String>,
     /// Provenance gate for content-triggered automation (#1455).
@@ -80,10 +80,8 @@ impl InboundMessage {
     }
 }
 
-/// Metadata key for the Matrix sender user ID (appservice identity assertion).
-///
-/// Set by the outbound forwarder when a profile has a dedicated bot user;
-/// consumed by `MatrixChannel::send_with_id()` for appservice identity assertion.
+/// Metadata key carrying the sender identity on outbound messages
+/// (channel-adapter identity assertion).
 pub const METADATA_SENDER_USER_ID: &str = "sender_user_id";
 
 #[cfg(test)]

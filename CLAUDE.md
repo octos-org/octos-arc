@@ -33,7 +33,7 @@ cargo install --path crates/octos-cli --features "api"
 octos is a Rust-native agentic coding runtime. 7-crate workspace, layered:
 
 ```
-octos-cli  (CLI: clap commands, config loading, config watcher, api/serve, session actor)
+octos-cli  (CLI: clap commands, config loading, api/serve, session actor)
     |
 octos-agent  (Agent loop, tool system, sandbox, MCP, compaction, skills loader)
     |          \
@@ -77,7 +77,7 @@ Auth module (`octos-cli/src/auth/`): OAuth PKCE + device code for OpenAI, paste-
 
 ### Tool System (`octos-agent/src/tools/`)
 
-All tools implement `Tool` trait (`spec() -> ToolSpec`, `execute(&Value) -> ToolResult`). Registered in `ToolRegistry` (HashMap). Coding-core tools only: shell/exec_command/bash/write_stdin, read_file/write_file/edit_file/diff_edit/apply_patch, glob/grep/list_dir, check, view_image, tool_search/tool_suggest, update_plan, the spawn family (spawn/spawn_agent/send_input/resume_agent/wait_agent/close_agent + `delegate` alias wrapping spawn_agent+wait_agent), configure_tool. (cron, delegate_task, request_user_input were removed in round 5.) `git` (gix) and `ast` (tree-sitter) tools are feature-gated. There are NO web/browser/research/media tools. Tool argument size limit: 1MB (non-allocating `estimate_json_size` with escape accounting). File tools use `O_NOFOLLOW` (Unix) for symlink-safe I/O.
+All tools implement `Tool` trait (`spec() -> ToolSpec`, `execute(&Value) -> ToolResult`). Registered in `ToolRegistry` (HashMap). Coding-core tools only: shell/exec_command/bash/write_stdin, read_file/write_file/edit_file/diff_edit/apply_patch, glob/grep/list_dir, check, view_image, tool_search/tool_suggest, update_plan, the spawn family (spawn/spawn_agent/send_input/resume_agent/wait_agent/close_agent + `delegate` alias wrapping spawn_agent+wait_agent), configure_tool, plus serve-registered send_file/read_task_output/check_background_tasks. (cron, delegate_task, request_user_input were removed in round 5.) `git` (gix) and `ast` (tree-sitter) tools are feature-gated. There are NO web/browser/research/media tools. Tool argument size limit: 1MB (non-allocating `estimate_json_size` with escape accounting). File tools use `O_NOFOLLOW` (Unix) for symlink-safe I/O.
 
 **Tool Policies** (`tools/policy.rs`): Allow/deny lists with deny-wins semantics, wildcard matching (`exec*`), and named groups: `group:fs` (file tools), `group:runtime` (shell entry points), `group:search` (glob/grep/list_dir), `group:sessions` (spawn family + delegate), `group:memory` (the 4 memory tools), `group:admin` (configure_tool), `group:delegated` was removed with delegate_task in round 5. Provider-specific policies via `tools.byProvider` in config.
 
@@ -95,7 +95,7 @@ Token-aware message compaction: estimates tokens, strips tool arguments, summari
 
 ### LLM Providers (`octos-llm/src/`)
 
-`LlmProvider` trait with `chat()` method. Native providers: `AnthropicProvider`, `OpenAIProvider`, `GeminiProvider` (+ `OpenAIResponsesProvider` for Responses-capable models). 7 registry families since round 5: anthropic, openai, gemini, deepseek, zai, zai-coding, moonshot-coding — `model_catalog.json` is the SSOT for model names/defaults (trimmed to these families). Failover: `RetryProvider` (exponential backoff on 429/5xx) → `ProviderChain` (adaptive hedge racing, lane scoring, the local-server family, credential_pool, discovery, and cache-manifest onboarding were removed in round 5).
+`LlmProvider` trait with `chat()` method. Native providers: `AnthropicProvider`, `OpenAIProvider`, `GeminiProvider` (+ `OpenAIResponsesProvider` for Responses-capable models). 7 registry families since round 5: anthropic, openai, gemini, deepseek, zai, zai-coding, moonshot-coding — `model_catalog.json` is the SSOT for model names/defaults (trimmed to these families). Failover is two layers: `RetryProvider` (exponential backoff on 429/5xx) → `ProviderChain` (the FallbackProvider third layer, Vertex-AI auth for gemini, adaptive hedge racing, lane scoring, the local-server family, credential_pool, and discovery were removed in rounds 5/6).
 
 ### Skills (`octos-agent/src/skills.rs`)
 
@@ -117,11 +117,7 @@ JSONL persistence with LRU in-memory cache. Session forking (`/new` command) wit
 
 ### Hooks (`octos-agent/src/hooks.rs`)
 
-Lifecycle hook system for running shell commands at agent events. 4 events: `before_tool_call`, `after_tool_call`, `before_llm_call`, `after_llm_call`. Before-hooks can deny operations (exit code 1). Shell protocol: JSON payload on stdin, exit code semantics (0=allow, 1=deny, 2+=error). Circuit breaker auto-disables hooks after 3 consecutive failures (configurable via `HookExecutor::with_threshold()`). Commands use argv array (no shell interpretation). Environment sanitized via shared `BLOCKED_ENV_VARS`. Tilde expansion supports `~/` and `~username/`. Config: `hooks` array in config.json with `event`, `command`, `timeout_ms` (default 5000), `tool_filter`. Hook changes trigger restart via config_watcher.
-
-### Config Hot-Reload (`octos-cli/src/config_watcher.rs`)
-
-SHA-256 hash-based change detection. Hot-reload for system prompt; restart-required for provider/model/hooks changes.
+Lifecycle hook system for running shell commands at agent events. 4 events: `before_tool_call`, `after_tool_call`, `before_llm_call`, `after_llm_call`. Before-hooks can deny operations (exit code 1). Shell protocol: JSON payload on stdin, exit code semantics (0=allow, 1=deny, 2+=error). Circuit breaker auto-disables hooks after 3 consecutive failures (configurable via `HookExecutor::with_threshold()`). Commands use argv array (no shell interpretation). Environment sanitized via shared `BLOCKED_ENV_VARS`. Tilde expansion supports `~/` and `~username/`. Config: `hooks` array in config.json with `event`, `command`, `timeout_ms` (default 5000), `tool_filter`. Hook changes require a process restart.
 
 ## Key Types
 
