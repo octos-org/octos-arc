@@ -68,7 +68,6 @@ const DEFAULT_PROVIDER_UNAVAILABLE_LIMIT: u32 = 4;
 const DEFAULT_NETWORK_LIMIT: u32 = 4;
 const DEFAULT_TIMEOUT_LIMIT: u32 = 3;
 const DEFAULT_TOOL_EXECUTION_LIMIT: u32 = 5;
-const DEFAULT_DELEGATE_DEPTH_LIMIT: u32 = 1;
 const DEFAULT_INTERNAL_LIMIT: u32 = 1;
 /// Hook-deny (policy) errors escalate immediately — retrying a policy
 /// decision can never succeed (#2249).
@@ -99,7 +98,6 @@ pub struct LoopRetryLimits {
     pub network: u32,
     pub timeout: u32,
     pub tool_execution: u32,
-    pub delegate_depth_exceeded: u32,
     pub internal: u32,
     /// Added with the PolicyDeny variant (#2249). `serde(default)` keeps
     /// legacy retry-state sidecar JSON (pre-policy) deserializable.
@@ -121,7 +119,6 @@ impl Default for LoopRetryLimits {
             network: DEFAULT_NETWORK_LIMIT,
             timeout: DEFAULT_TIMEOUT_LIMIT,
             tool_execution: DEFAULT_TOOL_EXECUTION_LIMIT,
-            delegate_depth_exceeded: DEFAULT_DELEGATE_DEPTH_LIMIT,
             internal: DEFAULT_INTERNAL_LIMIT,
             policy: DEFAULT_POLICY_LIMIT,
             shell_spiral: DEFAULT_SHELL_SPIRAL_LIMIT,
@@ -209,7 +206,6 @@ pub struct LoopRetryCounters {
     pub network: u32,
     pub timeout: u32,
     pub tool_execution: u32,
-    pub delegate_depth_exceeded: u32,
     pub internal: u32,
     /// Added with the PolicyDeny variant (#2249). `serde(default)` keeps
     /// legacy retry-state sidecar JSON (pre-policy) deserializable; a
@@ -262,10 +258,6 @@ impl LoopRetryCounters {
         self.tool_execution = self
             .tool_execution
             .saturating_add(turn.tool_execution.saturating_sub(base.tool_execution));
-        self.delegate_depth_exceeded = self.delegate_depth_exceeded.saturating_add(
-            turn.delegate_depth_exceeded
-                .saturating_sub(base.delegate_depth_exceeded),
-        );
         self.internal = self
             .internal
             .saturating_add(turn.internal.saturating_sub(base.internal));
@@ -493,10 +485,6 @@ impl LoopRetryState {
             HarnessError::ToolExecution { .. } => (
                 &mut self.counters.tool_execution,
                 self.limits.tool_execution,
-            ),
-            HarnessError::DelegateDepthExceeded { .. } => (
-                &mut self.counters.delegate_depth_exceeded,
-                self.limits.delegate_depth_exceeded,
             ),
             HarnessError::Internal { .. } => (&mut self.counters.internal, self.limits.internal),
             HarnessError::PolicyDeny { .. } => (&mut self.counters.policy, self.limits.policy),

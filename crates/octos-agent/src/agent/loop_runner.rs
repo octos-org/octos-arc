@@ -753,10 +753,6 @@ impl Agent {
         history: &[Message],
         media: Vec<String>,
     ) -> Result<ConversationResponse> {
-        // Observe-only (#read-paging probe): report the running totals when
-        // this turn ends, on every path including errors. `None` when the
-        // probe is disarmed, which is the default.
-        let _probe_summary = crate::tools::read_paging_probe::TurnSummaryGuard::new();
         self.process_message_inner(
             user_content,
             history,

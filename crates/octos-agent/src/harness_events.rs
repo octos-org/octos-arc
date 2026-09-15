@@ -236,57 +236,6 @@ pub fn write_event_line_to_sink(raw_sink: impl AsRef<str>, line: &str) -> std::i
     append_line_atomic(&path, line)
 }
 
-pub fn emit_registered_progress_event(
-    raw_sink: impl AsRef<str>,
-    workflow: Option<&str>,
-    phase: &str,
-    message: &str,
-    progress: Option<f64>,
-) -> bool {
-    let raw_sink = raw_sink.as_ref();
-    let Some(context) = lookup_event_sink_context(raw_sink) else {
-        return false;
-    };
-    let event = HarnessEvent::progress(
-        context.session_id,
-        context.task_id,
-        workflow.map(ToOwned::to_owned),
-        phase.to_string(),
-        Some(message.to_string()),
-        progress,
-    );
-    write_event_to_sink(raw_sink, &event).is_ok()
-}
-
-/// Emit a `Progress` event carrying additive structured `extra` fields to a
-/// registered sink (Gap 4.2). Same lookup/write path as
-/// [`emit_registered_progress_event`] but threads the structured
-/// node/eta/preview map through [`HarnessEvent::progress_with_extra`].
-/// Returns `true` when the sink accepted the write.
-pub fn emit_registered_progress_event_with_extra(
-    raw_sink: impl AsRef<str>,
-    workflow: Option<&str>,
-    phase: &str,
-    message: &str,
-    progress: Option<f64>,
-    extra: HashMap<String, Value>,
-) -> bool {
-    let raw_sink = raw_sink.as_ref();
-    let Some(context) = lookup_event_sink_context(raw_sink) else {
-        return false;
-    };
-    let event = HarnessEvent::progress_with_extra(
-        context.session_id,
-        context.task_id,
-        workflow.map(ToOwned::to_owned),
-        phase.to_string(),
-        Some(message.to_string()),
-        progress,
-        extra,
-    );
-    write_event_to_sink(raw_sink, &event).is_ok()
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HarnessEvent {
     pub schema: String,
@@ -468,42 +417,6 @@ impl HarnessEvent {
                     message: message.map(Into::into),
                     progress,
                     extra: HashMap::new(),
-                },
-            },
-        }
-    }
-
-    /// Build a `Progress` event carrying additive structured fields in the
-    /// flattened `extra` map (Gap 4.2). The canonical `phase`/`message`/
-    /// `progress` keep working for consumers that ignore `extra`; producers
-    /// (e.g. the pipeline executor) attach structured per-node fields —
-    /// `node`, `node_index`, `node_total`, `eta_secs`, `preview` — so the
-    /// SPA/TUI can render real per-node progress instead of an opaque chip.
-    ///
-    /// `extra` is purely additive on the v1 wire (a HashMap flatten that
-    /// round-trips); no schema-version bump is needed and consumers that
-    /// don't read the keys are unaffected.
-    pub fn progress_with_extra(
-        session_id: impl Into<String>,
-        task_id: impl Into<String>,
-        workflow: Option<impl Into<String>>,
-        phase: impl Into<String>,
-        message: Option<impl Into<String>>,
-        progress: Option<f64>,
-        extra: HashMap<String, Value>,
-    ) -> Self {
-        Self {
-            schema: HARNESS_EVENT_SCHEMA_V1.to_string(),
-            payload: HarnessEventPayload::Progress {
-                data: HarnessProgressEvent {
-                    schema_version: HARNESS_PROGRESS_EVENT_SCHEMA_VERSION,
-                    session_id: session_id.into(),
-                    task_id: task_id.into(),
-                    workflow: workflow.map(Into::into),
-                    phase: phase.into(),
-                    message: message.map(Into::into),
-                    progress,
-                    extra,
                 },
             },
         }
@@ -1116,61 +1029,6 @@ mod tests {
         assert_eq!(detail["workflow_kind"], "bg_research");
         assert_eq!(detail["current_phase"], "fetching_sources");
         assert_eq!(detail["progress_message"], "Fetching source 3/12");
-    }
-
-    #[test]
-    fn progress_with_extra_surfaces_structured_fields_in_runtime_detail() {
-        // Gap 4.2 — producer-side structured per-node progress. The pipeline
-        // executor needs to attach node-index/eta/preview as structured fields
-        // (not buried in the message string) so existing consumers can render
-        // them. They ride the additive `extra` map; `runtime_detail_value`
-        // must surface them so the SPA/TUI see them via `BackgroundTask
-        // .runtime_detail`.
-        let mut extra = HashMap::new();
-        extra.insert("node".to_string(), Value::String("analyze".into()));
-        extra.insert("node_index".to_string(), Value::from(2));
-        extra.insert("node_total".to_string(), Value::from(3));
-        extra.insert("eta_secs".to_string(), Value::from(45));
-        extra.insert(
-            "preview".to_string(),
-            Value::String("partial output…".into()),
-        );
-
-        let event = HarnessEvent::progress_with_extra(
-            "session-1",
-            "task-1",
-            Some("research"),
-            "node_completed",
-            Some("analyze (2 of 3)"),
-            Some(0.66),
-            extra,
-        );
-
-        // Round-trips on the wire (extra is flattened, so it survives).
-        let json = serde_json::to_string(&event).unwrap();
-        let parsed = HarnessEvent::from_json_line(&json).unwrap();
-        match &parsed.payload {
-            HarnessEventPayload::Progress { data } => {
-                assert_eq!(data.extra["node"], Value::String("analyze".into()));
-                assert_eq!(data.extra["node_index"], Value::from(2));
-            }
-            other => panic!("expected Progress, got {other:?}"),
-        }
-
-        // Consumers read runtime_detail — the structured fields must be there.
-        let detail = parsed.runtime_detail_value(Some("research"), None);
-        assert_eq!(detail["progress_message"], "analyze (2 of 3)");
-        assert_eq!(detail["node"], "analyze");
-        assert_eq!(detail["node_index"], 2);
-        assert_eq!(detail["node_total"], 3);
-        assert_eq!(detail["eta_secs"], 45);
-        assert_eq!(detail["preview"], "partial output…");
-        // Backward-compat: the canonical progress keys must still be present so
-        // consumers that ignore `extra` keep working.
-        assert_eq!(detail["kind"], "progress");
-        assert_eq!(detail["workflow_kind"], "research");
-        let progress = detail["progress"].as_f64().unwrap();
-        assert!((progress - 0.66).abs() < 0.0001);
     }
 
     #[test]

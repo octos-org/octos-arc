@@ -17,10 +17,6 @@
 //!      `HarnessEvent::from_json_line`.
 //!   5. The schema version is registered as
 //!      [`abi_schema::HARNESS_ERROR_SCHEMA_VERSION`].
-//!
-//! M6.7 note: [`HarnessError::DelegateDepthExceeded`] is reserved for the
-//! delegation-depth enforcement task so that variant naming stays consistent
-//! across the M6 series.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -134,14 +130,6 @@ pub enum HarnessError {
     Timeout { message: String },
     /// A tool's `execute` returned `Err(...)` or panicked.
     ToolExecution { tool_name: String, message: String },
-    /// Reserved for M6.7 — the spawn/delegate chain exceeded its configured
-    /// depth limit. Included here so variant naming stays stable across M6.x
-    /// milestones.
-    DelegateDepthExceeded {
-        depth: u32,
-        limit: u32,
-        message: String,
-    },
     /// A lifecycle hook denied the operation (#2249). Expected policy
     /// behaviour, not a harness fault — classified apart from `Internal` so
     /// operator dashboards and alerting do not treat a policy decision as a
@@ -199,7 +187,6 @@ impl HarnessError {
             HarnessError::Network { .. } => "network",
             HarnessError::Timeout { .. } => "timeout",
             HarnessError::ToolExecution { .. } => "tool_execution",
-            HarnessError::DelegateDepthExceeded { .. } => "delegate_depth_exceeded",
             HarnessError::PolicyDeny { .. } => "policy",
             HarnessError::Internal { .. } => "internal",
         }
@@ -258,7 +245,6 @@ impl HarnessError {
             HarnessError::Authentication { .. }
             | HarnessError::InvalidRequest { .. }
             | HarnessError::ContentFiltered { .. }
-            | HarnessError::DelegateDepthExceeded { .. }
             | HarnessError::ToolExecution { .. } => RecoveryHint::FailFast,
 
             // Non-retryable, but NOT a fault: a lifecycle hook denied the
@@ -284,7 +270,6 @@ impl HarnessError {
             | HarnessError::Network { message }
             | HarnessError::Timeout { message }
             | HarnessError::ToolExecution { message, .. }
-            | HarnessError::DelegateDepthExceeded { message, .. }
             | HarnessError::PolicyDeny { message }
             | HarnessError::Internal { message } => message,
         }
@@ -475,10 +460,6 @@ impl HarnessError {
             HarnessError::ToolExecution { tool_name, .. } => {
                 out.insert("tool_name".into(), Value::from(tool_name.clone()));
             }
-            HarnessError::DelegateDepthExceeded { depth, limit, .. } => {
-                out.insert("depth".into(), Value::from(*depth));
-                out.insert("limit".into(), Value::from(*limit));
-            }
             HarnessError::Authentication { .. }
             | HarnessError::Quota { .. }
             | HarnessError::ContentFiltered { .. }
@@ -594,11 +575,6 @@ mod tests {
             },
             HarnessError::ToolExecution {
                 tool_name: "shell".into(),
-                message: "x".into(),
-            },
-            HarnessError::DelegateDepthExceeded {
-                depth: 3,
-                limit: 2,
                 message: "x".into(),
             },
             HarnessError::Internal {
