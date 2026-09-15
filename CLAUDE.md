@@ -30,7 +30,7 @@ cargo install --path crates/octos-cli --features "api"
 
 ## Architecture
 
-octos is a Rust-native agentic coding runtime. 8-crate workspace, layered:
+octos is a Rust-native agentic coding runtime. 7-crate workspace, layered:
 
 ```
 octos-cli  (CLI: clap commands, config loading, config watcher, api/serve, session actor)
@@ -43,7 +43,7 @@ octos-memory   octos-llm  (hybrid search + memory store | LLM providers)
 ```
 
 Alongside octos-agent:
-- **octos-bus**: session persistence, cron service, resume policy (the channel fleet was removed)
+- **octos-bus**: session persistence + file-handle resolution (cron service and resume policy were removed in round 5)
 - **octos-arc**: the `octos arc` competition workflow (drives `octos chat`)
 
 Skills are pure SKILL.md prompt injections (`octos-agent/src/skills.rs`: `SkillsLoader`
@@ -52,18 +52,17 @@ marked content). The binary plugin protocol (`octos-plugin` crate + plugin tools
 skill actions/multi-user onboarding) was retired in the round-4 slimming; `octos
 skills install` is file-copy + git only.
 
-Commands: chat, arc, cache (status/gc/gate), config (show/path), init, serve (`#[cfg(feature = "api")]`), clean, completions, skills (list/install/remove), auth (login/logout/status).
+Commands: chat, arc, cache (status/gc/gate), config (show/path), serve (`#[cfg(feature = "api")]`, stdio-only), skills (list/install/remove), auth (login/logout/status). (init/clean/completions retired in round 5.)
 
 Runtime modes:
 - `octos chat` — interactive coding session (the core loop)
 - `octos serve --stdio --solo` — NDJSON JSON-RPC transport over stdin/stdout; this is the
   ARC bench driver (one process per session, no HTTP)
-- `octos serve` (HTTP) — WS UI Protocol v1 at `/api/ui-protocol/ws` plus a small REST
-  surface (~12 endpoints: uploads `/api/upload`, file serving `/api/files*`, task control
-  `/api/tasks/{id}/cancel|restart-from-node`, `/metrics`, `/api/version`, `/health`,
-  session-ingress WS). Legacy chat SSE/REST, the dashboard, provider/usage diagnostics,
-  the binary plugin protocol, and the multi-user identity system were retired;
-  session/status reads moved to WS RPC methods.
+- `octos serve` — stdio-only since round 5. The HTTP/WS server, REST surface,
+  `/metrics`, session ingress, and the web-only protocol commands (M12 auxiliary,
+  monitor/loop, task-control REST, agent-panel notifications) were all removed;
+  the dispatcher itself is shared by both `octos serve --stdio --solo` and `octos chat`
+  (in-process duplex), so one code path serves both.
 - `octos arc` — competition workflow that drives `octos chat` end to end
 
 Auth module (`octos-cli/src/auth/`): OAuth PKCE + device code for OpenAI, paste-token for others. Stored in `~/.octos/auth.json`. `config.rs` checks auth store before env vars.
@@ -78,9 +77,9 @@ Auth module (`octos-cli/src/auth/`): OAuth PKCE + device code for OpenAI, paste-
 
 ### Tool System (`octos-agent/src/tools/`)
 
-All tools implement `Tool` trait (`spec() -> ToolSpec`, `execute(&Value) -> ToolResult`). Registered in `ToolRegistry` (HashMap). Coding-core tools only: shell/exec_command/bash/write_stdin, read_file/write_file/edit_file/diff_edit/apply_patch, glob/grep/list_dir, check, view_image, tool_search/tool_suggest, update_plan, ask_user_question, delegate_task, the spawn family (spawn/spawn_agent/send_input/resume_agent/wait_agent/close_agent/delegate), cron, configure_tool. `git` (gix) and `ast` (tree-sitter) tools are feature-gated. There are NO web/browser/research/media tools. Tool argument size limit: 1MB (non-allocating `estimate_json_size` with escape accounting). File tools use `O_NOFOLLOW` (Unix) for symlink-safe I/O.
+All tools implement `Tool` trait (`spec() -> ToolSpec`, `execute(&Value) -> ToolResult`). Registered in `ToolRegistry` (HashMap). Coding-core tools only: shell/exec_command/bash/write_stdin, read_file/write_file/edit_file/diff_edit/apply_patch, glob/grep/list_dir, check, view_image, tool_search/tool_suggest, update_plan, the spawn family (spawn/spawn_agent/send_input/resume_agent/wait_agent/close_agent + `delegate` alias wrapping spawn_agent+wait_agent), configure_tool. (cron, delegate_task, request_user_input were removed in round 5.) `git` (gix) and `ast` (tree-sitter) tools are feature-gated. There are NO web/browser/research/media tools. Tool argument size limit: 1MB (non-allocating `estimate_json_size` with escape accounting). File tools use `O_NOFOLLOW` (Unix) for symlink-safe I/O.
 
-**Tool Policies** (`tools/policy.rs`): Allow/deny lists with deny-wins semantics, wildcard matching (`exec*`), and named groups: `group:fs` (file tools), `group:runtime` (shell entry points), `group:search` (glob/grep/list_dir), `group:sessions` (spawn family + delegate), `group:memory` (the 4 memory tools), `group:admin` (configure_tool), `group:delegated` (deny list applied to delegated children — recursion/resource control, not a confinement boundary). Provider-specific policies via `tools.byProvider` in config.
+**Tool Policies** (`tools/policy.rs`): Allow/deny lists with deny-wins semantics, wildcard matching (`exec*`), and named groups: `group:fs` (file tools), `group:runtime` (shell entry points), `group:search` (glob/grep/list_dir), `group:sessions` (spawn family + delegate), `group:memory` (the 4 memory tools), `group:admin` (configure_tool), `group:delegated` was removed with delegate_task in round 5. Provider-specific policies via `tools.byProvider` in config.
 
 ### Sandbox (`octos-agent/src/sandbox/`)
 
@@ -96,7 +95,7 @@ Token-aware message compaction: estimates tokens, strips tool arguments, summari
 
 ### LLM Providers (`octos-llm/src/`)
 
-`LlmProvider` trait with `chat()` method. Four native providers: `AnthropicProvider`, `OpenAIProvider`, `GeminiProvider`, `OpenRouterProvider`. OpenAI-compatible families via `with_base_url()`, registered in `registry/` (one module per family + one line in `ALL`; `model_catalog.json` is the SSOT for model names/defaults and gates onboarding visibility). The unified `local` family (aliases: llamacpp/llama.cpp/llama-server/lmstudio/openai-compatible) covers any local OpenAI-compatible server — keyless, zero-config default `http://127.0.0.1:8080/v1`; `local_discovery.rs` holds candidate ports + `/v1/models` parsing (surfaced through the local context probe at serve/chat startup). 3-layer failover: `RetryProvider` (exponential backoff on 429/5xx) → `ProviderChain` → `AdaptiveRouter` (hedge racing, lane scoring, circuit breakers).
+`LlmProvider` trait with `chat()` method. Native providers: `AnthropicProvider`, `OpenAIProvider`, `GeminiProvider` (+ `OpenAIResponsesProvider` for Responses-capable models). 7 registry families since round 5: anthropic, openai, gemini, deepseek, zai, zai-coding, moonshot-coding — `model_catalog.json` is the SSOT for model names/defaults (trimmed to these families). Failover: `RetryProvider` (exponential backoff on 429/5xx) → `ProviderChain` (adaptive hedge racing, lane scoring, the local-server family, credential_pool, discovery, and cache-manifest onboarding were removed in round 5).
 
 ### Skills (`octos-agent/src/skills.rs`)
 
@@ -156,4 +155,4 @@ All code changes follow the RED -> GREEN -> REFACTOR cycle.
 - Symlink-safe file I/O via `O_NOFOLLOW` on Unix (eliminates TOCTOU races); symlink-check fallback on Windows
 - Cross-platform: shell via `cmd /C` on Windows, `sh -c` on Unix; process kill via `taskkill` on Windows, `kill` signals on Unix; `where` on Windows, `which` on Unix for binary discovery
 - `deny(unsafe_code)` workspace-wide lint
-- API server (`octos serve`) binds to 127.0.0.1 by default (`--host` to override)
+- `octos serve` is stdio-only (no HTTP listener); each stdio instance shares `state_home` for config-like state
