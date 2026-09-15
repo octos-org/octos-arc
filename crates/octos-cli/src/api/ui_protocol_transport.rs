@@ -46,8 +46,8 @@ use octos_core::ui_protocol::{
     UiContextNormalizationReport, UiContextState, UiCursor, UiFileMutationNotice, UiGitHistoryItem,
     UiGitPaneSnapshot, UiGitStatusItem, UiNotification, UiPaneSnapshot, UiPaneSnapshotLimitation,
     UiProtocolCapabilities, UiRpcResult, UiWorkspacePaneEntry, UiWorkspacePaneSnapshot,
-    UnsupportedCapabilityReport, UserQuestionRequestedEvent, UserQuestionRespondParams,
-    approval_cancelled_reasons, approval_kinds, hydrate_sections, thread_status,
+    UserQuestionRequestedEvent, UserQuestionRespondParams, approval_cancelled_reasons,
+    approval_kinds, hydrate_sections, thread_status,
 };
 
 use octos_core::{
@@ -179,11 +179,6 @@ const APPUI_METHOD_SESSION_COMPACT: &str = "session/compact";
 /// Set the per-session compaction mode (LLM vs heuristic) from the `/context`
 /// menu; overrides the `--llm-compaction` default for auto + manual compaction.
 const APPUI_METHOD_SESSION_COMPACT_MODE_SET: &str = "session/compact/mode/set";
-const APPUI_METHOD_AUTH_STATUS: &str = "auth/status";
-const APPUI_METHOD_AUTH_SEND_CODE: &str = "auth/send_code";
-const APPUI_METHOD_AUTH_VERIFY: &str = "auth/verify";
-const APPUI_METHOD_AUTH_ME: &str = "auth/me";
-const APPUI_METHOD_AUTH_LOGOUT: &str = "auth/logout";
 const APPUI_METHOD_PROFILE_LLM_CATALOG: &str = "profile/llm/catalog";
 const APPUI_METHOD_PROFILE_LLM_UPSERT: &str = "profile/llm/upsert";
 const APPUI_METHOD_PROFILE_LLM_DELETE: &str = "profile/llm/delete";
@@ -203,19 +198,6 @@ const APPUI_METHOD_PROFILE_SUB_PROVIDERS_REMOVE: &str = "profile/sub_providers/r
 const APPUI_METHOD_SNAPSHOT_LIST: &str = "snapshot/list";
 /// `snapshot/restore`: restore the session workspace to a snapshot (#1768).
 const APPUI_METHOD_SNAPSHOT_RESTORE: &str = "snapshot/restore";
-/// `turn/steer` — mid-turn prompt injection into the ACTIVE turn (codex
-/// parity: app-server `turn/steer` → `Session::steer_input`). Params
-/// `{session_id, expected_turn_id?, input}`; result `{turn_id, steered}`.
-/// With a live turn, the input is pushed into that turn's pending-input
-/// buffer under the active-turns registry lock and drained by the agent
-/// loop at the next iteration boundary as a plain `role: user` message
-/// (`steered: true` + the ACTIVE turn id). `expected_turn_id` mismatch →
-/// `invalid_params` (codex `ExpectedTurnMismatch`). With NO live turn, the
-/// call falls back to the ordinary `turn/start` admission path and returns
-/// `steered: false` + the NEW turn id (codex `user_input_or_turn_inner`'s
-/// `NoActiveTurn` fallback). Steering is NOT an interrupt — the in-flight
-/// round always completes; `turn/interrupt` stays a separate op.
-const APPUI_METHOD_TURN_STEER: &str = "turn/steer";
 const APPUI_METHOD_PROFILE_SKILLS_LIST: &str = "profile/skills/list";
 const APPUI_METHOD_PROFILE_SKILLS_REGISTRY_SEARCH: &str = "profile/skills/registry/search";
 const APPUI_METHOD_PROFILE_SKILLS_INSTALL: &str = "profile/skills/install";
@@ -272,11 +254,6 @@ const APPUI_EXTRA_METHODS: &[&str] = &[
     APPUI_METHOD_PROFILE_LLM_SELECT,
     APPUI_METHOD_MCP_STATUS_LIST,
     APPUI_METHOD_TOOL_STATUS_LIST,
-    APPUI_METHOD_AUTH_STATUS,
-    APPUI_METHOD_AUTH_SEND_CODE,
-    APPUI_METHOD_AUTH_VERIFY,
-    APPUI_METHOD_AUTH_ME,
-    APPUI_METHOD_AUTH_LOGOUT,
     APPUI_METHOD_PROFILE_LLM_CATALOG,
     APPUI_METHOD_PROFILE_LLM_UPSERT,
     APPUI_METHOD_PROFILE_LLM_DELETE,
@@ -286,7 +263,6 @@ const APPUI_EXTRA_METHODS: &[&str] = &[
     APPUI_METHOD_PROFILE_SUB_PROVIDERS_REMOVE,
     APPUI_METHOD_SNAPSHOT_LIST,
     APPUI_METHOD_SNAPSHOT_RESTORE,
-    APPUI_METHOD_TURN_STEER,
     APPUI_METHOD_PROFILE_SKILLS_LIST,
     APPUI_METHOD_PROFILE_SKILLS_REGISTRY_SEARCH,
     APPUI_METHOD_PROFILE_SKILLS_INSTALL,
@@ -296,8 +272,6 @@ const APPUI_EXTRA_METHODS: &[&str] = &[
     APPUI_METHOD_SESSION_COMPACT,
     APPUI_METHOD_SESSION_COMPACT_MODE_SET,
 ];
-const APPUI_STDIO_AUTH_BOUND_UNAVAILABLE_METHODS: &[&str] =
-    &[APPUI_METHOD_AUTH_ME, APPUI_METHOD_AUTH_LOGOUT];
 type SharedActiveTurns = Arc<tokio::sync::Mutex<HashMap<SessionKey, ActiveTurn>>>;
 #[derive(Clone)]
 struct ConnectionTurn {
@@ -1129,12 +1103,12 @@ struct ActiveTurn {
     /// Single-shot wake-up so the turn loop can return from `progress_rx.recv`
     /// promptly when an interrupt arrives. `None` once consumed.
     interrupt_tx: Arc<TokioMutex<Option<mpsc::Sender<()>>>>,
-    /// Per-turn pending-input buffer for `turn/steer` (codex
-    /// `TurnState.pending_input` parity). `Some` for regular standalone
-    /// turns — `turn/steer` pushes into it under the registry lock and the
-    /// agent loop drains at the next iteration boundary. `None` for
-    /// non-steerable turns (code review, M9 protocol fixtures), mirroring
-    /// codex's `ActiveTurnNotSteerable` for review/compact turn kinds.
+    /// Per-turn pending-input buffer (codex `TurnState.pending_input`
+    /// parity). `Some` for regular standalone turns — inputs pushed under
+    /// the registry lock are drained by the agent loop at the next
+    /// iteration boundary. `None` for non-steerable turns (code review,
+    /// M9 protocol fixtures). No in-tree producer currently pushes; the
+    /// buffer stays empty and the turn-end settle is a no-op.
     steer: Option<octos_agent::SharedSteerBuffer>,
     abort: AbortHandle,
 }
@@ -1510,9 +1484,6 @@ impl ConnectionUiFeatures {
                 APPUI_FEATURE_ONBOARDING_WORKSPACE_PROBE_V1,
             );
         }
-        if self.stdio_transport {
-            apply_stdio_auth_bound_capability_policy(&mut capabilities);
-        }
         capabilities
     }
 }
@@ -1560,22 +1531,6 @@ fn record_ui_protocol_delivery_metric(metric: Option<UiProtocolDeliveryMetric>) 
     match metric {
         UiProtocolDeliveryMetric::V2Envelope => {
             metrics::counter!("octos_ui_protocol_v2_envelope_delivered_total").increment(1);
-        }
-    }
-}
-
-fn apply_stdio_auth_bound_capability_policy(capabilities: &mut UiProtocolCapabilities) {
-    for method in APPUI_STDIO_AUTH_BOUND_UNAVAILABLE_METHODS {
-        capabilities
-            .supported_methods
-            .retain(|supported| supported != method);
-        if capabilities.unsupported_report(method).is_none() {
-            capabilities
-                .unsupported
-                .push(UnsupportedCapabilityReport::method(
-                    *method,
-                    "unauthenticated stdio transport has no AppUI auth identity",
-                ));
         }
     }
 }
@@ -6011,15 +5966,6 @@ fn profile_unresolved_error(profile_id: &str) -> RpcError {
     }))
 }
 
-fn auth_unavailable_error(method: &str) -> RpcError {
-    RpcError::permission_denied(format!("{method}: authenticated user identity required"))
-        .with_data(json!({
-            "kind": "auth_unavailable",
-            "recoverable": true,
-            "recovery": "authenticate before calling this method",
-        }))
-}
-
 fn profile_is_known(state: &AppState, profile_id: &str) -> bool {
     state
         .profile_store
@@ -9046,41 +8992,6 @@ async fn handle_raw_appui_rpc(
         APPUI_METHOD_PROFILE_SKILLS_REMOVE => {
             raw_profile_skills_remove(state, request, connection_profile_id).await
         }
-        APPUI_METHOD_AUTH_STATUS => Ok(json!({
-            "bootstrap_mode": false,
-            "email_login_enabled": true,
-            "admin_token_login_enabled": false,
-            "allow_self_registration": true,
-            "authenticated": true,
-            "email_otp": true,
-            "token_login": false,
-            "profile_id": connection_profile_id.unwrap_or(MAIN_PROFILE_ID),
-            "scoped_profile": {
-                "id": connection_profile_id.unwrap_or(MAIN_PROFILE_ID),
-                "name": connection_profile_id.unwrap_or(MAIN_PROFILE_ID),
-                "email_login_enabled": true
-            }
-        })),
-        APPUI_METHOD_AUTH_ME if features.stdio_transport => {
-            Err(auth_unavailable_error(APPUI_METHOD_AUTH_ME))
-        }
-        APPUI_METHOD_AUTH_ME => Ok(json!({
-            "email": "unknown account",
-            "profile_id": connection_profile_id.unwrap_or(MAIN_PROFILE_ID)
-        })),
-        APPUI_METHOD_AUTH_SEND_CODE => {
-            Ok(json!({ "ok": true, "message": "OTP code accepted in local AppUI mode" }))
-        }
-        APPUI_METHOD_AUTH_VERIFY => Ok(json!({
-            "ok": true,
-            "token": "local-appui-token",
-            "user": { "email": "unknown account" },
-            "message": "verified"
-        })),
-        APPUI_METHOD_AUTH_LOGOUT if features.stdio_transport => {
-            Err(auth_unavailable_error(APPUI_METHOD_AUTH_LOGOUT))
-        }
-        APPUI_METHOD_AUTH_LOGOUT => Ok(json!({ "ok": true })),
         APPUI_METHOD_MCP_STATUS_LIST | APPUI_METHOD_TOOL_STATUS_LIST => {
             let params: RawProfileParams = match parse_raw_params(request) {
                 Ok(params) => params,
@@ -9248,9 +9159,6 @@ fn route_rpc_command(
 /// feature won't dispatch), while adding it here without a matching arm panics
 /// the `unreachable!`.
 fn raw_method_is_dispatched(method: &str, _stdio_transport: bool) -> bool {
-    if method == APPUI_METHOD_TURN_STEER {
-        return true;
-    }
     if matches!(
         method,
         APPUI_METHOD_CONFIG_CAPABILITIES_LIST
@@ -9270,11 +9178,6 @@ fn raw_method_is_dispatched(method: &str, _stdio_transport: bool) -> bool {
             | APPUI_METHOD_PROFILE_SKILLS_REGISTRY_SEARCH
             | APPUI_METHOD_PROFILE_SKILLS_INSTALL
             | APPUI_METHOD_PROFILE_SKILLS_REMOVE
-            | APPUI_METHOD_AUTH_STATUS
-            | APPUI_METHOD_AUTH_ME
-            | APPUI_METHOD_AUTH_SEND_CODE
-            | APPUI_METHOD_AUTH_VERIFY
-            | APPUI_METHOD_AUTH_LOGOUT
             | APPUI_METHOD_MCP_STATUS_LIST
             | APPUI_METHOD_TOOL_STATUS_LIST
             | APPUI_METHOD_ONBOARDING_WORKSPACE_PROBE
@@ -14939,14 +14842,12 @@ async fn run_standalone_turn(
     routed_profile_id: Option<String>,
     turn_state: Arc<TokioMutex<TurnState>>,
     mut interrupt_rx: mpsc::Receiver<()>,
-    // `turn/steer` pending-input buffer for THIS turn (codex
-    // `TurnState.pending_input`). The RPC pushes into it under the
-    // active-turns registry lock; here it is threaded onto the per-turn
-    // agent, whose loop drains it at each iteration boundary. The drained
-    // callback registered below persists each steer row through the
-    // canonical session path (same commit-observer emit the `turn/start`
-    // prompt row gets) the moment it is folded into the conversation.
-    // `None` for non-steerable turns.
+    // Per-turn pending-input buffer (codex `TurnState.pending_input`
+    // parity). Threaded onto the per-turn agent, whose loop drains it at
+    // each iteration boundary. The drained callback registered below
+    // persists each steer row through the canonical session path (same
+    // commit-observer emit the `turn/start` prompt row gets) the moment it
+    // is folded into the conversation. `None` for non-steerable turns.
     steer_buffer: Option<octos_agent::SharedSteerBuffer>,
     // #1128 codex P1 re-review #2 — when this turn is draining a
     // self-paced or maintenance LoopFire continuation, pass the loop

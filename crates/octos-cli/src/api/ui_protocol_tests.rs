@@ -551,16 +551,6 @@ fn local_profile_params(
     }
 }
 
-fn sorted_supported_methods(
-    capabilities: &UiProtocolCapabilities,
-) -> std::collections::BTreeSet<&str> {
-    capabilities
-        .supported_methods
-        .iter()
-        .map(String::as_str)
-        .collect()
-}
-
 fn test_message(role: MessageRole, content: impl Into<String>) -> Message {
     Message {
         role,
@@ -1202,41 +1192,6 @@ fn capabilities_advertise_local_solo_profile_create_only_when_supported() {
     assert!(
         !tenant_capabilities.supports_feature(APPUI_FEATURE_PROFILE_LOCAL_CREATE_REQUESTED_ID_V1)
     );
-}
-
-#[test]
-fn stdio_capabilities_omit_auth_bound_methods_and_report_unsupported() {
-    let dir = tempfile::tempdir().unwrap();
-    for state in [AppState::empty_for_tests(), local_profile_state(dir.path())] {
-        let websocket = ConnectionUiFeatures::default().advertised_capabilities(&state);
-        let stdio = ConnectionUiFeatures::stdio_defaults().advertised_capabilities(&state);
-
-        let stdio_methods = sorted_supported_methods(&stdio);
-        let websocket_only: std::collections::BTreeSet<&str> = sorted_supported_methods(&websocket)
-            .difference(&stdio_methods)
-            .copied()
-            .collect();
-        let expected: std::collections::BTreeSet<&str> = APPUI_STDIO_AUTH_BOUND_UNAVAILABLE_METHODS
-            .iter()
-            .copied()
-            .collect();
-        assert_eq!(
-            websocket_only, expected,
-            "stdio should omit only auth-bound methods from supported_methods",
-        );
-
-        for method in APPUI_STDIO_AUTH_BOUND_UNAVAILABLE_METHODS {
-            assert!(
-                websocket.supports_method(method),
-                "websocket should support {method}"
-            );
-            assert!(!stdio.supports_method(method), "stdio should omit {method}");
-            assert!(
-                stdio.unsupported_report(method).is_some(),
-                "stdio should explicitly report {method} unsupported",
-            );
-        }
-    }
 }
 
 /// The persisted `default-profile` pointer drives a bare launch even when it is
