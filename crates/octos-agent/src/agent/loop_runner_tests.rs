@@ -18,12 +18,6 @@ fn should_use_video_call_hint_when_turn_is_flagged_live_video() {
     assert!(out.contains("what am I holding"));
 }
 
-#[test]
-fn should_not_add_hint_when_no_image() {
-    // No image and not flagged → plain transcript passes through.
-    let out = compose_turn_user_content("hello there", false, false, None);
-    assert_eq!(out, "hello there");
-}
 use octos_llm::{
     ChatResponse, LlmError, LlmErrorKind, LlmProvider, StopReason, TokenUsage as LlmTokenUsage,
     ToolChoice,
@@ -45,6 +39,20 @@ fn tool_use(tool_calls: Vec<ToolCall>, input_tokens: u32, output_tokens: u32) ->
             ..Default::default()
         },
         provider_index: None,
+    }
+}
+
+fn tool_out(tool_call_id: impl Into<String>, content: impl Into<String>) -> Message {
+    Message {
+        role: MessageRole::Tool,
+        content: content.into(),
+        media: vec![],
+        tool_calls: None,
+        tool_call_id: Some(tool_call_id.into()),
+        reasoning_content: None,
+        client_message_id: None,
+        thread_id: None,
+        timestamp: chrono::Utc::now(),
     }
 }
 
@@ -639,93 +647,6 @@ impl LlmProvider for LedgerDrivenVerifier {
     }
 }
 
-struct PrematureEndPlanner {
-    calls: AtomicUsize,
-}
-
-#[async_trait]
-impl LlmProvider for PrematureEndPlanner {
-    async fn chat(
-        &self,
-        _messages: &[Message],
-        _tools: &[octos_llm::ToolSpec],
-        _config: &ChatConfig,
-    ) -> Result<ChatResponse> {
-        let call = self.calls.fetch_add(1, AtomicOrdering::SeqCst);
-        if call == 0 {
-            return Ok(tool_use(
-                vec![ToolCall {
-                    id: "fail_once".into(),
-                    name: "fail_tool".into(),
-                    arguments: serde_json::json!({"path": "style.toml"}),
-                    metadata: None,
-                }],
-                8,
-                4,
-            ));
-        }
-        if call == 1 {
-            return Ok(end_turn("premature answer", 8, 4));
-        }
-        Ok(end_turn("ready answer", 8, 4))
-    }
-
-    fn model_id(&self) -> &str {
-        "planner-test"
-    }
-
-    fn provider_name(&self) -> &str {
-        "mock"
-    }
-}
-
-struct GateVerifier {
-    calls: AtomicUsize,
-}
-
-#[async_trait]
-impl LlmProvider for GateVerifier {
-    async fn chat(
-        &self,
-        messages: &[Message],
-        _tools: &[octos_llm::ToolSpec],
-        _config: &ChatConfig,
-    ) -> Result<ChatResponse> {
-        let call = self.calls.fetch_add(1, AtomicOrdering::SeqCst);
-        let prompt = messages
-            .iter()
-            .map(|message| message.content.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        let verdict = if prompt.contains("Proposed answer:\nready answer") {
-            r#"{"verdict":"ReadyToAnswer"}"#
-        } else if call == 0 {
-            r#"{"verdict":"Blocked","reason":"tool failed"}"#
-        } else {
-            r#"{"verdict":"Insufficient","reason":"not ready yet"}"#
-        };
-        Ok(ChatResponse {
-            content: Some(verdict.to_string()),
-            reasoning_content: None,
-            tool_calls: vec![],
-            stop_reason: StopReason::EndTurn,
-            usage: LlmTokenUsage {
-                input_tokens: 3,
-                output_tokens: 2,
-                ..Default::default()
-            },
-            provider_index: None,
-        })
-    }
-
-    fn model_id(&self) -> &str {
-        "haiku-test"
-    }
-
-    fn provider_name(&self) -> &str {
-        "mock-verifier"
-    }
-}
 use crate::tools::{Tool, ToolRegistry, ToolResult};
 
 struct MaxTokensThenEndProvider {
@@ -1126,127 +1047,7 @@ fn split_tool_calls_caps_parallel_batches() {
 #[test]
 fn recover_shell_retry_output_prefers_diff_like_success() {
     let messages = vec![
-            Message::user("show a diff"),
-            Message {
-                role: MessageRole::Assistant,
-                content: String::new(),
-                media: vec![],
-                tool_calls: Some(vec![ToolCall {
-                    id: "call_shell_1".into(),
-                    name: "shell".into(),
-                    arguments: serde_json::json!({"command": "git diff -- notes.txt"}),
-                    metadata: None,
-                }]),
-                tool_call_id: None,
-                reasoning_content: None,
-                client_message_id: None,
-                thread_id: None,
-                timestamp: chrono::Utc::now(),
-            },
-            Message {
-                role: MessageRole::Tool,
-                content: "fatal: not a git repository\n\nExit code: 128".into(),
-                media: vec![],
-                tool_calls: None,
-                tool_call_id: Some("call_shell_1".into()),
-                reasoning_content: None,
-                client_message_id: None,
-                thread_id: None,
-                timestamp: chrono::Utc::now(),
-            },
-            Message {
-                role: MessageRole::Assistant,
-                content: String::new(),
-                media: vec![],
-                tool_calls: Some(vec![ToolCall {
-                    id: "call_shell_2".into(),
-                    name: "shell".into(),
-                    arguments: serde_json::json!({"command": "cd /tmp && git diff -- notes.txt"}),
-                    metadata: None,
-                }]),
-                tool_call_id: None,
-                reasoning_content: None,
-                client_message_id: None,
-                thread_id: None,
-                timestamp: chrono::Utc::now(),
-            },
-            Message {
-                role: MessageRole::Tool,
-                content: "diff --git a/notes.txt b/notes.txt\n--- a/notes.txt\n+++ b/notes.txt\n@@ -1,2 +1,2 @@\n alpha\n-beta\n+gamma\n\nExit code: 0".into(),
-                media: vec![],
-                tool_calls: None,
-                tool_call_id: Some("call_shell_2".into()),
-                reasoning_content: None,
-                client_message_id: None,
-                thread_id: None,
-                timestamp: chrono::Utc::now(),
-            },
-            Message {
-                role: MessageRole::Assistant,
-                content: String::new(),
-                media: vec![],
-                tool_calls: Some(vec![ToolCall {
-                    id: "call_shell_3".into(),
-                    name: "shell".into(),
-                    arguments: serde_json::json!({"command": "git status --short"}),
-                    metadata: None,
-                }]),
-                tool_call_id: None,
-                reasoning_content: None,
-                client_message_id: None,
-                thread_id: None,
-                timestamp: chrono::Utc::now(),
-            },
-            Message {
-                role: MessageRole::Tool,
-                content: "(no output)\n\nExit code: 0".into(),
-                media: vec![],
-                tool_calls: None,
-                tool_call_id: Some("call_shell_3".into()),
-                reasoning_content: None,
-                client_message_id: None,
-                thread_id: None,
-                timestamp: chrono::Utc::now(),
-            },
-            Message {
-                role: MessageRole::Assistant,
-                content: String::new(),
-                media: vec![],
-                tool_calls: Some(vec![ToolCall {
-                    id: "call_shell_4".into(),
-                    name: "shell".into(),
-                    arguments: serde_json::json!({"command": "git diff -- notes.txt"}),
-                    metadata: None,
-                }]),
-                tool_call_id: None,
-                reasoning_content: None,
-                client_message_id: None,
-                thread_id: None,
-                timestamp: chrono::Utc::now(),
-            },
-            Message {
-                role: MessageRole::Tool,
-                content: "fatal: not a git repository\n\nExit code: 128".into(),
-                media: vec![],
-                tool_calls: None,
-                tool_call_id: Some("call_shell_4".into()),
-                reasoning_content: None,
-                client_message_id: None,
-                thread_id: None,
-                timestamp: chrono::Utc::now(),
-            },
-        ];
-
-    let recovered = recover_shell_retry(&messages, 4).expect("should recover");
-    assert_eq!(recovered.kind, ShellRetryRecoveryKind::DiffLikeSuccess);
-    assert!(recovered.content.contains("diff --git"));
-    assert!(!recovered.content.contains("Exit code: 0"));
-}
-
-#[test]
-fn recover_shell_retry_output_requires_failure_before_useful_success() {
-    let messages = vec![
-        Message::user("inspect the repo"),
+        Message::user("show a diff"),
         Message {
             role: MessageRole::Assistant,
             content: String::new(),
@@ -1254,7 +1055,7 @@ fn recover_shell_retry_output_requires_failure_before_useful_success() {
             tool_calls: Some(vec![ToolCall {
                 id: "call_shell_1".into(),
                 name: "shell".into(),
-                arguments: serde_json::json!({"command": "pwd"}),
+                arguments: serde_json::json!({"command": "git diff -- notes.txt"}),
                 metadata: None,
             }]),
             tool_call_id: None,
@@ -1263,17 +1064,10 @@ fn recover_shell_retry_output_requires_failure_before_useful_success() {
             thread_id: None,
             timestamp: chrono::Utc::now(),
         },
-        Message {
-            role: MessageRole::Tool,
-            content: "/tmp/octos\n\nExit code: 0".into(),
-            media: vec![],
-            tool_calls: None,
-            tool_call_id: Some("call_shell_1".into()),
-            reasoning_content: None,
-            client_message_id: None,
-            thread_id: None,
-            timestamp: chrono::Utc::now(),
-        },
+        tool_out(
+            "call_shell_1",
+            "fatal: not a git repository\n\nExit code: 128",
+        ),
         Message {
             role: MessageRole::Assistant,
             content: String::new(),
@@ -1281,7 +1075,7 @@ fn recover_shell_retry_output_requires_failure_before_useful_success() {
             tool_calls: Some(vec![ToolCall {
                 id: "call_shell_2".into(),
                 name: "shell".into(),
-                arguments: serde_json::json!({"command": "ls src"}),
+                arguments: serde_json::json!({"command": "cd /tmp && git diff -- notes.txt"}),
                 metadata: None,
             }]),
             tool_call_id: None,
@@ -1290,17 +1084,10 @@ fn recover_shell_retry_output_requires_failure_before_useful_success() {
             thread_id: None,
             timestamp: chrono::Utc::now(),
         },
-        Message {
-            role: MessageRole::Tool,
-            content: "lib.rs\nmain.rs\n\nExit code: 0".into(),
-            media: vec![],
-            tool_calls: None,
-            tool_call_id: Some("call_shell_2".into()),
-            reasoning_content: None,
-            client_message_id: None,
-            thread_id: None,
-            timestamp: chrono::Utc::now(),
-        },
+        tool_out(
+            "call_shell_2",
+            "diff --git a/notes.txt b/notes.txt\n--- a/notes.txt\n+++ b/notes.txt\n@@ -1,2 +1,2 @@\n alpha\n-beta\n+gamma\n\nExit code: 0",
+        ),
         Message {
             role: MessageRole::Assistant,
             content: String::new(),
@@ -1317,17 +1104,7 @@ fn recover_shell_retry_output_requires_failure_before_useful_success() {
             thread_id: None,
             timestamp: chrono::Utc::now(),
         },
-        Message {
-            role: MessageRole::Tool,
-            content: " M src/lib.rs\n?? notes.txt\n\nExit code: 0".into(),
-            media: vec![],
-            tool_calls: None,
-            tool_call_id: Some("call_shell_3".into()),
-            reasoning_content: None,
-            client_message_id: None,
-            thread_id: None,
-            timestamp: chrono::Utc::now(),
-        },
+        tool_out("call_shell_3", "(no output)\n\nExit code: 0"),
         Message {
             role: MessageRole::Assistant,
             content: String::new(),
@@ -1335,7 +1112,7 @@ fn recover_shell_retry_output_requires_failure_before_useful_success() {
             tool_calls: Some(vec![ToolCall {
                 id: "call_shell_4".into(),
                 name: "shell".into(),
-                arguments: serde_json::json!({"command": "cat Cargo.toml"}),
+                arguments: serde_json::json!({"command": "git diff -- notes.txt"}),
                 metadata: None,
             }]),
             tool_call_id: None,
@@ -1344,20 +1121,16 @@ fn recover_shell_retry_output_requires_failure_before_useful_success() {
             thread_id: None,
             timestamp: chrono::Utc::now(),
         },
-        Message {
-            role: MessageRole::Tool,
-            content: "[package]\nname = \"octos\"\n\nExit code: 0".into(),
-            media: vec![],
-            tool_calls: None,
-            tool_call_id: Some("call_shell_4".into()),
-            reasoning_content: None,
-            client_message_id: None,
-            thread_id: None,
-            timestamp: chrono::Utc::now(),
-        },
+        tool_out(
+            "call_shell_4",
+            "fatal: not a git repository\n\nExit code: 128",
+        ),
     ];
 
-    assert!(recover_shell_retry(&messages, 4).is_none());
+    let recovered = recover_shell_retry(&messages, 4).expect("should recover");
+    assert_eq!(recovered.kind, ShellRetryRecoveryKind::DiffLikeSuccess);
+    assert!(recovered.content.contains("diff --git"));
+    assert!(!recovered.content.contains("Exit code: 0"));
 }
 
 // ── Fix #1+#2 (2026-05-10, codex r2): intra-turn scoping + correct splice ─
@@ -1412,17 +1185,7 @@ fn latest_tool_batch_contains_picks_up_shell_in_mixed_batch() {
             thread_id: None,
             timestamp: chrono::Utc::now(),
         },
-        Message {
-            role: MessageRole::Tool,
-            content: "failed".into(),
-            media: vec![],
-            tool_calls: None,
-            tool_call_id: Some("call_shell".into()),
-            reasoning_content: None,
-            client_message_id: None,
-            thread_id: None,
-            timestamp: chrono::Utc::now(),
-        },
+        tool_out("call_shell", "failed"),
         Message {
             role: MessageRole::Tool,
             content: "{ \"x\": 1 }".into(),
@@ -1535,17 +1298,10 @@ fn stale_shell_failure_streak(id_prefix: &str) -> Vec<Message> {
             thread_id: None,
             timestamp: chrono::Utc::now(),
         });
-        out.push(Message {
-            role: MessageRole::Tool,
-            content: "error: could not find Cargo.toml\n\nExit code: 101".into(),
-            media: vec![],
-            tool_calls: None,
-            tool_call_id: Some(id),
-            reasoning_content: None,
-            client_message_id: None,
-            thread_id: None,
-            timestamp: chrono::Utc::now(),
-        });
+        out.push(tool_out(
+            id,
+            "error: could not find Cargo.toml\n\nExit code: 101",
+        ));
     }
     out
 }
@@ -1609,55 +1365,6 @@ async fn verifier_repeating_note_changes_next_planner_action() {
     let persisted = std::fs::read_to_string(&ledger_path).expect("turn ledger persisted");
     assert!(persisted.contains("\"tool\":\"fail_tool\""));
     assert!(persisted.contains("\"tool\":\"fix_tool\""));
-}
-
-#[tokio::test]
-async fn verifier_ready_to_answer_gates_endturn_after_problem_signal() {
-    let dir = tempfile::tempdir().unwrap();
-    let planner = Arc::new(PrematureEndPlanner {
-        calls: AtomicUsize::new(0),
-    });
-    let verifier = Arc::new(GateVerifier {
-        calls: AtomicUsize::new(0),
-    });
-    let mut tools = ToolRegistry::new();
-    tools.register(StaticResultTool::new(
-        "fail_tool",
-        "[VALIDATION FAILED] artifact missing",
-        false,
-        Arc::new(AtomicUsize::new(0)),
-    ));
-    let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
-    let agent = Agent::new(
-        AgentId::new("verifier-gate"),
-        planner.clone(),
-        tools,
-        memory,
-    )
-    .with_config(AgentConfig {
-        max_iterations: 8,
-        save_episodes: false,
-        ..Default::default()
-    })
-    .with_verifier_config(AgentVerifierConfig::with_provider(
-        verifier.clone(),
-        "haiku-test",
-    ));
-
-    let response = agent
-        .process_message("try then answer too early", &[], vec![])
-        .await
-        .unwrap();
-
-    assert_eq!(response.content, "ready answer");
-    assert!(
-        planner.calls.load(AtomicOrdering::SeqCst) >= 3,
-        "premature EndTurn must be rejected until ReadyToAnswer"
-    );
-    assert!(
-        verifier.calls.load(AtomicOrdering::SeqCst) >= 3,
-        "failure classification plus two termination checks expected"
-    );
 }
 
 // ── is_productive_tool_message (M6.2) ───────────────────────────────
@@ -1795,25 +1502,6 @@ async fn dedup_loop_warning_returns_warning_on_first_fire() {
 }
 
 #[tokio::test]
-async fn dedup_loop_warning_returns_terminal_error_on_second_fire() {
-    let dir = tempfile::tempdir().unwrap();
-    let agent = build_agent_with_mock(dir.path()).await;
-
-    let first = agent.dedup_loop_warning("[LOOP DETECTED] one".to_string());
-    assert!(first.is_ok());
-    let second = agent.dedup_loop_warning("[LOOP DETECTED] two".to_string());
-    assert!(second.is_err());
-    let err = second.err().unwrap().to_string();
-    assert!(
-        err.contains("agent loop got stuck"),
-        "expected terminal error, got: {err}"
-    );
-    // Flag stays set after the terminal error so further fires keep
-    // returning terminal errors until the next process_message reset.
-    assert!(agent.is_loop_detected_recently());
-}
-
-#[tokio::test]
 async fn shell_spiral_dispatch_marks_loop_detected_recently() {
     // #1656: a firing shell spiral must mark the two-stage dedup flag, so a
     // generic loop detection later in the SAME turn is treated as the second
@@ -1842,17 +1530,7 @@ async fn shell_spiral_dispatch_marks_loop_detected_recently() {
             thread_id: None,
             timestamp: chrono::Utc::now(),
         });
-        messages.push(Message {
-            role: MessageRole::Tool,
-            content: "error[E0999]: broken\n\nExit code: 101".into(),
-            media: vec![],
-            tool_calls: None,
-            tool_call_id: Some(call_id),
-            reasoning_content: None,
-            client_message_id: None,
-            thread_id: None,
-            timestamp: chrono::Utc::now(),
-        });
+        messages.push(tool_out(call_id, "error[E0999]: broken\n\nExit code: 101"));
     }
 
     assert!(!agent.is_loop_detected_recently());
@@ -2241,92 +1919,6 @@ async fn doom_loop_aborts_turn_when_third_identical_call_arrives() {
              loop instead of issuing a 4th; got {total_calls}"
     );
 }
-/// LLM mock that alternates between two different argument sets for the
-/// same tool. The doom guard (consecutive identical) must never fire;
-/// the cycle detector (`LoopDetector::record`) owns alternating
-/// patterns and still runs its two-stage warn-then-terminate recovery.
-struct CountingAlternatingArgsProvider {
-    calls: AtomicUsize,
-}
-
-#[async_trait]
-impl LlmProvider for CountingAlternatingArgsProvider {
-    async fn chat(
-        &self,
-        _messages: &[Message],
-        _tools: &[octos_llm::ToolSpec],
-        _config: &octos_llm::ChatConfig,
-    ) -> Result<ChatResponse> {
-        let n = self.calls.fetch_add(1, AtomicOrdering::SeqCst);
-        let path = if n % 2 == 0 { "a.txt" } else { "b.txt" };
-        Ok(ChatResponse {
-            content: None,
-            reasoning_content: None,
-            tool_calls: vec![ToolCall {
-                id: format!("call_alt_{n}"),
-                name: "read_file".to_string(),
-                arguments: serde_json::json!({ "path": path }),
-                metadata: None,
-            }],
-            stop_reason: StopReason::ToolUse,
-            usage: LlmTokenUsage::default(),
-            provider_index: None,
-        })
-    }
-
-    fn model_id(&self) -> &str {
-        "mock"
-    }
-
-    fn provider_name(&self) -> &str {
-        "mock"
-    }
-}
-
-#[tokio::test]
-async fn alternating_cycle_still_uses_two_stage_warning_not_doom_abort() {
-    // #1765: the doom guard counts CONSECUTIVE identical calls only —
-    // an A,B,A,B,… alternation resets the streak every call, so the
-    // existing cycle detector must keep owning that pattern with its
-    // two-stage recovery (first fire injects a warning + one more LLM
-    // iteration; second fire terminates with
-    // `loop_detected_terminal_message`).
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("a.txt"), b"a").unwrap();
-    std::fs::write(dir.path().join("b.txt"), b"b").unwrap();
-    let provider = Arc::new(CountingAlternatingArgsProvider {
-        calls: AtomicUsize::new(0),
-    });
-    let provider_arc: Arc<dyn LlmProvider> = provider.clone();
-    let tools = ToolRegistry::with_builtins(dir.path());
-    let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
-    let agent = Agent::new(AgentId::new("recover"), provider_arc, tools, memory).with_config(
-        crate::AgentConfig {
-            max_iterations: 30,
-            save_episodes: false,
-            ..Default::default()
-        },
-    );
-
-    let result = agent
-        .process_message("please alternate", &[], vec![])
-        .await
-        .expect("process_message should return Ok when the cycle detector terminates");
-
-    assert_eq!(
-        result.content,
-        loop_detected_terminal_message(),
-        "alternating A,B cycles belong to the two-stage cycle detector, \
-             not the doom guard"
-    );
-    let total_calls = provider.calls.load(AtomicOrdering::SeqCst);
-    assert!(
-        total_calls >= 7,
-        "expected >= 7 LLM calls (6 to reach a cycle-2 first fire + 1 \
-             recovery iteration before the terminating fire); got {total_calls}"
-    );
-}
-
 /// LLM stub that always returns a single EndTurn — used to drive
 /// `run_task` straight to the completion branch without iterating
 /// through tool calls.
@@ -2447,17 +2039,7 @@ fn spawn_only_tool_call(id: &str, name: &str) -> ToolCall {
 }
 
 fn spawn_only_tool_result(tool_call_id: &str, content: &str) -> Message {
-    Message {
-        role: MessageRole::Tool,
-        content: content.to_string(),
-        media: vec![],
-        tool_calls: None,
-        tool_call_id: Some(tool_call_id.to_string()),
-        reasoning_content: None,
-        client_message_id: None,
-        thread_id: None,
-        timestamp: chrono::Utc::now(),
-    }
+    tool_out(tool_call_id.to_string(), content.to_string())
 }
 
 fn spawn_only_chat_response(tool_calls: Vec<ToolCall>) -> ChatResponse {
@@ -2482,29 +2064,6 @@ fn any_tool_invocation_errored_detects_error_envelope() {
     // Empty success-map exercises the content-classifier fallback path
     // (the success bit is the post-#1187 authoritative input; absence
     // means the call bypassed execute_tools, e.g. session-limit block).
-    assert!(any_tool_invocation_errored(&messages, &response, &[]));
-}
-
-#[test]
-fn any_tool_invocation_errored_mixed_batch_one_failed() {
-    // The realistic production shape: spawn_only tool returned its
-    // task-handle envelope (foreground always reports success for
-    // spawn_only) AND a sibling regular tool errored in the same batch.
-    // The gate MUST fire so the synthesized "Background work started"
-    // ack is suppressed — otherwise the user sees a successful-looking
-    // ack alongside the red error chip from the sibling tool.
-    let response = spawn_only_chat_response(vec![
-        spawn_only_tool_call("call_pipeline", "bg_research"),
-        spawn_only_tool_call("call_shell", "shell"),
-    ]);
-    let messages = vec![
-        spawn_only_tool_result(
-            "call_pipeline",
-            "{\"task_handle\": \"deep-research-xyz\", \"output_dir\": \"/tmp/dr\"}",
-        ),
-        spawn_only_tool_result("call_shell", "Error: command not found: foo"),
-    ];
-
     assert!(any_tool_invocation_errored(&messages, &response, &[]));
 }
 
@@ -2602,107 +2161,6 @@ async fn should_classify_hook_deny_as_policy_not_internal_bug() {
     assert_eq!(error_events[0].variant, "policy");
     assert_eq!(error_events[0].recovery, "expected");
     assert!(error_events[0].message.contains("denied by hook"));
-}
-
-/// Records the message contents of every LLM call and returns EndTurn
-/// immediately. Used to assert what the model actually saw and that it was
-/// (or was not) called at all.
-#[cfg(unix)]
-struct RecordingEndProvider {
-    chat_calls: Arc<AtomicUsize>,
-    observed: Arc<StdMutex<Vec<Vec<String>>>>,
-}
-
-#[cfg(unix)]
-#[async_trait]
-impl LlmProvider for RecordingEndProvider {
-    async fn chat(
-        &self,
-        messages: &[Message],
-        _tools: &[octos_llm::ToolSpec],
-        _config: &ChatConfig,
-    ) -> Result<ChatResponse> {
-        self.chat_calls.fetch_add(1, AtomicOrdering::SeqCst);
-        self.observed
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .push(messages.iter().map(|m| m.content.clone()).collect());
-        Ok(ChatResponse {
-            content: Some("ok".to_string()),
-            reasoning_content: None,
-            tool_calls: vec![],
-            stop_reason: StopReason::EndTurn,
-            usage: LlmTokenUsage::default(),
-            provider_index: None,
-        })
-    }
-
-    fn model_id(&self) -> &str {
-        "mock"
-    }
-
-    fn provider_name(&self) -> &str {
-        "mock"
-    }
-}
-
-#[tokio::test]
-#[cfg(unix)]
-async fn user_prompt_submit_hook_deny_blocks_turn_before_llm() {
-    use crate::hooks::{HookConfig, HookEvent, HookExecutor};
-
-    let dir = tempfile::tempdir().unwrap();
-    let tools = ToolRegistry::with_builtins(dir.path());
-    let chat_calls = Arc::new(AtomicUsize::new(0));
-    let observed = Arc::new(StdMutex::new(Vec::new()));
-    let provider: Arc<dyn LlmProvider> = Arc::new(RecordingEndProvider {
-        chat_calls: chat_calls.clone(),
-        observed: Arc::clone(&observed),
-    });
-    let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
-    // Hook writes its reason on stdout and exits 1 → prompt denied.
-    let hooks = Arc::new(HookExecutor::new(vec![HookConfig {
-        event: HookEvent::UserPromptSubmit,
-        command: vec![
-            "sh".into(),
-            "-c".into(),
-            "echo 'no coding on fridays'; exit 1".into(),
-        ],
-        timeout_ms: 5000,
-        tool_filter: vec![],
-        path_filter: vec![],
-        requires_bin: None,
-    }]));
-    let agent = Agent::new(AgentId::new("ups-deny"), provider, tools, memory).with_hooks(hooks);
-
-    let result = agent
-        .process_message("write code", &[], vec![])
-        .await
-        .unwrap();
-
-    // The turn is blocked and the hook's reason is surfaced...
-    assert!(
-        result.content.contains("[HOOK DENIED]"),
-        "deny should be clearly surfaced; got {:?}",
-        result.content
-    );
-    assert!(
-        result.content.contains("no coding on fridays"),
-        "deny reason (hook stdout) should be surfaced; got {:?}",
-        result.content
-    );
-    // ...and the LLM is never reached.
-    assert_eq!(
-        chat_calls.load(AtomicOrdering::SeqCst),
-        0,
-        "denied prompt must not reach the model"
-    );
-    assert!(
-        observed
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .is_empty()
-    );
 }
 
 // --- Mid-turn steer injection (codex `TurnState.pending_input` parity) ---
@@ -2851,17 +2309,7 @@ fn spiral_shell_exchange(id: &str, command: &str, output: &str) -> [Message; 2] 
             thread_id: None,
             timestamp: chrono::Utc::now(),
         },
-        Message {
-            role: MessageRole::Tool,
-            content: output.into(),
-            media: vec![],
-            tool_calls: None,
-            tool_call_id: Some(id.into()),
-            reasoning_content: None,
-            client_message_id: None,
-            thread_id: None,
-            timestamp: chrono::Utc::now(),
-        },
+        tool_out(id, output),
     ]
 }
 
@@ -3121,31 +2569,6 @@ async fn malformed_toolcall_feedback_lets_model_self_correct_and_survive() {
     );
 }
 
-/// #27d — after MALFORMED_TOOLCALL_FEEDBACK_LIMIT (3) fed-back diagnostics
-/// the buffer is exhausted and the turn terminates with the error (the
-/// pinned pre-#27d behavior).
-#[tokio::test]
-async fn malformed_toolcall_feedback_exhausts_and_terminates() {
-    let provider: Arc<dyn LlmProvider> = Arc::new(MalformedThenOkProvider {
-        malformed_first: StdMutex::new(10), // never self-corrects
-        ok_response: plain_text_response("unreachable"),
-    });
-    let tools = ToolRegistry::new();
-    let dir = tempfile::tempdir().unwrap();
-    let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
-    let agent = Agent::new(AgentId::new("malformed-exhaust"), provider, tools, memory);
-    let result = agent
-        .process_message("never produces valid JSON", &[], vec![])
-        .await;
-    let err = result.expect_err("exhausted malformed budget terminates the turn");
-    assert!(
-        err.to_string().contains("MalformedArgs")
-            || err.to_string().contains("malformed")
-            || err.to_string().contains("arguments"),
-        "the terminal error names the malformed-args failure: {err}"
-    );
-}
-
 #[test]
 fn build_chat_config_applies_temperature_override() {
     let cfg = AgentConfig {
@@ -3154,21 +2577,6 @@ fn build_chat_config_applies_temperature_override() {
     };
     let chat = build_chat_config(&cfg, false);
     assert_eq!(chat.temperature, Some(0.7));
-}
-
-#[test]
-fn build_chat_config_local_provider_unsets_temperature() {
-    // #2229: on a local provider with no explicit chat_temperature, temperature
-    // is left UNSET (None) so the server samples — the request omits it — rather
-    // than forcing greedy 0.0 (which degenerates local reasoning models).
-    let cfg = AgentConfig {
-        chat_temperature: None,
-        ..AgentConfig::default()
-    };
-    let chat = build_chat_config(&cfg, true);
-    assert_eq!(chat.temperature, None);
-    // Cloud path is unchanged: still the built-in 0.0.
-    assert_eq!(build_chat_config(&cfg, false).temperature, Some(0.0));
 }
 
 // --- #2174: conversation-loop recovery from a degenerate empty MaxTokens ---

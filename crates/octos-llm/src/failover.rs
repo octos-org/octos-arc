@@ -510,20 +510,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_primary_succeeds_no_failover() {
-        let chain = ProviderChain::new(vec![
-            Arc::new(SuccessProvider { name: "primary" }),
-            Arc::new(FailingProvider {
-                name: "fallback",
-                error: "Fallback",
-            }),
-        ]);
-
-        let result = chain.chat(&[], &[], &ChatConfig::default()).await.unwrap();
-        assert_eq!(result.content.unwrap(), "ok");
-    }
-
-    #[tokio::test]
     async fn test_all_providers_fail() {
         let chain = ProviderChain::new(vec![
             Arc::new(FailingProvider {

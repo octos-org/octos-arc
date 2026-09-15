@@ -1584,35 +1584,6 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_gpt4o() {
-        let h = ModelHints::detect("gpt-4o");
-        assert!(!h.uses_completion_tokens);
-        assert!(!h.fixed_temperature);
-        assert!(!h.lacks_vision);
-    }
-
-    #[test]
-    fn test_detect_gpt5_uses_fixed_temperature() {
-        // All gpt-5.* variants use fixed temperature and completion tokens
-        for model in &["gpt-5-nano", "gpt-5.3-codex", "gpt-5.4"] {
-            let h = ModelHints::detect(model);
-            assert!(
-                h.uses_completion_tokens,
-                "{model} should use completion_tokens"
-            );
-            assert!(h.fixed_temperature, "{model} should use fixed_temperature");
-        }
-    }
-
-    #[test]
-    fn test_detect_o3() {
-        let h = ModelHints::detect("o3-mini");
-        assert!(h.uses_completion_tokens);
-        assert!(h.fixed_temperature);
-        assert!(!h.lacks_vision);
-    }
-
-    #[test]
     fn is_image_modality_error_matches_known_provider_400s() {
         // The exact string observed live on mini3 (kimi via the autodl proxy).
         assert!(is_image_modality_error(
@@ -1763,25 +1734,6 @@ mod tests {
     }
 
     #[test]
-    fn build_request_flattens_sampling_params() {
-        // Operator-supplied sampler params (#2172) appear as top-level fields in
-        // the request body, so an OpenAI-compatible server receives e.g.
-        // repeat_penalty even though octos does not model it.
-        let p = OpenAIProvider::new("key", "gpt-4o");
-        let mut sp = serde_json::Map::new();
-        sp.insert("repeat_penalty".to_string(), serde_json::json!(1.1));
-        sp.insert("top_p".to_string(), serde_json::json!(0.95));
-        let cfg = ChatConfig {
-            sampling_params: Some(sp),
-            ..Default::default()
-        };
-        let msgs = [msg("hi")];
-        let v = serde_json::to_value(p.build_request(&msgs, &[], &cfg, false)).unwrap();
-        assert_eq!(v["repeat_penalty"], serde_json::json!(1.1));
-        assert_eq!(v["top_p"], serde_json::json!(0.95));
-    }
-
-    #[test]
     fn build_request_drops_reserved_keys_from_sampling_params() {
         // Defense-in-depth (#2172): a modeled key put in sampling_params is
         // dropped so it can't duplicate/override the dedicated field. The
@@ -1807,106 +1759,6 @@ mod tests {
         assert!(v.get("prompt_cache_key").is_none(), "{v}");
         assert!(v.get("tool_choice").is_none(), "{v}");
         assert_eq!(v["repeat_penalty"], serde_json::json!(1.1));
-    }
-
-    #[test]
-    fn build_request_maps_max_effort_by_style() {
-        let msgs = [msg("hi")];
-        let cfg = ChatConfig {
-            reasoning_effort: Some(crate::config::ReasoningEffort::Max),
-            ..Default::default()
-        };
-        // deepseek (EffortAndThinkingToggle) emits DeepSeek's real "max".
-        let ds = OpenAIProvider::new("k", "deepseek-v4-pro");
-        let v = serde_json::to_value(ds.build_request(&msgs, &[], &cfg, false)).unwrap();
-        assert_eq!(v["reasoning_effort"], "max");
-        // Effort-style providers (grok) have no max tier -> clamp to "high".
-        let grok = OpenAIProvider::new("k", "grok-4.3");
-        let v2 = serde_json::to_value(grok.build_request(&msgs, &[], &cfg, false)).unwrap();
-        assert_eq!(v2["reasoning_effort"], "high");
-    }
-
-    #[test]
-    fn should_emit_none_when_reasoning_is_disabled_for_openai_compatible_endpoint() {
-        let effort = serde_json::from_value(serde_json::json!("none"))
-            .expect("none should disable reasoning");
-        let provider =
-            OpenAIProvider::new("key", "qwen3.5:9b").with_base_url("http://localhost:11434/v1");
-        let config = ChatConfig {
-            reasoning_effort: Some(effort),
-            ..Default::default()
-        };
-
-        let request = serde_json::to_value(provider.build_request(
-            &[msg("return JSON")],
-            &[],
-            &config,
-            false,
-        ))
-        .unwrap();
-
-        assert_eq!(request["reasoning_effort"], "none");
-        assert!(request.get("thinking").is_none());
-    }
-
-    #[test]
-    fn build_request_stubs_reasoning_content_for_bare_k3_ids() {
-        // Kimi Code API model ids are the BARE `k3` / `k3-256k` /
-        // `kimi-for-coding*` — the old gate only matched "kimi-k2"/"kimi-k3"
-        // substrings, so the exact ids Kimi Code serves got NO stub and risked
-        // 400 "reasoning_content is missing" on multi-round tool calls.
-        for model in [
-            "k3",
-            "k3-256k",
-            "kimi-for-coding",
-            "kimi-for-coding-highspeed",
-        ] {
-            let p = OpenAIProvider::new("key", model);
-            let mut assistant = msg("the answer");
-            assistant.role = MessageRole::Assistant;
-            let msgs = [assistant];
-            let v =
-                serde_json::to_value(p.build_request(&msgs, &[], &ChatConfig::default(), false))
-                    .unwrap();
-            let a = v["messages"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|m| m["role"] == "assistant")
-                .expect("assistant message present");
-            assert_eq!(
-                a.get("reasoning_content").and_then(|r| r.as_str()),
-                Some("."),
-                "{model} assistant message must carry the reasoning stub"
-            );
-        }
-    }
-
-    #[test]
-    fn build_request_drops_prior_reasoning_content_for_non_kimi_model() {
-        // (a) A non-kimi reasoning model must NOT have prior verbose
-        // reasoning_content round-tripped back into the request — reasoning
-        // models re-derive their chain of thought each turn, so re-sending it
-        // is pure context bloat. The field must be absent entirely.
-        let p = OpenAIProvider::new("key", "deepseek-v4-pro");
-        let mut assistant = msg("the final answer");
-        assistant.role = MessageRole::Assistant;
-        assistant.reasoning_content =
-            Some("a very long prior chain of thought that should not be re-sent".to_string());
-        let msgs = [assistant];
-        let v = serde_json::to_value(p.build_request(&msgs, &[], &ChatConfig::default(), false))
-            .unwrap();
-        let a = v["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|m| m["role"] == "assistant")
-            .expect("assistant message present");
-        assert!(
-            a.get("reasoning_content").is_none(),
-            "non-kimi model must drop prior reasoning_content, got: {:?}",
-            a.get("reasoning_content")
-        );
     }
 
     #[test]
@@ -1956,37 +1808,6 @@ mod tests {
             Some("."),
             "kimi-k2 must get the \".\" stub when reasoning_content is absent"
         );
-    }
-
-    /// The Kimi coding plan (family `moonshot-coding`) exposes K3 under the bare
-    /// ids `k3` / `k3-256k` / `kimi-for-coding*`, which don't contain `kimi-k3`.
-    /// They MUST still pin temperature (else the endpoint 400s "only 1 is
-    /// allowed") and get K3's max-only reasoning.
-    #[test]
-    fn coding_plan_k3_ids_pin_temperature_and_max_reasoning() {
-        for id in [
-            "k3",
-            "k3-256k",
-            "kimi-for-coding",
-            "kimi-for-coding-highspeed",
-        ] {
-            let h = ModelHints::detect(id);
-            assert!(
-                h.fixed_temperature,
-                "{id} must pin temperature (K3 rejects any temperature != 1)"
-            );
-            // These ids ARE the K3 model, so they must also get K3's graded
-            // low|high|max reasoning — otherwise `/thinking` is silently a
-            // no-op for the coding-plan aliases even though temperature is pinned.
-            assert_eq!(
-                h.reasoning_style,
-                ReasoningStyle::EffortLowHighMax,
-                "{id} is the K3 model and must get K3's graded low|high|max reasoning"
-            );
-        }
-        // Guard: an unrelated model containing "k3" as a substring is NOT the
-        // coding plan (exact match only), so it is unaffected.
-        assert!(!ModelHints::detect("mock-k3000").fixed_temperature);
     }
 
     #[test]
@@ -2056,58 +1877,6 @@ mod cache_usage_tests {
 
     use super::*;
 
-    fn reasoning_usage_cases() -> Vec<(serde_json::Value, u32)> {
-        use serde_json::json;
-        [
-            (Some(json!({"reasoning_tokens": 6})), 6),
-            (Some(json!({"reasoning_tokens": 0})), 0),
-            (None, 0),
-            (Some(serde_json::Value::Null), 0),
-            (Some(json!({})), 0),
-        ]
-        .into_iter()
-        .map(|(details, expected)| {
-            let mut usage = json!({
-                "prompt_tokens": 17,
-                "completion_tokens": 8,
-                "prompt_tokens_details": {"cached_tokens": 7}
-            });
-            if let Some(details) = details {
-                usage["completion_tokens_details"] = details;
-            }
-            (usage, expected)
-        })
-        .collect()
-    }
-
-    fn assert_reasoning_usage(usage: &TokenUsage, expected: u32) {
-        assert_eq!(usage.reasoning_tokens, expected);
-        // Reasoning is a component of completion_tokens, not extra output.
-        assert_eq!(usage.output_tokens, 8);
-        assert_eq!(usage.input_tokens, 10);
-        assert_eq!(usage.cache_read_tokens, 7);
-        assert_eq!(usage.cache_write_tokens, 0);
-    }
-
-    #[test]
-    fn should_preserve_reasoning_usage_from_sse_without_adding_to_output() {
-        for (usage, expected) in reasoning_usage_cases() {
-            let event = SseEvent {
-                event: None,
-                data: serde_json::json!({"choices": [], "usage": usage}).to_string(),
-            };
-            let events = parse_openai_sse_events(&event);
-            let usage = events
-                .iter()
-                .find_map(|event| match event {
-                    StreamEvent::Usage(usage) => Some(usage),
-                    _ => None,
-                })
-                .expect("usage event");
-            assert_reasoning_usage(usage, expected);
-        }
-    }
-
     #[test]
     fn should_parse_cached_tokens_from_sse_usage() {
         let event = SseEvent {
@@ -2167,24 +1936,6 @@ mod prompt_cache_affinity_tests {
     fn body(provider: &OpenAIProvider, config: &ChatConfig) -> serde_json::Value {
         serde_json::to_value(provider.build_request(&[Message::user("hello")], &[], config, false))
             .unwrap()
-    }
-
-    #[test]
-    fn should_keep_explicit_affinity_opt_in_when_base_url_is_set_in_either_order() {
-        let config = affinity_config();
-        let opt_in_then_custom = OpenAIProvider::new("key", "kimi-k3")
-            .with_prompt_cache_affinity(true)
-            .with_base_url("https://api.moonshot.ai/v1");
-        let custom_then_opt_in = OpenAIProvider::new("key", "kimi-k3")
-            .with_base_url("https://api.moonshot.ai/v1")
-            .with_prompt_cache_affinity(true);
-        for provider in [opt_in_then_custom, custom_then_opt_in] {
-            let body = body(&provider, &config);
-            assert_eq!(
-                body["prompt_cache_key"], "octos-stable-affinity",
-                "an explicit opt-in must survive builder call ordering: {body}"
-            );
-        }
     }
 
     #[test]

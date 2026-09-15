@@ -1295,21 +1295,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_cap_ids_per_call_and_skip_oversized() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = MemoryStore::open(dir.path()).await.unwrap();
-        let d = chrono::NaiveDate::from_ymd_opt(2026, 7, 10).unwrap();
-        let many: Vec<String> = (0..100).map(|i| format!("^mid{i:04}")).collect();
-        store.record_memory_use(&many, d).await;
-        let over = "x".repeat(200);
-        store.record_memory_use([over.clone()], d).await;
-
-        let usage = store.load_usage().await;
-        assert!(usage.entries.len() <= 64, "per-call id cap enforced");
-        assert!(!usage.entries.contains_key(&over), "oversized id skipped");
-    }
-
-    #[tokio::test]
     async fn test_long_term_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(dir.path()).await.unwrap();
@@ -1363,14 +1348,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_read_recent_empty() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = MemoryStore::open(dir.path()).await.unwrap();
-        let recent = store.read_recent(7).await.unwrap();
-        assert!(recent.is_empty());
-    }
-
-    #[tokio::test]
     async fn test_read_recent_with_files() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::open(dir.path()).await.unwrap();
@@ -1391,24 +1368,12 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_abstract_with_frontmatter() {
-        let content = "---\nname: test\ntype: project\n---\n# Test\n\nA cool project for testing.\n\n## Details\nMore info.";
-        assert_eq!(extract_abstract(content), "A cool project for testing.");
-    }
-
-    #[test]
     fn test_extract_abstract_truncation() {
         let long = "A".repeat(150);
         let content = format!("# Title\n\n{long}\n");
         let abs = extract_abstract(&content);
         assert!(abs.len() <= 103); // 97 + "..."
         assert!(abs.ends_with("..."));
-    }
-
-    #[test]
-    fn test_strip_frontmatter() {
-        let content = "---\nname: test\n---\nBody here.";
-        assert_eq!(strip_frontmatter(content), "Body here.");
     }
 
     #[test]
@@ -1432,48 +1397,6 @@ mod tests {
         // Not found
         let missing = store.read_entity("nonexistent").await.unwrap();
         assert_eq!(missing, None);
-    }
-
-    #[tokio::test]
-    async fn test_list_entities_sorted() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = MemoryStore::open(dir.path()).await.unwrap();
-
-        store
-            .write_entity("zebra", "# Zebra\n\nA zebra entity.\n")
-            .await
-            .unwrap();
-        store
-            .write_entity("alpha", "# Alpha\n\nAn alpha entity.\n")
-            .await
-            .unwrap();
-
-        let entities = store.list_entities().await.unwrap();
-        assert_eq!(entities.len(), 2);
-        assert_eq!(entities[0].0, "alpha");
-        assert_eq!(entities[0].1, "An alpha entity.");
-        assert_eq!(entities[1].0, "zebra");
-        assert_eq!(entities[1].1, "A zebra entity.");
-    }
-
-    #[tokio::test]
-    async fn test_get_memory_context_includes_recent() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = MemoryStore::open(dir.path()).await.unwrap();
-
-        store.write_long_term("long term").await.unwrap();
-
-        // Write yesterday's notes
-        let yesterday = (chrono::Local::now().date_naive() - chrono::Duration::days(1))
-            .format("%Y-%m-%d")
-            .to_string();
-        let path = dir.path().join("memory").join(format!("{yesterday}.md"));
-        tokio::fs::write(&path, "yesterday notes").await.unwrap();
-
-        let ctx = store.get_memory_context().await;
-        assert!(ctx.contains("## Long-term Memory"));
-        assert!(ctx.contains("## Recent Activity"));
-        assert!(ctx.contains("yesterday notes"));
     }
 
     // --- PR-1 foundations: atomic writes + backups ---

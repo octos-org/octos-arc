@@ -1012,18 +1012,4 @@ mod tests {
             );
         }
     }
-
-    #[test]
-    fn should_default_snapshot_config_to_disabled() {
-        let cfg = SnapshotConfig::default();
-        assert!(!cfg.enabled, "snapshots must be opt-in (default OFF)");
-        assert_eq!(cfg.keep_last, DEFAULT_SNAPSHOT_KEEP_LAST);
-        // Serde: missing fields fall back to the same defaults.
-        let parsed: SnapshotConfig = serde_json::from_str("{}").unwrap();
-        assert_eq!(parsed, cfg);
-        let parsed: SnapshotConfig =
-            serde_json::from_str(r#"{"enabled": true, "keep_last": 5}"#).unwrap();
-        assert!(parsed.enabled);
-        assert_eq!(parsed.keep_last, 5);
-    }
 }

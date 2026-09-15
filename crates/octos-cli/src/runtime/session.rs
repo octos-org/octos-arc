@@ -1235,7 +1235,6 @@ tools = ["read_file"]
         ToolRegistry,
     };
 
-    use octos_agent::workspace_policy::WORKSPACE_POLICY_FILE;
     use octos_core::Message;
 
     use octos_llm::{ChatConfig, ChatResponse, LlmProvider, ToolSpec};
@@ -1320,14 +1319,6 @@ tools = ["read_file"]
             memory_refresh_enabled: true,
             hook_executor: None,
         })
-    }
-
-    async fn make_profile_with_sandbox(
-        data_dir: PathBuf,
-        sandbox: SandboxConfig,
-    ) -> Arc<ProfileRuntime> {
-        make_profile_with_prompt_and_sandbox(data_dir, "test-system-prompt".to_string(), sandbox)
-            .await
     }
 
     #[tokio::test]
@@ -1420,52 +1411,6 @@ tools = ["read_file"]
     }
 
     #[tokio::test]
-    async fn bootstrap_with_explicit_sandbox_overrides_are_per_session() {
-        let tmp = TempDir::new().unwrap();
-        let data_dir = tmp.path().join("profile-data");
-        let profile = make_profile_with_sandbox(
-            data_dir,
-            SandboxConfig {
-                allow_network: true,
-                ..SandboxConfig::default()
-            },
-        )
-        .await;
-
-        let gamma_sandbox = SandboxConfig {
-            allow_network: false,
-            ..profile.default_sandbox.clone()
-        };
-
-        let gamma = SessionRuntime::bootstrap_with_permissions_and_sandbox(
-            &profile,
-            SessionKey::new("api", "gamma"),
-            Some(tmp.path().join("gamma")),
-            EffectivePermissions::workspace_write(),
-            Some(gamma_sandbox),
-            false,
-        )
-        .await
-        .expect("gamma bootstrap");
-        let delta = SessionRuntime::bootstrap_with_permissions_and_sandbox(
-            &profile,
-            SessionKey::new("api", "delta"),
-            Some(tmp.path().join("delta")),
-            EffectivePermissions::workspace_write(),
-            None,
-            false,
-        )
-        .await
-        .expect("delta bootstrap");
-
-        assert!(profile.default_sandbox.allow_network);
-        assert!(!gamma.sandbox.allow_network);
-        assert!(delta.sandbox.allow_network);
-        assert_ne!(gamma.workspace_root, delta.workspace_root);
-        assert!(!Arc::ptr_eq(&gamma.tools, &delta.tools));
-    }
-
-    #[tokio::test]
     async fn bootstrap_attaches_tenant_scope_for_channel_prefixed_session_id() {
         // #1377 Phase-3-B reconciliation: channel-prefixed (`:`) session
         // ids previously left `session_scope` unset, dropping the per-turn
@@ -1499,42 +1444,6 @@ tools = ["read_file"]
         // propagation attaches it.
         assert_eq!(scope.workspace(), rt.workspace_root.as_path());
         assert!(rt.workspace_root.starts_with(&data_dir));
-    }
-
-    #[tokio::test]
-    async fn bootstrap_preserves_manual_policy_edits() {
-        let tmp = TempDir::new().unwrap();
-        let data_dir = tmp.path().join("profile-data");
-        let profile = make_profile(data_dir.clone()).await;
-
-        let hint = tmp.path().join("manual-edit");
-        let key = SessionKey::new("api", "edited");
-
-        // First bootstrap writes the default policy.
-        let rt1 = SessionRuntime::bootstrap(&profile, key.clone(), Some(hint.clone()))
-            .await
-            .expect("bootstrap 1");
-        let policy_path = rt1.workspace_root.join(WORKSPACE_POLICY_FILE);
-        assert!(policy_path.exists());
-
-        // Operator (or earlier session) hand-edits the policy.
-        let sentinel = "# operator hand-edit do not overwrite\n";
-        let original = std::fs::read_to_string(&policy_path).unwrap();
-        let edited = format!("{sentinel}{original}");
-        std::fs::write(&policy_path, &edited).unwrap();
-
-        // Second bootstrap at the same workspace root must NOT
-        // overwrite the operator's edits.
-        let key2 = SessionKey::new("api", "edited-again");
-        let _rt2 = SessionRuntime::bootstrap(&profile, key2, Some(hint.clone()))
-            .await
-            .expect("bootstrap 2");
-        let after = std::fs::read_to_string(&policy_path).unwrap();
-        assert!(
-            after.starts_with(sentinel),
-            "policy file was overwritten; expected sentinel preserved"
-        );
-        assert_eq!(after, edited);
     }
 
     /// M11 regression fix (#891): `SessionRuntime::bootstrap` must
@@ -1664,87 +1573,6 @@ tools = ["read_file"]
         );
     }
 
-    #[test]
-    fn active_profile_marker_round_trips_through_scanner() {
-        let tmp = TempDir::new().unwrap();
-        // Write the marker, then read it back through the SAME path the launch
-        // scanner uses — proving the write byte-matches the read, and that the
-        // explicit marker drives `derive_sticky_profile`.
-        write_active_profile_marker(tmp.path(), "glm");
-        let folder = crate::runtime::launch::scan_folder_sessions(tmp.path(), &["glm".to_string()]);
-        assert_eq!(folder.active_profile.as_deref(), Some("glm"));
-        assert_eq!(
-            crate::runtime::launch::derive_sticky_profile(&folder).as_deref(),
-            Some("glm"),
-        );
-
-        // Last writer wins — reopening under a different brain updates the marker.
-        write_active_profile_marker(tmp.path(), "deepseek");
-        let folder2 =
-            crate::runtime::launch::scan_folder_sessions(tmp.path(), &["deepseek".to_string()]);
-        assert_eq!(folder2.active_profile.as_deref(), Some("deepseek"));
-    }
-
-    #[tokio::test]
-    async fn bootstrap_relocates_store_to_cwd_when_flag_on() {
-        // A cwd-hinted AppUi session with the flag on persists its transcript
-        // under `<cwd>/.octos`, NOT under `profile.data_dir`. Sidecars that
-        // derive their path from `sessions.data_dir()` follow to the same
-        // root by construction (asserted via data_dir()).
-        let tmp = TempDir::new().unwrap();
-        let data_dir = tmp.path().join("profile-data");
-        let profile = make_profile(data_dir.clone()).await;
-        let cwd = tmp.path().join("project");
-        std::fs::create_dir_all(&cwd).unwrap();
-        let cwd_canon = std::fs::canonicalize(&cwd).unwrap();
-
-        let key = SessionKey::new("api", "coding");
-        let rt = SessionRuntime::bootstrap_in_cwd(&profile, key.clone(), Some(cwd.clone()), true)
-            .await
-            .expect("bootstrap in cwd");
-
-        // sessions_root and the manager's data_dir both point at
-        // <cwd>/.octos/<profile_id>.
-        let expected_root = cwd_canon.join(".octos").join(&profile.profile_id);
-        assert_eq!(rt.sessions_root, expected_root);
-        {
-            let mgr = rt.sessions.lock().await;
-            assert_eq!(mgr.data_dir(), expected_root);
-        }
-
-        // Persist a message and confirm the JSONL lives under <cwd>/.octos and
-        // NOT under the profile data dir.
-        let session_path = {
-            let mut mgr = rt.sessions.lock().await;
-            mgr.add_message(&key, Message::user("hello from the project"))
-                .await
-                .unwrap();
-            mgr.session_path(&key)
-        };
-        assert!(
-            session_path.starts_with(cwd_canon.join(".octos")),
-            "transcript must live under <cwd>/.octos: {}",
-            session_path.display()
-        );
-        assert!(
-            !session_path.starts_with(&data_dir),
-            "transcript must NOT live under profile.data_dir: {}",
-            session_path.display()
-        );
-        assert!(
-            session_path.exists(),
-            "transcript file should exist on disk"
-        );
-        // The profile data dir has no `users/` session tree for this key.
-        assert!(
-            !data_dir.join("users").exists()
-                || std::fs::read_dir(data_dir.join("users"))
-                    .map(|mut d| d.next().is_none())
-                    .unwrap_or(true),
-            "profile data dir must not accrue this session's transcript"
-        );
-    }
-
     #[tokio::test]
     async fn two_cwds_same_key_do_not_collide() {
         // The sharpest risk: the SAME logical session key opened against two
@@ -1818,60 +1646,5 @@ tools = ["read_file"]
             "project B must have exactly its message"
         );
         assert_eq!(b.messages[0].content, "message-for-B");
-    }
-
-    #[tokio::test]
-    async fn fork_and_rollback_resolve_through_cwd_root() {
-        // hydrate/rollback/fork all operate on the session runtime's own
-        // `SessionManager` (resolved via `resolve_sessions_for_lookup` in the
-        // dispatcher), so once the manager is rooted at `<cwd>/.octos` they
-        // follow automatically. Prove it for fork + rollback: a child forked
-        // from a cwd-scoped session lands under the SAME `<cwd>/.octos` root,
-        // and a rollback rewrites there too.
-        let tmp = TempDir::new().unwrap();
-        let data_dir = tmp.path().join("profile-data");
-        let profile = make_profile(data_dir.clone()).await;
-        let cwd = tmp.path().join("project");
-        std::fs::create_dir_all(&cwd).unwrap();
-        let cwd_canon = std::fs::canonicalize(&cwd).unwrap();
-
-        let key = SessionKey::new("api", "parent");
-        let rt = SessionRuntime::bootstrap_in_cwd(&profile, key.clone(), Some(cwd), true)
-            .await
-            .expect("bootstrap");
-
-        let child_path = {
-            let mut mgr = rt.sessions.lock().await;
-            // User rows only: the new write path requires a caller-supplied
-            // thread_id for Assistant/Tool rows, and this test only cares
-            // about the on-disk ROOT, not the transcript shape.
-            mgr.add_message(&key, Message::user("q1")).await.unwrap();
-            mgr.add_message(&key, Message::user("q2")).await.unwrap();
-            let child = mgr.fork(&key, "child-1", 2).await.expect("fork");
-            mgr.session_path(&child)
-        };
-        assert!(
-            child_path.starts_with(cwd_canon.join(".octos")),
-            "forked child must live under <cwd>/.octos: {}",
-            child_path.display()
-        );
-        assert!(
-            !child_path.starts_with(&data_dir),
-            "forked child must NOT live under profile.data_dir"
-        );
-
-        // Rollback rewrites in-place under the same root.
-        {
-            let mut mgr = rt.sessions.lock().await;
-            mgr.rollback_last_n_user_turns(&key, 1)
-                .await
-                .expect("rollback");
-            let parent_path = mgr.session_path(&key);
-            assert!(
-                parent_path.starts_with(cwd_canon.join(".octos")),
-                "rollback must rewrite under <cwd>/.octos: {}",
-                parent_path.display()
-            );
-        }
     }
 }

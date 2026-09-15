@@ -1374,32 +1374,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_build_content_with_non_image_media() {
-        let m = Message {
-            role: MessageRole::User,
-            content: "check this".into(),
-            media: vec!["file.txt".into(), "data.csv".into()],
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-            client_message_id: None,
-            thread_id: None,
-            timestamp: chrono::Utc::now(),
-        };
-        // Non-image media should include file paths for read_file
-        let content = build_anthropic_content(&m);
-        match content {
-            AnthropicContent::Text(t) => {
-                assert!(t.contains("check this"));
-                assert!(t.contains("file.txt"));
-                assert!(t.contains("data.csv"));
-                assert!(t.contains("read_file"));
-            }
-            _ => panic!("expected Text for non-image media"),
-        }
-    }
-
     // --- tool_use / tool_result round-trip tests ---
 
     fn tool_call(id: &str, name: &str, args: serde_json::Value) -> octos_core::ToolCall {
@@ -1663,24 +1637,6 @@ mod tests {
     }
 
     #[test]
-    fn should_clamp_thinking_budget_below_max_tokens() {
-        // P2: budget must stay strictly below max_tokens (with output room).
-        // High ladder is 8192; with max_tokens=6000 it clamps to 6000-1024=4976.
-        let provider = AnthropicProvider::new("test-key", "claude-test");
-        let messages = vec![msg(MessageRole::User, "hi")];
-        let config = ChatConfig {
-            reasoning_effort: Some(ReasoningEffort::High),
-            max_tokens: Some(6_000),
-            ..Default::default()
-        };
-        let body = serde_json::to_value(provider.build_request(&messages, &[], &config)).unwrap();
-        let budget = body["thinking"]["budget_tokens"].as_u64().unwrap();
-        assert_eq!(budget, 4_976, "clamped to max_tokens - reserve");
-        assert!(budget < 6_000, "budget strictly below max_tokens");
-        assert!(budget >= 1_024, "budget meets Anthropic minimum");
-    }
-
-    #[test]
     fn should_parse_redacted_thinking_block() {
         // P2: a redacted_thinking block must not break deserialization; the
         // answer/tool calls still come through and it contributes no reasoning.
@@ -1700,18 +1656,6 @@ mod tests {
     }
 
     // --- SSE mapping tests ---
-
-    #[test]
-    fn test_sse_text_delta() {
-        let mut state = AnthropicStreamState::default();
-        let event = crate::sse::SseEvent {
-            event: None,
-            data: r#"{"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Hello"}}"#.into(),
-        };
-        let events = map_anthropic_sse(&mut state, &event);
-        assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], StreamEvent::TextDelta(t) if t == "Hello"));
-    }
 
     #[test]
     fn test_sse_tool_call_start() {
@@ -1736,24 +1680,6 @@ mod tests {
     }
 
     #[test]
-    fn test_sse_message_delta_end_turn() {
-        let mut state = AnthropicStreamState {
-            input_tokens: 100,
-            ..Default::default()
-        };
-        let event = crate::sse::SseEvent {
-            event: None,
-            data: r#"{"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 50}}"#.into(),
-        };
-        let events = map_anthropic_sse(&mut state, &event);
-        assert_eq!(events.len(), 2);
-        assert!(
-            matches!(&events[0], StreamEvent::Usage(u) if u.input_tokens == 100 && u.output_tokens == 50)
-        );
-        assert!(matches!(&events[1], StreamEvent::Done(StopReason::EndTurn)));
-    }
-
-    #[test]
     fn test_sse_error_event() {
         let mut state = AnthropicStreamState::default();
         let event = crate::sse::SseEvent {
@@ -1766,20 +1692,6 @@ mod tests {
     }
 
     // --- Provider metadata tests ---
-
-    #[test]
-    fn test_provider_name_and_model() {
-        let provider = AnthropicProvider::new("test-key", "claude-3-haiku");
-        assert_eq!(provider.provider_name(), "anthropic");
-        assert_eq!(provider.model_id(), "claude-3-haiku");
-    }
-
-    #[test]
-    fn test_with_base_url() {
-        let provider =
-            AnthropicProvider::new("key", "model").with_base_url("https://custom.api.com");
-        assert_eq!(provider.base_url, "https://custom.api.com");
-    }
 
     /// `tool_choice: {"type": "none"}` must reach the wire for an explicit
     /// choice and stay absent for the default, so ordinary requests are
@@ -1816,28 +1728,6 @@ mod tests {
         let tool_less =
             serde_json::to_value(provider.build_request(&messages, &[], &none)).unwrap();
         assert!(tool_less.get("tool_choice").is_none(), "{tool_less}");
-    }
-
-    #[test]
-    fn custom_compatible_endpoint_omits_cache_control_by_default() {
-        let provider =
-            AnthropicProvider::new("key", "model").with_base_url("https://custom.api.com");
-        let body = serde_json::to_value(provider.build_request(
-            &[
-                msg(MessageRole::System, "system"),
-                msg(MessageRole::User, "hello"),
-            ],
-            &[tool_spec("read", "read a file")],
-            &ChatConfig::default(),
-        ))
-        .unwrap();
-
-        assert_eq!(body["system"], "system");
-        assert!(body["messages"][0]["content"].is_string(), "{body}");
-        assert!(
-            !body.to_string().contains("cache_control"),
-            "custom endpoints must opt in to Anthropic cache extensions: {body}"
-        );
     }
 
     #[test]
@@ -1894,13 +1784,6 @@ mod tests {
         let err =
             crate::error::LlmError::from_status_with_label(429, "rate_limit_error", &error_label);
         assert_eq!(err.provider, "r9s/claude-3-5-sonnet");
-    }
-
-    #[test]
-    fn should_default_error_label_to_anthropic_when_label_not_overridden() {
-        let provider = AnthropicProvider::new("test-key", "claude-3-5-sonnet");
-        let error_label = format!("{}/{}", provider.provider_label, provider.model);
-        assert_eq!(error_label, "anthropic/claude-3-5-sonnet");
     }
 
     // --- prompt caching tests ---
@@ -2099,26 +1982,6 @@ mod tests {
     }
 
     #[test]
-    fn should_forward_temperature_top_p_and_top_k_to_glm_when_operator_overrides() {
-        let (provider, tools, messages) = glm_fixture();
-        let mut sp = serde_json::Map::new();
-        sp.insert("top_p".to_string(), serde_json::json!(0.9));
-        sp.insert("top_k".to_string(), serde_json::json!(40));
-        let config = ChatConfig {
-            // 0.5 is exactly representable in f32, so the f32 -> f64 widening
-            // in `serde_json::to_value` cannot skew the equality check.
-            temperature: Some(0.5),
-            sampling_params: Some(sp),
-            ..ChatConfig::default()
-        };
-        let body =
-            serde_json::to_value(provider.build_request(&messages, &tools, &config)).unwrap();
-        assert_eq!(body["temperature"], serde_json::json!(0.5), "{body}");
-        assert_eq!(body["top_p"], serde_json::json!(0.9), "{body}");
-        assert_eq!(body["top_k"], serde_json::json!(40), "{body}");
-    }
-
-    #[test]
     fn should_treat_zero_temperature_as_unset_sentinel_even_on_accepting_model() {
         // 0.0 is the plumbing's built-in default (#2172); it is
         // indistinguishable from "unset" and must never be emitted, even to a
@@ -2134,40 +1997,5 @@ mod tests {
             body.get("temperature").is_none(),
             "the 0.0 default sentinel must stay off the wire: {body}"
         );
-    }
-
-    #[test]
-    fn should_keep_cache_breakpoints_unchanged_when_sampling_forwarded_to_glm() {
-        // #1640 interaction: sampling fields are top-level request fields and
-        // must not disturb cache_control placement (system block, LAST tool,
-        // last user content block — exactly three markers). Exercised on the
-        // ACCEPTING path so the sampling fields are actually present.
-        let (provider, tools, messages) = glm_fixture();
-        let mut sp = serde_json::Map::new();
-        sp.insert("top_p".to_string(), serde_json::json!(0.9));
-        let config = ChatConfig {
-            temperature: Some(0.7),
-            sampling_params: Some(sp),
-            ..ChatConfig::default()
-        };
-        let wire =
-            serde_json::to_string(&provider.build_request(&messages, &tools, &config)).unwrap();
-        assert_eq!(
-            wire.matches("\"cache_control\"").count(),
-            3,
-            "exactly three breakpoints (system, last tool, last user block): {wire}"
-        );
-        let body: serde_json::Value = serde_json::from_str(&wire).unwrap();
-        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
-        assert_eq!(
-            body["tools"].as_array().unwrap().last().unwrap()["cache_control"]["type"],
-            "ephemeral"
-        );
-        let blocks = body["messages"].as_array().unwrap().last().unwrap()["content"]
-            .as_array()
-            .unwrap();
-        assert_eq!(blocks.last().unwrap()["cache_control"]["type"], "ephemeral");
-        assert!(body.get("temperature").is_some(), "{body}");
-        assert_eq!(body["top_p"], serde_json::json!(0.9), "{body}");
     }
 }

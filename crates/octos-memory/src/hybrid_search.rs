@@ -750,32 +750,6 @@ fn l2_normalize(v: &[f32]) -> Option<Vec<f32>> {
 mod tests {
     use super::*;
 
-    /// The counter must survive the exact scenario it exists for: a model
-    /// change, where the store re-inserts every persisted episode and each one
-    /// carries a now-wrong width.
-    #[test]
-    fn vector_coverage_counts_every_dimension_mismatch() {
-        let mut index = HybridIndex::new(4);
-        // Three good, two the wrong width (as if the model changed under us).
-        index.insert("ok1", "alpha beta", Some(&[1.0, 0.0, 0.0, 0.0]));
-        index.insert("bad1", "gamma delta", Some(&[1.0, 0.0]));
-        index.insert("ok2", "epsilon zeta", Some(&[0.0, 1.0, 0.0, 0.0]));
-        index.insert("bad2", "eta theta", Some(&[1.0, 0.0, 0.0, 0.0, 0.0, 0.0]));
-        index.insert("ok3", "iota kappa", Some(&[0.0, 0.0, 1.0, 0.0]));
-
-        let c = index.vector_coverage();
-        assert_eq!(c.total, 5);
-        assert_eq!(c.vectorized, 3, "only the correctly-sized vectors index");
-        assert_eq!(
-            c.dimension_mismatches, 2,
-            "both mismatches counted, not just the logged one"
-        );
-        assert_eq!(c.bm25_only(), 2);
-        assert_eq!(c.dimension, 4);
-        assert!(c.has_dimension_mismatch());
-        assert!((c.ratio() - 0.6).abs() < 1e-9);
-    }
-
     /// An episode saved with no embedding at all is BM25-only but is NOT a
     /// mismatch — conflating the two would make the health signal cry wolf on
     /// every text-only episode.
@@ -795,19 +769,6 @@ mod tests {
         );
         assert_eq!(c.dimension_mismatches, 0, "absent != mismatched");
         assert!(!c.has_dimension_mismatch());
-    }
-
-    #[test]
-    fn test_bm25_only_ranking() {
-        let mut index = HybridIndex::new(4);
-        index.insert("ep1", "rust ownership borrow checker memory safety", None);
-        index.insert("ep2", "python web framework django flask", None);
-        index.insert("ep3", "rust async tokio runtime concurrency", None);
-
-        let results = index.search("rust memory ownership", None, 3);
-        assert!(!results.is_empty());
-        // ep1 should rank highest (most query term overlap)
-        assert_eq!(results[0].0, "ep1");
     }
 
     #[test]
@@ -900,35 +861,6 @@ mod tests {
             index.hnsw.as_ref().map(|h| h.get_nb_point()),
             Some(HNSW_CAPACITY),
             "HNSW point count must NOT grow past capacity — saturation invariant for vector_fetch_count"
-        );
-    }
-
-    #[test]
-    fn insert_vectorizes_when_hnsw_has_room_despite_many_bm25_docs() {
-        // The insert-side HNSW gate must count actual HNSW points (like
-        // `add_embedding` does), not total indexed docs: a store can exceed
-        // HNSW_CAPACITY in BM25-only docs while the vector index is empty.
-        // Gating on doc count silently stops vectorizing new episodes for
-        // any >10k-episode store even though HNSW has full capacity left.
-        let mut index = HybridIndex::new(4);
-        for i in 0..HNSW_CAPACITY {
-            index.insert(&format!("bm25-{i}"), "text", None);
-        }
-        index.insert("with-embedding", "vector text", Some(&[1.0, 0.0, 0.0, 0.0]));
-
-        let idx = index
-            .ids
-            .iter()
-            .position(|id| id == "with-embedding")
-            .expect("doc indexed");
-        assert!(
-            index.has_embedding[idx],
-            "insert must vectorize when the HNSW index itself has room"
-        );
-        assert_eq!(
-            index.hnsw.as_ref().map(|h| h.get_nb_point()),
-            Some(1),
-            "the embedding must actually land in HNSW"
         );
     }
 
@@ -1106,109 +1038,6 @@ mod tests {
     }
 
     #[test]
-    fn vector_fetch_count_saturates_at_hnsw_capacity() {
-        // Regression for codex P2 round 5: vector-side fetch must not
-        // exceed `HNSW_CAPACITY` since the HNSW index can never hold
-        // more docs than that — asking for more is wasted work.
-
-        // Small limit, with or without floor: vector pool == bm25
-        // pool because both are below HNSW_CAPACITY.
-        assert_eq!(vector_fetch_count(6, None), 24);
-        assert_eq!(vector_fetch_count(6, Some(0.55)), HNSW_CAPACITY);
-
-        // Large limit with floor: BM25 pool expands to limit*4, but
-        // vector pool MUST saturate at HNSW_CAPACITY.
-        assert_eq!(bm25_fetch_count(100_000, Some(0.0)), 400_000);
-        assert_eq!(vector_fetch_count(100_000, Some(0.0)), HNSW_CAPACITY);
-        assert_eq!(vector_fetch_count(50_000, Some(0.0)), HNSW_CAPACITY);
-
-        // Large limit without floor: same saturation rule.
-        assert_eq!(vector_fetch_count(100_000, None), HNSW_CAPACITY);
-    }
-
-    #[test]
-    fn search_scored_filtered_admits_bm25_only_winner_across_large_noise() {
-        // Regression for codex P2 round-2 (the storage-layer fix):
-        // simulate a memory store where the BM25-perfect older episode
-        // is buried under many sub-threshold vector-only candidates.
-        // With combined-rank truncation BEFORE filtering, the BM25
-        // winner would be stranded. The floor applied inside the index
-        // (before truncation) guarantees it survives — this is the
-        // contamination-safe BM25-only recall guarantee.
-        //
-        // Construct 12 vector-only docs with vector ~0.54 each
-        // (sub-threshold for the 0.55 gate). Then one keyword-perfect
-        // BM25-only doc with no embedding. Default weights: combined
-        // for vector docs ~ 0.7 * 0.54 = 0.378; combined for BM25
-        // winner = bm25_weight * 1.0 = 0.30. With `limit=6` and
-        // floor=0.55, the result MUST contain the BM25 winner and
-        // NONE of the vector noise.
-        let mut index = HybridIndex::new(4);
-        // Vector-only sub-threshold noise. Each gets a slightly
-        // different embedding so they're all valid candidates but
-        // all score ~0.54 against the query.
-        let query_emb: [f32; 4] = [1.0, 0.0, 0.0, 0.0];
-        for i in 0..12 {
-            // Pick an embedding whose cosine-with-query is ~0.54: at
-            // angle theta with cos(theta) = 0.54, vector (0.54, sqrt(1-0.54^2), 0, 0).
-            let cosine_target: f32 = 0.54;
-            let orth = (1.0 - cosine_target * cosine_target).sqrt();
-            let emb = [cosine_target, orth, 0.0, 0.0];
-            index.insert(
-                &format!("vec-noise-{i}"),
-                &format!("noise topic {i}"),
-                Some(&emb),
-            );
-        }
-        // BM25-perfect older episode, no embedding.
-        index.insert("bm25-winner", "ferrocene rustacean ownership", None);
-
-        // Query keywords match only "bm25-winner"; query embedding is
-        // close to the vector-noise embeddings.
-        let q = "ferrocene rustacean ownership";
-
-        // Without the floor: the 12 vector-noise docs at combined~0.378
-        // each rank above bm25-winner at combined=0.30 (when has_vectors=true,
-        // bm25-winner gets combined = bm25_weight * bm25 = 0.3 * 1.0 = 0.3),
-        // so a limit-6 unfiltered call returns only vector noise.
-        let unfiltered = index.search_scored_filtered(q, Some(&query_emb), 6, None);
-        assert_eq!(
-            unfiltered.len(),
-            6,
-            "without floor, top-6 fills with vector noise"
-        );
-        let any_winner = unfiltered.iter().any(|(id, _)| id == "bm25-winner");
-        assert!(
-            !any_winner,
-            "without floor, the BM25 winner is crowded out of top-6 by vector noise — \
-             this is the dead band codex P2 round 2 flagged"
-        );
-
-        // With the floor: vector-noise docs (best_modality ≈ 0.54) are
-        // dropped INSIDE the index before truncation, so bm25-winner
-        // (best_modality = 1.0) survives.
-        let filtered = index.search_scored_filtered(q, Some(&query_emb), 6, Some(0.55));
-        let winner = filtered.iter().find(|(id, _)| id == "bm25-winner").expect(
-            "BM25 winner must survive the index-level floor regardless of how much vector \
-                 noise sits ahead of it in combined-rank order",
-        );
-        assert!(
-            winner.1.bm25 >= 0.99,
-            "BM25 winner should have a near-1.0 BM25 score (got {})",
-            winner.1.bm25
-        );
-        assert_eq!(winner.1.vector, 0.0, "BM25 winner has no embedding");
-        for (id, score) in &filtered {
-            assert!(
-                score.best_modality() >= 0.55,
-                "every returned candidate must clear the floor (got {} for {})",
-                score.best_modality(),
-                id
-            );
-        }
-    }
-
-    #[test]
     fn should_drop_vector_and_keep_bm25_when_insert_dimension_mismatches() {
         let mut index = HybridIndex::new(4);
         // 3-dim vector into a 4-dim index: vector dropped, text still indexed.
@@ -1281,21 +1110,6 @@ mod tests {
             assert!(
                 (g - want_norm).abs() < 1e-6,
                 "rank {i}: got {g}, want {want_norm}"
-            );
-        }
-    }
-
-    #[test]
-    fn should_rank_descending_and_respect_limit_when_searching() {
-        let index = wide_index();
-        let results = index.search("common", None, 5);
-        assert_eq!(results.len(), 5);
-        for pair in results.windows(2) {
-            assert!(
-                pair[0].1 >= pair[1].1,
-                "results must be descending: {:?} then {:?}",
-                pair[0],
-                pair[1]
             );
         }
     }

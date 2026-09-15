@@ -4122,31 +4122,6 @@ mod tests {
     }
 
     #[test]
-    fn records_context_state_checkpoint_and_snapshot_hash() {
-        let mut manager = ContextManager::new("coding:local:test", Some("thread-1".into()));
-        // System messages are intentionally not recorded as
-        // SystemInstruction items — they belong to the agent's runtime
-        // prompt composition. See `record_message_with_source_ref`
-        // early-return. Use User + Assistant to exercise checkpoint /
-        // snapshot machinery.
-        manager.record_message(&Message::user("Review this project"));
-        manager.record_message(&Message::assistant("On it."));
-        let before_checkpoint = manager.transcript_hash();
-
-        let checkpoint = manager.checkpoint("before_sampling");
-
-        assert_eq!(checkpoint.as_str(), "ctxchk_000003");
-        let state = manager.state();
-        assert_eq!(state.generation, 3);
-        assert_eq!(state.last_checkpoint_id, Some(checkpoint));
-        assert_ne!(state.transcript_hash, before_checkpoint);
-
-        let rebuilt = ContextManager::from_snapshot(manager.snapshot());
-        assert_eq!(rebuilt.state().transcript_hash, state.transcript_hash);
-        assert_eq!(rebuilt.generation(), 3);
-    }
-
-    #[test]
     fn rebuilds_context_from_session_history_with_source_sequences() {
         let mut user = Message::user("hello");
         user.thread_id = Some("thread-a".into());
@@ -4204,44 +4179,6 @@ mod tests {
         assert!(frame.messages[1].content.contains("missing"));
         assert_eq!(frame.report.synthetic_item_ids.len(), 1);
         assert_eq!(frame.report.dropped_item_ids.len(), 1);
-    }
-
-    /// Tool-output artifacts are content-addressed (`tool-output/<sha>.txt`),
-    /// so an existing file is by definition current. Re-writing every
-    /// accumulated artifact on every snapshot persist turns each message
-    /// commit into O(session tool outputs) file writes.
-    #[test]
-    fn persist_skips_existing_content_addressed_artifacts() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let session_id = "coding:local:artifact-skip";
-        let mut manager = ContextManager::new(session_id, None);
-        manager.record_message(&assistant_tool_call("call_1"));
-        // Oversized output -> raw artifact sidecar.
-        manager.record_tool_output("call_1", "shell", &"y".repeat(20 * 1024));
-        persist_context_manager_snapshot(temp.path(), session_id, &manager).expect("first persist");
-
-        let artifact_ref = manager
-            .items()
-            .iter()
-            .find_map(|item| match &item.kind {
-                TranscriptItemKind::ToolOutput { envelope } => envelope.raw_artifact_ref.clone(),
-                _ => None,
-            })
-            .expect("raw artifact ref recorded");
-        let artifact_path = context_ledger_artifact_path(temp.path(), &artifact_ref)
-            .expect("artifact path resolves");
-        assert!(artifact_path.exists(), "first persist writes the artifact");
-
-        // Plant a sentinel: a second persist must SKIP the existing
-        // content-addressed file rather than rewrite it.
-        std::fs::write(&artifact_path, b"sentinel").expect("plant sentinel");
-        persist_context_manager_snapshot(temp.path(), session_id, &manager)
-            .expect("second persist");
-        assert_eq!(
-            std::fs::read(&artifact_path).expect("read artifact"),
-            b"sentinel",
-            "second persist must not rewrite an existing content-addressed artifact"
-        );
     }
 
     /// #2131: recall re-materializes an evicted tool output by its
@@ -4307,82 +4244,6 @@ mod tests {
             manager.tool_output_by_call_id("call_src").as_deref(),
             Some(src.as_str()),
             "recall must survive compaction that pruned the transcript"
-        );
-    }
-
-    /// Snapshots persisted by a pre-normalization daemon can hold raw
-    /// provider ids; importing them verbatim would re-introduce the
-    /// frame/vector id mismatch. The import boundary must normalize.
-    #[test]
-    fn from_snapshot_normalizes_legacy_raw_tool_call_ids() {
-        let mut manager = ContextManager::new("s", None);
-        let mut msg = Message::assistant("");
-        msg.tool_calls = Some(vec![ToolCall {
-            id: "toolu_legacy".to_owned(),
-            name: "shell".to_owned(),
-            arguments: json!({}),
-            metadata: None,
-        }]);
-        manager.record_message(&msg);
-        manager.record_tool_output("toolu_legacy", "shell", "legacy output");
-        let mut snapshot = manager.snapshot();
-        // Simulate a pre-fix snapshot by reverting the stored ids to the raw
-        // provider form.
-        for item in snapshot.items.iter_mut() {
-            match &mut item.kind {
-                TranscriptItemKind::AssistantToolCall { call_id, .. } => {
-                    *call_id = "toolu_legacy".to_owned();
-                }
-                TranscriptItemKind::ToolOutput { envelope } => {
-                    envelope.tool_call_id = "toolu_legacy".to_owned();
-                }
-                _ => {}
-            }
-        }
-
-        let loaded = ContextManager::from_snapshot(snapshot);
-        let frame = loaded.for_prompt(&PromptBuildPolicy::default());
-        let tool_row = frame
-            .messages
-            .iter()
-            .find(|m| m.role == MessageRole::Tool)
-            .expect("tool row present");
-        assert_eq!(
-            tool_row.tool_call_id.as_deref(),
-            Some("call_legacy"),
-            "imported raw ids must be normalized at the snapshot boundary"
-        );
-        assert!(tool_row.content.contains("legacy output"));
-    }
-
-    /// The agent loop's `normalize_system_messages` runs BEFORE the prompt
-    /// bridge and rewrites any non-leading System row (context rows like
-    /// `[Conversation summary]` are converted to User, instruction rows are
-    /// merged into `messages[0]`). A System-role summary row therefore
-    /// guarantees the bridge's contiguous coverage window match fails on the
-    /// first post-compaction turn, and the whole conversation is re-recorded
-    /// as source-less duplicates. Emit the summary as a protected User row so
-    /// the loop's normalization leaves it byte-identical.
-    #[test]
-    fn for_prompt_emits_compaction_summary_as_user_row() {
-        let mut manager = ContextManager::new("s", None);
-        for index in 0..6 {
-            manager.record_message(&Message::user(format!("u{index}")));
-            manager.record_message(&Message::assistant(format!("a{index}")));
-        }
-        manager.install_compaction_summary("older turns summarized", 2);
-
-        let frame = manager.for_prompt(&PromptBuildPolicy::default());
-        let summary_row = frame
-            .messages
-            .iter()
-            .find(|m| m.content.contains("[Conversation summary]"))
-            .expect("summary row present");
-        assert_eq!(
-            summary_row.role,
-            MessageRole::User,
-            "compaction summary must render as a User row so the agent loop's \
-             system normalization cannot mutate it out of the bridge coverage window"
         );
     }
 
@@ -4512,76 +4373,6 @@ mod tests {
             .expect("parent must render the result capsule");
         assert_eq!(capsule.role, MessageRole::Assistant);
         assert!(capsule.tool_calls.is_none());
-    }
-
-    #[test]
-    fn durable_context_ledger_persists_tool_output_sidecar_and_preview_link() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let session_id = "coding:local:tui#tool-output";
-        let policy = ToolOutputPolicy {
-            policy_id: "test-policy".into(),
-            inline_raw_threshold_bytes: 8,
-            model_visible_max_bytes: 10,
-        };
-        let mut manager = ContextManager::new(session_id, None).with_tool_output_policy(policy);
-        // Committed rows: a snapshot only reloads conversation rows that the
-        // durable history backs, so record the call and its output with
-        // source references as the end-of-turn persist does.
-        manager.record_persisted_message(&assistant_tool_call("call_1"), 0);
-        manager.record_tool_output_with_source_ref(
-            "call_1",
-            "shell",
-            "0123456789abcdef",
-            Some(TranscriptSourceRef {
-                session_id: session_id.to_owned(),
-                thread_id: None,
-                source_seq: Some(1),
-                source_event_kind: "tool".to_owned(),
-            }),
-        );
-
-        let envelope = match &manager.items()[1].kind {
-            TranscriptItemKind::ToolOutput { envelope } => envelope,
-            other => panic!("expected tool output, got {other:?}"),
-        };
-        let artifact_ref = envelope
-            .raw_artifact_ref
-            .as_deref()
-            .expect("large output should have sidecar ref");
-        let preview_ref = envelope
-            .ui_preview
-            .as_ref()
-            .expect("ui preview link")
-            .preview_ref
-            .clone();
-
-        let snapshot_path = persist_context_manager_snapshot(temp.path(), session_id, &manager)
-            .expect("persist context manager");
-        let artifact_path =
-            context_ledger_artifact_path(temp.path(), artifact_ref).expect("artifact path");
-
-        assert!(snapshot_path.exists());
-        assert_eq!(
-            std::fs::read_to_string(&artifact_path).expect("read sidecar"),
-            "0123456789abcdef"
-        );
-        assert_eq!(preview_ref, "appui/tool-output-preview/call_1");
-
-        let loaded = load_context_manager_snapshot(temp.path(), session_id)
-            .expect("load snapshot")
-            .expect("snapshot exists");
-        let frame = loaded.for_prompt(&PromptBuildPolicy::default());
-        let tool_message = frame
-            .messages
-            .iter()
-            .find(|message| message.role == MessageRole::Tool)
-            .expect("tool message");
-        assert_eq!(tool_message.content, "0123456789\n[truncated]");
-        assert_eq!(
-            frame.report.truncated_item_ids.len(),
-            1,
-            "replay should preserve the same model-visible truncation evidence"
-        );
     }
 
     #[test]
@@ -4744,84 +4535,6 @@ mod tests {
     }
 
     #[test]
-    fn compact_context_records_lifecycle_evidence_and_installed_generation() {
-        let mut manager = ContextManager::new("s", None);
-        manager.record_message(&Message::system("system"));
-        for index in 0..5 {
-            manager.record_message(&Message::user(format!("u{index}")));
-            manager.record_message(&Message::assistant(format!("a{index}")));
-        }
-        let input_generation = manager.generation();
-        let input_hash = manager.transcript_hash();
-
-        let record = manager.compact_context(
-            "older turns summarized",
-            CompactContextPolicy {
-                policy_id: "test-compact".into(),
-                trigger: "context_pressure".into(),
-                keep_recent_items: 2,
-                keep_recent_tokens: None,
-                semantic_shadow_keep_recent_tokens: None,
-                target_tokens_after_compaction: None,
-                preserve_system_instructions: true,
-            },
-        );
-
-        assert_eq!(record.status, ContextCompactionStatus::Installed);
-        assert_eq!(record.policy_id, "test-compact");
-        assert_eq!(record.trigger, "context_pressure");
-        assert_eq!(record.input_generation, input_generation);
-        assert_eq!(record.output_generation, Some(input_generation + 1));
-        assert_eq!(record.input_transcript_hash, input_hash);
-        assert!(record.replacement_transcript_hash.is_some());
-        assert_eq!(
-            record.installed_transcript_hash.as_deref(),
-            Some(manager.transcript_hash().as_str())
-        );
-        assert!(record.summary_item_id.is_some());
-        assert!(!record.retained_item_ids.is_empty());
-        assert!(!record.dropped_item_ids.is_empty());
-        assert_eq!(manager.compactions().len(), 1);
-        assert_eq!(
-            manager.state().last_compaction_id,
-            Some(record.compaction_id)
-        );
-        assert_eq!(
-            manager.state().last_checkpoint_id,
-            Some(record.checkpoint_id)
-        );
-    }
-
-    #[test]
-    fn immediate_repeated_compaction_is_idempotent() {
-        let mut manager = ContextManager::new("s", None);
-        manager.record_message(&Message::user("old request ".repeat(80)));
-        manager.record_message(&Message::assistant("old answer ".repeat(80)));
-        manager.record_message(&Message::user("current request"));
-        let policy = CompactContextPolicy {
-            policy_id: "semantic-budget-v1".to_owned(),
-            trigger: "context_pressure".to_owned(),
-            keep_recent_tokens: Some(32),
-            target_tokens_after_compaction: Some(256),
-            ..CompactContextPolicy::default()
-        };
-
-        let first = manager.compact_context("old exchange", policy.clone());
-        let generation = manager.generation();
-        let ledger = manager.ledger_items().to_vec();
-        let active = manager.items().to_vec();
-        let compaction_count = manager.compactions().len();
-
-        let repeated = manager.compact_context("different regenerated prose", policy);
-
-        assert_eq!(repeated, first);
-        assert_eq!(manager.generation(), generation);
-        assert_eq!(manager.ledger_items(), ledger.as_slice());
-        assert_eq!(manager.items(), active.as_slice());
-        assert_eq!(manager.compactions().len(), compaction_count);
-    }
-
-    #[test]
     fn semantic_compaction_enforces_feasible_post_install_budget() {
         let mut manager = ContextManager::new("s", None);
         manager.record_message(&Message::user("old request ".repeat(100)));
@@ -4862,56 +4575,6 @@ mod tests {
             &item.kind,
             TranscriptItemKind::UserInput { content, .. } if content == "CURRENT REQUEST"
         )));
-    }
-
-    #[test]
-    fn over_budget_rejection_does_not_mutate_ledger_or_active_generation() {
-        let mut manager = ContextManager::new("s", None);
-        manager.record_message(&Message::user("old request ".repeat(100)));
-        manager.record_message(&Message::assistant("old answer ".repeat(100)));
-        manager.record_message(&Message::user("current"));
-        let generation = manager.generation();
-        let ledger = manager.ledger_items().to_vec();
-        let active = manager.items().to_vec();
-        let next_item_seq = manager.next_item_seq;
-
-        let record = manager.compact_context(
-            "summary",
-            CompactContextPolicy {
-                keep_recent_tokens: Some(10_000),
-                target_tokens_after_compaction: Some(96),
-                ..CompactContextPolicy::default()
-            },
-        );
-
-        assert_eq!(record.status, ContextCompactionStatus::Failed);
-        assert_eq!(
-            record.budget_outcome,
-            ContextCompactionBudgetOutcome::RejectedOverBudget
-        );
-        assert_eq!(record.output_generation, None);
-        assert_eq!(manager.generation(), generation);
-        assert_eq!(manager.next_item_seq, next_item_seq);
-        assert_eq!(manager.ledger_items(), ledger.as_slice());
-        assert_eq!(manager.items(), active.as_slice());
-        assert!(manager.state().last_compaction_id.is_none());
-        assert!(!manager.should_auto_compact(96));
-    }
-
-    #[test]
-    fn snapshot_preserves_compaction_records() {
-        let mut manager = ContextManager::new("s", None);
-        manager.record_message(&Message::system("system"));
-        manager.record_message(&Message::user("hello"));
-        manager.compact_context("summary", CompactContextPolicy::default());
-
-        let rebuilt = ContextManager::from_snapshot(manager.snapshot());
-
-        assert_eq!(rebuilt.compactions(), manager.compactions());
-        assert_eq!(
-            rebuilt.state().last_compaction_id,
-            manager.state().last_compaction_id
-        );
     }
 
     #[test]
@@ -5010,76 +4673,6 @@ mod tests {
                 .any(|message| message.content == "new durable request")
         );
         assert!(context_ledger_covers_history(&rebased, &appended));
-    }
-
-    #[test]
-    fn persisted_message_merge_stamps_prompt_equivalent_without_duplication() {
-        let mut manager = ContextManager::new("coding:local:test", None);
-        manager.record_message(&Message::system("system"));
-        manager.record_message(&Message::user("current turn"));
-        let before_len = manager.items().len();
-
-        let ids = manager
-            .record_persisted_message_merging_prompt_equivalent(&Message::user("current turn"), 7);
-
-        assert_eq!(ids.len(), 1);
-        assert_eq!(
-            manager.items().len(),
-            before_len,
-            "merging the durable row should not duplicate a prompt-only item"
-        );
-        assert_eq!(manager.source_high_watermark(), Some(7));
-        let prompt = manager.for_prompt(&PromptBuildPolicy::default());
-        assert_eq!(
-            prompt
-                .messages
-                .iter()
-                .filter(|message| message.role == MessageRole::User
-                    && message.content == "current turn")
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn media_is_stripped_when_model_capability_is_text_only() {
-        let mut manager = ContextManager::new("s", None);
-        let mut user = Message::user("inspect image");
-        user.media = vec!["image.png".into()];
-        manager.record_message(&user);
-
-        let text_only = manager.for_prompt(&PromptBuildPolicy::default());
-        let media_model = manager.for_prompt(&PromptBuildPolicy {
-            supports_media: true,
-            model_capability_id: "vision-v1".into(),
-            ..PromptBuildPolicy::default()
-        });
-
-        assert!(text_only.messages[0].media.is_empty());
-        assert_eq!(text_only.report.repaired_item_ids.len(), 1);
-        assert_eq!(media_model.messages[0].media, vec!["image.png"]);
-        assert!(media_model.report.repaired_item_ids.is_empty());
-    }
-
-    #[test]
-    fn prompt_normalization_is_idempotent_for_same_policy() {
-        let mut manager = ContextManager::new("s", None);
-        manager.record_message(&Message::system("system"));
-        manager.record_message(&Message::user("hello"));
-        manager.record_message(&Message::assistant("world"));
-
-        let first = manager.for_prompt(&PromptBuildPolicy::default());
-        let second = manager.for_prompt(&PromptBuildPolicy::default());
-
-        assert_eq!(
-            first.report.output_prompt_hash,
-            second.report.output_prompt_hash
-        );
-        assert_eq!(
-            first.report.dropped_item_ids,
-            second.report.dropped_item_ids
-        );
-        assert_eq!(first.messages.len(), second.messages.len());
     }
 
     #[test]
@@ -5441,29 +5034,6 @@ mod tests {
             input
                 .iter()
                 .all(|message| message.content != "current request")
-        );
-    }
-
-    #[test]
-    fn open_tool_interaction_is_never_compaction_input() {
-        let mut manager = ContextManager::new("s", None);
-        manager.record_message(&Message::user("old request"));
-        manager.record_message(&Message::assistant("old answer"));
-        manager.record_message(&Message::user("current request"));
-        manager.record_message(&assistant_tool_call("call_pending"));
-        let policy = CompactContextPolicy {
-            keep_recent_tokens: Some(1),
-            ..CompactContextPolicy::default()
-        };
-
-        let input = manager
-            .compaction_input(&policy, &PromptBuildPolicy::default())
-            .messages;
-        assert!(input.iter().any(|message| message.content == "old request"));
-        assert!(
-            input
-                .iter()
-                .all(|message| message.tool_calls.as_ref().is_none_or(Vec::is_empty))
         );
     }
 

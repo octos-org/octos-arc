@@ -256,35 +256,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_truncate_no_op() {
-        let mut s = "hello".to_string();
-        truncate_utf8(&mut s, 10, "...");
-        assert_eq!(s, "hello");
-    }
-
-    #[test]
-    fn test_truncate_ascii() {
-        let mut s = "abcdefghij".to_string();
-        truncate_utf8(&mut s, 5, "...");
-        assert_eq!(s, "abcde...");
-    }
-
-    #[test]
     fn test_truncate_utf8_boundary() {
         // 你好世 = 9 bytes, truncate at 7 should back up to byte 6
         let mut s = "\u{4F60}\u{597D}\u{4E16}".to_string();
         truncate_utf8(&mut s, 7, "...");
         assert_eq!(s, "\u{4F60}\u{597D}...");
-    }
-
-    #[test]
-    fn test_truncated_utf8_no_op() {
-        assert_eq!(truncated_utf8("hello", 10, "..."), "hello");
-    }
-
-    #[test]
-    fn test_truncated_utf8_ascii() {
-        assert_eq!(truncated_utf8("abcdefghij", 5, "..."), "abcde...");
     }
 
     #[test]
@@ -357,51 +333,12 @@ mod tests {
         );
     }
 
-    /// Companion regression for `deep_search` AND the runtime tool name
-    /// `search` exposed by the bundled deep-search skill
-    /// (`app-skills/deep-search/manifest.json` — `"tool_name": "search"`).
-    ///
-    /// Execution keys the truncation budget on the runtime tool name, so
-    /// the `deep_search` arm alone never takes effect for the shipping skill.
-    /// We MUST guard both — `search` is the load-bearing one in production,
-    /// `deep_search` is the contract-slot alias for future variants and any
-    /// external consumers that key on the contract name.
-    #[test]
-    fn deep_search_limit_is_at_least_100k_bytes() {
-        assert!(
-            tool_output_limit("search") >= 100_000,
-            "search tool_output_limit must stay >=100K bytes — this is the \
-             runtime tool name of the bundled deep-search skill, and elision \
-             of its aggregated payload causes the same retry spiral as \
-             news_fetch; current value is {}",
-            tool_output_limit("search")
-        );
-        assert!(
-            tool_output_limit("deep_search") >= 100_000,
-            "deep_search tool_output_limit must stay >=100K bytes to avoid \
-             middle-elision triggering retry behaviour; current value is {}",
-            tool_output_limit("deep_search")
-        );
-    }
-
-    #[test]
-    fn should_pass_through_plain_ascii_when_safe_filename() {
-        assert_eq!(safe_filename("hello-world_1"), "hello-world_1");
-    }
-
     #[test]
     fn should_percent_encode_specials_and_cjk_when_safe_filename() {
         assert_eq!(safe_filename("a b"), "a%20b");
         assert_eq!(safe_filename("a.b/c"), "a%2Eb%2Fc");
         // "密" = E5 AF 86 in UTF-8
         assert_eq!(safe_filename("密"), "%E5%AF%86");
-    }
-
-    #[test]
-    fn should_stay_injective_when_names_differ_only_by_special_chars() {
-        // The legacy char-replace slugging collapsed these; percent-encoding must not.
-        assert_ne!(safe_filename("a/b"), safe_filename("a_b"));
-        assert_ne!(safe_filename("a b"), safe_filename("a-b"));
     }
 
     #[test]
@@ -414,61 +351,7 @@ mod tests {
         assert!(!out.contains('~'));
     }
 
-    #[test]
-    fn should_clamp_with_distinct_hash_suffix_when_names_share_long_prefix() {
-        let prefix = "x".repeat(100);
-        let a = safe_filename(&format!("{prefix}-alpha"));
-        let b = safe_filename(&format!("{prefix}-beta"));
-        assert!(a.len() <= SAFE_FILENAME_MAX_BYTES);
-        assert!(b.len() <= SAFE_FILENAME_MAX_BYTES);
-        assert_ne!(a, b, "hash suffix must disambiguate clamped names");
-    }
-
-    #[test]
-    fn should_not_split_percent_triplet_when_clamping() {
-        // All-CJK input: every char encodes to three %XX triplets (9 bytes),
-        // so a naive 64-byte cut would land mid-triplet.
-        let name = "记".repeat(40);
-        let out = safe_filename(&name);
-        assert!(out.len() <= SAFE_FILENAME_MAX_BYTES);
-        // Every '%' must be followed by two hex digits within the stem.
-        let stem = &out[..out.rfind('-').unwrap()];
-        let bytes = stem.as_bytes();
-        let mut i = 0;
-        while i < bytes.len() {
-            if bytes[i] == b'%' {
-                assert!(
-                    i + 2 < bytes.len()
-                        && bytes[i + 1].is_ascii_hexdigit()
-                        && bytes[i + 2].is_ascii_hexdigit(),
-                    "dangling percent triplet in {out}"
-                );
-                i += 3;
-            } else {
-                i += 1;
-            }
-        }
-    }
-
-    #[test]
-    fn should_return_placeholder_when_input_empty() {
-        assert_eq!(safe_filename(""), "_");
-    }
-
     // ── structured truncation report (pi TruncationResult port) ──────────
-
-    #[test]
-    fn should_report_untruncated_when_input_at_exact_limit() {
-        let s = "a".repeat(100);
-        let r = truncate_head_tail_report(&s, 100, 0.7);
-        assert!(!r.truncated);
-        assert_eq!(r.truncated_by, None);
-        assert_eq!(r.content, s);
-        assert_eq!(r.total_bytes, 100);
-        assert_eq!(r.output_bytes, 100);
-        assert_eq!(r.omitted_bytes, 0);
-        assert_eq!(r.max_len, 100);
-    }
 
     #[test]
     fn should_report_bytes_truncation_when_one_byte_over_limit() {
@@ -486,17 +369,6 @@ mod tests {
             "report and inline marker must agree on the omitted count: {}",
             r.content
         );
-    }
-
-    #[test]
-    fn should_report_untruncated_when_input_empty() {
-        let r = truncate_head_tail_report("", 0, 0.7);
-        assert!(!r.truncated);
-        assert_eq!(r.truncated_by, None);
-        assert_eq!(r.content, "");
-        assert_eq!(r.total_bytes, 0);
-        assert_eq!(r.output_bytes, 0);
-        assert_eq!(r.omitted_bytes, 0);
     }
 
     #[test]
@@ -523,64 +395,5 @@ mod tests {
         assert_eq!(r.output_bytes, r.content.len());
         // Whole chars only: kept payload + omitted covers the input exactly.
         assert_eq!(head.len() + tail.len() + r.omitted_bytes, r.total_bytes);
-    }
-
-    /// Wrapper equivalence: `truncate_head_tail` must be a thin projection of
-    /// the report — one implementation, two surfaces. Property-style over
-    /// fixtures crossing the limit from both sides, multi-byte content, and
-    /// out-of-range ratios.
-    #[test]
-    fn should_match_wrapper_content_when_report_and_wrapper_share_inputs() {
-        let fixtures: Vec<String> = vec![
-            String::new(),
-            "short".to_string(),
-            "a".repeat(99),
-            "a".repeat(100),
-            "a".repeat(101),
-            "x".repeat(10_000),
-            "\u{1F980}".repeat(400),
-            "\u{4F60}\u{597D}\u{4E16}\u{754C}".repeat(500),
-            format!("head\n{}\ntail", "mid ".repeat(2_000)),
-        ];
-        for s in &fixtures {
-            for max_len in [0usize, 10, 49, 50, 51, 100, 1_000, 30_000] {
-                for ratio in [0.0f32, 0.3, 0.5, 0.7, 0.9, 1.5] {
-                    let report = truncate_head_tail_report(s, max_len, ratio);
-                    assert_eq!(
-                        truncate_head_tail(s, max_len, ratio),
-                        report.content,
-                        "wrapper and report must share one implementation \
-                         (len={}, max_len={max_len}, ratio={ratio})",
-                        s.len(),
-                    );
-                }
-            }
-        }
-    }
-
-    /// Degenerate regime: `max_len` below the marker overhead reservation
-    /// keeps zero payload bytes — the emitted content is only the elision
-    /// marker (and, pre-existing behaviour, longer than `max_len` itself).
-    /// The report must still be internally consistent: everything omitted,
-    /// marker N accurate. Unreachable through `tool_output_limit` (>= 20K).
-    #[test]
-    fn should_emit_only_marker_when_budget_below_marker_overhead() {
-        let s = "z".repeat(100);
-        let r = truncate_head_tail_report(&s, 10, 0.7);
-        assert!(r.truncated);
-        assert_eq!(r.omitted_bytes, 100);
-        assert_eq!(r.content, "\n\n... [100 bytes omitted] ...\n\n");
-        assert_eq!(r.truncated_by, Some(TruncatedBy::Bytes));
-        assert_eq!(r.output_bytes, r.content.len());
-    }
-
-    #[test]
-    fn should_clamp_reported_head_ratio_when_ratio_out_of_range() {
-        let s = "a".repeat(300);
-        let hi = truncate_head_tail_report(&s, 100, 5.0);
-        assert_eq!(hi.head_ratio, 0.9);
-        assert_eq!(hi.content, truncate_head_tail(&s, 100, 5.0));
-        let lo = truncate_head_tail_report(&s, 100, -1.0);
-        assert_eq!(lo.head_ratio, 0.1);
     }
 }

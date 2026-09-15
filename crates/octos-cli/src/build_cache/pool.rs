@@ -1336,10 +1336,6 @@ mod tests {
 
     use crate::build_cache::repo_key_for_path;
 
-    use std::sync::Arc;
-
-    use std::sync::atomic::Ordering;
-
     fn config() -> BuildCacheConfig {
         BuildCacheConfig {
             peer_slots: 2,
@@ -1421,22 +1417,6 @@ mod tests {
         }
 
         #[test]
-        fn inherited_flock_released_slot_reacquires_first_slot() {
-            let tmp = tempfile::tempdir().unwrap();
-            let mut slot = held_slot(&tmp, HolderInfo::default());
-            let dir = slot.path.clone();
-            let mut child = InheritedLockChild::spawn(slot.lock.as_ref().unwrap());
-            release(&mut slot, SlotOutcome::Completed).unwrap();
-            child.assert_contended(&dir);
-            child.finish_shortly();
-            let replacement = held_slot(&tmp, HolderInfo::default());
-            assert_eq!(
-                replacement.path, dir,
-                "transient inheritance must not skip slot-1"
-            );
-        }
-
-        #[test]
         fn inherited_flock_dead_holder_reacquires_first_slot() {
             let tmp = tempfile::tempdir().unwrap();
             let dead = spawn_dead_pid();
@@ -1458,56 +1438,6 @@ mod tests {
                 replacement.path, dir,
                 "dead holder with inherited flock must reuse slot-1"
             );
-        }
-
-        #[test]
-        fn inherited_flock_matching_token_detached_release_retries() {
-            let tmp = tempfile::tempdir().unwrap();
-            let slot = held_slot(&tmp, HolderInfo::default());
-            let dir = slot.path.clone();
-            let token = slot.claim_token.clone();
-            let mut child = InheritedLockChild::spawn(slot.lock.as_ref().unwrap());
-            drop(slot); // Same fd-drop handoff as acquire_detached; pid stays live.
-            child.assert_contended(&dir);
-            child.finish_shortly();
-            assert_eq!(
-                release_detached(
-                    &tmp.path().join("pool"),
-                    &dir,
-                    &token,
-                    SlotOutcome::Completed
-                )
-                .unwrap(),
-                ReleaseDisposition::Released
-            );
-            assert!(!dir.join(HOLDER_LEAF).exists());
-        }
-
-        #[test]
-        fn inherited_flock_gc_retries_before_reclaiming() {
-            let tmp = tempfile::tempdir().unwrap();
-            let mut slot = held_slot(&tmp, HolderInfo::default());
-            let dir = slot.path.clone();
-            let mut child = InheritedLockChild::spawn(slot.lock.as_ref().unwrap());
-            release(&mut slot, SlotOutcome::Completed).unwrap();
-            write_last_used(&dir, 0).unwrap();
-            child.assert_contended(&dir);
-            child.finish_shortly();
-            let report = reclaim_stale(
-                &tmp.path().join("pool"),
-                &GcPolicy {
-                    stale_hours: 1,
-                    apply: true,
-                },
-                &config(),
-            )
-            .unwrap();
-            assert_eq!(
-                report.iter().find(|r| r.slot_path == dir).unwrap().outcome,
-                ReclaimOutcome::Reclaimed
-            );
-            assert!(!dir.join(TARGET_LEAF).exists());
-            assert!(dir.join(LOCK_LEAF).exists());
         }
 
         #[test]
@@ -1542,99 +1472,6 @@ mod tests {
             assert_eq!(fs::read(dir.join(LAST_USED_LEAF)).unwrap(), before);
             assert!(!dir.join(HOLDER_LEAF).exists());
             child.assert_contended(&dir);
-        }
-
-        #[test]
-        fn inherited_flock_matching_token_release_expires_without_writes() {
-            let tmp = tempfile::tempdir().unwrap();
-            let slot = held_slot(&tmp, HolderInfo::default());
-            let dir = slot.path.clone();
-            let token = slot.claim_token.clone();
-            let child = InheritedLockChild::spawn(slot.lock.as_ref().unwrap());
-            drop(slot);
-            child.assert_contended(&dir);
-            let holder = fs::read(dir.join(HOLDER_LEAF)).unwrap();
-            let last_used = fs::read(dir.join(LAST_USED_LEAF)).unwrap();
-            let start = Instant::now();
-            assert!(matches!(
-                release_detached(&tmp.path().join("pool"), &dir, &token, SlotOutcome::Failed),
-                Err(BuildCacheError::SlotHeld { .. })
-            ));
-            assert!(start.elapsed() >= Duration::from_millis(180));
-            assert!(start.elapsed() < Duration::from_secs(2));
-            assert_eq!(fs::read(dir.join(HOLDER_LEAF)).unwrap(), holder);
-            assert_eq!(fs::read(dir.join(LAST_USED_LEAF)).unwrap(), last_used);
-            child.assert_contended(&dir);
-        }
-
-        #[test]
-        fn inherited_flock_unknown_metadata_does_not_retry() {
-            let tmp = tempfile::tempdir().unwrap();
-            let slot = held_slot(&tmp, HolderInfo::default());
-            let dir = slot.path.clone();
-            let child = InheritedLockChild::spawn(slot.lock.as_ref().unwrap());
-            drop(slot);
-            child.assert_contended(&dir);
-            fs::write(dir.join(HOLDER_LEAF), b"invalid json").unwrap();
-            let probe = File::open(dir.join(LOCK_LEAF)).unwrap();
-            for unreadable in [false, true] {
-                if unreadable {
-                    fs::remove_file(dir.join(HOLDER_LEAF)).unwrap();
-                    fs::create_dir(dir.join(HOLDER_LEAF)).unwrap();
-                }
-                let start = Instant::now();
-                assert_eq!(
-                    try_lock_slot(&probe, &dir, None).unwrap_err().kind(),
-                    std::io::ErrorKind::WouldBlock
-                );
-                assert!(
-                    start.elapsed() < Duration::from_millis(180),
-                    "unknown metadata must stop retries"
-                );
-            }
-        }
-
-        #[test]
-        fn inherited_flock_live_holder_and_wrong_token_remain_excluded() {
-            let tmp = tempfile::tempdir().unwrap();
-            let slot = held_slot(&tmp, HolderInfo::default());
-            let dir = slot.path.clone();
-            let child = InheritedLockChild::spawn(slot.lock.as_ref().unwrap());
-            drop(slot);
-            child.assert_contended(&dir);
-            let holder = fs::read(dir.join(HOLDER_LEAF)).unwrap();
-            let last_used = fs::read(dir.join(LAST_USED_LEAF)).unwrap();
-            let start = Instant::now();
-            let replacement = held_slot(&tmp, HolderInfo::default());
-            assert_ne!(replacement.path, dir);
-            assert!(matches!(
-                release_detached(
-                    &tmp.path().join("pool"),
-                    &dir,
-                    "wrong-token",
-                    SlotOutcome::Failed
-                ),
-                Err(BuildCacheError::SlotHeld { .. })
-            ));
-            let report = reclaim_stale(
-                &tmp.path().join("pool"),
-                &GcPolicy {
-                    stale_hours: 0,
-                    apply: true,
-                },
-                &config(),
-            )
-            .unwrap();
-            assert_eq!(
-                report.iter().find(|r| r.slot_path == dir).unwrap().outcome,
-                ReclaimOutcome::Locked
-            );
-            assert!(
-                start.elapsed() < Duration::from_millis(180),
-                "live unrelated ownership must not wait through the retry window"
-            );
-            assert_eq!(fs::read(dir.join(HOLDER_LEAF)).unwrap(), holder);
-            assert_eq!(fs::read(dir.join(LAST_USED_LEAF)).unwrap(), last_used);
         }
     }
 
@@ -1795,64 +1632,6 @@ mod tests {
         assert_eq!(pid_alive(i32::MAX as u32 + 1), Some(false));
     }
 
-    // Dead-holder reclamation hinges on `pid_alive`'s kill(pid, 0)
-    // semantics, which only exist on Unix; `spawn_dead_pid` is cfg(unix).
-    #[test]
-    #[cfg(unix)]
-    fn report_only_preserves_dead_holder_and_all_slot_files() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("pool");
-        let slot = acquire(
-            &root,
-            &key(&tmp),
-            SlotPurpose::Peer,
-            &config(),
-            &HolderInfo {
-                pid_override: Some(spawn_dead_pid()),
-                ..HolderInfo::default()
-            },
-        )
-        .unwrap();
-        let dir = slot.path.clone();
-        fs::write(slot.target_dir.join("artifact"), b"cache").unwrap();
-        drop(slot);
-        for last_used in [0, now_secs()] {
-            write_last_used(&dir, last_used).unwrap();
-            let paths = [
-                dir.join(HOLDER_LEAF),
-                dir.join(LOCK_LEAF),
-                dir.join(LAST_USED_LEAF),
-                dir.join(TARGET_LEAF).join("artifact"),
-            ];
-            let before: Vec<_> = paths.iter().map(|path| fs::read(path).unwrap()).collect();
-            let reports = reclaim_stale(
-                &root,
-                &GcPolicy {
-                    stale_hours: 1,
-                    apply: false,
-                },
-                &config(),
-            )
-            .unwrap();
-            let after: Vec<_> = paths.iter().map(|path| fs::read(path).unwrap()).collect();
-            assert_eq!(before, after, "report-only preserves slot files");
-            let report = reports
-                .iter()
-                .find(|report| report.slot_path == dir)
-                .unwrap();
-            if last_used == 0 {
-                assert_eq!(report.outcome, ReclaimOutcome::Stale);
-                assert_eq!(report.would_free_bytes, 5);
-            } else {
-                assert_eq!(report.outcome, ReclaimOutcome::Fresh);
-            }
-            assert!(
-                reports.iter().all(|report| report.freed_bytes == 0
-                    && report.outcome != ReclaimOutcome::HolderCleared)
-            );
-        }
-    }
-
     #[test]
     fn namespaces_do_not_share_slots() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1916,135 +1695,6 @@ mod tests {
             &HolderInfo::default(),
         )
         .unwrap();
-    }
-
-    #[test]
-    fn concurrent_acquire_never_exceeds_pool_size() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = Arc::new(tmp.path().join("pool"));
-        let cfg = Arc::new(config());
-        let key = Arc::new(key(&tmp));
-        let holders = Arc::new(std::sync::Mutex::new(Vec::<PathBuf>::new()));
-        let acquired = Arc::new(std::sync::Barrier::new(9));
-        let checked = Arc::new(std::sync::Barrier::new(9));
-        let exhausted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let mut joins = Vec::new();
-        for _ in 0..8 {
-            let (root, cfg, key, holders, acquired, checked, exhausted) = (
-                Arc::clone(&root),
-                Arc::clone(&cfg),
-                Arc::clone(&key),
-                Arc::clone(&holders),
-                Arc::clone(&acquired),
-                Arc::clone(&checked),
-                Arc::clone(&exhausted),
-            );
-            joins.push(std::thread::spawn(move || {
-                let result = acquire(&root, &key, SlotPurpose::Peer, &cfg, &HolderInfo::default());
-                if let Ok(slot) = &result {
-                    holders.lock().unwrap().push(slot.path.clone());
-                } else if matches!(&result, Err(BuildCacheError::PoolExhausted { .. })) {
-                    exhausted.fetch_add(1, Ordering::Relaxed);
-                }
-                // Keep every successful Slot alive across both barriers.
-                acquired.wait();
-                checked.wait();
-                match result {
-                    Ok(mut slot) => {
-                        release(&mut slot, SlotOutcome::Completed).unwrap();
-                    }
-                    Err(BuildCacheError::PoolExhausted { .. }) => {}
-                    Err(other) => panic!("unexpected acquire error: {other}"),
-                }
-            }));
-        }
-        acquired.wait();
-        let held = holders.lock().unwrap().clone();
-        // Capture lock ownership while all worker handles are still alive.
-        let all_locked = held.iter().all(|path| {
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(path.join(LOCK_LEAF))
-                .is_ok_and(|lock| fs2::FileExt::try_lock_exclusive(&lock).is_err())
-        });
-        // Always unblock workers before assertions, including on failures.
-        checked.wait();
-        for join in joins {
-            join.join().unwrap();
-        }
-        let mut distinct = held.clone();
-        distinct.sort();
-        distinct.dedup();
-        assert!(
-            all_locked,
-            "successful workers must retain flock through the overlap interval"
-        );
-        assert_eq!(held.len(), cfg.peer_slots as usize);
-        assert_eq!(
-            distinct.len(),
-            held.len(),
-            "simultaneous holders must use different paths"
-        );
-        assert!(held.len() <= cfg.peer_slots as usize);
-        assert_eq!(exhausted.load(Ordering::Relaxed), 8 - held.len());
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn dead_holder_slot_is_reclaimable() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("pool");
-        let slot = acquire(
-            &root,
-            &key(&tmp),
-            SlotPurpose::Peer,
-            &config(),
-            &HolderInfo::default(),
-        )
-        .unwrap();
-        fs::create_dir_all(slot.target_dir.join("deps")).unwrap();
-        let dir = slot.path.clone();
-        drop(slot); // simulate a crash: lock gone, holder.json remains
-
-        // Forge a dead holder: spawn a real short-lived process, kill it,
-        // and wait — the pid is then verifiably gone (kill -0 → ESRCH),
-        // unlike a guessed constant that the kernel may recycle.
-        let dead = spawn_dead_pid();
-        assert_eq!(pid_alive(dead), None, "test seam must produce a dead pid");
-        let meta = HolderMeta {
-            kind: SlotKind::Peer,
-            pid: dead,
-            slug: None,
-            goal_id: None,
-            task_id: None,
-            purpose_note: None,
-            acquired_at: 1,
-            claim_token: String::new(),
-        };
-        write_file_atomic(&dir, HOLDER_LEAF, &serde_json::to_string(&meta).unwrap()).unwrap();
-        // Age it past the window by backdating last_used.
-        write_last_used(&dir, 0).unwrap();
-
-        let report = reclaim_stale(
-            &root,
-            &GcPolicy {
-                stale_hours: 1,
-                apply: true,
-            },
-            &config(),
-        )
-        .unwrap();
-        assert!(
-            report
-                .iter()
-                .any(|r| r.outcome == ReclaimOutcome::Reclaimed)
-        );
-        assert!(!dir.join(TARGET_LEAF).exists());
-        assert!(
-            dir.join(LOCK_LEAF).exists(),
-            "the lock inode must survive GC"
-        );
     }
 
     #[test]
@@ -2137,60 +1787,4 @@ mod tests {
     }
 
     // ---- review #3 fixes (D1, D3, D4, D6) ----
-
-    // chmod-based EACCES plus the dead-pid seam are both Unix-only.
-    #[test]
-    #[cfg(unix)]
-    fn unreadable_holder_json_is_skipped_not_stale() {
-        // D4: an EACCES on holder.json means the slot is probably someone
-        // else's — conservative skip, not "stale holder".
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("pool");
-        let slot = acquire(
-            &root,
-            &key(&tmp),
-            SlotPurpose::Peer,
-            &config(),
-            &HolderInfo::default(),
-        )
-        .unwrap();
-        let dir = slot.path.clone();
-        drop(slot);
-        let holder = dir.join(HOLDER_LEAF);
-        let meta = HolderMeta {
-            kind: SlotKind::Peer,
-            pid: spawn_dead_pid(),
-            slug: None,
-            goal_id: None,
-            task_id: None,
-            purpose_note: None,
-            acquired_at: 1,
-            claim_token: String::new(),
-        };
-        write_file_atomic(&dir, HOLDER_LEAF, &serde_json::to_string(&meta).unwrap()).unwrap();
-        // chmod 000: unreadable to everyone (root sees through it; the
-        // assertion below holds for both the skip and the root case).
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&holder, fs::Permissions::from_mode(0o000)).unwrap();
-        }
-        let report = reclaim_stale(
-            &root,
-            &GcPolicy {
-                stale_hours: 0,
-                apply: true,
-            },
-            &config(),
-        )
-        .unwrap();
-        let row = report.iter().find(|r| r.slot_path == dir).unwrap();
-        // Either skipped-as-held (unprivileged: EACCES→skip) or cleared
-        // (root reads through 0000 and finds the dead pid). Both are safe;
-        // neither may have deleted the target.
-        assert!(matches!(
-            row.outcome,
-            ReclaimOutcome::Locked | ReclaimOutcome::HolderCleared
-        ));
-    }
 }

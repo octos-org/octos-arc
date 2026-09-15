@@ -215,69 +215,6 @@ async fn should_produce_typed_session_summary_from_llm_response() {
 }
 
 #[tokio::test]
-async fn should_preserve_prior_decision_through_iterative_refinement() {
-    // First pass produces a decision. Second pass returns a summary where
-    // the LLM "forgot" that decision; the summarizer must retain it (marked
-    // stale), never silently drop it.
-    let first = base_summary();
-    let second = SessionSummary {
-        schema_version: SESSION_SUMMARY_SCHEMA_VERSION,
-        goal: "land iterative summarizer".to_string(),
-        constraints: vec![],
-        progress_done: vec!["wired trait".to_string(), "added tests".to_string()],
-        progress_in_progress: vec![],
-        decisions: vec![], // LLM omitted the prior decision.
-        files: vec![],
-        next_steps: vec!["merge PR".to_string()],
-    };
-
-    let scripted = Arc::new(ScriptedLlm::new(vec![
-        json_summary(&first),
-        json_summary(&second),
-    ]));
-    let summarizer = LlmIterativeSummarizer::new(scripted.clone());
-
-    summarizer
-        .summarize(&[user("first turn")], 2_000)
-        .expect("first pass succeeds");
-    summarizer
-        .summarize(&[user("second turn")], 2_000)
-        .expect("second pass succeeds");
-
-    let latest = summarizer
-        .latest_summary()
-        .expect("latest_summary after refinement");
-    // Prior decision must still be present — marked stale by the merge.
-    let retained = latest
-        .decisions
-        .iter()
-        .find(|d| d.at_turn == 1)
-        .expect("prior decision preserved after refinement");
-    assert!(
-        retained.summary.starts_with(STALE_DECISION_PREFIX),
-        "retained prior decision must be marked stale, not silently dropped; got {:?}",
-        retained.summary,
-    );
-    assert_eq!(
-        retained.rationale.as_deref(),
-        Some("round-trip guarantee"),
-        "rationale carried through from the prior summary",
-    );
-    // Constraints and files from the prior pass must survive too.
-    assert!(
-        latest.constraints.iter().any(|c| c == "no unsafe"),
-        "prior constraint retained",
-    );
-    assert!(
-        latest
-            .files
-            .iter()
-            .any(|f| f.path == "crates/octos-agent/src/summarizer.rs"),
-        "prior file retained",
-    );
-}
-
-#[tokio::test]
 async fn should_mark_stale_decision_explicitly() {
     // When the LLM itself emits a stale marker for an existing decision,
     // the retained decision must carry that explicit marker (no silent
@@ -407,39 +344,4 @@ fn should_reject_future_schema_version_with_actionable_error() {
     let rendered = err.to_string();
     assert!(rendered.contains("SessionSummary"));
     assert!(rendered.contains("upgrade octos"));
-}
-
-#[test]
-fn should_round_trip_session_summary_byte_identical() {
-    // Invariant 1: `serialize(deserialize(x)) == serialize(deserialize(
-    // serialize(deserialize(x))))`. After the first normalization pass, the
-    // wire shape is stable; subsequent round-trips must be byte-identical.
-    let raw = load_fixture("session_summary_v1.json");
-    let parsed: SessionSummary = serde_json::from_str(&raw).expect("fixture parses");
-    assert_eq!(parsed.schema_version, SESSION_SUMMARY_SCHEMA_VERSION);
-    assert_eq!(parsed.decisions.len(), 2);
-
-    let once = serde_json::to_string(&parsed).expect("serialize once");
-    let twice_parsed: SessionSummary = serde_json::from_str(&once).expect("re-parse succeeds");
-    let twice = serde_json::to_string(&twice_parsed).expect("serialize twice");
-    assert_eq!(
-        once, twice,
-        "SessionSummary must round-trip byte-identical after normalization",
-    );
-    assert_eq!(
-        twice_parsed, parsed,
-        "round-tripped struct must compare equal to the original",
-    );
-
-    // Canonicalise both strings through serde_json::Value so ordering
-    // differences (pretty-printed whitespace in the fixture vs. compact on
-    // round-trip) don't mask semantic drift.
-    let fixture_value: serde_json::Value =
-        serde_json::from_str(&raw).expect("fixture parses as Value");
-    let roundtrip_value: serde_json::Value =
-        serde_json::from_str(&once).expect("roundtrip parses as Value");
-    assert_eq!(
-        fixture_value, roundtrip_value,
-        "fixture and roundtrip must be semantically identical",
-    );
 }

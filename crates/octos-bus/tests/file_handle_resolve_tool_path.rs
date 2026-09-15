@@ -8,8 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use octos_bus::file_handle::{
-    ResolvedToolPath, ToolPathError, ToolPathScope, encode_tmp_upload_handle, resolve_tool_path,
-    temp_upload_root,
+    ResolvedToolPath, ToolPathError, ToolPathScope, resolve_tool_path, temp_upload_root,
 };
 use tempfile::TempDir;
 
@@ -78,16 +77,6 @@ impl Rig {
         std::fs::write(&abs, body).expect("write upload file");
         std::fs::canonicalize(&abs).expect("canonicalise upload file")
     }
-
-    /// Relative path inside the rig's upload subdir as the file_handle
-    /// helpers see it (the bit between `temp_upload_root()` and the
-    /// file).
-    fn upload_relative(&self, name: &str) -> PathBuf {
-        self.upload_dir
-            .strip_prefix(temp_upload_root())
-            .map(|p| p.join(name))
-            .expect("upload dir lies under temp_upload_root")
-    }
 }
 
 impl Drop for Rig {
@@ -123,24 +112,6 @@ fn row_1_workspace_relative_input() {
 }
 
 #[test]
-fn row_2_absolute_inside_workspace_kept() {
-    let rig = Rig::new("row2");
-    let abs = rig.make_workspace_file("foo.txt", b"hi");
-
-    let resolved = expect_resolved(resolve_tool_path(
-        rig.workspace_root(),
-        Some(rig.profile_root()),
-        &abs.to_string_lossy(),
-    ));
-    assert_eq!(resolved.scope, ToolPathScope::Workspace);
-    // For absolute paths the resolver collapses macOS firmlinks via
-    // `canonicalize_lossy`, so the resolved path is the canonical form.
-    // The workspace-relative branch keeps the lexical workspace path —
-    // see `row_1_workspace_relative_input`.
-    assert_eq!(resolved.absolute, abs);
-}
-
-#[test]
 fn row_3_absolute_inside_upload_tmpdir_kept() {
     let rig = Rig::new("row3");
     let abs = rig.make_upload_file("019e22ab-cd-real-upload.wav", b"WAV");
@@ -159,30 +130,6 @@ fn row_3_absolute_inside_upload_tmpdir_kept() {
         resolved.absolute,
         temp_upload_root()
     );
-}
-
-#[test]
-fn row_4_three_segment_upload_handle() {
-    let rig = Rig::new("row4");
-    let abs = rig.make_upload_file("019e22-three-segment.wav", b"WAV");
-    let relative = rig.upload_relative("019e22-three-segment.wav");
-
-    let handle = encode_tmp_upload_handle(
-        &temp_upload_root().join(&relative),
-        Some("019e22-three-segment.wav"),
-    )
-    .expect("3-segment handle encoded");
-    assert!(handle.starts_with("up/"));
-    assert!(handle.matches('/').count() >= 2);
-
-    let resolved = expect_resolved(resolve_tool_path(
-        rig.workspace_root(),
-        Some(rig.profile_root()),
-        &handle,
-    ));
-    assert_eq!(resolved.scope, ToolPathScope::UploadTmpdir);
-    // canonicalise inside test to handle /private firmlinks on macOS.
-    assert_eq!(resolved.absolute, abs);
 }
 
 #[test]

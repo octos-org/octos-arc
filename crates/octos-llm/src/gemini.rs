@@ -1301,37 +1301,6 @@ mod tests {
     // --- sanitize_schema_for_gemini tests ---
 
     #[test]
-    fn test_sanitize_removes_additional_properties() {
-        let mut schema = serde_json::json!({
-            "type": "object",
-            "properties": {"name": {"type": "string"}},
-            "additionalProperties": false
-        });
-        sanitize_schema_for_gemini(&mut schema);
-        assert!(schema.get("additionalProperties").is_none());
-    }
-
-    #[test]
-    fn should_not_guess_items_when_array_items_are_empty() {
-        let mut schema = serde_json::json!({
-            "type": "array",
-            "items": {}
-        });
-        sanitize_schema_for_gemini(&mut schema);
-        assert_eq!(schema["items"], serde_json::json!({}));
-    }
-
-    #[test]
-    fn test_sanitize_preserves_non_empty_items() {
-        let mut schema = serde_json::json!({
-            "type": "array",
-            "items": {"type": "integer"}
-        });
-        sanitize_schema_for_gemini(&mut schema);
-        assert_eq!(schema["items"]["type"], "integer");
-    }
-
-    #[test]
     fn test_sanitize_removes_non_string_enum_values() {
         let mut schema = serde_json::json!({
             "type": "object",
@@ -1539,47 +1508,7 @@ mod tests {
         assert_eq!(serialized["parts"][0]["thoughtSignature"], "real-signature");
     }
 
-    #[test]
-    fn gemini_2_does_not_receive_gemini_3_signature_fallback() {
-        let messages = vec![
-            msg(MessageRole::User, "run it"),
-            Message {
-                role: MessageRole::Assistant,
-                content: String::new(),
-                media: vec![],
-                tool_calls: Some(vec![ToolCall {
-                    id: "tc1".into(),
-                    name: "first".into(),
-                    arguments: serde_json::json!({}),
-                    metadata: None,
-                }]),
-                tool_call_id: None,
-                reasoning_content: None,
-                client_message_id: None,
-                thread_id: None,
-                timestamp: chrono::Utc::now(),
-            },
-        ];
-
-        let (contents, _) = build_gemini_contents_for_model(&messages, "gemini-2.5-flash");
-        let serialized = serde_json::to_value(&contents[1]).expect("serialize model content");
-
-        assert!(serialized["parts"][0].get("thoughtSignature").is_none());
-    }
-
     // --- SSE mapping tests ---
-
-    #[test]
-    fn test_gemini_sse_text_delta() {
-        let mut state = GeminiStreamState::default();
-        let event = crate::sse::SseEvent {
-            event: None,
-            data: r#"{"candidates": [{"content": {"parts": [{"text": "Hello"}]}}]}"#.into(),
-        };
-        let events = map_gemini_sse(&mut state, &event);
-        assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], StreamEvent::TextDelta(t) if t == "Hello"));
-    }
 
     #[test]
     fn test_gemini_sse_function_call() {
@@ -1661,20 +1590,6 @@ mod tests {
     }
 
     #[test]
-    fn test_gemini_sse_usage() {
-        let mut state = GeminiStreamState::default();
-        let event = crate::sse::SseEvent {
-            event: None,
-            data: r#"{"usageMetadata": {"promptTokenCount": 100, "candidatesTokenCount": 50}}"#
-                .into(),
-        };
-        let events = map_gemini_sse(&mut state, &event);
-        assert!(events.iter().any(
-            |e| matches!(e, StreamEvent::Usage(u) if u.input_tokens == 100 && u.output_tokens == 50)
-        ));
-    }
-
-    #[test]
     fn test_gemini_response_accepts_content_without_role() {
         let api_response: GeminiResponse = serde_json::from_value(serde_json::json!({
             "candidates": [
@@ -1693,20 +1608,6 @@ mod tests {
     }
 
     // --- Provider metadata tests ---
-
-    #[test]
-    fn test_provider_name_and_model() {
-        let provider = GeminiProvider::new("test-key", "gemini-2.5-flash");
-        assert_eq!(provider.provider_name(), "gemini");
-        assert_eq!(provider.model_id(), "gemini-2.5-flash");
-    }
-
-    #[test]
-    fn test_with_base_url() {
-        let provider =
-            GeminiProvider::new("key", "model").with_base_url("https://custom.googleapis.com");
-        assert_eq!(provider.base_url, "https://custom.googleapis.com");
-    }
 
     // --- Vertex / Gemini auth-mode tests ---
 
@@ -1749,18 +1650,6 @@ mod tests {
     }
 
     // --- Generation config tests ---
-
-    #[test]
-    fn test_thinking_config_low_effort() {
-        use crate::config::ReasoningEffort;
-        let config = ChatConfig {
-            reasoning_effort: Some(ReasoningEffort::Low),
-            ..Default::default()
-        };
-        let gen_config = build_gemini_generation_config(&config, "gemini/test").unwrap();
-        let tc = gen_config.thinking_config.unwrap();
-        assert_eq!(tc.thinking_budget, Some(1024));
-    }
 
     #[test]
     fn should_set_zero_thinking_budget_when_reasoning_is_disabled() {

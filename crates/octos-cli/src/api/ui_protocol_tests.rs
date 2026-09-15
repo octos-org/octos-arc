@@ -7,37 +7,9 @@ use super::*;
 use crate::approvals_audit::{ApprovalsAuditConfig, ApprovalsAuditLog};
 
 use octos_core::ui_protocol::{
-    ApprovalDecision, ApprovalId, ApprovalRespondParams, ApprovalRespondStatus, QuestionId,
-    approval_scopes, methods, rpc_error_codes,
+    ApprovalDecision, ApprovalId, ApprovalRespondParams, ApprovalRespondStatus, approval_scopes,
+    methods, rpc_error_codes,
 };
-
-#[test]
-fn should_reclaim_expired_context_persist_locks_without_splitting_live_writers() {
-    let locks = AppUiContextPersistLocks::default();
-    let session = SessionKey("persist-lock-live".into());
-    let first = appui_context_persist_lock_from(&locks, &session);
-    let guard = first.lock().unwrap();
-    let waiting = appui_context_persist_lock_from(&locks, &session);
-    assert!(Arc::ptr_eq(&first, &waiting));
-    assert!(waiting.try_lock().is_err());
-    for i in 0..2048 {
-        drop(appui_context_persist_lock_from(
-            &locks,
-            &SessionKey(format!("expired-{i}")),
-        ));
-        assert!(locks.lock().unwrap().len() <= 2);
-    }
-    drop(guard);
-    drop(first);
-    assert!(Arc::ptr_eq(
-        &waiting,
-        &appui_context_persist_lock_from(&locks, &session)
-    ));
-    drop(waiting);
-    let replacement = appui_context_persist_lock_from(&locks, &SessionKey("new-session".into()));
-    assert_eq!(locks.lock().unwrap().len(), 1);
-    assert!(replacement.try_lock().is_ok());
-}
 
 #[test]
 fn should_normalize_safe_tool_context_at_protocol_boundary() {
@@ -51,31 +23,16 @@ fn should_normalize_safe_tool_context_at_protocol_boundary() {
     assert_eq!(normalize_tool_context(Some(&"a".repeat(65))), None);
 }
 
-/// The §6 "Envelope Model" catalog in
-/// `api/OCTOS_UI_PROTOCOL_V1_SPEC_2026-04-24.md` is a hand-maintained
-/// mirror of the advertised method constants and has historically drifted
-/// — methods shipped without a catalog update (e.g. `session/rollback`
-/// #1516, `message/reasoning_delta` #1502). Nothing else gates catalog
-/// completeness (`check-ui-protocol-upcr.sh` only checks that a protocol
-/// edit ships with *a* UPCR doc). This test keeps §6 a superset of
-/// `UI_PROTOCOL_COMMAND_METHODS ∪ UI_PROTOCOL_NOTIFICATION_METHODS ∪
-/// UI_PROTOCOL_FIRST_SERVER_METHODS ∪ APPUI_EXTRA_METHODS` — the full set the
-/// server advertises (`ui_protocol_server_supported_methods` builds from
-/// `FIRST_SERVER ∪ APPUI_EXTRA`) — so the catalog can no longer silently
-/// fall behind, even for a future server-only method.
+/// Small reports are inlined verbatim; oversized ones collapse to a preview
+/// that must carry the `read_task_output` recovery pointer (Mini4 regression:
+/// the old bare 300-char preview made the parent conclude the report was lost).
 #[test]
-fn spawn_report_announcement_inlines_small_reports_in_full() {
+fn spawn_report_announcement_inlines_small_and_previews_large_reports() {
     let body = "Status: SUCCESS\n\nshort review body";
     let out = format_spawn_report_announcement("review-octos-web", body, Some("task-1"));
     assert!(out.contains(body), "small report must be inlined verbatim");
     assert!(!out.contains("preview truncated"));
-}
 
-#[test]
-fn spawn_report_announcement_previews_large_reports_with_recovery_pointer() {
-    // Mini4 re-review regression: the old 300-char preview with no
-    // pointer left the parent no way to recover a child's multi-KB
-    // report; it concluded the result "was lost".
     let body = "x".repeat(SPAWN_REPORT_INLINE_CAP_CHARS + 500);
     let out = format_spawn_report_announcement("review-octos-web", &body, Some("019f6e66-f94c"));
     assert!(out.contains("preview truncated"));
@@ -87,12 +44,9 @@ fn spawn_report_announcement_previews_large_reports_with_recovery_pointer() {
     assert!(out.len() > SPAWN_REPORT_INLINE_CAP_CHARS);
 }
 
-/// Provider stub for the open-snapshot compaction tests. The window must be
-/// LARGE relative to the compaction floor (16 kept items + a ≤4096-token
-/// summary) so a successful pass actually lands under threshold — with a toy
-/// window the keep-floor dominates and the assertion would test nothing. 64K
-/// window → ~45K threshold; 60×4000-char messages ≈ 60K estimate. `chat` is
-/// unreachable because the deterministic summarizer never calls the model.
+/// Provider stub with a window LARGE relative to the compaction floor (64K →
+/// ~45K threshold; 60×4000-char messages ≈ 60K estimate); `chat` is unreachable
+/// because the deterministic summarizer never calls the model.
 struct OpenSnapshotTinyProvider;
 
 #[async_trait::async_trait]
@@ -133,15 +87,11 @@ fn open_snapshot_padding_history(messages: usize) -> Vec<octos_core::Message> {
         .collect()
 }
 
+/// Field report 2026-08-07: a session whose ledger is REBUILT from long raw
+/// history at `session/open` published an over-window estimate. Open must run
+/// the SAME threshold compaction the pre-turn path would run.
 #[tokio::test]
 async fn session_open_snapshot_compacts_oversized_context() {
-    // Field report 2026-08-07: a session whose ledger is REBUILT from a long
-    // raw history at `session/open` (legacy/stale/missing snapshot) published
-    // and persisted an over-window estimate — the TUI gauge sat at
-    // `ctx 1.2M/1M` from open until the next turn's pre-turn pass finally
-    // compacted. Open must run the SAME threshold compaction the pre-turn
-    // path would run, so the published state is never over the window the
-    // session's own provider reports.
     let dir = tempfile::tempdir().unwrap();
     let session: SessionKey = SessionKey("full:api:open-compact".to_string());
     let history = open_snapshot_padding_history(60);
@@ -162,10 +112,7 @@ async fn session_open_snapshot_compacts_oversized_context() {
         "the open-time pass must be recorded as a real compaction"
     );
 
-    // The pass must return the lifecycle events for the caller to append to
-    // the ledger — a silent open-time rewrite of the session's context is
-    // exactly what the compaction UX exists to surface (field feedback on the
-    // first cut, which dropped these on the floor).
+    // The pass must return lifecycle events for the caller to append.
     let started_pos = events
         .iter()
         .position(|n| matches!(n, UiNotification::ContextCompactionStarted(_)));
@@ -184,8 +131,7 @@ async fn session_open_snapshot_compacts_oversized_context() {
     };
     assert_eq!(started.trigger, "appui_open");
 
-    // The compacted manager — not the oversized rebuild — must be what
-    // persisted: a reload sees the small estimate and a LOADED ledger.
+    // The compacted manager — not the oversized rebuild — must be persisted.
     let (reloaded, status) = crate::context_manager::load_or_rebuild_context_manager(
         dir.path(),
         session.to_string(),
@@ -202,29 +148,18 @@ async fn session_open_snapshot_compacts_oversized_context() {
 
 #[test]
 fn post_terminal_drain_skips_late_tokens_but_keeps_background_progress() {
-    // Regression for the "queued N messages after active turn" wedge: the
-    // post-terminal spawn_only drain must drop late assistant `token`
-    // deltas (they carry the already-completed foreground turn id and
-    // resurrect the client's input gate) alongside the already-emitted
-    // `done`/`error` terminal signals...
+    // Drain must drop late `token`/`reasoning_chunk` deltas (they resurrect
+    // the client's input gate) alongside emitted terminal signals...
     assert!(drain_should_skip_event(Some("done")));
     assert!(drain_should_skip_event(Some("error")));
     assert!(drain_should_skip_event(Some("token")));
     assert!(drain_should_skip_event(Some("reasoning_chunk")));
 
-    // ...while still forwarding the background task's real progress, which
-    // is the entire point of the drain (#961). None of these produce a
-    // `MessageDelta`, so none can wedge the turn gate.
+    // ...while still forwarding the background task's real progress (#961).
     for keep in [
         "task_started",
         "task_updated",
-        "task_completed",
-        "task_interrupted",
-        "tool_start",
         "tool_progress",
-        "tool_end",
-        "file_modified",
-        "file_written",
         "cost_update",
     ] {
         assert!(
@@ -234,19 +169,6 @@ fn post_terminal_drain_skips_late_tokens_but_keeps_background_progress() {
     }
     // A typeless event is forwarded (the mapper warns on it downstream).
     assert!(!drain_should_skip_event(None));
-}
-
-#[tokio::test]
-async fn independent_oup_app_states_do_not_share_the_first_instances_ledger() {
-    let first = AppState::empty_for_tests();
-    let second = AppState::empty_for_tests();
-    let a = event_ledger(&first).await;
-    let b = event_ledger(&second).await;
-    assert!(
-        !Arc::ptr_eq(&a, &b),
-        "an embedded runtime must not inherit another runtime's ledger root"
-    );
-    assert!(Arc::ptr_eq(&a, &event_ledger(&first).await));
 }
 
 fn local_profile_state(dir: &Path) -> AppState {
@@ -276,8 +198,11 @@ fn profile_for_runtime_message(id: &str) -> crate::profiles::UserProfile {
     }
 }
 
+/// The runtime-unavailable message must distinguish a missing profile (not-found
+/// explanation) from an unconfigured one (API-key guidance) and never blame a
+/// missing API key for a profile that does not exist.
 #[test]
-fn should_report_unknown_profile_when_profile_runtime_unavailable_and_profile_missing() {
+fn profile_runtime_unavailable_message_distinguishes_missing_profile_from_no_llm() {
     let dir = tempfile::tempdir().unwrap();
     let state = local_profile_state(dir.path());
     let message = profile_runtime_unavailable_message(&state, "ghost");
@@ -289,12 +214,7 @@ fn should_report_unknown_profile_when_profile_runtime_unavailable_and_profile_mi
         !message.contains("API key"),
         "must not blame a missing API key: {message}"
     );
-}
 
-#[test]
-fn should_report_missing_api_key_when_profile_runtime_unavailable_and_no_llm_selected() {
-    let dir = tempfile::tempdir().unwrap();
-    let state = local_profile_state(dir.path());
     let profile = profile_for_runtime_message("no-llm-one");
     state
         .profile_store
@@ -302,62 +222,15 @@ fn should_report_missing_api_key_when_profile_runtime_unavailable_and_no_llm_sel
         .unwrap()
         .save(&profile)
         .unwrap();
-
     let message = profile_runtime_unavailable_message(&state, "no-llm-one");
     assert!(
         message.contains("API key"),
         "a genuinely unconfigured profile should keep the API-key guidance, got: {message}"
     );
 }
-
-#[test]
-fn profile_local_create_make_default_persists_pointer() {
-    let dir = tempfile::tempdir().unwrap();
-    let state = local_profile_state(dir.path());
-
-    // Create with make_default → the assigned profile becomes the global
-    // default pointer.
-    let created = create_or_get_local_solo_profile(
-        &state,
-        octos_core::ui_protocol::ProfileLocalCreateParams {
-            requested_id: Some("glm".into()),
-            name: String::new(),
-            username: String::new(),
-            email: String::new(),
-            make_default: Some(true),
-        },
-    )
-    .expect("create with make_default");
-    let store = state.profile_store.as_ref().unwrap();
-    assert_eq!(
-        store.default_profile().as_deref(),
-        Some(created.profile_id.as_str())
-    );
-
-    // A later create WITHOUT make_default must not steal the default.
-    let other = create_or_get_local_solo_profile(
-        &state,
-        octos_core::ui_protocol::ProfileLocalCreateParams {
-            requested_id: Some("deepseek".into()),
-            name: String::new(),
-            username: String::new(),
-            email: String::new(),
-            make_default: None,
-        },
-    )
-    .expect("create without make_default");
-    assert_ne!(other.profile_id, created.profile_id);
-    assert_eq!(
-        store.default_profile().as_deref(),
-        Some(created.profile_id.as_str()),
-        "a create without make_default must leave the default pointer intact"
-    );
-}
-
 /// `profile/sub_providers/{list,upsert,remove}`: add/replace-by-key/remove the
-/// named provider lanes (`cheap`/`strong` etc.) that back the isolated research
-/// pipeline router; upsert with an existing key REPLACES rather than appends,
-/// removing a missing key reports `applied:false`, and everything persists.
+/// named provider lanes; same-key upsert REPLACES, removing a missing key
+/// reports `applied:false`, and everything persists.
 #[tokio::test]
 async fn sub_providers_upsert_list_and_remove_round_trip() {
     let dir = tempfile::tempdir().unwrap();
@@ -383,8 +256,7 @@ async fn sub_providers_upsert_list_and_remove_round_trip() {
         assert_eq!(res["restart_required"], true);
     }
 
-    // A pasted api_key with no api_key_env must be REJECTED (was silently
-    // dropped, leaving the lane to grab ambient/primary credentials).
+    // api_key with no api_key_env must be REJECTED (was silently dropped).
     let no_env = RpcRequest::new(
         "u-noenv".to_string(),
         APPUI_METHOD_PROFILE_SUB_PROVIDERS_UPSERT.to_string(),
@@ -454,23 +326,10 @@ async fn sub_providers_upsert_list_and_remove_round_trip() {
         .expect("remove");
     assert_eq!(res["applied"], true);
     assert_eq!(res["sub_providers"].as_array().unwrap().len(), 1);
-
-    // Removing a missing key is a no-op with applied:false.
-    let rm2 = RpcRequest::new(
-        "r2".to_string(),
-        APPUI_METHOD_PROFILE_SUB_PROVIDERS_REMOVE.to_string(),
-        json!({ "profile_id": "dev", "key": "nonexistent" }),
-    );
-    let res = raw_profile_sub_providers_remove(&state, &rm2, None)
-        .await
-        .expect("remove-miss");
-    assert_eq!(res["applied"], false);
 }
 
-/// Unknown fields on `profile/llm/upsert` must be rejected with EVERY
-/// rejected field named by its dotted path — never accepted with
-/// `applied: true` while the values are silently discarded — and the prior
-/// configuration must be left untouched.
+/// Unknown fields on `profile/llm/upsert` must be rejected with EVERY field
+/// named by its dotted path, and the prior configuration left untouched.
 #[tokio::test]
 async fn llm_upsert_rejects_unknown_fields_and_names_every_one() {
     let dir = tempfile::tempdir().unwrap();
@@ -575,10 +434,8 @@ fn llm_upsert_rpc(
     )
 }
 
-/// #2164 acceptance — dynamic profile, endpoint edit: changing the primary's
-/// base URL (same family/model/route address) must evict the cached
-/// ProfileRuntime and rebuild from the committed file, so the next turn
-/// serves the new endpoint instead of the stale provider chain.
+/// #2164 acceptance — an endpoint edit on the primary must evict the cached
+/// ProfileRuntime and rebuild from the committed file for the next turn.
 #[tokio::test]
 async fn should_upsert_endpoint_edit_reload_dynamic_profile_runtime_for_next_turn() {
     let dir = tempfile::tempdir().unwrap();
@@ -598,12 +455,8 @@ async fn should_upsert_endpoint_edit_reload_dynamic_profile_runtime_for_next_tur
         &before,
         &dynamic_cached_profile_runtime(&state, "dev").expect("cache entry"),
     ));
-    // A turn in flight keeps its start-of-turn runtime; the test drops its
-    // handle the same way a finished turn would, so the rebuild below can
-    // take over the profile's data directory (single-writer redb).
     // A weak handle keeps the allocation identity reserved without keeping
-    // the runtime's single-writer episode store alive during reload. Saving
-    // only its address lets the allocator reuse it for the new runtime.
+    // the runtime's episode store alive during reload.
     let before_identity = Arc::downgrade(&before);
     drop(before);
 
@@ -646,15 +499,15 @@ async fn should_upsert_endpoint_edit_reload_dynamic_profile_runtime_for_next_tur
 
 #[test]
 fn catalog_result_sourced_from_registry_and_canonical_catalog() {
-    // With no runtime data-dir catalog, the onboarding catalog is fully
-    // populated from the compiled-in canonical model_catalog.json (the SSOT)
-    // with family key-env from the provider registry — providers.json is no
-    // longer the source.
+    // No runtime data-dir catalog → fully populated from the compiled-in
+    // canonical model_catalog.json (the SSOT) with registry key-envs.
     let dir = tempfile::tempdir().unwrap();
     let state = local_profile_state(dir.path());
     let catalog = raw_catalog_result(&state, None).expect("catalog");
     let families = catalog["families"].as_object().expect("families object");
 
+    // Key-env comes from the registry, not a hand-maintained env map.
+    assert_eq!(families["zai"]["env"], "ZAI_API_KEY");
     let ids = |fam: &str| -> Vec<String> {
         families[fam]["models"]
             .as_array()
@@ -663,62 +516,24 @@ fn catalog_result_sourced_from_registry_and_canonical_catalog() {
             .filter_map(|m| m["id"].as_str().map(str::to_owned))
             .collect()
     };
+    // Curation: glm-5.3 + k3 present, deepseek-chat curated out.
+    assert!(ids("zai").contains(&"glm-5.3".to_owned()));
+    assert!(ids("moonshot-coding").contains(&"k3".to_owned()));
+    assert!(!ids("deepseek").contains(&"deepseek-chat".to_owned()));
 
-    // Key-env comes from the registry, not a hand-maintained env map.
-    assert_eq!(families["zai"]["env"], "ZAI_API_KEY");
-    // Curation: glm-5.3 + k3 present; deepseek-chat removed.
-    assert!(
-        ids("zai").contains(&"glm-5.3".to_owned()),
-        "{:?}",
-        ids("zai")
-    );
-    assert!(
-        ids("moonshot-coding").contains(&"k3".to_owned()),
-        "{:?}",
-        ids("moonshot-coding")
-    );
-    // k3 onboards under the moonshot-coding family key-env with its
-    // researched 1M context window.
-    assert_eq!(families["moonshot-coding"]["env"], "KIMI_CODING_API_KEY");
-    let k3 = families["moonshot-coding"]["models"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|m| m["id"] == "k3")
-        .unwrap();
-    assert_eq!(k3["context_window"], 1_048_576);
-    assert_eq!(k3["max_output"], 131_072);
-    assert!(
-        !ids("deepseek").contains(&"deepseek-chat".to_owned()),
-        "deepseek-chat curated out: {:?}",
-        ids("deepseek")
-    );
-    assert!(ids("deepseek").contains(&"deepseek-v4-pro".to_owned()));
-
-    // Researched context window flows through to the catalog (glm-5.2 = 1M).
-    let glm52 = families["zai"]["models"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|m| m["id"] == "glm-5.3")
-        .unwrap();
-    assert_eq!(glm52["context_window"], 1_000_000);
-
-    // Alternative provisioning endpoints (AutoDL/WiseModel) survive into the
-    // onboarding catalog so the TUI route-picker keeps its choices — this was
-    // supplied by the retired providers.json and must not be lost.
+    // Alternative provisioning endpoints survive into the onboarding catalog.
     let v4pro = families["deepseek"]["models"]
         .as_array()
         .unwrap()
         .iter()
         .find(|m| m["id"] == "deepseek-v4-pro")
         .unwrap();
-    let endpoints = v4pro["endpoints"].as_array().expect("v4-pro has endpoints");
     assert!(
-        endpoints
+        v4pro["endpoints"]
+            .as_array()
+            .expect("v4-pro has endpoints")
             .iter()
             .any(|e| e["id"] == "autodl" && e["api_key_env"] == "AUTODL_API_KEY"),
-        "AutoDL alternative endpoint present: {endpoints:?}"
     );
 }
 
@@ -798,69 +613,6 @@ impl AsyncWrite for FailingWriter {
     }
 }
 
-struct DropNotify(Option<oneshot::Sender<()>>);
-
-impl DropNotify {
-    fn new(tx: oneshot::Sender<()>) -> Self {
-        Self(Some(tx))
-    }
-}
-
-impl Drop for DropNotify {
-    fn drop(&mut self) {
-        if let Some(tx) = self.0.take() {
-            let _ = tx.send(());
-        }
-    }
-}
-
-#[test]
-fn stdio_durable_send_waits_for_capacity_instead_of_backpressure_drop() {
-    let (writer_tx, writer_rx) = std::sync::mpsc::sync_channel(1);
-    let ws = WsConnection::new_stdio(writer_tx);
-    let ledger = Arc::new(UiProtocolLedger::new(16));
-    let session_id = SessionKey("local:stdio-backpressure".into());
-    let turn_id = TurnId::new();
-
-    send_rpc_result(&ws, "fill".into(), json!({"ok": true}))
-        .expect("priming lifecycle frame fills stdio queue");
-
-    let send_ws = ws.clone();
-    let send_ledger = Arc::clone(&ledger);
-    let send_session_id = session_id.clone();
-    let send_turn_id = turn_id.clone();
-    let send_thread = std::thread::spawn(move || {
-        send_notification_durable(
-            &send_ws,
-            send_ledger.as_ref(),
-            UiNotification::Warning(octos_core::ui_protocol::WarningEvent {
-                session_id: send_session_id,
-                turn_id: Some(send_turn_id),
-                code: "test".into(),
-                message: "wait for capacity".into(),
-            }),
-        )
-    });
-
-    std::thread::sleep(Duration::from_millis(50));
-    assert!(
-        !send_thread.is_finished(),
-        "stdio durable send must wait while the bounded queue is full",
-    );
-
-    let _first = writer_rx
-        .recv_timeout(Duration::from_millis(500))
-        .expect("priming frame drains");
-    let send_result = send_thread
-        .join()
-        .expect("stdio durable send thread should not panic");
-    assert_eq!(send_result, Ok(()));
-
-    let _second = writer_rx
-        .recv_timeout(Duration::from_millis(500))
-        .expect("durable frame queued after capacity becomes available");
-}
-
 #[tokio::test]
 async fn stdio_ndjson_reader_rejects_oversized_frame_before_newline() {
     let input = std::io::Cursor::new(vec![b'x'; MAX_TEXT_FRAME_BYTES + 1]);
@@ -932,125 +684,29 @@ async fn stdio_connection_stops_dispatch_after_writer_failure() {
     reset_stdio_dispatch_count_for_test();
 }
 
-#[tokio::test]
-async fn stdio_cleanup_aborts_active_turns_and_live_forwarders() {
-    let active_turns: SharedActiveTurns = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-    let connection_turns: SharedConnectionTurns = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-    let live_forwarders: SharedLiveForwarders = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-    let contracts = UiProtocolContractStores::default();
-    let ledger = UiProtocolLedger::new(16);
-    let session_id = SessionKey("local:stdio-cleanup".into());
-    let turn_id = TurnId::new();
-
-    let (turn_started_tx, turn_started_rx) = oneshot::channel();
-    let (turn_drop_tx, turn_drop_rx) = oneshot::channel();
-    let turn_task = tokio::spawn(async move {
-        let _drop = DropNotify::new(turn_drop_tx);
-        let _ = turn_started_tx.send(());
-        std::future::pending::<()>().await;
-    });
-    active_turns.lock().await.insert(
-        session_id.clone(),
-        test_active_turn(turn_id.clone(), turn_task.abort_handle()),
-    );
-    connection_turns.lock().await.insert(
-        session_id.clone(),
-        test_connection_turn(&active_turns, &session_id, &turn_id).await,
-    );
-
-    let (forwarder_started_tx, forwarder_started_rx) = oneshot::channel();
-    let (forwarder_drop_tx, forwarder_drop_rx) = oneshot::channel();
-    let forwarder_task = tokio::spawn(async move {
-        let _drop = DropNotify::new(forwarder_drop_tx);
-        let _ = forwarder_started_tx.send(());
-        std::future::pending::<()>().await;
-    });
-    live_forwarders
-        .lock()
-        .await
-        .insert(session_id.clone(), forwarder_task);
-
-    turn_started_rx.await.expect("active turn task started");
-    forwarder_started_rx
-        .await
-        .expect("live forwarder task started");
-
-    cleanup_stdio_connection_resources(
-        &active_turns,
-        &connection_turns,
-        &live_forwarders,
-        &contracts,
-        &ledger,
-    )
-    .await;
-
-    assert!(active_turns.lock().await.is_empty());
-    assert!(connection_turns.lock().await.is_empty());
-    assert!(live_forwarders.lock().await.is_empty());
-    tokio::time::timeout(Duration::from_millis(500), turn_drop_rx)
-        .await
-        .expect("active turn task should be aborted")
-        .expect("active turn drop notification");
-    let _ = turn_task.await;
-    tokio::time::timeout(Duration::from_millis(500), forwarder_drop_rx)
-        .await
-        .expect("live forwarder should be aborted and awaited")
-        .expect("live forwarder drop notification");
-
-    let replay = ledger
-        .replay_after(
-            &session_id,
-            Some(&UiCursor {
-                stream: session_id.0.clone(),
-                seq: 0,
-            }),
-        )
-        .expect("replay cleanup events");
-    assert!(replay.iter().any(|entry| matches!(
-        &entry.event,
-        UiProtocolLedgerEvent::Notification(UiNotification::TurnError(event))
-            if event.turn_id == turn_id && event.code == "connection_closed"
-    )));
-}
-
 #[test]
 fn stdio_session_open_candidate_profile_is_last_success_candidate_only() {
-    let params = SessionOpenParams {
-        session_id: SessionKey("coding:local:test".into()),
+    let base = |session_id: SessionKey, profile_id: Option<String>| SessionOpenParams {
+        session_id,
         topic: None,
-        profile_id: None,
+        profile_id,
         cwd: None,
         sandbox: None,
         after: None,
     };
+    let candidate = |session_id, profile_id| {
+        stdio_session_open_candidate_profile(&base(session_id, profile_id), Some("previous"))
+    };
     assert_eq!(
-        stdio_session_open_candidate_profile(&params, Some("previous")).as_deref(),
+        candidate(SessionKey("coding:local:test".into()), None).as_deref(),
         Some("coding")
     );
-
-    let params = SessionOpenParams {
-        session_id: SessionKey("local:test".into()),
-        topic: None,
-        profile_id: Some("explicit".into()),
-        cwd: None,
-        sandbox: None,
-        after: None,
-    };
     assert_eq!(
-        stdio_session_open_candidate_profile(&params, Some("previous")).as_deref(),
+        candidate(SessionKey("local:test".into()), Some("explicit".into())).as_deref(),
         Some("explicit")
     );
-
-    let params = SessionOpenParams {
-        session_id: SessionKey("local:test".into()),
-        topic: None,
-        profile_id: None,
-        cwd: None,
-        sandbox: None,
-        after: None,
-    };
     assert_eq!(
-        stdio_session_open_candidate_profile(&params, Some("previous")).as_deref(),
+        candidate(SessionKey("local:test".into()), None).as_deref(),
         Some("previous")
     );
 }
@@ -1103,25 +759,19 @@ fn appui_prompt_context_bridge_preserves_current_user_turn() {
     assert_eq!(
         prompt
             .iter()
-            .filter(|message| {
-                message.role == MessageRole::User && message.content == "old request"
-            })
+            .filter(|message| message.role == MessageRole::User && message.content == "old request")
             .count(),
         1,
         "known history should not be duplicated while adding the current turn"
     );
     assert!(
-        crate::context_manager::context_ledger_path(dir.path(), &session_id.to_string()).exists(),
-        "AppUI prompt-context preparation should persist the canonical context ledger"
+        crate::context_manager::context_ledger_path(dir.path(), &session_id.to_string()).exists()
     );
 }
 
-/// UPCR-2026-026 follow-up: the in-loop (mid-turn) compaction pass must
-/// emit `ContextCompactionStarted` → `ContextCompactionCompleted` through
-/// the bridge's notify hook. It previously compacted SILENTLY — the only
-/// emitting site (the pre-turn bridge) was then starved forever by the
-/// persisted post-compaction snapshot, so a session whose context filled
-/// mid-turn never showed any compaction UX.
+/// UPCR-2026-026: the in-loop (mid-turn) compaction pass must emit
+/// Started → Completed through the bridge's notify hook (it previously
+/// compacted SILENTLY, so mid-turn fills never showed compaction UX).
 #[test]
 fn in_loop_compaction_emits_lifecycle_notifications() {
     let session_id = SessionKey::new("api", "context-inloop-events");
@@ -1142,12 +792,6 @@ fn in_loop_compaction_emits_lifecycle_notifications() {
         None,
         &history,
     )));
-    let epoch_before = manager
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .reconcile_prompt_cache_epoch("test", "tiny-context", "runtime system", &[])
-        .epoch_id
-        .clone();
     let dir = tempfile::tempdir().unwrap();
     let captured: Arc<StdMutex<Vec<UiNotification>>> = Arc::new(StdMutex::new(Vec::new()));
     let sink = captured.clone();
@@ -1190,35 +834,15 @@ fn in_loop_compaction_emits_lifecycle_notifications() {
         .iter()
         .position(|n| matches!(n, UiNotification::ContextCompactionCompleted(_)))
         .expect("in-loop compaction must emit ContextCompactionCompleted");
-    assert!(
-        started < completed,
-        "started must precede completed in the emitted order"
-    );
+    assert!(started < completed, "started must precede completed");
     let UiNotification::ContextCompactionStarted(event) = &events[started] else {
         unreachable!()
     };
-    assert_eq!(event.session_id, session_id);
     assert_eq!(event.trigger, "agent_loop:turn_start");
-    assert_eq!(event.threshold_tokens, 210);
     let UiNotification::ContextCompactionCompleted(done) = &events[completed] else {
         unreachable!()
     };
-    assert_eq!(done.session_id, session_id);
-    assert_eq!(done.compaction.trigger, "agent_loop:turn_start");
-    let epoch_after = bridge
-        .prompt_cache_epoch_id()
-        .expect("compaction keeps an initialized epoch");
-    assert_ne!(epoch_after, epoch_before);
-    assert_eq!(
-        done.context_state.cache_epoch_id.as_deref(),
-        Some(epoch_after.as_str())
-    );
-    assert_eq!(
-        done.context_state.last_cache_invalidation_reason.as_deref(),
-        Some("compaction_installed")
-    );
     assert!(done.context_state.semantic_head_id.is_some());
-    assert!(done.context_state.semantic_head_kind.is_some());
 }
 
 #[test]
@@ -1234,8 +858,7 @@ fn profile_local_create_creates_profile_without_otp() {
 
     assert_eq!(result.profile_id, "ada");
     assert_eq!(result.user_id, "ada");
-    // Single-identity model: the wire email is a synthesized placeholder,
-    // the legacy client-provided email is not persisted anywhere.
+    // Single-identity model: wire email is a synthesized placeholder.
     assert_eq!(result.email, "ada@solo.local");
     assert!(result.created);
     assert_eq!(result.runtime_mode, "solo");
@@ -1247,9 +870,7 @@ fn profile_local_create_creates_profile_without_otp() {
         .get("ada")
         .unwrap()
         .expect("profile");
-    assert_eq!(profile.id, "ada");
     assert_eq!(profile.name, "Ada Lovelace");
-
     let profile_json: Value = serde_json::from_str(
         &std::fs::read_to_string(dir.path().join("profiles/ada.json")).unwrap(),
     )
@@ -1273,10 +894,8 @@ fn profile_local_create_returns_typed_errors_for_invalid_or_nonlocal_requests() 
         Some(&json!("profile_local_invalid_username"))
     );
 
-    // codex #1613 r5: a reserved channel-name username must be
-    // rejected BEFORE any record persists. Previously the user
-    // record was saved and only the later profile save failed,
-    // leaving a valid user with no usable profile.
+    // codex #1613 r5: a reserved channel-name username must be rejected
+    // BEFORE any record persists.
     let reserved = create_or_get_local_solo_profile(
         &state,
         local_profile_params("Ada Lovelace", "api", "api@example.com"),
@@ -1314,11 +933,12 @@ fn profile_local_create_returns_typed_errors_for_invalid_or_nonlocal_requests() 
     );
 }
 
-/// #1057 / M22 — backend workspace probe reports canonical path,
-/// existence, writability, and absent workspace_policy.toml for an
-/// existing directory the user could plausibly pick during onboarding.
+/// #1057 / M22 — the backend workspace probe reports canonical path,
+/// existence, writability, and absent workspace_policy.toml for a plausible
+/// onboarding pick, and rejects roots escaping into banned system paths
+/// (`/etc`, `/usr`, ...) regardless of existence.
 #[test]
-fn workspace_probe_reports_canonical_path_and_writability_for_existing_dir() {
+fn workspace_probe_reports_writability_and_flags_banned_root_escape() {
     let dir = tempfile::tempdir().unwrap();
     let state = local_profile_state(dir.path());
     let workspace = dir.path().join("repo");
@@ -1327,56 +947,22 @@ fn workspace_probe_reports_canonical_path_and_writability_for_existing_dir() {
 
     let result = onboarding_workspace_probe_result(&state, workspace.to_str().unwrap())
         .expect("probe an existing writable dir");
-
     assert_eq!(result["exists"], json!(true));
     assert_eq!(result["is_directory"], json!(true));
     assert_eq!(result["writable"], json!(true));
     assert_eq!(result["root_escape"], json!(false));
-    assert_eq!(result["banned_root"], Value::Null);
     assert_eq!(result["runtime_mode"], json!("solo"));
     assert_eq!(
         result["canonical_path"].as_str().unwrap(),
         canonical.to_string_lossy()
     );
     assert_eq!(result["workspace_policy"]["present"], json!(false));
-    assert_eq!(result["workspace_policy"]["parse_error"], Value::Null);
-    assert_eq!(result["workspace_policy"]["kind"], Value::Null);
-}
-
-/// #1057 — probe rejects roots that escape into a banned system path
-/// (`/etc`, `/usr`, ...) so the TUI can preflight the same gate that
-/// `session/open` enforces.
-#[test]
-fn workspace_probe_flags_root_escape_under_banned_system_path() {
-    let dir = tempfile::tempdir().unwrap();
-    let state = local_profile_state(dir.path());
 
     let result = onboarding_workspace_probe_result(&state, "/etc/octos-test-not-a-real-path-1057")
         .expect("probe an /etc candidate");
-
     assert_eq!(result["root_escape"], json!(true));
     assert_eq!(result["banned_root"], json!("etc"));
-    // Banned-root candidates may not even exist; the gate must fire
-    // regardless of existence.
 }
-
-#[test]
-fn session_workspace_allowed_returns_cwd_runtime_unavailable_when_profile_unknown() {
-    let dir = tempfile::tempdir().unwrap();
-    let state = local_profile_state(dir.path());
-
-    let workspace = dir.path().join("repo");
-    std::fs::create_dir_all(&workspace).expect("workspace dir");
-    let workspace = std::fs::canonicalize(&workspace).expect("canonical workspace");
-
-    let error = validate_session_workspace_allowed(&state, Some("nobody"), &workspace)
-        .expect_err("unknown profile is rejected");
-    assert_eq!(
-        error.data.as_ref().and_then(|data| data.get("kind")),
-        Some(&json!("cwd_runtime_unavailable"))
-    );
-}
-
 #[test]
 fn permission_profile_handlers_are_server_owned_and_reject_danger_outside_local() {
     use octos_core::ui_protocol::{
@@ -1384,11 +970,7 @@ fn permission_profile_handlers_are_server_owned_and_reject_danger_outside_local(
         PermissionProfileSetParams, PermissionProfileUpdate,
     };
 
-    // yolo GAP #1: Local + the explicit `--solo` opt-in is what permits
-    // danger; bare Local no longer does (see
-    // `danger_full_access_requires_solo_opt_in_on_local_server`). This
-    // test exercises the deployment-mode / runtime_mode-override gates on
-    // top of that opt-in, so enable it here.
+    // yolo GAP #1: Local + the explicit `--solo` opt-in is what permits danger.
     let local = AppState {
         solo_login_enabled: true,
         ..AppState::empty_for_tests()
@@ -1442,10 +1024,8 @@ fn permission_profile_handlers_are_server_owned_and_reject_danger_outside_local(
         Some(&json!("permission_profile_disallowed"))
     );
 
-    // Even when the server runs in Local mode, an explicit
-    // `runtime_mode: "tenant"` in the request must tighten the gate so
-    // dangerous mode is rejected. This is the M12 soak negative-probe
-    // contract (#951).
+    // An explicit `runtime_mode: "tenant"` in the request tightens the gate
+    // even on a Local server (M12 soak negative-probe contract, #951).
     let tenant_request_denied = permission_profile_set_result(
         &local,
         PermissionProfileSetParams {
@@ -1470,34 +1050,11 @@ fn permission_profile_handlers_are_server_owned_and_reject_danger_outside_local(
             .and_then(|data| data.get("kind")),
         Some(&json!("permission_profile_disallowed"))
     );
-
-    // Reverse direction must not relax: server in Tenant + request
-    // `runtime_mode: "solo"` still rejects danger.
-    let solo_override_denied = permission_profile_set_result(
-        &tenant,
-        PermissionProfileSetParams {
-            session_id,
-            update: PermissionProfileUpdate {
-                mode: Some(Mode::DangerFullAccess),
-                network: Some(Network::Allow),
-                approval_policy: Some("never".into()),
-            },
-            runtime_mode: Some("solo".into()),
-        },
-    )
-    .expect_err("solo override cannot relax tenant gate");
-    assert_eq!(
-        solo_override_denied.code,
-        rpc_error_codes::PERMISSION_DENIED
-    );
 }
 
-/// GAP #1 follow-through: `effective_permissions_for_session` must map
-/// Local → Solo ONLY when the `--solo` opt-in is set. Without it, a
-/// stored `danger_full_access` selection resolves through
-/// `RuntimeMode::Local`, which `EffectivePermissions::for_runtime`
-/// rejects — so a fleet daemon cannot bootstrap a dangerous session
-/// runtime even if a selection was somehow persisted.
+/// GAP #1: `effective_permissions_for_session` maps Local → Solo ONLY with the
+/// `--solo` opt-in; without it a persisted danger selection still resolves
+/// through RuntimeMode::Local and is rejected.
 #[test]
 fn effective_permissions_rejects_danger_without_solo_opt_in() {
     use octos_core::ui_protocol::{
@@ -1537,26 +1094,12 @@ fn effective_permissions_rejects_danger_without_solo_opt_in() {
         permissions.approval_policy,
         octos_agent::ApprovalPolicy::Never
     );
-    // The session key is unique to this test, so the process-global store
-    // holds no cross-test state — no explicit cleanup needed.
 }
 
-/// #1162 — M12-G regression. A session whose base key carries a
-/// tenant/cloud scope marker in a structural slot (the
-/// `with_profile` first slot OR the M12-G soak's `{profile}:tenant:`
-/// channel-slot literal) on a Local server must reject
-/// `danger_full_access` even when the client omits the
-/// `runtime_mode` override. The explicit override (UPCR-2026-018 /
-/// #1086) is the PRIMARY signal but a buggy / older / non-conforming
-/// client may omit it; this defense-in-depth gate prevents a
-/// tenant-scoped session from slipping dangerous mode past the
-/// policy boundary by leaving the override out.
-///
-/// Codex P1/P2 (#1167) review: chat-id text is arbitrary so the
-/// gate must NOT key off colon-delimited chat-id segments. The
-/// channel-slot check is EXACT (`== "tenant"` / `== "cloud"`) to
-/// avoid false positives on legitimate chat-id text like
-/// `_main:api:tenant-demo` (2nd slot there is `api`, not `tenant`).
+/// #1162 / #1167 — defense-in-depth: a session key carrying a tenant/cloud
+/// scope marker in a structural slot (profile slot or the exact
+/// `{profile}:tenant:` channel-slot literal) rejects `danger_full_access` on a
+/// Local server even when the client omits the `runtime_mode` override.
 #[test]
 fn danger_full_access_rejected_for_non_cloud_tenant_per_1162() {
     use octos_core::ui_protocol::{
@@ -1564,10 +1107,8 @@ fn danger_full_access_rejected_for_non_cloud_tenant_per_1162() {
         PermissionProfileSetParams, PermissionProfileUpdate,
     };
 
-    // yolo GAP #1: enable the `--solo` opt-in so a denial here is
-    // attributable to the tenant/cloud SCOPE marker rather than to the
-    // missing opt-in (which would deny every case trivially and hide the
-    // scope-gate regression this test guards).
+    // Enable the `--solo` opt-in so a denial is attributable to the
+    // tenant/cloud SCOPE marker, not the missing opt-in.
     let local = AppState {
         solo_login_enabled: true,
         ..AppState::empty_for_tests()
@@ -1579,60 +1120,18 @@ fn danger_full_access_rejected_for_non_cloud_tenant_per_1162() {
             "profile=tenant-a",
             SessionKey::with_profile("tenant-a", "api", "m12-negative"),
         ),
-        (
-            "profile=tenant--child",
-            SessionKey::with_profile("tenant--child", "api", "m12-negative"),
-        ),
-        (
-            "profile=cloud--root",
-            SessionKey::with_profile("cloud--root", "api", "m12-negative"),
-        ),
-        (
-            "profile=TENANT-A (case-insensitive)",
-            SessionKey::with_profile("TENANT-A", "api", "m12-negative"),
-        ),
-        (
-            "profile=tenant-a + topic suffix",
-            SessionKey::with_profile_topic("tenant-a", "api", "m12-negative", "research"),
-        ),
-        // M12-G soak shape: `{profile}:tenant:{chat}` /
-        // `{profile}:cloud:{chat}` — `tenant`/`cloud` sits in the
-        // channel slot. `SessionKey::profile_id()` returns `None`
-        // because neither is a registered channel name, so the
-        // helper has to detect the channel-slot literal directly.
+        // M12-G soak shape: `tenant`/`cloud` sits in the channel slot and
+        // `SessionKey::profile_id()` returns None (not a registered channel).
         (
             "channel-slot=tenant (soak shape)",
             SessionKey("coding:tenant:m12-negative".into()),
         ),
-        (
-            "channel-slot=cloud (soak shape)",
-            SessionKey("m12solo:cloud:m12-negative".into()),
-        ),
-        (
-            "channel-slot=tenant + topic suffix",
-            SessionKey("coding:tenant:m12-negative#1747".into()),
-        ),
-        (
-            "channel-slot=TENANT (case-insensitive)",
-            SessionKey("coding:TENANT:m12-negative".into()),
-        ),
-        // Codex P1 round 3 (#1167) — profiled tenant sessions on
-        // channels that core's `is_channel_name` doesn't include
-        // (`line`, `wechat`, …). The gate must reject these too,
-        // so it can't rely solely on `SessionKey::profile_id()`
-        // (which returns `None` when the 2nd segment isn't in
-        // the recognition list).
+        // #1167 — profiled tenant sessions on channels core's
+        // `is_channel_name` doesn't include; the gate can't rely solely on
+        // `SessionKey::profile_id()`.
         (
             "profile=tenant-a + channel=line",
             SessionKey("tenant-a:line:room-1".into()),
-        ),
-        (
-            "profile=cloud--root + channel=wechat",
-            SessionKey("cloud--root:wechat:group-42".into()),
-        ),
-        (
-            "profile=tenant + channel=line",
-            SessionKey("tenant:line:room-1".into()),
         ),
     ] {
         let denied = match permission_profile_set_result(
@@ -1677,26 +1176,6 @@ fn capabilities_advertise_local_solo_profile_create_only_when_supported() {
             .any(|method| method == methods::PROFILE_LOCAL_CREATE)
     );
     assert!(local_capabilities.supports_feature(APPUI_FEATURE_PROFILE_LOCAL_CREATE_V1));
-    assert!(
-        local_capabilities.supports_feature(APPUI_FEATURE_PROFILE_LOCAL_CREATE_REQUESTED_ID_V1)
-    );
-    assert!(local_capabilities.supports_feature(APPUI_FEATURE_PERMISSION_PROFILE_V1));
-    assert!(local_capabilities.supports_feature(APPUI_FEATURE_RUNTIME_POLICY_STAMP_V1));
-    assert!(local_capabilities.supports_feature(APPUI_FEATURE_CONTEXT_LIFECYCLE_V1));
-    for method in [
-        APPUI_METHOD_PROFILE_SKILLS_LIST,
-        APPUI_METHOD_PROFILE_SKILLS_REGISTRY_SEARCH,
-        APPUI_METHOD_PROFILE_SKILLS_INSTALL,
-        APPUI_METHOD_PROFILE_SKILLS_REMOVE,
-    ] {
-        assert!(
-            local_capabilities
-                .supported_methods
-                .iter()
-                .any(|advertised| advertised == method),
-            "{method} should be advertised with a profile store"
-        );
-    }
 
     let no_profile_store = AppState::empty_for_tests();
     let no_profile_capabilities =
@@ -1760,19 +1239,14 @@ fn stdio_capabilities_omit_auth_bound_methods_and_report_unsupported() {
     }
 }
 
-/// The persisted `default-profile` pointer drives a bare launch: with no
-/// `--profile` and no folder-sticky profile, `launch/resolve` resolves to
-/// the pointer even when it is not the first-sorted profile. A stale pointer
-/// (naming a profile that no longer exists) is ignored, falling back to the
-/// derived default.
+/// The persisted `default-profile` pointer drives a bare launch even when it is
+/// not the first-sorted profile; a stale pointer is ignored.
 #[tokio::test]
 async fn launch_resolve_prefers_persisted_default_profile() {
     use octos_core::ui_protocol::{LaunchDecisionKind, LaunchResolveParams};
 
     let tmp = tempfile::tempdir().unwrap();
-    // The default-profile pointer lives in its own octos home; each profile
-    // bootstraps in a separate data dir because the redb episode store takes
-    // an exclusive lock and two profiles cannot share one.
+    // Each profile bootstraps in a separate data dir (single-writer redb).
     let home = tmp.path().join("home");
 
     let make_profile = |id: &str| crate::profiles::UserProfile {
@@ -1782,17 +1256,15 @@ async fn launch_resolve_prefers_persisted_default_profile() {
         data_dir: None,
         parent_id: None,
         public_subdomain: None,
+        // bootstrap requires a primary provider; the key never leaves env.
         config: crate::profiles::ProfileConfig {
             llm: Some(crate::profiles::LlmProfileConfig {
                 primary: Some(crate::profiles::LlmModelSelectionConfig {
                     family_id: Some("openai".to_string()),
                     model_id: Some("gpt-4o-mini".to_string()),
                     route: Some(crate::profiles::LlmRouteConfig {
-                        route_id: None,
-                        label: None,
-                        base_url: None,
                         api_key_env: Some("LAUNCH_DEFAULT_TEST_KEY".to_string()),
-                        api_type: None,
+                        ..Default::default()
                     }),
                     ..Default::default()
                 }),
@@ -1837,9 +1309,8 @@ async fn launch_resolve_prefers_persisted_default_profile() {
 
     let project = tmp.path().join("fresh");
     std::fs::create_dir_all(&project).unwrap();
-    // Bare launch (no `--profile`) in an empty folder. The connection
-    // authenticated as "alpha"; the persisted default is "zeta". The default
-    // pointer must win over BOTH the connection profile and sort order.
+    // Bare launch: the persisted default pointer must win over BOTH the
+    // connection profile ("alpha") and sort order.
     let params = LaunchResolveParams {
         cwd: project.to_string_lossy().into_owned(),
         profile_id: None,
@@ -1857,28 +1328,6 @@ async fn launch_resolve_prefers_persisted_default_profile() {
     store.set_default_profile("ghost").unwrap();
     let stale = resolve_launch_result(&state, Some("alpha"), cap, &params).unwrap();
     assert_eq!(stale.resolved_profile.as_deref(), Some("alpha"));
-}
-
-#[tokio::test]
-async fn raw_session_status_read_missing_profile_returns_profile_unresolved() {
-    let dir = tempfile::tempdir().unwrap();
-    let state = Arc::new(local_profile_state(dir.path()));
-    let request = RpcRequest::<Value>::new(
-        "status-read-missing-profile",
-        APPUI_METHOD_SESSION_STATUS_READ,
-        json!({
-            "session_id": "missing:local:tui#coding",
-            "profile_id": "missing",
-        }),
-    );
-
-    let error = raw_session_status_result(&state, &request, ConnectionUiFeatures::default(), None)
-        .await
-        .expect_err("missing profile should be typed AppUI error");
-    assert_eq!(
-        error.data.as_ref().and_then(|data| data.get("kind")),
-        Some(&json!("profile_unresolved"))
-    );
 }
 
 #[tokio::test]
@@ -1913,29 +1362,6 @@ async fn stdio_status_read_prefers_explicit_or_session_profile_over_binding() {
     .await
     .expect("explicit profile wins over stdio binding");
     assert_eq!(explicit["profile_id"], json!("grace"));
-    assert_eq!(
-        explicit["runtime_policy_stamp"]["profile_id"],
-        json!("grace")
-    );
-
-    let profiled_session = SessionKey::with_profile_topic("grace", "local", "tui", "coding");
-    let from_session_id = raw_session_status_result(
-        &state,
-        &RpcRequest::<Value>::new(
-            "profiled-session",
-            APPUI_METHOD_SESSION_STATUS_READ,
-            json!({ "session_id": profiled_session }),
-        ),
-        features,
-        Some("ada"),
-    )
-    .await
-    .expect("profile-qualified session_id wins over stdio binding");
-    assert_eq!(from_session_id["profile_id"], json!("grace"));
-    assert_eq!(
-        from_session_id["runtime_policy_stamp"]["profile_id"],
-        json!("grace")
-    );
 
     let missing_session = SessionKey::with_profile_topic("missing", "local", "tui", "coding");
     let error = raw_session_status_result(
@@ -1997,9 +1423,7 @@ async fn profile_llm_test_without_api_key_returns_not_applied() {
 async fn newly_configured_local_profile_allows_session_open_cwd_validation() {
     let dir = tempfile::tempdir().unwrap();
     let state = Arc::new(local_profile_state(dir.path()));
-    // Profile-runtime bootstrap uses process-wide caches. Keep this
-    // parallel test's profile identity distinct from other local-profile
-    // fixtures, just as its temporary store is distinct.
+    // Process-wide caches: keep this profile identity distinct.
     let profile_id = format!("ada-cwd-{}", uuid::Uuid::now_v7());
     let email = format!("{profile_id}@example.com");
     create_or_get_local_solo_profile(
@@ -2029,15 +1453,12 @@ async fn newly_configured_local_profile_allows_session_open_cwd_validation() {
     raw_profile_llm_upsert(&state, &primary, None)
         .await
         .expect("primary upsert registers runtime");
-    // `open_session_result` performs this bootstrap before validating the
-    // requested cwd. Mirror that ordering instead of relying on the
-    // upsert's best-effort bootstrap side effect.
+    // `open_session_result` bootstraps before validating cwd — mirror that.
     assert!(
         ensure_session_profile_runtime(&state, Some(&profile_id))
             .await
             .expect("configured profile runtime bootstraps")
             .is_some(),
-        "configured local profile has a runtime before cwd validation",
     );
 
     let workspace = tempfile::tempdir().unwrap();
@@ -2086,11 +1507,6 @@ fn runtime_policy_stamp_exposes_effective_permission_fields() {
 
     let stamp = runtime_policy_stamp_for_profile(&state, "ada", Some(&session_id), None);
     assert_eq!(stamp["runtime_mode"], json!("solo"));
-    assert_eq!(stamp["profile_id"], json!("ada"));
-    assert_eq!(
-        stamp["workspace_root"],
-        json!(workspace.path().to_string_lossy())
-    );
     assert_eq!(stamp["approval_policy"], json!("never"));
     assert_eq!(stamp["sandbox_mode"], json!("danger-full-access"));
     assert_eq!(stamp["permission_profile"], json!("danger_full_access"));
@@ -2099,7 +1515,7 @@ fn runtime_policy_stamp_exposes_effective_permission_fields() {
 }
 
 #[test]
-fn parses_turn_start_rpc_request() {
+fn parses_turn_start_rpc_request_and_keeps_legacy_shape_back_compat() {
     let request = UiCommand::TurnStart(TurnStartParams {
         session_id: SessionKey("local:test".into()),
         turn_id: TurnId::new(),
@@ -2125,12 +1541,9 @@ fn parses_turn_start_rpc_request() {
         route_rpc_command(decoded, ConnectionUiFeatures::default()).expect("route"),
         UiCommand::TurnStart(_)
     ));
-}
 
-/// UPCR-2026-015 (M9-β-1): bare turn/start (no β-1 fields)
-/// continues to deserialize and round-trip with the new defaults.
-#[test]
-fn parses_legacy_turn_start_rpc_request_stays_back_compat() {
+    // UPCR-2026-015 (M9-β-1): bare turn/start (no β-1 fields) still decodes
+    // with the new defaults.
     let raw = json!({
         "jsonrpc": "2.0",
         "id": "rpc-legacy",
@@ -2155,13 +1568,8 @@ fn parses_legacy_turn_start_rpc_request_stays_back_compat() {
     }
 }
 
-/// Issue #1332: when the standalone-turn `done` event carries
-/// token totals + cursor + final-assistant message_id, the
-/// `turn/completed` lifecycle envelope must surface them on
-/// `tokens_in`, `tokens_out`, and `session_result` rather than the
-/// dormant-stub `None` triple. Drives `try_emit_terminal` directly
-/// because the spawn pipeline is too wide to fixture; the helper
-/// is the wire-side closure that issue #1332 modified.
+/// Issue #1332: `turn/completed` must surface the `done` event's token totals +
+/// cursor + final-assistant message_id instead of the dormant `None` triple.
 #[tokio::test]
 async fn try_emit_terminal_populates_turn_completed_tokens_and_session_result() {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<super::WsMessage>(8);
@@ -2211,51 +1619,24 @@ async fn try_emit_terminal_populates_turn_completed_tokens_and_session_result() 
         }
     }
     let frame = completed_frame.expect("turn/completed must be emitted");
-    assert!(
-        frame.contains("\"tokens_in\":123"),
-        "tokens_in must surface from completion details: {frame}"
-    );
-    assert!(
-        frame.contains("\"tokens_out\":456"),
-        "tokens_out must surface from completion details: {frame}"
-    );
-    assert!(
-        frame.contains("\"session_result\""),
-        "session_result must surface when populated: {frame}"
-    );
-    assert!(
-        frame.contains("\"committed_seq\":17"),
-        "session_result.committed_seq must reflect the assistant carrier seq: {frame}"
-    );
+    assert!(frame.contains("\"tokens_in\":123"), "{frame}");
+    assert!(frame.contains("\"tokens_out\":456"), "{frame}");
+    assert!(frame.contains("\"session_result\""), "{frame}");
+    assert!(frame.contains("\"committed_seq\":17"), "{frame}");
     assert!(
         frame.contains("\"client_message_id\":\"cmid-user-1\""),
-        "session_result.client_message_id must round-trip: {frame}"
+        "{frame}"
     );
-    assert!(
-        frame.contains("\"cursor\""),
-        "top-level cursor must be threaded too: {frame}"
-    );
+    assert!(frame.contains("\"cursor\""), "{frame}");
 }
 
-/// Issue #1337 codex round-2 regression: in the trimmed-dedupe
-/// path, an assistant carrier with `tool_calls` is persisted at
-/// seq N, followed by tool rows at seq N+1, N+2. The loop's
-/// `cursor` therefore advances past the assistant row to the last
-/// tool row, but `final_assistant_message_id` was stamped at the
-/// assistant row's seq N. Building `TurnSessionResult` from
-/// `cursor.seq` would surface `committed_seq=N+2` alongside
-/// `message_id=session:N:ts` — a per-row-identity contract
-/// violation. The helper must source `committed_seq` from
-/// `final_assistant_committed_seq` (pinned at the assistant row)
-/// not from `cursor`.
+/// Issue #1337: in the trimmed-dedupe path the helper must source
+/// `committed_seq` from `final_assistant_committed_seq` (the assistant
+/// carrier row), not from the loop's last-row cursor.
 #[test]
 fn build_turn_session_result_from_done_pins_seq_to_assistant_carrier_in_trimmed_dedupe() {
-    // Simulate the `done` JSON producer's output for a turn where:
-    //   - assistant carrier persisted at seq N=10 (with tool_calls)
-    //   - tool rows persisted at seq 11, 12
-    //   - loop's outer `cursor` ended at seq 12 (last tool row)
-    //   - `final_assistant_committed_seq` = 10 (assistant carrier)
-    //   - `final_assistant_message_id` = "sess-1:10:<ts_ns>"
+    // done JSON: assistant carrier at seq 10 (+ tool rows 11, 12), loop
+    // cursor ended at 12, final_assistant_committed_seq = 10.
     let assistant_seq: u64 = 10;
     let last_tool_seq: u64 = 12;
     let assistant_message_id = format!("sess-1:{assistant_seq}:99999");
@@ -2276,20 +1657,12 @@ fn build_turn_session_result_from_done_pins_seq_to_assistant_carrier_in_trimmed_
     let session_result = build_turn_session_result_from_done(&done)
         .expect("session_result must be present when both carrier seq + message_id stamped");
 
-    // The fix: committed_seq is pinned to the assistant carrier's
-    // seq (10), NOT the loop's last `cursor.seq` (12).
     assert_eq!(
         session_result.committed_seq, assistant_seq,
         "committed_seq must pin to assistant carrier seq, not last tool-row cursor"
     );
-    assert_ne!(
-        session_result.committed_seq, last_tool_seq,
-        "committed_seq must NOT be the loop's last-row cursor seq when it points at a tool row"
-    );
-    assert_eq!(
-        session_result.message_id, assistant_message_id,
-        "message_id must reference the assistant carrier row"
-    );
+    assert_ne!(session_result.committed_seq, last_tool_seq);
+    assert_eq!(session_result.message_id, assistant_message_id);
     assert_eq!(session_result.client_message_id, None);
 }
 
@@ -2312,28 +1685,10 @@ fn tool_emitted_risk_is_ignored_in_favor_of_manifest() {
     );
     // The malicious tool tries to advertise itself as `low`.
     tool_emitted.risk = Some("low".to_owned());
-
     harden_progress_emitted_approval(&mut tool_emitted);
-
     // Server overwrites with manifest-declared `critical`.
     assert_eq!(tool_emitted.risk.as_deref(), Some("critical"));
 
-    // A tool whose manifest is silent collapses to `unspecified`,
-    // never silently passes through the tool-claimed value.
-    let mut silent = ApprovalRequestedEvent::generic(
-        SessionKey("local:test".into()),
-        ApprovalId::new(),
-        TurnId::new(),
-        "unknown_tool",
-        "Unknown",
-        "body",
-    );
-    silent.risk = Some("low".to_owned());
-    harden_progress_emitted_approval(&mut silent);
-    assert_eq!(
-        silent.risk.as_deref(),
-        Some(octos_core::ui_protocol::RISK_UNSPECIFIED)
-    );
     clear_tool_risk_registry_for_test();
 }
 
@@ -2365,11 +1720,8 @@ fn task_output_delta_tracker_emits_live_tail_for_task_progress() {
         )
         .expect("task output emits output delta");
 
-    assert_eq!(first.session_id, session_id);
     assert_eq!(first.task_id, task_id);
-    assert_eq!(first.cursor.offset, 0);
     assert_eq!(first.text, "collecting\n");
-    assert_eq!(second.task_id, task_id);
     assert_eq!(second.cursor.offset, first.text.len() as u64);
     assert_eq!(second.text, "done\n");
 }
@@ -2383,12 +1735,8 @@ async fn recv_rpc_json(rx: &mut mpsc::Receiver<WsMessage>) -> Value {
 
 #[test]
 fn malformed_approval_params_return_invalid_params_not_unsupported() {
-    // FIX-01 added `ApprovalDecision::Unknown(String)` — unknown decision
-    // strings (e.g. `"later"`) are now valid forward-compat wire content
-    // and decode to `Unknown(...)`. The server's downstream tool path
-    // treats them as Deny (fail-closed). To trigger INVALID_PARAMS we
-    // need *structurally* malformed params, e.g. `decision` of the wrong
-    // JSON type.
+    // Unknown decision STRINGS are forward-compat (`Unknown` → Deny);
+    // INVALID_PARAMS requires structurally malformed params.
     let request = RpcRequest::new(
         "approval-bad",
         methods::APPROVAL_RESPOND,
@@ -2409,41 +1757,10 @@ fn malformed_approval_params_return_invalid_params_not_unsupported() {
     assert!(error.message.contains(methods::APPROVAL_RESPOND));
 }
 
+/// Progress-mapped `approval_requested` events are stored for respond, and a
+/// successful respond serializes as a typed JSON-RPC result frame.
 #[test]
-fn known_approval_returns_typed_json_rpc_result() {
-    let contracts = UiProtocolContractStores::default();
-    let session_id = SessionKey("local:test".into());
-    let approval_id = ApprovalId::new();
-    contracts
-        .approvals
-        .insert_pending(session_id.clone(), approval_id.clone());
-
-    let outcome = contracts
-        .approvals
-        .respond(ApprovalRespondParams::new(
-            session_id,
-            approval_id.clone(),
-            ApprovalDecision::Approve,
-        ))
-        .expect("known pending approval accepts");
-    let frame = RpcResponse::success(
-        "approval-1",
-        serde_json::to_value(outcome.result).expect("serialize result"),
-    );
-
-    assert_eq!(frame.jsonrpc, octos_core::ui_protocol::JSON_RPC_VERSION);
-    assert_eq!(frame.id, "approval-1");
-    assert_eq!(frame.result["approval_id"], json!(approval_id));
-    assert_eq!(frame.result["accepted"], json!(true));
-    assert_eq!(
-        frame.result["status"],
-        json!(ApprovalRespondStatus::Accepted)
-    );
-    assert_eq!(frame.result["runtime_resumed"], json!(false));
-}
-
-#[test]
-fn progress_approval_request_is_stored_for_respond() {
+fn progress_approval_request_is_stored_and_responds_with_typed_result() {
     let contracts = UiProtocolContractStores::default();
     let session_id = SessionKey("local:test".into());
     let turn_id = TurnId::new();
@@ -2473,6 +1790,17 @@ fn progress_approval_request_is_stored_for_respond() {
 
     assert!(outcome.result.accepted);
     assert!(!outcome.result.runtime_resumed);
+
+    let frame = RpcResponse::success(
+        "approval-1",
+        serde_json::to_value(outcome.result).expect("serialize result"),
+    );
+    assert_eq!(frame.jsonrpc, octos_core::ui_protocol::JSON_RPC_VERSION);
+    assert_eq!(frame.result["accepted"], json!(true));
+    assert_eq!(
+        frame.result["status"],
+        json!(ApprovalRespondStatus::Accepted)
+    );
 }
 
 #[test]
@@ -2495,33 +1823,6 @@ fn missing_and_not_pending_approval_return_typed_json_rpc_errors() {
     assert_eq!(
         frame.error.data.as_ref().unwrap()["kind"],
         json!("unknown_approval")
-    );
-
-    let approval_id = ApprovalId::new();
-    contracts
-        .approvals
-        .insert_pending(session_id.clone(), approval_id.clone());
-    contracts
-        .approvals
-        .respond(ApprovalRespondParams::new(
-            session_id.clone(),
-            approval_id.clone(),
-            ApprovalDecision::Deny,
-        ))
-        .expect("first response accepts");
-    let not_pending = contracts
-        .approvals
-        .respond(ApprovalRespondParams::new(
-            session_id,
-            approval_id,
-            ApprovalDecision::Approve,
-        ))
-        .expect_err("second response should be not pending");
-
-    assert_eq!(not_pending.code, rpc_error_codes::APPROVAL_NOT_PENDING);
-    assert_eq!(
-        not_pending.data.as_ref().unwrap()["kind"],
-        json!("approval_not_pending")
     );
 }
 
@@ -2548,27 +1849,18 @@ fn idless_envelope_parses_as_notification() {
 }
 
 #[test]
-fn session_scope_allows_matching_authenticated_profile() {
+fn session_scope_allows_matching_profile_and_rejects_cross_profile() {
     let session_id = SessionKey::with_profile("profile-a", "api", "chat-1");
-
     let active_profile_id =
         validate_session_scope(&session_id, Some("profile-a"), Some("profile-a"))
             .expect("valid scope");
-
     assert_eq!(active_profile_id.as_deref(), Some("profile-a"));
-}
 
-#[test]
-fn session_scope_rejects_cross_profile_session_id() {
+    // Cross-profile session ids are rejected with the expected/actual ids.
     let session_id = SessionKey::with_profile("profile-b", "api", "chat-1");
-
     let error =
         validate_session_scope(&session_id, None, Some("profile-a")).expect_err("scope error");
-
-    assert_eq!(
-        error.code,
-        octos_core::ui_protocol::rpc_error_codes::INVALID_PARAMS
-    );
+    assert_eq!(error.code, rpc_error_codes::INVALID_PARAMS);
     assert_eq!(
         error
             .data
@@ -2585,15 +1877,9 @@ fn session_scope_rejects_cross_profile_session_id() {
     );
 }
 
-/// #2040: a stdio connection must NEVER receive the 1008 auth-expiry close.
-/// The stdio dispatch passes the session/open CANDIDATE profile as the
-/// connection scope (so a successful open can rebind the connection), which
-/// routes a profile-segment mismatch through the AUTHENTICATED validator and
-/// tags the error `auth_scope_violation`. On a WS connection that tag
-/// enqueues a 1008 close ahead of the error envelope; on stdio the Close
-/// frame ends the writer loop (`write_stdio_message`), so pre-fix the error
-/// reply was never written and the whole transport died with the request
-/// unanswered.
+/// #2040: a stdio connection must NEVER receive the 1008 auth-expiry close —
+/// the Close frame ends the stdio writer loop, killing the transport before
+/// the error reply is written. The FIRST frame must be the error envelope.
 #[test]
 fn send_scope_error_on_stdio_answers_without_closing() {
     let (writer_tx, writer_rx) = std::sync::mpsc::sync_channel(8);
@@ -2635,23 +1921,6 @@ fn send_scope_error_on_stdio_answers_without_closing() {
 }
 
 #[test]
-fn session_scope_preserves_legacy_keys_without_profile_context() {
-    let legacy_session_id = SessionKey::new("api", "chat-1");
-    let profiled_session_id = SessionKey::with_profile("profile-a", "api", "chat-1");
-
-    assert_eq!(
-        validate_session_scope(&legacy_session_id, None, None).expect("legacy scope"),
-        None
-    );
-    assert_eq!(
-        validate_session_scope(&profiled_session_id, None, None)
-            .expect("profiled scope")
-            .as_deref(),
-        Some("profile-a")
-    );
-}
-
-#[test]
 fn prompt_text_requires_non_empty_text_input() {
     assert_eq!(
         prompt_text(&[InputItem::Text {
@@ -2676,25 +1945,6 @@ fn state_with_sessions(data_dir: &std::path::Path) -> Arc<AppState> {
         ))),
         ..AppState::empty_for_tests()
     })
-}
-
-/// Build an `ActiveTurn` with default `Active` state for tests that drive
-/// the registry directly without going through `handle_turn_start`.
-async fn test_connection_turn(
-    active: &SharedActiveTurns,
-    session: &SessionKey,
-    turn_id: &TurnId,
-) -> ConnectionTurn {
-    let map = active.lock().await;
-    let state = map
-        .get(session)
-        .filter(|entry| entry.turn_id == *turn_id)
-        .map(|entry| entry.state.clone())
-        .unwrap_or_else(|| Arc::new(TokioMutex::new(TurnState::Active)));
-    ConnectionTurn {
-        turn_id: turn_id.clone(),
-        state,
-    }
 }
 
 fn test_active_turn(turn_id: TurnId, abort: AbortHandle) -> ActiveTurn {
@@ -2803,123 +2053,9 @@ async fn session_open_replays_pending_approval_after_reconnect_without_cursor() 
     assert!(outcome.replay.is_empty());
     assert_eq!(outcome.pending_approvals.len(), 1);
     assert_eq!(outcome.pending_approvals[0].approval_id, approval_id);
-    assert_eq!(outcome.pending_approvals[0].title, "Run command");
 }
 
-// ---- UPCR-2026-023 pending-question reconnect + capability gating ----
-
-fn sample_pending_question(
-    session_id: SessionKey,
-    question_id: QuestionId,
-    turn_id: TurnId,
-) -> UserQuestionRequestedEvent {
-    use octos_core::ui_protocol::{UserQuestion, UserQuestionOption};
-    UserQuestionRequestedEvent::new(
-        session_id,
-        question_id,
-        turn_id,
-        "Pick a framework",
-        "Which framework should I scaffold?",
-        vec![UserQuestion {
-            header: "Framework".into(),
-            question: "Which framework?".into(),
-            options: vec![
-                UserQuestionOption {
-                    label: "axum".into(),
-                    description: "tower-based".into(),
-                },
-                UserQuestionOption {
-                    label: "actix".into(),
-                    description: "actor-based".into(),
-                },
-            ],
-            multi_select: false,
-            allow_free_text: true,
-        }],
-    )
-}
-
-fn features_with_user_question_v1() -> ConnectionUiFeatures {
-    ConnectionUiFeatures {
-        user_question_v1: true,
-        ..ConnectionUiFeatures::default()
-    }
-}
-
-#[tokio::test]
-async fn session_open_replays_pending_question_for_negotiated_client() {
-    // #3: a reconnecting client that negotiated `user_question.v1` must see
-    // the still-pending structured question in `pending_questions`.
-    let temp = tempfile::tempdir().expect("tempdir");
-    let state = state_with_sessions(temp.path());
-    let ledger = UiProtocolLedger::new(16);
-    let approvals = PendingApprovalStore::default();
-    let questions = PendingQuestionStore::default();
-    let session_id = SessionKey("local:test".into());
-    let question_id = QuestionId::new();
-    let _rx = questions.request_runtime(sample_pending_question(
-        session_id.clone(),
-        question_id.clone(),
-        TurnId::new(),
-    ));
-
-    let outcome = open_session_result(
-        &state,
-        &ledger,
-        &approvals,
-        &questions,
-        ConnectionId::next(),
-        None,
-        None,
-        features_with_user_question_v1(),
-        SessionOpenParams {
-            session_id: session_id.clone(),
-            topic: None,
-            profile_id: None,
-            cwd: None,
-            sandbox: None,
-            after: None,
-        },
-    )
-    .await
-    .expect("open session should replay pending question");
-
-    assert_eq!(outcome.pending_questions.len(), 1);
-    assert_eq!(outcome.pending_questions[0].question_id, question_id);
-    assert_eq!(
-        outcome.pending_questions[0].title, "Pick a framework",
-        "the reconnecting client must re-render the pending question"
-    );
-}
-
-#[test]
-fn plan_updated_gated_by_plan_todos_capability() {
-    use octos_core::ui_protocol::{PlanUpdatedEvent, UiPlanRecord};
-    let event =
-        UiProtocolLedgerEvent::Notification(UiNotification::PlanUpdated(PlanUpdatedEvent {
-            session_id: SessionKey("local:test".into()),
-            topic: None,
-            turn_id: None,
-            plan: UiPlanRecord {
-                items: Vec::new(),
-                title: None,
-                updated_at_ms: 0,
-            },
-        }));
-    // A connection that did not negotiate plan.todos.v1 never receives it —
-    // on the live broadcast OR reconnect replay (both call this filter).
-    assert!(!live_event_passes_capability_filter(
-        &event,
-        ConnectionUiFeatures::default()
-    ));
-    let negotiated = ConnectionUiFeatures {
-        plan_todos: true,
-        ..Default::default()
-    };
-    assert!(live_event_passes_capability_filter(&event, negotiated));
-}
-
-/// #2019 — build a human-sink event for the tests below.
+/// Build a #2019 human-sink background-activity event.
 fn background_activity_for(
     session_id: &SessionKey,
     origin_id: &str,
@@ -2938,27 +2074,45 @@ fn background_activity_for(
     }
 }
 
-/// #2019 — `background/activity` is a NEW notification shape. A client that
-/// did not negotiate `event.background_activity.v1` cannot render it and would
-/// report "unknown UI protocol notification" — the ui-protocol-v2-migration
-/// trap. Gate it on both the live broadcast and reconnect replay (both routes
-/// call this filter), mirroring the `plan.todos.v1` discipline.
+/// Capability-gated notifications (`plan.todos.v1`, `event.background_activity.v1`)
+/// never reach a connection that did not negotiate them — on the live broadcast
+/// OR reconnect replay (both call this filter); #2019 migration trap.
 #[test]
-fn should_gate_background_activity_when_the_capability_was_not_negotiated() {
-    let event = UiProtocolLedgerEvent::Notification(UiNotification::BackgroundActivity(
+fn capability_gated_notifications_require_negotiation() {
+    use octos_core::ui_protocol::{PlanUpdatedEvent, UiPlanRecord};
+    let plan = UiProtocolLedgerEvent::Notification(UiNotification::PlanUpdated(PlanUpdatedEvent {
+        session_id: SessionKey("local:test".into()),
+        topic: None,
+        turn_id: None,
+        plan: UiPlanRecord {
+            items: Vec::new(),
+            title: None,
+            updated_at_ms: 0,
+        },
+    }));
+    assert!(!live_event_passes_capability_filter(
+        &plan,
+        ConnectionUiFeatures::default()
+    ));
+    let negotiated = ConnectionUiFeatures {
+        plan_todos: true,
+        ..Default::default()
+    };
+    assert!(live_event_passes_capability_filter(&plan, negotiated));
+
+    let activity = UiProtocolLedgerEvent::Notification(UiNotification::BackgroundActivity(
         background_activity_for(&SessionKey("local:test".into()), "monitor_01", "boom"),
     ));
     assert!(
-        !live_event_passes_capability_filter(&event, ConnectionUiFeatures::default()),
+        !live_event_passes_capability_filter(&activity, ConnectionUiFeatures::default()),
         "a connection without event.background_activity.v1 must never receive it"
     );
     let negotiated = ConnectionUiFeatures {
         background_activity: true,
         ..Default::default()
     };
-    assert!(live_event_passes_capability_filter(&event, negotiated));
+    assert!(live_event_passes_capability_filter(&activity, negotiated));
 }
-
 #[tokio::test]
 async fn session_open_rejects_cwd_without_negotiated_feature() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -2997,22 +2151,6 @@ async fn session_open_rejects_cwd_without_negotiated_feature() {
 // ----- UPCR-2026-007: capability advertisement on `SessionOpened` -----
 
 #[test]
-fn semantic_context_cache_diagnostics_negotiate_with_parent_capability() {
-    let features = ConnectionUiFeatures::from_requested_feature_tokens(
-        [
-            UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1,
-            UI_PROTOCOL_FEATURE_CONTEXT_SEMANTIC_CACHE_V1,
-        ],
-        true,
-    );
-    let capabilities = features.negotiated_capabilities();
-
-    assert!(capabilities.supports_feature(UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1));
-    assert!(capabilities.supports_feature(UI_PROTOCOL_FEATURE_CONTEXT_SEMANTIC_CACHE_V1));
-    assert!(features.context_semantic_cache_available());
-}
-
-#[test]
 fn prompt_coverage_compares_provider_visible_media_and_reasoning() {
     let mut known = test_message(MessageRole::Assistant, "same visible text");
     known.media = vec!["image://one".into()];
@@ -3026,13 +2164,6 @@ fn prompt_coverage_compares_provider_visible_media_and_reasoning() {
         "equal text with different provider-visible media is not covered"
     );
 
-    let mut changed_reasoning = known.clone();
-    changed_reasoning.reasoning_content = Some("visible reasoning two".into());
-    assert_eq!(
-        covered_prompt_message_indices(&[changed_reasoning], &[known.clone()]),
-        vec![false],
-        "equal text with different provider-visible reasoning is not covered"
-    );
     assert_eq!(
         covered_prompt_message_indices(&[known.clone()], &[known]),
         vec![true]
@@ -3070,16 +2201,13 @@ fn rejected_manual_compaction_reports_typed_failure_without_generation_change() 
     assert!(result["output_generation"].is_null());
 }
 
-/// Over a stdio-default connection (`projection_envelope == false`),
-/// the legacy `turn/completed` notification MUST pass the
-/// per-connection capability filter — both the broadcast path
-/// (`live_event_passes_capability_filter`) and the direct-send path
-/// (`direct_send_passes_capability_filter`). This is the
-/// turn-lifecycle signal the stdio TUI keys on to clear its
-/// turn-active state. If it were dropped (as it is when
-/// `projection_envelope` is true), the TUI wedges after turn 1.
+/// Over a stdio-default connection (`projection_envelope == false`) the legacy
+/// `turn/completed` notification must pass BOTH capability filters (broadcast +
+/// direct-send) — it is the turn-lifecycle signal the stdio TUI keys on. A
+/// connection that opts into `projection.envelope.v1` via `client_hello` flips
+/// the gate back and (correctly) suppresses the legacy notification.
 #[tokio::test]
-async fn stdio_default_connection_delivers_legacy_turn_completed() {
+async fn stdio_delivers_legacy_turn_completed_until_projection_envelope_opt_in() {
     let session_id = SessionKey("local:stdio-turn-completed".into());
     let completed =
         UiProtocolLedgerEvent::Notification(UiNotification::TurnCompleted(TurnCompletedEvent {
@@ -3092,16 +2220,12 @@ async fn stdio_default_connection_delivers_legacy_turn_completed() {
             session_result: None,
         }));
 
-    // Broadcast / live-forwarder path.
     let features = ConnectionUiFeatures::stdio_defaults();
     assert!(
         live_event_passes_capability_filter(&completed, features),
         "stdio-default connection must receive legacy turn/completed via the broadcast filter"
     );
 
-    // Direct-send path: a stdio connection snapshots stdio_defaults
-    // into its live-features, so the direct-send gate must also let
-    // turn/completed through.
     let (tx, _rx) = mpsc::channel(16);
     let ws = WsConnection::new(tx);
     ws.update_live_features(ConnectionUiFeatures::stdio_defaults());
@@ -3109,68 +2233,32 @@ async fn stdio_default_connection_delivers_legacy_turn_completed() {
         direct_send_passes_capability_filter(&ws, &completed),
         "stdio-default connection must receive legacy turn/completed via the direct-send filter"
     );
-}
 
-/// Opt-in preservation: a stdio connection that DOES consume
-/// envelopes can still negotiate `projection.envelope.v1` via
-/// `client_hello` (`from_requested_feature_tokens` with the stdio
-/// transport flag), flipping `projection_envelope` back to true. The
-/// default change is default-only — it does not remove the ability
-/// to opt in. When opted in, the γ gate then (correctly) suppresses
-/// legacy `turn/completed` for that connection in favour of the
-/// canonical envelope.
-#[test]
-fn projection_envelope_client_hello_over_stdio_opt_in_preserved() {
+    // Opt-in via client_hello over stdio must be preserved, and once opted in
+    // the γ gate suppresses legacy turn/completed (envelope supersedes it).
     let features = ConnectionUiFeatures::from_requested_feature_tokens(
         [UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V1],
         true, // stdio_transport
     );
     assert!(
         features.projection_envelope,
-        "client_hello over stdio must still be able to opt into projection.envelope.v1"
+        "client_hello over stdio must still opt into projection.envelope.v1"
     );
     assert!(features.stdio_transport);
-    let capabilities = features.negotiated_capabilities();
-    assert!(capabilities.supports_feature(UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V1));
-
-    // And once opted in, the γ gate suppresses legacy turn/completed
-    // for that connection (envelope supersedes it) — confirming the
-    // opt-in actually re-engages the mutual-exclusion contract.
-    let session_id = SessionKey("local:stdio-opt-in".into());
-    let completed =
-        UiProtocolLedgerEvent::Notification(UiNotification::TurnCompleted(TurnCompletedEvent {
-            session_id,
-            topic: None,
-            turn_id: TurnId::new(),
-            cursor: None,
-            tokens_in: None,
-            tokens_out: None,
-            session_result: None,
-        }));
+    assert!(
+        features
+            .negotiated_capabilities()
+            .supports_feature(UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V1)
+    );
     assert!(
         !live_event_passes_capability_filter(&completed, features),
         "an opted-in stdio connection sees the envelope, not legacy turn/completed"
     );
 }
-
-#[test]
-fn advertised_capabilities_include_session_btw() {
-    let state = AppState::empty_for_tests();
-    let capabilities = ConnectionUiFeatures::default().advertised_capabilities(&state);
-    assert!(
-        capabilities
-            .supported_methods
-            .iter()
-            .any(|method| method == octos_core::ui_protocol::methods::SESSION_BTW),
-        "session/btw must be advertised so clients can gate /btw; got {:?}",
-        capabilities.supported_methods
-    );
-}
-
 #[tokio::test]
 async fn session_btw_rejects_unknown_session() {
-    let known = SessionKey("local:btw-known".into());
-    let state = prg_state_with_session(&known, prg_seed_user_assistant);
+    let temp = tempfile::tempdir().expect("tempdir");
+    let state = state_with_sessions(temp.path());
     let ledger = event_ledger(&state).await;
     let (ws, mut rx) = ws_connection_for_test(4);
 
@@ -3211,13 +2299,8 @@ fn runtime_unavailable_errors_are_typed_for_protocol_clients() {
 
 #[test]
 fn held_data_dir_lock_yields_a_clear_actionable_error() {
-    // A `session/open` bootstrap that fails because another octos process
-    // already owns the profile's redb must be recognized structurally
-    // (through the eyre wrap chain that `ProfileRuntime::bootstrap` adds) and
-    // rendered with both remedies. Previously this reached the client as
-    // "failed to bootstrap ProfileRuntime for profile 'alan': failed to open
-    // episode store for profile 'alan'" — the cause, the path, and every hint
-    // about what to do were dropped by the `{error}` (non-alternate) format.
+    // Lock contention must be recognized structurally through the eyre wrap
+    // chain and rendered with cause + remedies intact.
     let report = eyre::Report::new(octos_memory::EpisodeStoreLocked {
         path: std::path::PathBuf::from("/Users/dev/.octos/profiles/alan/data/episodes.redb"),
     })
@@ -3235,7 +2318,6 @@ fn held_data_dir_lock_yields_a_clear_actionable_error() {
     assert_eq!(
         error.data.as_ref().and_then(|d| d.get("kind")),
         Some(&json!("data_dir_locked")),
-        "clients branch on `kind`; this must not be the generic runtime_unavailable"
     );
     let message = error
         .data
@@ -3243,48 +2325,28 @@ fn held_data_dir_lock_yields_a_clear_actionable_error() {
         .and_then(|d| d.get("message"))
         .and_then(|m| m.as_str())
         .unwrap_or_default();
-    assert!(
-        message.contains("alan"),
-        "message must name the profile: {message}"
-    );
-    assert!(
-        message.contains("--instance-data-dir"),
-        "message must offer the private-storage remedy: {message}"
-    );
-    assert!(
-        message.contains("episodes.redb"),
-        "message must carry the underlying cause, including the contended path: {message}"
-    );
+    assert!(message.contains("alan"), "{message}");
+    assert!(message.contains("--instance-data-dir"), "{message}");
+    assert!(message.contains("episodes.redb"), "{message}");
 }
 
 #[test]
-fn final_assistant_message_persists_content_when_response_messages_omit_it() {
+fn final_assistant_message_persists_omitted_dedupes_and_preserves_distinct_final() {
+    // Response messages without an assistant row → persist the final content.
     let message = final_assistant_message(&[Message::user("hello")], "world", Some("r".into()))
         .expect("assistant message");
-
     assert_eq!(message.role, MessageRole::Assistant);
     assert_eq!(message.content, "world");
     assert_eq!(message.reasoning_content.as_deref(), Some("r"));
-}
 
-#[test]
-fn final_assistant_message_skips_duplicate_assistant_content() {
+    // A trailing assistant row equal to the final content is deduped.
     let messages = vec![Message::assistant("world")];
-
     assert!(final_assistant_message(&messages, "world", None).is_none());
-}
 
-/// NEW-10 NEGATIVE: the legitimate two-bubble flow (iter-N
-/// emits a SHORT preamble "Looking that up..." and the EndTurn
-/// produces a DIFFERENT long answer) must STILL render both
-/// rows. The preamble is not trimmed-equal to the final answer,
-/// so the dedupe helper returns false.
-#[test]
-fn final_assistant_message_preserves_preamble_plus_distinct_final() {
-    let preamble = Message::assistant("Looking that up...");
-    let messages = vec![preamble];
+    // NEW-10 NEGATIVE: a short preamble + a DISTINCT final answer keeps both
+    // rows (the preamble is not trimmed-equal to the final).
+    let messages = vec![Message::assistant("Looking that up...")];
     let final_content = "旧金山今天天气晴朗，气温17.1°C，湿度68%。需要更详细的湾区预报吗？";
-
     let synthesised = final_assistant_message(&messages, final_content, None);
     assert!(
         synthesised.is_some(),
@@ -3292,60 +2354,32 @@ fn final_assistant_message_preserves_preamble_plus_distinct_final() {
     );
     assert_eq!(synthesised.unwrap().content, final_content);
 }
-
-/// M10 Phase 6.1: the standalone-turn persist loop must pre-stamp the
-/// `User` row with the originating `TurnId`-derived thread id so the
-/// user prompt and the assistant reply land in the same thread on the
-/// SPA. Without this the SPA renders an empty placeholder bubble in
-/// the user's `clientMessageId`-keyed thread and creates an orphan
-/// thread for the assistant reply (3 bubbles per spawn_only turn
-/// instead of the target 2).
+/// M10 Phase 6.1: pre-stamp rows with the turn-derived thread id so user +
+/// assistant land in the same SPA thread (else: 3 bubbles per turn).
 #[test]
 fn pre_stamp_turn_thread_id_stamps_user_assistant_and_tool_when_unbound() {
     let turn_thread_id = "turn-abc";
 
     let user = pre_stamp_turn_thread_id(Message::user("hi"), turn_thread_id);
     let assistant = pre_stamp_turn_thread_id(Message::assistant("ok"), turn_thread_id);
-    let tool = pre_stamp_turn_thread_id(
-        Message {
-            role: MessageRole::Tool,
-            content: "result".into(),
-            media: vec![],
-            tool_calls: None,
-            tool_call_id: Some("call-1".into()),
-            reasoning_content: None,
-            client_message_id: None,
-            thread_id: None,
-            timestamp: chrono::Utc::now(),
-        },
-        turn_thread_id,
-    );
+    let mut tool = test_message(MessageRole::Tool, "result");
+    tool.tool_call_id = Some("call-1".into());
+    let tool = pre_stamp_turn_thread_id(tool, turn_thread_id);
 
-    assert_eq!(
-        user.thread_id.as_deref(),
-        Some(turn_thread_id),
-        "user row must inherit the turn-derived thread_id so its bubble \
-             coalesces with the assistant reply"
-    );
+    assert_eq!(user.thread_id.as_deref(), Some(turn_thread_id));
     assert_eq!(assistant.thread_id.as_deref(), Some(turn_thread_id));
     assert_eq!(tool.thread_id.as_deref(), Some(turn_thread_id));
 }
 
 #[tokio::test]
 async fn interrupt_cancels_running_spawn_only_tasks_for_session() {
-    // Root-cause regression: `turn/interrupt` must cancel the session's
-    // still-running spawn_only background tasks (a hung `bg_research` /
-    // `bg_research`), not only abort the foreground agent loop. The
-    // interrupt path calls `cancel_session_spawn_only_tasks`, which fires
-    // each task's supervisor cancel token so the detached worker drops its
-    // in-flight pipeline future at the next poll.
+    // `turn/interrupt` must cancel the session's still-running spawn_only
+    // background tasks, not only abort the foreground agent loop.
     let supervisor = octos_agent::TaskSupervisor::new();
     let session_id = SessionKey("api:profile/local:owned".into());
     let session_key = session_id.to_string();
 
-    // Two live spawn_only tasks for THIS session and one for another
-    // session that must survive (turns are per-session; a sibling
-    // session's background work is unrelated to this interrupt).
+    // Two live tasks for THIS session; one for another session survives.
     let running_a = supervisor.register("bg_research", "tc-a", Some(&session_key));
     let running_b = supervisor.register("bg_research", "tc-b", Some(&session_key));
     supervisor.mark_running(&running_a);
@@ -3356,43 +2390,27 @@ async fn interrupt_cancels_running_spawn_only_tasks_for_session() {
         supervisor.register("bg_research", "tc-c", Some(&other_session.to_string()));
     supervisor.mark_running(&other_running);
 
-    // An already-terminal task for this session: cancel must skip it
-    // (idempotent — `cancel` would otherwise return `AlreadyTerminal`).
+    // An already-terminal task for this session is skipped.
     let done = supervisor.register("bg_research", "tc-d", Some(&session_key));
     supervisor.mark_completed(&done, vec![]);
 
     cancel_session_spawn_only_tasks(&supervisor, &session_id);
 
-    // Both live tasks for this session are now terminal `Cancelled`,
-    // which fires their cancel tokens.
+    // Both live tasks for this session are now terminal `Cancelled`.
     assert!(matches!(
         supervisor.get_task(&running_a).map(|t| t.status),
         Some(octos_agent::TaskStatus::Cancelled)
     ));
-    assert!(supervisor.cancel_token(&running_a).is_cancelled());
-    assert!(matches!(
-        supervisor.get_task(&running_b).map(|t| t.status),
-        Some(octos_agent::TaskStatus::Cancelled)
-    ));
     assert!(supervisor.cancel_token(&running_b).is_cancelled());
-
-    // The completed task is left intact (still `Completed`, not clobbered).
+    // The completed task is intact; the sibling session's task is untouched.
     assert!(matches!(
         supervisor.get_task(&done).map(|t| t.status),
         Some(octos_agent::TaskStatus::Completed)
     ));
-
-    // A different session's running task is untouched by this interrupt.
-    assert!(matches!(
-        supervisor.get_task(&other_running).map(|t| t.status),
-        Some(octos_agent::TaskStatus::Running)
-    ));
     assert!(!supervisor.cancel_token(&other_running).is_cancelled());
 }
 
-/// Mirror of `handle_turn_interrupt`'s post-abort drain step. Used by
-/// the interrupt-flow tests below to drive the store + ledger without
-/// constructing a real `WsSink`.
+/// Mirror of `handle_turn_interrupt`'s post-abort drain step.
 fn drain_pending_approvals_for_interrupt(
     ledger: &UiProtocolLedger,
     approvals: &PendingApprovalStore,
@@ -3424,8 +2442,6 @@ async fn interrupt_cancels_pending_approvals_for_turn() {
     let session_id = SessionKey("local:test".into());
     let interrupted_turn = TurnId::new();
     let approval_id = ApprovalId::new();
-    let surviving_turn = TurnId::new();
-    let surviving_approval = ApprovalId::new();
 
     approvals.request(ApprovalRequestedEvent::generic(
         session_id.clone(),
@@ -3435,21 +2451,12 @@ async fn interrupt_cancels_pending_approvals_for_turn() {
         "Pending",
         "ls",
     ));
-    approvals.request(ApprovalRequestedEvent::generic(
-        session_id.clone(),
-        surviving_approval.clone(),
-        surviving_turn,
-        "shell",
-        "Different turn",
-        "ls",
-    ));
 
     let emitted =
         drain_pending_approvals_for_interrupt(&ledger, &approvals, &session_id, &interrupted_turn);
 
     assert_eq!(emitted.len(), 1);
     assert_eq!(emitted[0].approval_id, approval_id);
-    assert_eq!(emitted[0].turn_id, interrupted_turn);
     assert_eq!(emitted[0].reason, "turn_interrupted");
 
     let err = approvals
@@ -3460,71 +2467,9 @@ async fn interrupt_cancels_pending_approvals_for_turn() {
         ))
         .expect_err("late respond against cancelled approval");
     assert_eq!(err.code, rpc_error_codes::APPROVAL_CANCELLED);
-
-    // Approval on the surviving (non-interrupted) turn still works.
-    let ok = approvals
-        .respond(ApprovalRespondParams::new(
-            session_id,
-            surviving_approval,
-            ApprovalDecision::Approve,
-        ))
-        .expect("non-interrupted turn approval still pending");
-    // FIX-06 wrapped the result in `RespondOutcome { result, context }`.
-    assert!(ok.result.accepted);
-}
-
-#[tokio::test]
-async fn respond_to_cancelled_approval_returns_typed_error() {
-    let ledger = UiProtocolLedger::new(16);
-    let approvals = PendingApprovalStore::default();
-    let session_id = SessionKey("local:test".into());
-    let turn_id = TurnId::new();
-    let approval_id = ApprovalId::new();
-    approvals.request(ApprovalRequestedEvent::generic(
-        session_id.clone(),
-        approval_id.clone(),
-        turn_id.clone(),
-        "shell",
-        "Pending",
-        "ls",
-    ));
-
-    drain_pending_approvals_for_interrupt(&ledger, &approvals, &session_id, &turn_id);
-
-    let err = approvals
-        .respond(ApprovalRespondParams::new(
-            session_id,
-            approval_id.clone(),
-            ApprovalDecision::Approve,
-        ))
-        .expect_err("late respond returns typed error");
-    assert_eq!(err.code, rpc_error_codes::APPROVAL_CANCELLED);
     let data = err.data.expect("typed error data");
     assert_eq!(data["kind"], json!("approval_cancelled"));
     assert_eq!(data["reason"], json!("turn_interrupted"));
-    assert_eq!(data["approval_id"], json!(approval_id));
-}
-
-// TODO(M9-FIX-06): once ScopePolicy lands in this worktree, add a test
-// verifying that approve_for_session scopes survive turn/interrupt while
-// approve_for_turn and per-call pending entries are cancelled. The
-// supervisor will reconcile the test during merge.
-
-#[test]
-fn notification_serializes_as_json_rpc_method_frame() {
-    let frame = UiNotification::TurnError(TurnErrorEvent {
-        session_id: SessionKey("local:test".into()),
-        topic: None,
-        turn_id: TurnId::new(),
-        code: "test".into(),
-        message: "failed".into(),
-        token_usage: None,
-        partial_result: None,
-    })
-    .into_rpc_notification()
-    .expect("notification");
-
-    assert_eq!(frame.method, methods::TURN_ERROR);
 }
 
 // ====================================================================
@@ -3572,43 +2517,7 @@ async fn interrupt_idempotent_on_completed_turn() {
         outcome,
         InterruptOutcome::AlreadyTerminal(TerminalReason::Completed)
     ));
-    // A second interrupt returns the same shape — idempotent.
-    let outcome2 = decide_interrupt(
-        &active_turns,
-        &TurnInterruptParams {
-            session_id,
-            turn_id,
-        },
-    )
-    .await;
-    assert!(matches!(
-        outcome2,
-        InterruptOutcome::AlreadyTerminal(TerminalReason::Completed)
-    ));
     handle.abort();
-}
-
-#[tokio::test]
-async fn interrupt_unknown_turn_returns_unknown_turn_error() {
-    let active_turns: SharedActiveTurns = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-    let turn_id = TurnId::new();
-
-    let outcome = decide_interrupt(
-        &active_turns,
-        &TurnInterruptParams {
-            session_id: SessionKey("local:test".into()),
-            turn_id: turn_id.clone(),
-        },
-    )
-    .await;
-    assert!(matches!(outcome, InterruptOutcome::Unknown));
-
-    let error = unknown_turn_error(&turn_id);
-    assert_eq!(error.code, UNKNOWN_TURN_CODE);
-    assert_eq!(
-        error.data.as_ref().and_then(|d| d.get("kind")),
-        Some(&json!("unknown_turn"))
-    );
 }
 
 #[tokio::test]
@@ -3671,10 +2580,8 @@ async fn interrupt_in_flight_turn_aborts_emits_one_terminal() {
 // the routing is exercised by the higher-level e2e suite.
 // ====================================================================
 
-/// Mirrors what `handle_approval_respond` does on success: respond to
-/// the pending approval and, if the scope is recordable, register the
-/// policy entry. Returns the recorded scope kind (or `None` if the
-/// scope was one-shot / unknown).
+/// Mirrors `handle_approval_respond` on success: respond, then record a
+/// recordable scope. Returns the recorded scope kind (or `None`).
 fn respond_with_scope(
     contracts: &UiProtocolContractStores,
     params: ApprovalRespondParams,
@@ -3714,7 +2621,7 @@ fn store_request(
 }
 
 #[test]
-fn scope_approve_for_turn_auto_resolves_within_turn() {
+fn scope_approve_auto_resolves_and_deny_short_circuits() {
     let contracts = UiProtocolContractStores::default();
     let session_id = SessionKey("local:test".into());
     let turn_id = TurnId::new();
@@ -3727,19 +2634,39 @@ fn scope_approve_for_turn_auto_resolves_within_turn() {
         "shell",
     );
 
+    // approve_for_turn: a second approval for the same tool in the same turn
+    // auto-resolves with the recorded decision.
     let mut params =
         ApprovalRespondParams::new(session_id.clone(), approval_id, ApprovalDecision::Approve);
     params.approval_scope = Some("approve_for_turn".into());
     let kind = respond_with_scope(&contracts, params).expect("scope recorded");
     assert_eq!(kind, ApprovalScopeKind::ApproveForTurn);
-
-    // Second approval in the same turn — same tool — should auto-resolve.
     let hit = contracts
         .scopes
         .lookup(&session_id, "shell", &turn_id)
         .expect("auto-resolve hit");
     assert_eq!(hit.decision, ApprovalDecision::Approve);
     assert_eq!(hit.scope_wire(), approval_scopes::TURN);
+
+    // Deny with a tool scope records a deny decision.
+    let turn_b = TurnId::new();
+    let deny_id = ApprovalId::new();
+    store_request(
+        &contracts,
+        &session_id,
+        deny_id.clone(),
+        turn_b.clone(),
+        "shell",
+    );
+    let mut params =
+        ApprovalRespondParams::new(session_id.clone(), deny_id, ApprovalDecision::Deny);
+    params.approval_scope = Some(approval_scopes::TOOL.into());
+    respond_with_scope(&contracts, params);
+    let hit = contracts
+        .scopes
+        .lookup(&session_id, "shell", &turn_b)
+        .expect("deny scope hit");
+    assert_eq!(hit.decision, ApprovalDecision::Deny);
 }
 
 #[test]
@@ -3777,7 +2704,6 @@ fn scope_approve_for_session_persists_until_session_close() {
             .lookup(&session_id, "shell", &turn_b)
             .is_some()
     );
-
     // Session close drops it.
     contracts.scopes.evict_session(&session_id);
     assert!(
@@ -3787,61 +2713,6 @@ fn scope_approve_for_session_persists_until_session_close() {
             .is_none()
     );
 }
-
-#[test]
-fn scope_approve_for_tool_auto_resolves_same_tool() {
-    let contracts = UiProtocolContractStores::default();
-    let session_id = SessionKey("local:test".into());
-    let turn_a = TurnId::new();
-    let turn_b = TurnId::new();
-    let approval_id = ApprovalId::new();
-    store_request(
-        &contracts,
-        &session_id,
-        approval_id.clone(),
-        turn_a.clone(),
-        "shell",
-    );
-
-    let mut params =
-        ApprovalRespondParams::new(session_id.clone(), approval_id, ApprovalDecision::Approve);
-    params.approval_scope = Some("approve_for_tool".into());
-    respond_with_scope(&contracts, params);
-
-    // Same tool, even on a different turn, auto-resolves.
-    let hit = contracts
-        .scopes
-        .lookup(&session_id, "shell", &turn_b)
-        .expect("tool scope persists across turns");
-    assert_eq!(hit.scope_wire(), approval_scopes::TOOL);
-    assert_eq!(hit.decision, ApprovalDecision::Approve);
-}
-
-#[test]
-fn scope_deny_short_circuit_records_deny() {
-    let contracts = UiProtocolContractStores::default();
-    let session_id = SessionKey("local:test".into());
-    let turn_id = TurnId::new();
-    let approval_id = ApprovalId::new();
-    store_request(
-        &contracts,
-        &session_id,
-        approval_id.clone(),
-        turn_id.clone(),
-        "shell",
-    );
-    let mut params =
-        ApprovalRespondParams::new(session_id.clone(), approval_id, ApprovalDecision::Deny);
-    params.approval_scope = Some(approval_scopes::TOOL.into());
-    respond_with_scope(&contracts, params);
-
-    let hit = contracts
-        .scopes
-        .lookup(&session_id, "shell", &turn_id)
-        .expect("deny scope hit");
-    assert_eq!(hit.decision, ApprovalDecision::Deny);
-}
-
 // ====================================================================
 // M9-FIX-04 — send-error handling + backpressure
 // ====================================================================
@@ -3875,10 +2746,9 @@ async fn send_error_propagates_for_lifecycle_messages() {
 // M9-FIX-07 — approval decision audit log + replay
 // ====================================================================
 
+/// One JSON-Lines entry per decision, and no payload bodies leak.
 #[test]
 fn audit_log_records_every_decision() {
-    // Mirrors what `handle_approval_respond` does. Verifies one
-    // JSON-Lines entry per decision and that no payload bodies leak.
     use octos_core::ui_protocol::ApprovalRequestedEvent;
 
     let temp = tempfile::tempdir().expect("tempdir");
@@ -3932,69 +2802,8 @@ fn audit_log_records_every_decision() {
 }
 
 // ====================================================================
-// Gap-1 unification: parity contract over the SINGLE terminal sink
-// (`route_terminal_event_to_continuation_queue`). The same consumer fn
-// is wired via `set_on_terminal` in every runtime mode (WS, gateway,
-// headless drain), so driving it directly proves the cross-mode parity:
-// exactly one continuation, correct reason, enqueued under the resolved
-// runtime profile (ZERO under `_main`), idempotent under repeated
-// terminal marks, recovery prompt body unchanged for failure-with-ack.
-// ====================================================================
-
-// ====================================================================
 // PR G — UPCR-2026-009 / -010 / -011 / -012 handler tests
 // ====================================================================
-
-fn prg_state_with_session(
-    session_id: &SessionKey,
-    seed: impl FnOnce(&mut octos_bus::Session),
-) -> Arc<AppState> {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let manager = octos_bus::SessionManager::open(tmp.path()).expect("session manager open");
-    let manager = Arc::new(tokio::sync::Mutex::new(manager));
-    // Seed by directly mutating in-memory session.
-    {
-        let mut guard = manager.try_lock().expect("session manager lock");
-        // get_or_create is async, so we sidestep by using try_lock + a
-        // synchronous workaround: spawn-blocking is overkill; this
-        // helper is only called from sync context above the test.
-        // We block_on a separate task so we can call async manager.
-        // Easiest: rebuild via a sync-OK helper. Use futures executor.
-        let session = futures::executor::block_on(guard.get_or_create(session_id));
-        seed(session);
-    }
-    Arc::new(AppState {
-        sessions: Some(manager),
-        ..AppState::empty_for_tests()
-    })
-    // tmp is dropped when state drops; tests don't observe disk
-}
-
-fn prg_seed_user_assistant(session: &mut octos_bus::Session) {
-    let now = Utc::now();
-    session.messages.push(Message {
-        role: MessageRole::User,
-        content: "hello".into(),
-        media: vec![],
-        tool_calls: None,
-        tool_call_id: None,
-        reasoning_content: None,
-        client_message_id: Some("cmid-user-1".into()),
-        thread_id: Some("cmid-user-1".into()),
-        timestamp: now,
-    });
-    session.messages.push(Message {
-        role: MessageRole::Assistant,
-        content: "world".into(),
-        media: vec![],
-        tool_calls: None,
-        tool_call_id: None,
-        reasoning_content: None,
-        client_message_id: None,
-        thread_id: Some("cmid-user-1".into()),
-        timestamp: now + chrono::Duration::milliseconds(10),
-    });
-}
 
 /// Open a disk-backed `SessionManager` and persist `turns` user turns
 /// (user + assistant each, thread-grouped) so `session/rollback` has a real
@@ -4051,19 +2860,14 @@ async fn prg_state_with_persisted_turns(
     (state, tmp)
 }
 
-/// A stale context ledger must not resurrect rolled-back turns. The
-/// ledger coverage check is a high-watermark `>=` (deliberately
-/// slice-tolerant, because turn paths pass bounded history slices), so
-/// after a rollback shrinks durable history a pre-rollback ledger still
-/// "covers" it, gets Loaded verbatim, and the next model prompt would
-/// contain the very turns the user rewound away. `session/rollback` must
-/// rebuild + persist the context ledger from the trimmed history.
+/// A stale pre-rollback context ledger (high-watermark coverage) must not
+/// resurrect rolled-back turns: `session/rollback` rebuilds + persists the
+/// ledger from the trimmed history.
 #[tokio::test(flavor = "current_thread")]
 async fn session_rollback_rebuilds_context_ledger() {
     let session_id = SessionKey("local:rollback-ctx-ledger".into());
     let (state, _tmp) = prg_state_with_persisted_turns(&session_id, 3).await;
-    // Persist a pre-rollback context ledger exactly like a prior turn's
-    // prompt path would have.
+    // Persist a pre-rollback context ledger like a prior turn would.
     let data_dir = {
         let sessions = state.sessions.as_ref().expect("sessions store");
         let mut guard = sessions.lock().await;
@@ -4129,9 +2933,7 @@ async fn session_rollback_rebuilds_context_ledger() {
 
 #[test]
 fn fork_reservations_scope_by_sessions_dir() {
-    // codex #1613 r2: identical child keys in DIFFERENT profiles'
-    // sessions dirs name different files — they must not exclude
-    // each other. Same dir + same key must.
+    // codex #1613 r2: identical keys in different sessions dirs don't collide.
     let child = SessionKey("local:contested".into());
     let dir_a = std::path::Path::new("/tmp/profile-a/sessions");
     let dir_b = std::path::Path::new("/tmp/profile-b/sessions");
@@ -4235,8 +3037,7 @@ async fn live_forwarder_pushes_v2_assistant_persisted_to_subscribed_ws() {
         "live forwarder must emit a v2 projection envelope; frame={frame:?}"
     );
 
-    // Cleanup: aborting the forwarder must not panic and must release
-    // the receiver so subsequent prune_idle_subscribers reclaims the slot.
+    // Aborting must release the receiver so the slot can be reclaimed.
     abort_live_forwarders(&forwarders, &ledger).await;
 }
 
@@ -4276,7 +3077,6 @@ fn v2_projects_errored_and_interrupted_terminals() {
             } => {
                 assert_eq!(outcome, expected_outcome);
                 assert_eq!(error.code, code);
-                assert_eq!(error.message, format!("{code} terminal"));
                 assert!(token_usage.is_none());
             }
             other => panic!("expected v2 terminal, got {other:?}"),

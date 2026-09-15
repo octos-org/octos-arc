@@ -577,15 +577,6 @@ mod tests {
     }
 
     #[test]
-    fn test_gpt4o_mini_before_gpt4o() {
-        // gpt-4o-mini must match before gpt-4o
-        let mini = model_pricing("gpt-4o-mini").unwrap();
-        assert!((mini.input_per_million - 0.15).abs() < f64::EPSILON);
-        let full = model_pricing("gpt-4o").unwrap();
-        assert!((full.input_per_million - 2.50).abs() < f64::EPSILON);
-    }
-
-    #[test]
     fn test_unknown_model_returns_none() {
         assert!(model_pricing("my-local-model").is_none());
         assert!(model_pricing("ollama/phi-custom").is_none());

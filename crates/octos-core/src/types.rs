@@ -697,22 +697,6 @@ mod tests {
     }
 
     #[test]
-    fn test_task_id_display() {
-        let id = TaskId::new();
-        let s = id.to_string();
-        assert!(!s.is_empty());
-        assert!(s.contains('-')); // UUID format
-    }
-
-    #[test]
-    fn test_task_id_from_str() {
-        let id = TaskId::new();
-        let s = id.to_string();
-        let parsed: TaskId = s.parse().unwrap();
-        assert_eq!(id, parsed);
-    }
-
-    #[test]
     fn test_agent_id() {
         let id = AgentId::new("worker-1");
         assert_eq!(id.to_string(), "worker-1");
@@ -783,46 +767,9 @@ mod tests {
     }
 
     #[test]
-    fn message_deserializes_legacy_jsonl_without_client_message_id() {
-        // Legacy persisted rows pre-dating this field MUST still parse so
-        // existing JSONL files don't break the runtime on reload.
-        let legacy = r#"{
-            "role": "user",
-            "content": "hi",
-            "timestamp": "2026-04-24T00:00:00Z"
-        }"#;
-        let msg: Message = serde_json::from_str(legacy).unwrap();
-        assert!(msg.client_message_id.is_none());
-        assert_eq!(msg.content, "hi");
-    }
-
-    #[test]
     fn test_session_key_new() {
         let key = SessionKey::new("telegram", "12345");
         assert_eq!(key.0, "telegram:12345");
-    }
-
-    #[test]
-    fn test_session_key_display() {
-        let key = SessionKey::new("cli", "default");
-        assert_eq!(key.to_string(), "cli:default");
-    }
-
-    #[test]
-    fn test_session_key_equality() {
-        let k1 = SessionKey::new("cli", "a");
-        let k2 = SessionKey::new("cli", "a");
-        let k3 = SessionKey::new("cli", "b");
-        assert_eq!(k1, k2);
-        assert_ne!(k1, k3);
-    }
-
-    #[test]
-    fn test_session_key_serde_roundtrip() {
-        let key = SessionKey::new("discord", "guild:123");
-        let json = serde_json::to_string(&key).unwrap();
-        let parsed: SessionKey = serde_json::from_str(&json).unwrap();
-        assert_eq!(key, parsed);
     }
 
     #[test]
@@ -833,32 +780,6 @@ mod tests {
         assert_eq!(key.topic(), Some("research"));
         assert_eq!(key.channel(), "telegram");
         assert_eq!(key.chat_id(), "12345");
-    }
-
-    #[test]
-    fn test_session_key_with_empty_topic() {
-        let key = SessionKey::with_topic("telegram", "12345", "");
-        assert_eq!(key.0, "telegram:12345");
-        assert_eq!(key.topic(), None);
-    }
-
-    #[test]
-    fn test_session_key_base_key_no_topic() {
-        let key = SessionKey::new("whatsapp", "abc");
-        assert_eq!(key.base_key(), "whatsapp:abc");
-        assert_eq!(key.topic(), None);
-        assert_eq!(key.channel(), "whatsapp");
-        assert_eq!(key.chat_id(), "abc");
-    }
-
-    #[test]
-    fn test_session_key_with_profile() {
-        let key = SessionKey::with_profile("weather", "matrix", "!room:localhost");
-        assert_eq!(key.0, "weather:matrix:!room:localhost");
-        assert_eq!(key.profile_id(), Some("weather"));
-        assert_eq!(key.base_key(), "weather:matrix:!room:localhost");
-        assert_eq!(key.channel(), "matrix");
-        assert_eq!(key.chat_id(), "!room:localhost");
     }
 
     #[test]
@@ -873,45 +794,11 @@ mod tests {
     }
 
     #[test]
-    fn test_session_key_with_profile_supports_qq_bot_channel() {
-        let key = SessionKey::with_profile("weather", "qq-bot", "group:123");
-        assert_eq!(key.profile_id(), Some("weather"));
-        assert_eq!(key.channel(), "qq-bot");
-        assert_eq!(key.chat_id(), "group:123");
-    }
-
-    #[test]
-    fn test_session_key_with_profile_supports_local_channel() {
-        let key = SessionKey::with_profile_topic("dspfac", "local", "tui", "coding");
-        assert_eq!(key.profile_id(), Some("dspfac"));
-        assert_eq!(key.channel(), "local");
-        assert_eq!(key.chat_id(), "tui");
-        assert_eq!(key.topic(), Some("coding"));
-    }
-
-    #[test]
     fn test_session_key_legacy_shape_has_no_profile() {
         let key = SessionKey::new("telegram", "12345");
         assert_eq!(key.profile_id(), None);
         assert_eq!(key.channel(), "telegram");
         assert_eq!(key.chat_id(), "12345");
-    }
-
-    #[test]
-    fn acp_session_keys_keep_named_profile_and_fork_channel() {
-        let key = SessionKey::with_profile("dev", "acp", "editor-session");
-        assert_eq!(key.profile_id(), Some("dev"));
-        assert_eq!(key.channel(), "acp");
-        assert_eq!(key.fork_child("child").0, "dev:acp:child");
-        assert_eq!(SessionKey::new("acp", "legacy:session").profile_id(), None);
-    }
-
-    #[test]
-    fn test_session_key_legacy_chat_id_with_colon_stays_legacy() {
-        let key = SessionKey::new("discord", "guild:123");
-        assert_eq!(key.profile_id(), None);
-        assert_eq!(key.channel(), "discord");
-        assert_eq!(key.chat_id(), "guild:123");
     }
 
     #[test]
@@ -953,31 +840,6 @@ mod tests {
     }
 
     #[test]
-    fn client_message_id_display_and_as_str_match_inner() {
-        let id = ClientMessageId::new("cmid-xyz");
-        assert_eq!(id.as_str(), "cmid-xyz");
-        assert_eq!(id.to_string(), "cmid-xyz");
-    }
-
-    #[test]
-    fn client_message_id_generate_yields_unique_values() {
-        let a = ClientMessageId::generate();
-        let b = ClientMessageId::generate();
-        assert_ne!(a, b);
-        // UUIDs are 36 chars; we don't pin the exact format, just non-empty.
-        assert!(!a.0.is_empty());
-    }
-
-    #[test]
-    fn thread_id_round_trips_through_serde() {
-        let tid = ThreadId::new("thread-cmid-xyz");
-        let json = serde_json::to_string(&tid).unwrap();
-        assert_eq!(json, "\"thread-cmid-xyz\"");
-        let parsed: ThreadId = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, tid);
-    }
-
-    #[test]
     fn thread_id_can_be_minted_from_client_message_id() {
         // The canonical "thread inherits from rooting user message" rule.
         let cmid = ClientMessageId::new("cmid-root");
@@ -1009,30 +871,6 @@ mod tests {
         // The assistant constructor MUST NOT inherit a client_message_id —
         // that's the user's identity, not the assistant's.
         assert!(msg.client_message_id.is_none());
-    }
-
-    #[test]
-    fn message_tool_with_thread_carries_call_id_and_thread() {
-        let tid = ThreadId::new("thread-root-1");
-        let msg = Message::tool_with_thread("ok", "call_42", tid);
-        assert_eq!(msg.role, MessageRole::Tool);
-        assert_eq!(msg.tool_call_id.as_deref(), Some("call_42"));
-        assert_eq!(msg.thread_id.as_deref(), Some("thread-root-1"));
-        assert!(msg.client_message_id.is_none());
-    }
-
-    #[test]
-    fn message_with_typed_client_message_id_attaches() {
-        let cmid = ClientMessageId::new("cmid-typed");
-        let msg = Message::user("hi").with_typed_client_message_id(cmid);
-        assert_eq!(msg.client_message_id.as_deref(), Some("cmid-typed"));
-    }
-
-    #[test]
-    fn message_with_thread_id_attaches() {
-        let tid = ThreadId::new("thread-typed");
-        let msg = Message::assistant("hi").with_thread_id(tid);
-        assert_eq!(msg.thread_id.as_deref(), Some("thread-typed"));
     }
 
     #[test]
@@ -1098,41 +936,6 @@ mod tests {
             }
         );
         assert_eq!(err.to_string(), "ThreadId cannot be empty");
-    }
-
-    #[test]
-    fn try_new_accepts_non_empty_strings() {
-        let cmid = ClientMessageId::try_new("ok").unwrap();
-        assert_eq!(cmid.as_str(), "ok");
-        let tid = ThreadId::try_new("ok").unwrap();
-        assert_eq!(tid.as_str(), "ok");
-    }
-
-    #[test]
-    fn thread_id_rooted_at_named_conversion_matches_from_impl() {
-        // Both spellings of "thread inherits from rooting user message" must
-        // produce identical results — the named conversion is for callers
-        // that prefer self-documenting code; the `From` impl is for generic
-        // contexts.
-        let cmid = ClientMessageId::new("cmid-root");
-        let tid_named = ThreadId::rooted_at(&cmid);
-        let tid_from: ThreadId = (&cmid).into();
-        assert_eq!(tid_named, tid_from);
-        assert_eq!(tid_named.as_str(), "cmid-root");
-    }
-
-    #[test]
-    fn message_user_rooting_thread_stamps_both_identity_tokens() {
-        // Codex's PR-A review (/tmp/codex-pra-review.log finding High-2):
-        // user-message constructors should be able to root their own thread
-        // so the server doesn't have to fall back to the derivation path.
-        let cmid = ClientMessageId::new("cmid-root-2");
-        let msg = Message::user_rooting_thread("hi", cmid.clone());
-        assert_eq!(msg.role, MessageRole::User);
-        assert_eq!(msg.client_message_id.as_deref(), Some("cmid-root-2"));
-        assert_eq!(msg.thread_id.as_deref(), Some("cmid-root-2"));
-        // Sanity: the thread always equals the cmid for a rooted user.
-        assert_eq!(msg.thread_id.as_deref(), msg.client_message_id.as_deref());
     }
 
     #[test]

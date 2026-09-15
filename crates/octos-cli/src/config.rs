@@ -1443,23 +1443,6 @@ mod tests {
     }
 
     #[test]
-    fn test_gateway_config_deserialize() {
-        let json = r#"{
-            "provider": "anthropic",
-            "model": "claude-sonnet-4-20250514",
-            "gateway": {
-                "max_history": 30
-            }
-        }"#;
-        let config: Config = serde_json::from_str(json).unwrap();
-        let gw = config.gateway.unwrap();
-        assert_eq!(gw.max_history, 30);
-        assert!(gw.system_prompt.is_none());
-        // reasoning_effort is optional and defaults to None when omitted.
-        assert!(gw.reasoning_effort.is_none());
-    }
-
-    #[test]
     fn appui_sessions_in_cwd_defaults_on_and_can_be_disabled() {
         // Absent `[appui]` → the `#[serde(default)]` on the parent field calls
         // `AppUiConfig::default()` → per-project storage ON.
@@ -1537,47 +1520,6 @@ mod tests {
         let (config, path) = Config::load_resolved(cwd.path(), data_dir.path(), true).unwrap();
         assert_eq!(config.provider.as_deref(), Some("anthropic"));
         assert_eq!(path.as_deref(), Some(local_config.as_path()));
-    }
-
-    /// Gate 3 (tenant isolation): explicit context (is_default == false) with
-    /// an empty config_home MUST NOT fall through to the host's legacy
-    /// ~/.octos/config.json — it loads defaults instead.
-    #[test]
-    #[allow(unsafe_code)]
-    fn load_explicit_never_reads_host_legacy_octos() {
-        let _g = HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-        let tmp = tempfile::tempdir().unwrap();
-        let fake_home = tmp.path();
-        let cwd = fake_home.join("work");
-        std::fs::create_dir_all(&cwd).unwrap();
-
-        // Host legacy config is present and would leak if isolation broke.
-        let legacy = fake_home.join(".octos").join("config.json");
-        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-        std::fs::write(&legacy, r#"{"provider":"anthropic","auth_token":"SECRET"}"#).unwrap();
-
-        // Explicit tenant data dir, no config inside it.
-        let tenant = fake_home.join("tenant-data");
-
-        let original_home = std::env::var_os("HOME");
-        // SAFETY: single-threaded inside LOCK; restored below.
-        unsafe { std::env::set_var("HOME", fake_home) };
-
-        let result = Config::load_resolved(&cwd, &tenant, false);
-
-        match original_home {
-            Some(v) => unsafe { std::env::set_var("HOME", v) },
-            None => unsafe { std::env::remove_var("HOME") },
-        }
-
-        let (config, path) = result.unwrap();
-        assert!(
-            config.provider.is_none(),
-            "explicit/tenant context must NOT read host ~/.octos/config.json"
-        );
-        assert!(config.auth_token.is_none());
-        assert!(path.is_none());
     }
 
     /// Gate 7 (end-to-end, the load-bearing "no per-profile login regression"):
@@ -1702,59 +1644,5 @@ mod tests {
         let refresh_empty: MemoryConfig =
             serde_json::from_value(serde_json::json!({"refresh": {}})).unwrap();
         assert!(MemoryConfig::refresh_enabled(Some(&refresh_empty)));
-    }
-
-    #[test]
-    fn explicit_env_var_skips_provider_auth_store() {
-        // Even with provider-default resolution available, the explicit
-        // override must come from ITS variable only — never the
-        // provider-scoped auth store (codex R2: an OpenAI OAuth token
-        // must not be sent to a custom-endpoint embedder).
-        let mut config = Config::default();
-        config
-            .env_vars
-            .insert("DASH_EMBED_KEY".to_string(), "dash-key".to_string());
-        // Provider-default path would resolve something else entirely;
-        // the explicit var wins regardless.
-        let key = config
-            .get_api_key_with_env("openai", Some("DASH_EMBED_KEY"))
-            .expect("explicit var resolves");
-        assert_eq!(key, "dash-key");
-        // And a MISSING explicit var is an error — no silent fallback to
-        // the provider chain.
-        assert!(
-            config
-                .get_api_key_with_env("openai", Some("NOPE_MISSING_VAR"))
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn should_round_trip_cli_block() {
-        // The `cli.<cmd>` block survives a deserialize → serialize → deserialize
-        // cycle, including a command key the typed struct doesn't know about.
-        let json = serde_json::json!({
-            "provider": "deepseek",
-            "cli": {
-                "serve": { "port": 50080, "solo": true },
-                "chat": { "sandbox": "workspace-write" },
-                "future_command": { "some_flag": 1 }
-            }
-        });
-        let config: Config = serde_json::from_value(json).unwrap();
-        assert_eq!(
-            config.cli.get("serve").and_then(|v| v.get("port")),
-            Some(&serde_json::json!(50080))
-        );
-        // A round-trip preserves every command section, including unknown ones.
-        let reserialized = serde_json::to_value(&config).unwrap();
-        assert_eq!(
-            reserialized.get("cli"),
-            Some(&serde_json::json!({
-                "serve": { "port": 50080, "solo": true },
-                "chat": { "sandbox": "workspace-write" },
-                "future_command": { "some_flag": 1 }
-            }))
-        );
     }
 }

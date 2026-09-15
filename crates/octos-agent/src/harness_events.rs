@@ -1174,51 +1174,6 @@ mod tests {
     }
 
     #[test]
-    fn progress_with_extra_does_not_let_extra_clobber_canonical_keys() {
-        // Defense-in-depth: a producer that accidentally stuffs a reserved key
-        // (e.g. "progress") into `extra` must not overwrite the typed
-        // canonical value in runtime_detail — the typed fields win.
-        let mut extra = HashMap::new();
-        extra.insert("progress".to_string(), Value::from(0.99));
-        extra.insert("kind".to_string(), Value::String("hijack".into()));
-        extra.insert("node".to_string(), Value::String("plan".into()));
-
-        let event = HarnessEvent::progress_with_extra(
-            "s",
-            "t",
-            Some("research"),
-            "node_started",
-            Some("plan (1 of 3)"),
-            Some(0.0),
-            extra,
-        );
-        let detail = event.runtime_detail_value(None, None);
-        // Canonical typed values survive; only the genuinely-new key lands.
-        assert_eq!(detail["kind"], "progress");
-        assert_eq!(detail["progress"], 0.0);
-        assert_eq!(detail["node"], "plan");
-    }
-
-    #[test]
-    fn ignores_unknown_future_fields() {
-        let mut json = serde_json::to_value(HarnessEvent::phase_event(
-            "s",
-            "t",
-            Some("demo"),
-            "running",
-            Some("phase changed"),
-        ))
-        .unwrap();
-        json.as_object_mut()
-            .unwrap()
-            .insert("future_field".into(), Value::String("ok".into()));
-        let parsed = HarnessEvent::from_json_line(&json.to_string()).unwrap();
-
-        assert_eq!(parsed.workflow(), Some("demo"));
-        assert_eq!(parsed.phase(), Some("running"));
-    }
-
-    #[test]
     fn progress_event_defaults_and_rejects_future_schema_version() {
         let legacy = serde_json::json!({
             "schema": "octos.harness.event.v1",

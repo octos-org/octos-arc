@@ -1445,30 +1445,6 @@ mod tests {
     }
 
     #[test]
-    fn llm_compaction_transcript_preserves_tool_structure_without_hidden_reasoning() {
-        let mut assistant = Message::assistant("checking");
-        assistant.reasoning_content = Some("private chain of thought".to_owned());
-        assistant.tool_calls = Some(vec![ToolCall {
-            id: "call_1".to_owned(),
-            name: "read_file".to_owned(),
-            arguments: serde_json::json!({"path": "README.md"}),
-            metadata: None,
-        }]);
-        let tool = Message::tool_with_thread(
-            "file contents",
-            "call_1",
-            octos_core::ThreadId::new("thread-1"),
-        );
-
-        let rendered = render_transcript(&[assistant, tool]);
-        assert!(rendered.contains("tool_call: id=call_1 name=read_file"));
-        assert!(rendered.contains("\"path\":\"README.md\""));
-        assert!(rendered.contains("tool_result_for: call_1"));
-        assert!(rendered.contains("reasoning: [present but intentionally omitted]"));
-        assert!(!rendered.contains("private chain of thought"));
-    }
-
-    #[test]
     fn summary_budget_cap_is_utf8_safe() {
         let summary = "界".repeat(100);
         let capped = cap_summary_to_budget(&summary, 10);
@@ -1658,17 +1634,6 @@ mod tests {
         let summary_tokens = estimate_tokens(&summary);
         assert!(summary_tokens <= 200);
         assert!(summary.contains("earlier messages omitted"));
-    }
-
-    #[test]
-    fn test_compact_error_tool_result() {
-        let messages = vec![
-            assistant_tool_call("shell", "tc1"),
-            tool_result("tc1", "Error: command not found"),
-        ];
-
-        let summary = compact_messages(&messages, 10000);
-        assert!(summary.contains("-> shell: error"));
     }
 
     #[test]

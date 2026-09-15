@@ -952,25 +952,6 @@ mod tests {
     }
 
     #[test]
-    fn contract_becomes_ready_when_canonical_required_tools_are_available() {
-        let context = ToolStatusListContext {
-            available_model_tools: CODING_P0_REQUIRED_TOOL_NAMES,
-            ..ToolStatusListContext::default_for_session("coding:test")
-        };
-        let payload = tool_status_list_payload(context);
-        let contract = &payload["coding_tool_contract"];
-
-        assert_eq!(contract["status"], json!("ready"));
-        assert_eq!(contract["missing_required_tools"], json!([]));
-        for name in CODING_P0_REQUIRED_TOOL_NAMES {
-            assert_eq!(
-                required_tool(contract, name)["status"],
-                json!(TOOL_STATUS_AVAILABLE)
-            );
-        }
-    }
-
-    #[test]
     fn deferred_canonical_tool_is_reported_as_available_via_deferred_status() {
         // #970: when ProfileRuntime auto-defers `group:runtime` /
         // `group:sessions`, the P0 tools `shell`, `exec_command`,

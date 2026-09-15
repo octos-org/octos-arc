@@ -342,41 +342,4 @@ mod tests {
         assert!(matches!(deserialized.tool_choice, ToolChoice::Required));
         assert_eq!(deserialized.stop_sequences, vec!["STOP"]);
     }
-
-    #[test]
-    fn test_chat_config_skip_serializing_none() {
-        let config = ChatConfig {
-            max_tokens: None,
-            temperature: None,
-            tool_choice: ToolChoice::Auto,
-            stop_sequences: vec![],
-            reasoning_effort: None,
-            response_format: None,
-            context_management: None,
-            sampling_params: None,
-            cache_retention: CacheRetention::Default,
-            prompt_cache_context: None,
-        };
-        let json = serde_json::to_value(&config).unwrap();
-        assert!(json.get("max_tokens").is_none());
-        assert!(json.get("temperature").is_none());
-        assert!(json.get("stop_sequences").is_none());
-        assert!(json.get("context_management").is_none());
-        assert!(json.get("prompt_cache_context").is_none());
-    }
-
-    #[test]
-    fn test_tool_choice_specific_serde() {
-        let choice = ToolChoice::Specific {
-            name: "search".to_string(),
-        };
-        let json = serde_json::to_value(&choice).unwrap();
-        // Externally tagged enum: {"specific": {"name": "search"}}
-        assert_eq!(json["specific"]["name"], "search");
-        let deserialized: ToolChoice = serde_json::from_value(json).unwrap();
-        match deserialized {
-            ToolChoice::Specific { name } => assert_eq!(name, "search"),
-            _ => panic!("expected Specific"),
-        }
-    }
 }

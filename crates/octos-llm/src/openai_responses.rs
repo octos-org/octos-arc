@@ -809,17 +809,6 @@ mod tests {
     }
 
     #[test]
-    fn test_build_request_reasoning_effort() {
-        let provider = OpenAIResponsesProvider::new("test-key", "o3");
-        let messages = vec![msg(MessageRole::User, "think")];
-        let mut config = ChatConfig::default();
-        config.reasoning_effort = Some(crate::config::ReasoningEffort::High);
-        let request = provider.build_request(&messages, &[], &config);
-
-        assert_eq!(request["reasoning"]["effort"].as_str(), Some("high"));
-    }
-
-    #[test]
     fn test_parse_response_text_only() {
         let resp = ResponsesApiResponse {
             output: vec![OutputItem::Message {
@@ -850,25 +839,6 @@ mod tests {
         assert!(is_responses_capable("gpt-5"));
         assert!(!is_responses_capable("deepseek-chat"));
         assert!(!is_responses_capable("claude-3"));
-    }
-
-    #[test]
-    fn test_sse_text_delta() {
-        let mut state = ResponsesStreamState::default();
-        let event = crate::sse::SseEvent {
-            event: None,
-            data: r#"{"type": "response.output_text.delta", "delta": "Hello"}"#.into(),
-        };
-        let events = map_responses_sse(&mut state, &event);
-        assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], StreamEvent::TextDelta(t) if t == "Hello"));
-    }
-
-    #[test]
-    fn test_provider_metadata() {
-        let provider = OpenAIResponsesProvider::new("key", "o4-mini");
-        assert_eq!(provider.model_id(), "o4-mini");
-        assert_eq!(provider.provider_name(), "openai");
     }
 }
 

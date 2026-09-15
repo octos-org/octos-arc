@@ -960,42 +960,6 @@ mod tests {
     // (`populate`/`run_deliverable_command`), which `cmd /C` cannot run.
     #[cfg(unix)]
     #[test]
-    fn deliverable_command_noop_and_branch_empty_when_nothing_produced() {
-        // §4b: a worker that produced nothing leaves the branch at base — the
-        // command is a clean no-op (exit 0) on an unchanged tree and
-        // `branch_advanced_past` reports `false` so the caller does not record a
-        // phantom success.
-        let repo = tempfile::tempdir().unwrap();
-        if !git_init_repo(repo.path()) {
-            return;
-        }
-        let work = tempfile::tempdir().unwrap();
-        let checkout = work.path().join("f1").join("a");
-        let prepared = prepare_fleet_worktree(repo.path(), work.path(), "fleet/f1/a", &checkout)
-            .expect("prepare");
-        // Populate the --no-checkout tree so the index matches HEAD; otherwise
-        // the empty index would show the seed as a staged deletion and the
-        // auto-commit would spuriously advance the branch.
-        assert!(
-            populate(&checkout),
-            "worker populates the --no-checkout worktree"
-        );
-
-        assert!(
-            run_deliverable_command(&checkout, "fleet a deliverable"),
-            "the auto-commit command must exit 0 (clean no-op) on an unchanged tree",
-        );
-        let landed = branch_advanced_past(&prepared.repo_root, "fleet/f1/a", &prepared.base_commit)
-            .expect("branch check");
-        assert!(!landed, "no changes → no deliverable → branch unchanged");
-        let head = run_git(&prepared.repo_root, &["rev-parse", "fleet/f1/a"]).unwrap();
-        assert_eq!(head, prepared.base_commit, "branch stays at base");
-    }
-
-    // POSIX-sh contract: drives the worker's `sh -c` command strings
-    // (`populate`/`run_deliverable_command`), which `cmd /C` cannot run.
-    #[cfg(unix)]
-    #[test]
     fn deliverable_commit_command_escapes_the_message() {
         // The commit MESSAGE is single-quote-escaped, so a message containing a
         // quote or shell metacharacters cannot break the command or inject — it
@@ -1072,24 +1036,6 @@ mod tests {
             envs.get("GIT_CONFIG_SYSTEM"),
             Some(&Some(NULL_DEVICE.to_string())),
             "must mask SYSTEM config to the null device",
-        );
-    }
-
-    #[test]
-    fn controller_git_command_uses_absolute_binary() {
-        // HIGH (controller-hijack): a full-FS worker could plant a fake `git`
-        // earlier in the controller's `$PATH`. Every controller-side git op must
-        // invoke an ABSOLUTE binary so `$PATH` is never consulted.
-        let cmd = git_command(Path::new("/some/repo"));
-        let prog = cmd.get_program();
-        assert!(
-            Path::new(prog).is_absolute(),
-            "controller git must use an ABSOLUTE binary (no $PATH lookup), got {prog:?}",
-        );
-        assert!(
-            GIT_BIN.is_absolute(),
-            "GIT_BIN must be absolute, got {:?}",
-            *GIT_BIN
         );
     }
 

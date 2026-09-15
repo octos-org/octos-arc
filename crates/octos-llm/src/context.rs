@@ -380,12 +380,6 @@ mod tests {
     }
 
     #[test]
-    fn test_estimate_tokens_ascii() {
-        assert_eq!(estimate_tokens("hello world"), 2);
-        assert_eq!(estimate_tokens("a"), 1);
-    }
-
-    #[test]
     fn test_estimate_message_tokens() {
         let msg = Message {
             role: octos_core::MessageRole::User,

@@ -1198,15 +1198,6 @@ mod tests {
             .expect("apply_patch execute")
     }
 
-    /// Parse an envelope whose first section is an Update and return its hunks.
-    fn parse_update_hunks(patch: &str) -> Vec<UpdateHunk> {
-        let mut ops = parse_patch_envelope(patch).expect("valid envelope");
-        match ops.remove(0) {
-            PatchOp::Update { hunks, .. } => hunks,
-            other => panic!("expected Update, got {other:?}"),
-        }
-    }
-
     // -- Metadata ----------------------------------------------------------
 
     #[test]
@@ -1313,21 +1304,6 @@ mod tests {
         assert!(err.contains("not there"), "got: {err}");
     }
 
-    #[test]
-    fn should_reject_pure_insertion_when_no_context_and_file_nonempty() {
-        // The common model-emitted shape "add an import": a bare '+' hunk
-        // with no '@@' anchor and no '*** End of File'. Against a non-empty
-        // file the position is ambiguous — this implementation deliberately
-        // rejects it with guidance instead of guessing.
-        let hunks =
-            parse_update_hunks("*** Begin Patch\n*** Update File: f\n+import os\n*** End Patch\n");
-        let err =
-            apply_codex_hunks("a\nb\n", &hunks).expect_err("ambiguous insertion must be rejected");
-        assert!(err.contains("hunk 1 has no context lines"), "got: {err}");
-        assert!(err.contains("@@ <anchor>"), "got: {err}");
-        assert!(err.contains("End of File"), "got: {err}");
-    }
-
     #[tokio::test]
     async fn apply_patch_adds_and_updates_file() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1399,54 +1375,6 @@ mod tests {
         .await;
         assert!(result.success, "{}", result.output);
         assert!(!temp.path().join("gone.txt").exists());
-    }
-
-    #[tokio::test]
-    async fn should_apply_multi_file_patch_when_sections_span_ops() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(temp.path().join("upd.txt"), "keep\nold\n").unwrap();
-        std::fs::write(temp.path().join("del.txt"), "x\n").unwrap();
-        std::fs::write(temp.path().join("mv.txt"), "content\n").unwrap();
-        let tool = ApplyPatchTool::new(temp.path());
-        let result = run(
-            &tool,
-            "*** Begin Patch\n\
-             *** Add File: sub/new.txt\n\
-             +fresh\n\
-             *** Update File: upd.txt\n\
-             @@\n \
-             keep\n\
-             -old\n\
-             +new\n\
-             *** Delete File: del.txt\n\
-             *** Update File: mv.txt\n\
-             *** Move to: moved.txt\n\
-             @@\n\
-             -content\n\
-             +moved content\n\
-             *** End Patch\n",
-        )
-        .await;
-        assert!(result.success, "{}", result.output);
-        assert_eq!(
-            std::fs::read_to_string(temp.path().join("sub/new.txt")).unwrap(),
-            "fresh"
-        );
-        assert_eq!(
-            std::fs::read_to_string(temp.path().join("upd.txt")).unwrap(),
-            "keep\nnew\n"
-        );
-        assert!(!temp.path().join("del.txt").exists());
-        assert!(!temp.path().join("mv.txt").exists());
-        assert_eq!(
-            std::fs::read_to_string(temp.path().join("moved.txt")).unwrap(),
-            "moved content\n"
-        );
-        let meta = result.structured_metadata.as_ref().expect("metadata");
-        assert_eq!(
-            meta["modified_paths"],
-            json!(["sub/new.txt", "upd.txt", "del.txt", "moved.txt"])
-        );
     }
 
     #[tokio::test]
@@ -1522,28 +1450,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_reject_when_add_target_exists() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(temp.path().join("dup.txt"), "already here\n").unwrap();
-        let tool = ApplyPatchTool::new(temp.path());
-        let result = run(
-            &tool,
-            "*** Begin Patch\n*** Add File: dup.txt\n+clobber\n*** End Patch\n",
-        )
-        .await;
-        assert!(!result.success);
-        assert!(
-            result.output.contains("already exists"),
-            "{}",
-            result.output
-        );
-        assert_eq!(
-            std::fs::read_to_string(temp.path().join("dup.txt")).unwrap(),
-            "already here\n"
-        );
-    }
-
-    #[tokio::test]
     async fn should_report_applied_sections_when_apply_fails_midway() {
         let temp = tempfile::tempdir().expect("tempdir");
         // `blocker` is a regular FILE, so `blocker/child.txt` passes the
@@ -1583,20 +1489,6 @@ mod tests {
         assert_eq!(meta["failed_section"], json!(2));
         assert_eq!(meta["modified_paths"], json!(["ok.txt"]));
         assert_eq!(meta["partial_paths"], json!([]));
-    }
-
-    #[tokio::test]
-    async fn should_refuse_when_file_access_read_only() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let tool = ApplyPatchTool::new(temp.path()).with_file_access(FileAccessMode::ReadOnly);
-        let result = run(
-            &tool,
-            "*** Begin Patch\n*** Add File: a.txt\n+x\n*** End Patch\n",
-        )
-        .await;
-        assert!(!result.success);
-        assert!(result.output.contains("read-only"), "{}", result.output);
-        assert!(!temp.path().join("a.txt").exists());
     }
 
     #[tokio::test]

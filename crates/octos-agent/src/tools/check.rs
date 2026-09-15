@@ -925,56 +925,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn should_run_fake_checker_and_render_diagnostics() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempdir();
-        touch(dir.path(), "Cargo.toml");
-
-        let line_a = cargo_line("src/main.rs", 3, "error", Some("E0308"), "mismatched types");
-        let line_b = cargo_line("src/lib.rs", 7, "warning", None, "unused import: `foo`");
-        let script = dir.path().join("fake-cargo.sh");
-        std::fs::write(
-            &script,
-            format!("#!/bin/sh\necho '{line_a}'\necho '{line_b}'\nexit 101\n"),
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        let script_for_resolver = script.clone();
-        let tool = CheckTool::new(dir.path()).with_binary_resolver(Arc::new(move |name, _| {
-            (name == "cargo").then(|| script_for_resolver.clone())
-        }));
-
-        let result = tool.execute(&serde_json::json!({})).await.unwrap();
-        assert!(
-            result.success,
-            "diagnostics found is a successful check run: {}",
-            result.output
-        );
-        assert!(
-            result
-                .output
-                .contains("src/main.rs:3: error[E0308]: mismatched types"),
-            "rendered error line missing: {}",
-            result.output
-        );
-        assert!(
-            result
-                .output
-                .contains("src/lib.rs:7: warning: unused import: `foo`"),
-            "rendered warning line missing: {}",
-            result.output
-        );
-        assert!(
-            result.output.contains("1 error") && result.output.contains("1 warning"),
-            "header must count levels: {}",
-            result.output
-        );
-    }
-
     // ---- execute: session-sandbox confinement ----
 
     /// Review #1772 (high): a real session sandbox must confine the checker

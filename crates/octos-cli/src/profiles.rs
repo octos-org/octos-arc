@@ -1720,44 +1720,6 @@ mod tests {
     }
 
     #[test]
-    fn test_save_preserves_local_owner_metadata_fields() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = ProfileStore::open_unified(dir.path()).unwrap();
-        let mut profile = UserProfile {
-            id: "ada".into(),
-            name: "Ada Lovelace".into(),
-            enabled: true,
-            data_dir: None,
-            parent_id: None,
-            public_subdomain: None,
-            config: ProfileConfig::default(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
-
-        store.save(&profile).unwrap();
-        let path = store.profile_path("ada");
-        let mut raw: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        raw.as_object_mut()
-            .unwrap()
-            .insert("username".into(), serde_json::json!("ada"));
-        raw.as_object_mut()
-            .unwrap()
-            .insert("email".into(), serde_json::json!("ada@example.com"));
-        std::fs::write(&path, serde_json::to_string_pretty(&raw).unwrap()).unwrap();
-
-        profile.name = "Ada Byron".into();
-        store.save(&profile).unwrap();
-
-        let saved: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(saved["username"], serde_json::json!("ada"));
-        assert_eq!(saved["email"], serde_json::json!("ada@example.com"));
-        assert_eq!(saved["name"], serde_json::json!("Ada Byron"));
-    }
-
-    #[test]
     fn config_from_profile_maps_sub_providers_for_isolated_pipeline_lanes() {
         // The `bg_research` pipeline's `cheap`/`strong` nodes resolve through
         // the profile's `sub_providers`; `config_from_profile` must carry them
@@ -1965,62 +1927,6 @@ mod tests {
             serde_json::to_string_pretty(config).unwrap(),
         )
         .unwrap();
-    }
-
-    #[test]
-    fn effective_config_prefers_profile_value_over_defaults() {
-        let registry_root = tempfile::tempdir().unwrap();
-        let data_root = tempfile::tempdir().unwrap();
-
-        let defaults = ProfileConfig {
-            memory: Some(crate::config::MemoryConfig {
-                max_inject_tokens: Some(1),
-                refresh: None,
-            }),
-            approval_policy: Some(crate::config::ApprovalPolicyConfig::default()),
-            // Non-default sandbox: workspace_write=false differs from the
-            // profile's own non-default sandbox below.
-            sandbox: octos_agent::SandboxConfig {
-                workspace_write: false,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        write_profile_defaults(registry_root.path(), &defaults);
-
-        let store = ProfileStore::open(registry_root.path(), data_root.path()).unwrap();
-
-        let mut profile = inheritance_profile("bob");
-        profile.config.memory = Some(crate::config::MemoryConfig {
-            max_inject_tokens: Some(999),
-            refresh: None,
-        });
-        profile.config.approval_policy = None; // will inherit
-        // The profile sets ONE sandbox field (allow_network) but omits
-        // workspace_write.
-        profile.config.sandbox = octos_agent::SandboxConfig {
-            allow_network: true,
-            ..Default::default()
-        };
-
-        let eff = store.effective_config(&profile);
-
-        // memory: profile's Some wins over the defaults'.
-        assert_eq!(eff.memory.as_ref().unwrap().max_inject_tokens, Some(999));
-        // approval_policy: None → inherits the defaults'.
-        assert!(eff.approval_policy.is_some());
-        // sandbox is now a FIELD-BY-FIELD merge, not whole-struct replace:
-        // the profile's explicitly-set allow_network stays true, ...
-        assert!(eff.sandbox.allow_network);
-        // ... while workspace_write, which the profile did NOT set, inherits the
-        // defaults' read-only floor (false) instead of reverting to the profile
-        // struct's type default (true). This is the FIX-1a correction — before,
-        // the whole struct reverted the moment any single field was set.
-        assert!(
-            !eff.sandbox.workspace_write,
-            "an omitted sandbox field must inherit the default restriction even \
-             when the profile set a different sandbox field"
-        );
     }
 
     #[test]

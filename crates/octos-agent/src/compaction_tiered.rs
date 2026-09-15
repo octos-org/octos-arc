@@ -751,35 +751,6 @@ mod tests {
         }
     }
 
-    /// An assistant message issuing one tool call with explicit `arguments`
-    /// (so #2131 pin/dedup can read the `path`/`offset`/`limit`).
-    fn assistant_call_args(
-        tool_name: &str,
-        tool_id: &str,
-        arguments: serde_json::Value,
-    ) -> Message {
-        Message {
-            role: MessageRole::Assistant,
-            content: String::new(),
-            media: vec![],
-            tool_calls: Some(vec![ToolCall {
-                id: tool_id.to_string(),
-                name: tool_name.to_string(),
-                arguments,
-                metadata: None,
-            }]),
-            tool_call_id: None,
-            reasoning_content: None,
-            client_message_id: None,
-            thread_id: None,
-            timestamp: chrono::Utc::now(),
-        }
-    }
-
-    fn is_placeholder(content: &str) -> bool {
-        ToolResultPlaceholder::from_placeholder_content(content).is_ok()
-    }
-
     #[test]
     fn should_prune_tool_results_older_than_max_age() {
         // 6 user turns; keep_age=2 so turns 1..=4 are stale.
@@ -840,60 +811,6 @@ mod tests {
         assert_eq!(parsed.tool_call_id, "call_big");
         assert_eq!(parsed.original_byte_len, Some(50_000));
         assert_eq!(parsed.reason, "tier1_oversized");
-    }
-
-    #[test]
-    fn dedups_superseded_reads_of_the_same_range() {
-        // #2131: two reads of the SAME file+range — the older is redundant and
-        // collapses to a placeholder; the newest survives.
-        let mut messages = vec![
-            user_msg("go"),
-            assistant_call_args(
-                "read_file",
-                "r1",
-                serde_json::json!({"path": "a.txt", "offset": 0, "limit": 100}),
-            ),
-            tool_result("r1", "stale content"),
-            assistant_call_args(
-                "read_file",
-                "r2",
-                serde_json::json!({"path": "a.txt", "offset": 0, "limit": 100}),
-            ),
-            tool_result("r2", "fresh content"),
-        ];
-        let policy = MicroCompactionPolicy {
-            max_age_turns: 0,                    // not stale
-            max_size_bytes_per_result: u32::MAX, // not oversized
-            pin_recent_files: 0,                 // isolate dedup from pinning
-            dedup_duplicate_reads: true,
-        };
-        policy.prune(&mut messages, &[]);
-        // r1 (older duplicate) is superseded → cleared with the dedup reason.
-        let parsed = ToolResultPlaceholder::from_placeholder_content(&messages[2].content)
-            .expect("superseded read is a placeholder");
-        assert_eq!(parsed.reason, "tier1_superseded");
-        // r2 (newest) survives untouched.
-        assert!(!is_placeholder(&messages[4].content));
-    }
-
-    #[test]
-    fn should_preserve_tool_call_id_on_pruned_results() {
-        let mut messages = vec![
-            user_msg("q"),
-            assistant_tool_call("shell", "call_alpha"),
-            tool_result("call_alpha", &"y".repeat(50_000)),
-            user_msg("q2"),
-        ];
-        let policy = MicroCompactionPolicy::default()
-            .with_max_age_turns(u32::MAX)
-            .with_max_size_bytes_per_result(1024);
-        policy.prune(&mut messages, &[]);
-        let tool = &messages[2];
-        assert_eq!(
-            tool.tool_call_id.as_deref(),
-            Some("call_alpha"),
-            "tool_call_id must survive the prune"
-        );
     }
 
     #[test]

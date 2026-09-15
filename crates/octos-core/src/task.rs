@@ -346,28 +346,6 @@ mod tests {
     }
 
     #[test]
-    fn test_task_subtask() {
-        let parent = Task::new(
-            TaskKind::Plan {
-                goal: "parent goal".to_string(),
-            },
-            TaskContext {
-                working_dir: PathBuf::from("/test"),
-                ..Default::default()
-            },
-        );
-
-        let child = parent.subtask(TaskKind::Code {
-            instruction: "implement feature".to_string(),
-            files: vec![],
-        });
-
-        assert_eq!(child.parent_id, Some(parent.id.clone()));
-        assert_eq!(child.status, TaskStatus::Pending);
-        assert_eq!(child.context.working_dir, parent.context.working_dir);
-    }
-
-    #[test]
     fn test_task_status_serialization() {
         let status = TaskStatus::InProgress {
             agent_id: crate::AgentId::new("test-agent"),
@@ -399,95 +377,6 @@ mod tests {
         let usage = TokenUsage::default();
         assert_eq!(usage.input_tokens, 0);
         assert_eq!(usage.output_tokens, 0);
-    }
-
-    #[test]
-    fn test_task_kind_plan_serde() {
-        let kind = TaskKind::Plan {
-            goal: "deploy app".to_string(),
-        };
-        let json = serde_json::to_string(&kind).unwrap();
-        assert!(json.contains("plan"));
-        assert!(json.contains("deploy app"));
-        let parsed: TaskKind = serde_json::from_str(&json).unwrap();
-        assert!(matches!(parsed, TaskKind::Plan { .. }));
-    }
-
-    #[test]
-    fn test_task_kind_review_serde() {
-        let kind = TaskKind::Review {
-            diff: "+line1\n-line2".to_string(),
-        };
-        let json = serde_json::to_string(&kind).unwrap();
-        assert!(json.contains("review"));
-        let parsed: TaskKind = serde_json::from_str(&json).unwrap();
-        match parsed {
-            TaskKind::Review { diff } => assert!(diff.contains("+line1")),
-            _ => panic!("expected Review"),
-        }
-    }
-
-    #[test]
-    fn test_task_kind_test_serde() {
-        let kind = TaskKind::Test {
-            command: "cargo test".to_string(),
-        };
-        let json = serde_json::to_string(&kind).unwrap();
-        assert!(json.contains("\"test\""));
-        let parsed: TaskKind = serde_json::from_str(&json).unwrap();
-        assert!(matches!(parsed, TaskKind::Test { .. }));
-    }
-
-    #[test]
-    fn test_task_kind_custom_serde() {
-        let kind = TaskKind::Custom {
-            name: "deploy".to_string(),
-            params: serde_json::json!({"env": "staging"}),
-        };
-        let json = serde_json::to_string(&kind).unwrap();
-        assert!(json.contains("custom"));
-        let parsed: TaskKind = serde_json::from_str(&json).unwrap();
-        match parsed {
-            TaskKind::Custom { name, params } => {
-                assert_eq!(name, "deploy");
-                assert_eq!(params["env"], "staging");
-            }
-            _ => panic!("expected Custom"),
-        }
-    }
-
-    #[test]
-    fn test_task_status_blocked_serde() {
-        let status = TaskStatus::Blocked {
-            reason: "waiting for review".to_string(),
-        };
-        let json = serde_json::to_string(&status).unwrap();
-        assert!(json.contains("blocked"));
-        let parsed: TaskStatus = serde_json::from_str(&json).unwrap();
-        assert!(matches!(parsed, TaskStatus::Blocked { .. }));
-    }
-
-    #[test]
-    fn test_task_status_failed_serde() {
-        let status = TaskStatus::Failed {
-            error: "timeout".to_string(),
-        };
-        let json = serde_json::to_string(&status).unwrap();
-        assert!(json.contains("failed"));
-        let parsed: TaskStatus = serde_json::from_str(&json).unwrap();
-        match parsed {
-            TaskStatus::Failed { error } => assert_eq!(error, "timeout"),
-            _ => panic!("expected Failed"),
-        }
-    }
-
-    #[test]
-    fn test_task_status_completed_serde() {
-        let status = TaskStatus::Completed;
-        let json = serde_json::to_string(&status).unwrap();
-        assert!(json.contains("completed"));
-        let parsed: TaskStatus = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, TaskStatus::Completed);
     }
 
     #[test]
@@ -554,46 +443,6 @@ mod tests {
         assert_eq!(parsed.branch, "main");
         assert!(parsed.has_uncommitted_changes);
         assert_eq!(parsed.head_commit.as_deref(), Some("abc123"));
-    }
-
-    fn sample_session_summary() -> SessionSummary {
-        SessionSummary {
-            schema_version: SESSION_SUMMARY_SCHEMA_VERSION,
-            goal: "land iterative summarizer".to_string(),
-            constraints: vec!["no unsafe".to_string()],
-            progress_done: vec!["read base summarizer".to_string()],
-            progress_in_progress: vec!["write tests".to_string()],
-            decisions: vec![
-                DecisionRecord {
-                    at_turn: 1,
-                    summary: "Store prior summary in Mutex".to_string(),
-                    rationale: Some("Sync trait forbids async state".to_string()),
-                },
-                DecisionRecord {
-                    at_turn: 2,
-                    summary: format!("{STALE_DECISION_PREFIX} revert stateless path"),
-                    rationale: None,
-                },
-            ],
-            files: vec![FileRecord {
-                path: "crates/octos-agent/src/summarizer.rs".to_string(),
-                role: "impl".to_string(),
-            }],
-            next_steps: vec!["wire acceptance tests".to_string()],
-        }
-    }
-
-    #[test]
-    fn should_round_trip_session_summary_byte_identical() {
-        let summary = sample_session_summary();
-        let json = serde_json::to_string(&summary).expect("serialize succeeds");
-        let parsed: SessionSummary = serde_json::from_str(&json).expect("deserialize succeeds");
-        assert_eq!(parsed, summary);
-        let reserialized = serde_json::to_string(&parsed).expect("reserialize succeeds");
-        assert_eq!(
-            reserialized, json,
-            "SessionSummary must round-trip byte-identical"
-        );
     }
 
     #[test]

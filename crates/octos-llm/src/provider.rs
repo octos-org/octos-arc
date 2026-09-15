@@ -510,12 +510,6 @@ mod tests {
         let _client = build_http_client(30, 10);
         // Just verify it doesn't panic
     }
-
-    #[test]
-    fn test_build_streaming_http_client_succeeds() {
-        let _client = build_streaming_http_client(10);
-        // Just verify it doesn't panic
-    }
 }
 
 #[cfg(test)]

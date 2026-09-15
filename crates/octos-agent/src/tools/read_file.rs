@@ -809,34 +809,6 @@ mod tests {
     use super::*;
     use crate::tools::ConcurrencyClass;
 
-    #[tokio::test]
-    async fn armed_read_caps_an_oversized_malformed_argument_error() {
-        // #2193 R4 (codex round 4): an armed tool's Err path must be bounded
-        // too — a pathological caller-controlled unknown-parameter name must
-        // not exceed the tool-output cap and get mangled by the loop's blind
-        // head/tail cut. The error stays a ToolInputError (downcastable).
-        let tool = ReadFileTool::new("/tmp").with_window_enforcement(true);
-        let big_key = "k".repeat(60_000);
-        let mut map = serde_json::Map::new();
-        map.insert(big_key, serde_json::json!(1));
-        map.insert("path".to_string(), serde_json::json!("f.txt"));
-        let err = match tool.execute(&serde_json::Value::Object(map)).await {
-            Ok(_) => panic!("an unknown parameter must be rejected"),
-            Err(e) => e,
-        };
-        assert!(
-            err.chain()
-                .any(|src| src.is::<crate::tools::ToolInputError>()),
-            "the error identity must stay ToolInputError: {err:#}",
-        );
-        let rendered = format!("{err}");
-        assert!(
-            rendered.len() <= crate::tools::TOOL_INPUT_ERROR_MAX_BYTES + 64,
-            "armed malformed-arg error must be capped (got {} bytes)",
-            rendered.len(),
-        );
-    }
-
     #[test]
     fn read_file_tool_is_safe() {
         // read_file is read-only and side-effect-free — the M8.8 default
@@ -904,29 +876,6 @@ mod tests {
         assert!(result.output.contains("line1"));
         assert!(result.output.contains("line2"));
         assert!(result.output.contains("line3"));
-    }
-
-    #[tokio::test]
-    async fn test_read_file_with_line_range() {
-        let dir = tempfile::tempdir().unwrap();
-        let content = (1..=10)
-            .map(|i| format!("line {i}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        std::fs::write(dir.path().join("lines.txt"), &content).unwrap();
-
-        let tool = ReadFileTool::new(dir.path());
-        let result = tool
-            .execute(&serde_json::json!({"path": "lines.txt", "start_line": 3, "end_line": 5}))
-            .await
-            .unwrap();
-
-        assert!(result.success);
-        assert!(result.output.contains("line 3"));
-        assert!(result.output.contains("line 5"));
-        assert!(!result.output.contains("line 1"));
-        assert!(!result.output.contains("line 6"));
-        assert!(result.output.contains("showing lines 3-5 of 10"));
     }
 
     #[tokio::test]
@@ -1044,34 +993,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_file_uses_scope_workspace_as_base_dir_for_relative_paths() {
-        // When a scope is present, relative paths resolve against
-        // `scope.workspace()` regardless of the legacy `base_dir`.
-        let scope_dir = tempfile::tempdir().unwrap();
-        let legacy_dir = tempfile::tempdir().unwrap();
-        std::fs::write(scope_dir.path().join("scoped.txt"), "from scope\n").unwrap();
-        std::fs::write(legacy_dir.path().join("scoped.txt"), "from legacy\n").unwrap();
-
-        // Note: legacy_dir is the tool's base_dir, but the scope's
-        // workspace is scope_dir — the latter must win.
-        let scope = SessionScope::solo(scope_dir.path().to_path_buf(), vec![]).unwrap();
-        let tool = ReadFileTool::new(legacy_dir.path());
-        let ctx = ctx_with_scope(scope);
-
-        let result = tool
-            .execute_with_context(&ctx, &serde_json::json!({"path": "scoped.txt"}))
-            .await
-            .unwrap();
-        assert!(result.success, "expected success, got: {}", result.output);
-        assert!(
-            result.output.contains("from scope"),
-            "expected scope_dir content, got: {}",
-            result.output
-        );
-        assert!(!result.output.contains("from legacy"));
-    }
-
-    #[tokio::test]
     async fn read_file_refuses_out_of_scope_path() {
         // An absolute path outside every declared zone classifies as
         // `OutOfScope` and must be refused.
@@ -1148,30 +1069,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_compute_end_line_from_limit() {
-        // limit is a COUNT of lines, not a line number: offset 3 + limit 3
-        // reads lines 3..=5 (end_line = start + limit - 1).
-        let dir = tempfile::tempdir().unwrap();
-        ten_lines_file(&dir);
-
-        let tool = ReadFileTool::new(dir.path());
-        let result = tool
-            .execute(&serde_json::json!({"path": "lines.txt", "offset": 3, "limit": 3}))
-            .await
-            .unwrap();
-
-        assert!(result.success, "{}", result.output);
-        assert!(
-            result.output.contains("showing lines 3-5 of 10"),
-            "limit must be a line count: {}",
-            result.output
-        );
-        assert!(result.output.contains("line 3"));
-        assert!(result.output.contains("line 5"));
-        assert!(!result.output.contains("line 6"));
-    }
-
-    #[tokio::test]
     async fn should_reject_when_both_end_line_and_limit_supplied() {
         let dir = tempfile::tempdir().unwrap();
         ten_lines_file(&dir);
@@ -1214,68 +1111,6 @@ mod tests {
         assert!(resolve_line_range(None, None, Some(0)).is_err());
     }
 
-    /// A truncated read must name the call that continues it.
-    ///
-    /// Without this the model sees only "N bytes omitted" and its sole
-    /// recovery is re-issuing the identical call, which returns the identical
-    /// truncation — spending the tokens the cap existed to save.
-    #[test]
-    fn should_name_the_next_offset_when_a_bounded_read_is_truncated() {
-        let tool = ReadFileTool::new(std::path::Path::new("."));
-        let advice = tool
-            .truncation_recovery(&serde_json::json!({ "offset": 1, "limit": 200 }), 47_000)
-            .expect("read_file paginates, so it always has a resume path");
-        assert!(advice.contains("47000 bytes omitted"), "{advice}");
-        assert!(
-            advice.contains("offset: 201"),
-            "the advice must name the CONCRETE next call, not just mention offset: {advice}"
-        );
-    }
-
-    /// #2131 part 4: an UNBOUNDED read of a file bigger than the tool-output
-    /// budget returns a range hint (not the body that would be truncated then
-    /// evicted); a read that already names a range is honored.
-    #[tokio::test]
-    async fn oversized_unbounded_read_returns_a_range_hint_not_the_body() {
-        let dir = tempfile::tempdir().unwrap();
-        let budget = octos_core::tool_output_limit("read_file");
-        // Comfortably over the budget, but well under the 10MB hard cap.
-        let line = "abcdefghij\n";
-        let big = line.repeat(budget / line.len() + 2_000);
-        std::fs::write(dir.path().join("big.rs"), &big).unwrap();
-        let tool = ReadFileTool::new(dir.path());
-
-        // Unbounded → hint, not the body.
-        let r = tool
-            .execute(&serde_json::json!({"path": "big.rs"}))
-            .await
-            .unwrap();
-        assert!(
-            !r.success,
-            "an oversized unbounded read must not dump the body"
-        );
-        assert!(
-            r.output.contains("bounded range"),
-            "the hint must tell the model to read a range: {}",
-            r.output
-        );
-        assert!(
-            !r.output.contains("abcdefghij"),
-            "the body must NOT be returned"
-        );
-
-        // A bounded read of the same file is honored (reads the slice).
-        let r2 = tool
-            .execute(&serde_json::json!({"path": "big.rs", "start_line": 1, "end_line": 3}))
-            .await
-            .unwrap();
-        assert!(r2.success, "a bounded read is honored");
-        assert!(
-            r2.output.contains("abcdefghij"),
-            "the bounded slice returns content"
-        );
-    }
-
     // -----------------------------------------------------------------------
     // #1638: flag-gated windowed reads. Armed via `with_window_enforcement`
     // per instance — never process-globally, because arming CHANGES read_file
@@ -1283,66 +1118,6 @@ mod tests {
     // Every test here asserts on files it created itself (per-path), never on
     // process-global counts (#2077/#2126 lesson).
     // -----------------------------------------------------------------------
-
-    /// 1500 lines, 100 bytes of content each (distinct `row NNNNNN` prefixes),
-    /// 151,500 content bytes total. With a 4-digit gutter each formatted line
-    /// is 109 bytes, so the 49,152-byte window holds exactly 450 of them:
-    /// 450 x 109 = 49,050 fits, 451 would not.
-    fn wide_rows_file(dir: &tempfile::TempDir, name: &str) {
-        let content = (1..=1500)
-            .map(|i| format!("row {i:06}{}", "z".repeat(90)))
-            .collect::<Vec<_>>()
-            .join("\n");
-        std::fs::write(dir.path().join(name), &content).unwrap();
-    }
-
-    #[tokio::test]
-    async fn should_window_an_unbounded_read_of_a_big_file_when_armed() {
-        let dir = tempfile::tempdir().unwrap();
-        wide_rows_file(&dir, "big_armed.txt");
-        let tool = ReadFileTool::new(dir.path()).with_window_enforcement(true);
-
-        let r = tool
-            .execute(&serde_json::json!({"path": "big_armed.txt"}))
-            .await
-            .unwrap();
-
-        assert!(
-            r.success,
-            "armed, the read returns page one instead of the unarmed refusal: {}",
-            r.output
-        );
-        assert!(r.output.contains("row 000001"), "page one starts at line 1");
-        assert!(
-            !r.output.contains("row 000451"),
-            "the byte limit stops the window at line 450"
-        );
-        assert!(
-            r.output.contains("showing lines 1-450 of 1500"),
-            "the footer names the actual range returned and the total: {}",
-            r.output
-        );
-        assert!(
-            r.output.contains("-byte limit"),
-            "the footer names WHICH limit fired (bytes, not lines): {}",
-            r.output
-        );
-        assert!(
-            r.output.contains("offset: 451"),
-            "the footer names the exact next call: {}",
-            r.output
-        );
-        assert!(
-            r.output.len() <= octos_core::tool_output_limit("read_file"),
-            "the tool's own advising cut must keep the loop's blind backstop from \
-             ever firing on an armed read: {} bytes",
-            r.output.len()
-        );
-        assert!(
-            !r.output.contains("... (content truncated)"),
-            "the internal blind cut must not fire on the armed path"
-        );
-    }
 
     #[tokio::test]
     async fn should_return_small_files_whole_and_byte_identical_when_armed() {

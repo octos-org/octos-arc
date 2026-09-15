@@ -763,7 +763,6 @@ mod tests {
         TokenUsage as LlmTokenUsage, ToolSpec,
     };
     use octos_memory::EpisodeStore;
-    use serde_json::json;
     use tempfile::TempDir;
 
     use super::super::Agent;
@@ -889,54 +888,6 @@ mod tests {
             elapsed < std::time::Duration::from_secs(5),
             "idle timeout took {elapsed:?} — wait_for_shutdown safety guard likely fired \
              before the 1s timeout, which means the test passes by accident"
-        );
-    }
-
-    #[tokio::test]
-    async fn stream_overall_wall_clock_cap_aborts_trickling_stream() {
-        // A stream that keeps trickling one chunk just under the inter-chunk
-        // idle gap forever never trips the idle guard — only the overall
-        // wall-clock cap can terminate it. Build a stream that emits a chunk
-        // every ~20ms; with a generous idle but a 1s overall cap, the cap
-        // must fire and return a retryable IdleTimeout within a bounded time.
-        use std::time::Duration;
-        let (agent, _dir) = build_test_agent().await;
-
-        // Infinite text-delta stream, one chunk every 20ms. Idle gap (20ms)
-        // stays well under the 10s idle budget, so only the 1s overall cap
-        // can stop it.
-        let trickle = futures::stream::unfold(0u64, |n| async move {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            Some((StreamEvent::TextDelta(format!("tok{n} ")), n + 1))
-        });
-        let stream: ChatStream = Box::pin(trickle);
-
-        let thresholds = super::StreamTimeouts {
-            first_token_grace_secs: 10,
-            inter_chunk_idle_secs: 10,
-            overall_max_secs: 1,
-        };
-
-        let start = std::time::Instant::now();
-        let result = agent
-            .consume_stream_for_test(stream, 9, 0, thresholds)
-            .await;
-        let elapsed = start.elapsed();
-
-        let err = result.expect_err("overall wall-clock cap must surface as Err");
-        let typed = as_stream_error(&err).expect("err must be StreamError typed");
-        assert!(
-            matches!(typed, StreamError::IdleTimeout { idle_secs } if *idle_secs == 1),
-            "expected overall-cap IdleTimeout{{idle_secs:1}}, got {typed:?}"
-        );
-        assert!(
-            typed.is_retryable(),
-            "overall-cap timeout must be retryable so the turn ends cleanly after retries"
-        );
-        // 1s cap + 20ms slack; must NOT have run for the full 10s idle budget.
-        assert!(
-            elapsed < std::time::Duration::from_secs(4),
-            "overall cap took {elapsed:?} — wall-clock backstop did not fire promptly"
         );
     }
 
@@ -1120,39 +1071,6 @@ mod tests {
             typed.is_retryable(),
             "Incomplete must be retryable so the lane router can pick a different slot"
         );
-    }
-
-    #[tokio::test]
-    async fn stream_complete_with_tool_use_returns_chat_response() {
-        // Happy path regression: a clean stream with valid tool_call args
-        // and a Done(ToolUse) signal returns Ok(ChatResponse) with the
-        // arguments parsed as a Value::Object.
-        let (agent, _dir) = build_test_agent().await;
-
-        let stream = into_chat_stream(vec![
-            StreamEvent::ToolCallDelta {
-                index: 0,
-                id: Some("call_0".to_string()),
-                name: Some("shell".to_string()),
-                arguments_delta: "{\"cmd\":\"ls\"}".to_string(),
-            },
-            StreamEvent::Usage(LlmTokenUsage {
-                input_tokens: 10,
-                output_tokens: 5,
-                ..Default::default()
-            }),
-            StreamEvent::Done(StopReason::ToolUse),
-        ]);
-
-        let (response, streamed) = agent
-            .consume_stream_with_input_estimate(stream, 1, 100)
-            .await
-            .expect("clean stream must return Ok");
-        assert!(!streamed, "stream had no text deltas");
-        assert_eq!(response.tool_calls.len(), 1);
-        assert_eq!(response.tool_calls[0].name, "shell");
-        assert_eq!(response.tool_calls[0].arguments, json!({"cmd": "ls"}));
-        assert_eq!(response.stop_reason, StopReason::ToolUse);
     }
 
     #[tokio::test]

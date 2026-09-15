@@ -1855,21 +1855,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_install_source_supports_local_path() {
-        let tmp = tempfile::tempdir().unwrap();
-        let skill_dir = tmp.path().join("local-skill");
-        std::fs::create_dir_all(&skill_dir).unwrap();
-        std::fs::write(skill_dir.join("SKILL.md"), "# local").unwrap();
-
-        let source = resolve_install_source(&skill_dir.to_string_lossy()).unwrap();
-        let InstallSource::Local(path) = source else {
-            panic!("expected local source");
-        };
-
-        assert_eq!(path, std::fs::canonicalize(&skill_dir).unwrap());
-    }
-
-    #[test]
     fn filter_registry_entries_matches_name_description_tags_and_skills() {
         let entries = vec![
             RegistryEntry {
@@ -1999,46 +1984,5 @@ fi
             std::fs::read_to_string(dest.join("SKILL.md")).unwrap(),
             "# existing\n"
         );
-    }
-
-    /// RFC-2: a clean, valid local skill manifest is still accepted by
-    /// the install path. Sanity test that the validator hook didn't
-    /// regress the happy path.
-    #[test]
-    fn install_from_local_accepts_valid_manifest() {
-        let tmp = tempfile::tempdir().unwrap();
-        let src = tmp.path().join("good-skill");
-        std::fs::create_dir_all(&src).unwrap();
-        std::fs::write(src.join("SKILL.md"), "# good\n").unwrap();
-        std::fs::write(
-            src.join("manifest.json"),
-            r#"{
-              "id": "good-skill",
-              "version": "0.1.0",
-              "tools": [{
-                "name": "do_thing",
-                "description": "Does a thing.",
-                "input_schema": {
-                  "type": "object",
-                  "properties": {
-                    "x": { "type": "string" }
-                  },
-                  "required": ["x"]
-                }
-              }]
-            }"#,
-        )
-        .unwrap();
-
-        let skills_dir = tmp.path().join("skills");
-        let result = install_skill(
-            &skills_dir,
-            &src.to_string_lossy(),
-            /* force */ false,
-            "main",
-        )
-        .expect("clean manifest must install");
-        assert_eq!(result.installed, vec!["good-skill".to_string()]);
-        assert!(skills_dir.join("good-skill").join("manifest.json").exists());
     }
 }

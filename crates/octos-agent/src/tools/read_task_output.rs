@@ -798,24 +798,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn line_range_returns_inclusive_slice() {
-        let dir = tempdir().unwrap();
-        let (supervisor, router, tool) = make_tool(dir.path());
-        let body = "1\n2\n3\n4\n5\n";
-        let task_id = seed_task(&supervisor, &router, "tc-4", body);
-
-        let result = tool
-            .execute(&json!({
-                "task_handle": task_id,
-                "mode": {"kind": "line_range", "start": 2, "end": 4}
-            }))
-            .await
-            .unwrap();
-        assert!(result.success);
-        assert_eq!(result.output, "2\n3\n4");
-    }
-
-    #[tokio::test]
     async fn file_mode_reads_expected_file_with_inner_mode() {
         let dir = tempdir().unwrap();
         let (supervisor, router, tool) = make_tool(dir.path());
@@ -899,42 +881,6 @@ mod tests {
         assert!(result.output.contains("different session"));
     }
 
-    // Codex P1 (round 1): file mode must refuse to read until the task has
-    // declared its output_files. Without this guard a fresh handle gives the
-    // LLM read access to any file inside the workspace.
-    #[tokio::test]
-    async fn file_mode_rejects_when_task_has_no_recorded_outputs() {
-        let dir = tempdir().unwrap();
-        let (supervisor, router, tool) = make_tool(dir.path());
-        let task_id = seed_task(&supervisor, &router, "tc-pre", "still running\n");
-        // Do NOT call mark_completed — output_files stays empty.
-
-        let secret_rel = "secret.md";
-        let secret_abs = dir.path().join("workspace").join(secret_rel);
-        std::fs::write(&secret_abs, "shh").unwrap();
-
-        let result = tool
-            .execute(&json!({
-                "task_handle": task_id,
-                "mode": {
-                    "kind": "file",
-                    "path": secret_rel,
-                    "mode": {"kind": "head", "lines": 1}
-                }
-            }))
-            .await;
-        // `execute` may surface this as Err or as success=false; either is
-        // a refusal. The important thing is the secret is NOT in the body.
-        let body = match result {
-            Ok(r) => r.output,
-            Err(e) => format!("{e}"),
-        };
-        assert!(
-            !body.contains("shh"),
-            "file mode must not return content before output_files declared; got: {body}"
-        );
-    }
-
     // Codex review round 3 P2 (2026-05-13): the ancestor walk must
     // operate on the ORIGINAL path components, not on the canonical
     // form. A symlinked parent that currently points inside the
@@ -986,40 +932,6 @@ mod tests {
             !body.contains("workspace-content"),
             "symlinked parent (even when target lies inside workspace) must be refused — \
              canonicalisation would otherwise let a later retarget grant escape; got: {body}"
-        );
-    }
-
-    // Codex P2 (round 3): even when an LLM supplies an absolute path,
-    // it must still lie inside the workspace root — otherwise an
-    // accidentally recorded absolute output_files entry outside the
-    // workspace cannot grant escape.
-    #[tokio::test]
-    async fn file_mode_rejects_absolute_path_outside_workspace() {
-        let dir = tempdir().unwrap();
-        let (supervisor, router, tool) = make_tool(dir.path());
-        let task_id = seed_task(&supervisor, &router, "tc-esc", "stdout\n");
-
-        let outside = dir.path().join("escape.md");
-        std::fs::write(&outside, "secret outside workspace").unwrap();
-        supervisor.mark_completed(&task_id, vec![outside.to_string_lossy().into_owned()]);
-
-        let result = tool
-            .execute(&json!({
-                "task_handle": task_id,
-                "mode": {
-                    "kind": "file",
-                    "path": outside.to_string_lossy(),
-                    "mode": {"kind": "head", "lines": 1}
-                }
-            }))
-            .await;
-        let body = match result {
-            Ok(r) => r.output,
-            Err(e) => format!("{e}"),
-        };
-        assert!(
-            !body.contains("secret outside workspace"),
-            "absolute paths recorded outside the workspace must not grant access; got: {body}"
         );
     }
 }

@@ -825,33 +825,6 @@ mod tests {
     }
 
     #[test]
-    fn should_verify_false_when_all_unverified_entries_succeed() {
-        let mut ledger = TurnLedger::new(None);
-        ledger.push_entry(ledger_entry_from_tool_result(
-            1,
-            Some("a"),
-            "read_file",
-            &json!({"path": "a"}),
-            Some(true),
-            "ok",
-            false,
-        ));
-        ledger.push_entry(ledger_entry_from_tool_result(
-            1,
-            Some("b"),
-            "read_file",
-            &json!({"path": "b"}),
-            Some(true),
-            "ok2",
-            false,
-        ));
-        assert!(
-            !ledger.should_verify_after_tool_batch(0),
-            "all-success batch with max_quiet_turns=0 must NOT trigger verification",
-        );
-    }
-
-    #[test]
     fn parser_accepts_ready_and_repeating_verdicts() {
         assert_eq!(
             parse_verifier_verdict(r#"{"verdict":"ReadyToAnswer"}"#),

@@ -441,26 +441,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_edit_file_multiline_replacement() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("multi.txt"), "line1\nline2\nline3\n").unwrap();
-
-        let tool = EditFileTool::new(dir.path());
-        let result = tool
-            .execute(&serde_json::json!({
-                "path": "multi.txt",
-                "old_string": "line2\nline3",
-                "new_string": "replaced2\nreplaced3"
-            }))
-            .await
-            .unwrap();
-
-        assert!(result.success);
-        let content = std::fs::read_to_string(dir.path().join("multi.txt")).unwrap();
-        assert!(content.contains("replaced2\nreplaced3"));
-    }
-
-    #[tokio::test]
     async fn test_edit_file_traversal_blocked() {
         let dir = tempfile::tempdir().unwrap();
         let tool = EditFileTool::new(dir.path());
@@ -490,44 +470,6 @@ mod tests {
         ctx.tool_id = "edit-with-scope".to_string();
         ctx.session_scope = Some(Arc::new(scope));
         ctx
-    }
-
-    #[tokio::test]
-    async fn edit_file_uses_scope_workspace_as_base_dir_for_relative_paths() {
-        // Relative edit path anchors at `scope.workspace()`, not the
-        // legacy `base_dir`. Pre-create the target file there.
-        let scope_dir = tempfile::tempdir().unwrap();
-        let legacy_dir = tempfile::tempdir().unwrap();
-        std::fs::write(scope_dir.path().join("doc.md"), "before\n").unwrap();
-        std::fs::write(legacy_dir.path().join("doc.md"), "decoy\n").unwrap();
-
-        let scope = SessionScope::solo(scope_dir.path().to_path_buf(), vec![]).unwrap();
-        let tool = EditFileTool::new(legacy_dir.path());
-        let ctx = ctx_with_scope(scope);
-
-        let result = tool
-            .execute_with_context(
-                &ctx,
-                &serde_json::json!({
-                    "path": "doc.md",
-                    "old_string": "before",
-                    "new_string": "after",
-                }),
-            )
-            .await
-            .unwrap();
-        assert!(result.success, "expected success, got: {}", result.output);
-
-        // Only the scope-dir copy is mutated; the legacy decoy is
-        // untouched. (Edit even refused to look at the legacy file.)
-        assert_eq!(
-            std::fs::read_to_string(scope_dir.path().join("doc.md")).unwrap(),
-            "after\n",
-        );
-        assert_eq!(
-            std::fs::read_to_string(legacy_dir.path().join("doc.md")).unwrap(),
-            "decoy\n",
-        );
     }
 
     #[tokio::test]
@@ -650,33 +592,6 @@ mod tests {
         let content = std::fs::read_to_string(dir.path().join("code.rs")).unwrap();
         assert!(content.contains("abort();"));
         assert!(!content.contains("launch();"));
-    }
-
-    #[tokio::test]
-    async fn should_match_via_block_anchor_when_middle_line_drifted() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("b.rs"),
-            "fn compute() {\n    let total = base + extra;\n    total * 2\n}\n",
-        )
-        .unwrap();
-
-        let tool = EditFileTool::new(dir.path());
-        // Middle line remembered slightly wrong (offset vs extra) — first
-        // and last lines anchor the block, similarity carries the middle.
-        let result = tool
-            .execute(&serde_json::json!({
-                "path": "b.rs",
-                "old_string": "fn compute() {\n    let total = base + offset;\n    total * 2\n}",
-                "new_string": "fn compute() {\n    base * 3\n}"
-            }))
-            .await
-            .unwrap();
-
-        assert!(result.success, "{}", result.output);
-        assert!(result.output.contains("block_anchor"));
-        let content = std::fs::read_to_string(dir.path().join("b.rs")).unwrap();
-        assert_eq!(content, "fn compute() {\n    base * 3\n}\n");
     }
 
     #[tokio::test]

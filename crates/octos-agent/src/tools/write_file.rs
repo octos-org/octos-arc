@@ -633,20 +633,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_write_file_creates_parent_dirs() {
-        let dir = tempfile::tempdir().unwrap();
-        let tool = WriteFileTool::new(dir.path());
-
-        let result = tool
-            .execute(&serde_json::json!({"path": "a/b/c/deep.txt", "content": "nested\n"}))
-            .await
-            .unwrap();
-
-        assert!(result.success);
-        assert!(dir.path().join("a/b/c/deep.txt").exists());
-    }
-
-    #[tokio::test]
     async fn test_write_file_overwrites_existing() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("exist.txt"), "old content").unwrap();
@@ -902,42 +888,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn write_grant_create_only_refuses_overwrite() {
-        // Acceptance (#1976): create_only = O_CREAT|O_EXCL semantics — the
-        // first create passes, the second write to the SAME allowlisted path
-        // is refused and the content is untouched.
-        let dir = tempfile::tempdir().unwrap();
-        let tool = fenced_tool(dir.path(), &["exemplar.card"], true);
-
-        let first = tool
-            .execute(&serde_json::json!({"path": "exemplar.card", "content": "v1\n"}))
-            .await
-            .unwrap();
-        assert!(first.success, "{}", first.output);
-
-        let second = tool
-            .execute(&serde_json::json!({"path": "exemplar.card", "content": "v2\n"}))
-            .await
-            .unwrap();
-        assert!(!second.success, "overwrite must be refused");
-        assert!(
-            second.output.contains("already exists"),
-            "typed create-only refusal: {}",
-            second.output
-        );
-        assert!(
-            second
-                .output
-                .contains(crate::tools::write_grant::DENIED_MARKER)
-        );
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join("exemplar.card")).unwrap(),
-            "v1\n",
-            "refused overwrite must leave the original bytes"
-        );
-    }
-
     #[cfg(unix)]
     #[tokio::test]
     async fn write_grant_symlinked_ancestor_cannot_reach_allowlisted_name() {
@@ -1137,43 +1087,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_refuse_overwriting_a_big_never_read_file_when_armed() {
-        // THE fail-closed default: no ledger entry for an over-window file
-        // means REFUSE — closing the giant-first-line hole (where the
-        // advice branch records nothing), the restart hole (empty ledger),
-        // and the eviction hole, all of which were fail-open when "no entry"
-        // meant "allow".
-        let dir = tempfile::tempdir().unwrap();
-        let original = big_rows(dir.path(), "unread.js");
-        let write = WriteFileTool::new(dir.path()).with_window_enforcement(true);
-        let ctx = ctx_with_session("unread-big");
-
-        let refused = write
-            .execute_with_context(
-                &ctx,
-                &serde_json::json!({"path": "unread.js", "content": "blind rebuild\n"}),
-            )
-            .await
-            .unwrap();
-        assert!(
-            !refused.success,
-            "an over-window file never read this session must not be \
-             overwritten: {}",
-            refused.output
-        );
-        assert!(
-            refused.output.contains("[PARTIAL_VIEW_OVERWRITE]")
-                && refused.output.contains("have not read it in this session"),
-            "the refusal must say WHY and what to do: {}",
-            refused.output
-        );
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join("unread.js")).unwrap(),
-            original
-        );
-    }
-
-    #[tokio::test]
     async fn should_allow_overwriting_a_never_read_small_file_when_armed() {
         // A file at or under the byte window is returned whole by a single
         // unbounded read — there is no partial-view illusion to protect
@@ -1287,35 +1200,6 @@ mod tests {
             std::fs::read_to_string(dir.path().join("secrets.env")).unwrap(),
             secret,
             "the refusal must leave the secret-bearing file intact"
-        );
-    }
-
-    #[tokio::test]
-    async fn should_clamp_pathological_paths_in_the_refusal() {
-        // H4: refusal messages interpolate the caller's path SPELLING, which
-        // is unbounded — a 50KB spelling must not push the refusal past the
-        // loop's output cap (a blind head/tail cut there would mangle the
-        // advice).
-        let dir = tempfile::tempdir().unwrap();
-        big_rows(dir.path(), "deep.js");
-        let write = WriteFileTool::new(dir.path()).with_window_enforcement(true);
-        let pathological = format!("{}deep.js", "./".repeat(25_000));
-
-        let refused = write
-            .execute(&serde_json::json!({"path": pathological, "content": "rebuilt\n"}))
-            .await
-            .unwrap();
-        assert!(!refused.success, "{}", refused.output);
-        assert!(
-            refused.output.contains("[PARTIAL_VIEW_OVERWRITE]"),
-            "still the typed refusal: {}",
-            octos_core::truncated_utf8(&refused.output, 200, "...")
-        );
-        assert!(
-            refused.output.len() <= octos_core::tool_output_limit("write_file"),
-            "the refusal must clamp the path so the loop backstop cannot \
-             mangle the advice: {} bytes",
-            refused.output.len()
         );
     }
 

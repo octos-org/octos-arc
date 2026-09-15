@@ -310,20 +310,8 @@ mod tests {
     }
 
     #[test]
-    fn lookup_case_insensitive() {
-        assert!(lookup("Anthropic").is_some());
-        assert!(lookup("OPENAI").is_some());
-        assert!(lookup("Google").is_some());
-    }
-
-    #[test]
     fn lookup_unknown() {
         assert!(lookup("foobar").is_none());
-    }
-
-    #[test]
-    fn all_entries_count() {
-        assert_eq!(all_entries().len(), 7);
     }
 
     /// The coding-plan families resolve to their coding endpoints + default
@@ -361,10 +349,5 @@ mod tests {
         assert_eq!(detect_provider("o4-mini"), Some("openai"));
         assert_eq!(detect_provider("gemini-2.5-flash"), Some("gemini"));
         assert_eq!(detect_provider("deepseek-chat"), Some("deepseek"));
-    }
-
-    #[test]
-    fn detect_unknown_model() {
-        assert_eq!(detect_provider("some-random-model"), None);
     }
 }

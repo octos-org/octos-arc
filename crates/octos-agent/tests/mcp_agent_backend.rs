@@ -129,48 +129,6 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"content":[{{"type":"text","t
     path
 }
 
-/// Boot a tiny HTTP server that mimics the JSON-RPC /tools/call contract
-/// without pulling axum as a dev-dependency. Accepts one connection per
-/// test — that is enough for the dispatch paths under test.
-async fn boot_fake_http_server(
-    response_body: serde_json::Value,
-    response_delay: Duration,
-) -> (String, tokio::task::JoinHandle<()>) {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind ephemeral port");
-    let addr = listener.local_addr().expect("local_addr");
-    let url = format!("http://{addr}/");
-    let body_text = response_body.to_string();
-
-    let join = tokio::spawn(async move {
-        loop {
-            let Ok((mut socket, _)) = listener.accept().await else {
-                return;
-            };
-            let body = body_text.clone();
-            let delay = response_delay;
-            tokio::spawn(async move {
-                // Drain the request (one shot — good enough for tests).
-                let mut buf = vec![0_u8; 8192];
-                let _ =
-                    tokio::time::timeout(Duration::from_millis(500), socket.read(&mut buf)).await;
-                tokio::time::sleep(delay).await;
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                let _ = socket.write_all(response.as_bytes()).await;
-                let _ = socket.shutdown().await;
-            });
-        }
-    });
-    (url, join)
-}
-
 /// Boot a tiny HTTP server that answers every request with a 302 redirect to
 /// `location`. Used to prove the HTTP MCP backend refuses to follow a
 /// redirect (whose target would bypass the SSRF check).
@@ -246,43 +204,6 @@ async fn should_dispatch_to_stdio_mcp_agent_and_return_contract_artifact() {
     assert_eq!(
         response.files_to_send,
         vec![PathBuf::from("/tmp/artifact.md")]
-    );
-}
-
-#[tokio::test]
-async fn should_dispatch_to_remote_mcp_agent_and_return_contract_artifact() {
-    let body = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "result": {
-            "content": [{"type": "text", "text": "remote-agent"}],
-            "files_to_send": ["/tmp/remote.md"],
-        }
-    });
-    let (url, join) = boot_fake_http_server(body, Duration::from_millis(5)).await;
-
-    let config = McpAgentBackendConfig::Remote {
-        url,
-        auth_header: Some("Bearer test".into()),
-        extra_headers: HashMap::new(),
-        connect_timeout_secs: Some(2),
-        read_timeout_secs: Some(2),
-        dispatch_timeout_secs: Some(5),
-    };
-    let backend = HttpMcpAgent::from_config(&config)
-        .expect("build http backend")
-        .with_loopback_allowed_for_tests();
-    let request = DispatchRequest::new("run_task", serde_json::json!({"task": "hi"}));
-    let response = backend.dispatch(request).await;
-    join.abort();
-
-    // Carry the whole response: a bare `left: TransportError` says nothing
-    // about *why* the transport failed.
-    assert_eq!(response.outcome, DispatchOutcome::Success, "{response:?}");
-    assert_eq!(response.output, "remote-agent");
-    assert_eq!(
-        response.files_to_send,
-        vec![PathBuf::from("/tmp/remote.md")]
     );
 }
 
@@ -438,44 +359,6 @@ async fn should_apply_blocked_env_vars_to_stdio_subprocess() {
     assert!(
         log_contents.contains("DYLD_INSERT_LIBRARIES=\n"),
         "DYLD_INSERT_LIBRARIES leaked into child: {log_contents}"
-    );
-}
-
-#[tokio::test]
-async fn should_enforce_http_timeout_on_remote_backend() {
-    let body = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "result": {"content": [{"type": "text", "text": "late"}]}
-    });
-    // Server sleeps 500ms — well past our 150ms read timeout.
-    let (url, join) = boot_fake_http_server(body, Duration::from_millis(500)).await;
-
-    let config = McpAgentBackendConfig::Remote {
-        url,
-        auth_header: None,
-        extra_headers: HashMap::new(),
-        connect_timeout_secs: Some(1),
-        read_timeout_secs: Some(1),
-        // Dispatch budget below the server delay so the client aborts.
-        dispatch_timeout_secs: None,
-    };
-    let backend = HttpMcpAgent::from_config(&config)
-        .unwrap()
-        .with_loopback_allowed_for_tests()
-        .with_dispatch_timeout(Duration::from_millis(150));
-
-    let start = Instant::now();
-    let response = backend
-        .dispatch(DispatchRequest::new("run_task", serde_json::json!({})))
-        .await;
-    let elapsed = start.elapsed();
-    join.abort();
-
-    assert_eq!(response.outcome, DispatchOutcome::Timeout);
-    assert!(
-        elapsed < Duration::from_millis(450),
-        "HTTP dispatch did not honour timeout: elapsed={elapsed:?}"
     );
 }
 

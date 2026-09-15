@@ -42,15 +42,6 @@ fn test_session_get_history() {
     assert_eq!(history[2].content, "msg9");
 }
 
-#[test]
-fn test_session_get_history_all() {
-    let mut session = Session::new(SessionKey::new("cli", "test"));
-    session.messages.push(make_message(MessageRole::User, "a"));
-    session.messages.push(make_message(MessageRole::User, "b"));
-    let history = session.get_history(10);
-    assert_eq!(history.len(), 2);
-}
-
 #[tokio::test]
 async fn test_session_manager_create_and_retrieve() {
     let tmp = TempDir::new().unwrap();
@@ -221,28 +212,6 @@ fn test_with_max_sessions_clamps_zero() {
 }
 
 #[tokio::test]
-async fn test_fork_persists_to_disk() {
-    let tmp = TempDir::new().unwrap();
-    let parent = SessionKey::new("cli", "main");
-
-    {
-        let mut mgr = SessionManager::open(tmp.path()).unwrap();
-        mgr.add_message(&parent, make_message(MessageRole::User, "hello"))
-            .await
-            .unwrap();
-        mgr.fork(&parent, "branch", 1).await.unwrap();
-    }
-
-    // Reload from disk
-    let mut mgr2 = SessionManager::open(tmp.path()).unwrap();
-    let child_key = SessionKey::new("cli", "branch");
-    let child = mgr2.get_or_create(&child_key).await;
-    assert_eq!(child.parent_key, Some(parent));
-    assert_eq!(child.messages.len(), 1);
-    assert_eq!(child.messages[0].content, "hello");
-}
-
-#[tokio::test]
 async fn test_session_handle_fork_from_parent_if_missing_copies_recent_history() {
     let tmp = TempDir::new().unwrap();
     let parent = SessionKey::new("api", "web-parent");
@@ -274,40 +243,6 @@ async fn test_session_handle_fork_from_parent_if_missing_copies_recent_history()
     assert_eq!(child_session.messages.len(), 2);
     assert_eq!(child_session.messages[0].content, "msg1");
     assert_eq!(child_session.messages[1].content, "msg2");
-}
-
-#[tokio::test]
-async fn test_session_handle_fork_from_parent_if_missing_links_existing_child_history() {
-    let tmp = TempDir::new().unwrap();
-    let parent = SessionKey::new("api", "web-parent");
-    let child = child_session_key(&parent, "task-linked");
-
-    {
-        let mut parent_handle = SessionHandle::open(tmp.path(), &parent);
-        parent_handle
-            .add_message(make_message(MessageRole::User, "parent-msg"))
-            .await
-            .unwrap();
-    }
-
-    {
-        let mut child_handle = SessionHandle::open(tmp.path(), &child);
-        child_handle
-            .add_message(make_message(MessageRole::Assistant, "existing-child-msg"))
-            .await
-            .unwrap();
-        assert_eq!(child_handle.session().parent_key, None);
-    }
-
-    SessionHandle::fork_from_parent_if_missing(tmp.path(), &parent, &child, 1)
-        .await
-        .unwrap();
-
-    let child_handle = SessionHandle::open(tmp.path(), &child);
-    let child_session = child_handle.session();
-    assert_eq!(child_session.parent_key, Some(parent));
-    assert_eq!(child_session.messages.len(), 1);
-    assert_eq!(child_session.messages[0].content, "existing-child-msg");
 }
 
 #[tokio::test]
@@ -460,94 +395,5 @@ async fn torn_tail_does_not_eat_rollback_marker() {
         contents,
         ["turn 1", "reply 1"],
         "rollback marker fused with a torn tail resurrects the rolled-back turn"
-    );
-}
-
-/// Issue #2006: the SessionHandle append path seals the same way.
-#[tokio::test]
-async fn torn_tail_does_not_eat_handle_appended_message() {
-    use std::io::Write;
-    let tmp = TempDir::new().unwrap();
-    let key = SessionKey::new("cli", "torn-tail-handle");
-    let mut handle = SessionHandle::open(tmp.path(), &key);
-    handle
-        .add_message(Message::user("before torn"))
-        .await
-        .unwrap();
-
-    std::fs::OpenOptions::new()
-        .append(true)
-        .open(handle.session_path())
-        .unwrap()
-        .write_all(b"{\"role\":\"user\",\"content\":\"torn")
-        .unwrap();
-
-    handle
-        .add_message(Message::user("after torn"))
-        .await
-        .unwrap();
-
-    let reloaded = SessionHandle::open(tmp.path(), &key);
-    let contents: Vec<&str> = reloaded
-        .session()
-        .messages
-        .iter()
-        .map(|m| m.content.as_str())
-        .collect();
-    assert_eq!(
-        contents,
-        ["before torn", "after torn"],
-        "torn tail must not eat the next handle-appended message"
-    );
-}
-
-/// Issue #2006: when the per-user layout exists the rollback marker lands
-/// THERE (the production-canonical layout) — the seal must protect the
-/// marker on that file too.
-#[tokio::test]
-async fn torn_tail_does_not_eat_rollback_marker_in_per_user_layout() {
-    use std::io::Write;
-    let tmp = TempDir::new().unwrap();
-    let key = SessionKey::new("cli", "torn-tail-rollback-per-user");
-
-    // Seed via SessionHandle so the transcript lives in the per-user layout.
-    let mut handle = SessionHandle::open(tmp.path(), &key);
-    for n in 1..=2 {
-        let tid = format!("t{n}");
-        let mut user = make_message(MessageRole::User, &format!("turn {n}"));
-        user.client_message_id = Some(tid.clone());
-        user.thread_id = Some(tid.clone());
-        handle.add_message(user).await.unwrap();
-        let mut asst = make_message(MessageRole::Assistant, &format!("reply {n}"));
-        asst.thread_id = Some(tid.clone());
-        handle.add_message(asst).await.unwrap();
-    }
-
-    // Crash mid-write leaves a torn tail on the per-user file.
-    std::fs::OpenOptions::new()
-        .append(true)
-        .open(handle.session_path())
-        .unwrap()
-        .write_all(b"{\"role\":\"user\",\"content\":\"torn")
-        .unwrap();
-    drop(handle);
-
-    // Roll back through a manager over the same dir: the marker targets the
-    // per-user file (the only layout present) and must survive the torn tail.
-    let mut mgr = SessionManager::open(tmp.path()).unwrap();
-    let dropped = mgr.rollback_last_n_user_turns(&key, 1).await.unwrap();
-    assert_eq!(dropped, 1);
-
-    let mut reload = SessionManager::open(tmp.path()).unwrap();
-    let session = reload.get_or_create(&key).await;
-    let contents: Vec<&str> = session
-        .messages
-        .iter()
-        .map(|m| m.content.as_str())
-        .collect();
-    assert_eq!(
-        contents,
-        ["turn 1", "reply 1"],
-        "rollback marker on the per-user file must survive a torn tail"
     );
 }

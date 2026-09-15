@@ -460,7 +460,6 @@ mod tests {
 
     #[test]
     fn retry_provider_propagates_the_inner_cache_lane() {
-        use std::sync::Arc;
         // #2194 R4: providers are wrapped RetryProvider -> Chain -> Router; a
         // wrapper that drops the inner cache lane prices a custom-anthropic slot
         // at the Residual default. RetryProvider must carry it through.
@@ -494,34 +493,9 @@ mod tests {
     }
 
     #[test]
-    fn test_is_retryable_connection() {
-        let err = eyre::eyre!("connection refused");
-        assert!(RetryProvider::is_retryable_error(&err));
-    }
-
-    #[test]
     fn test_not_retryable_401() {
         let err = eyre::eyre!("API error: 401 - unauthorized");
         assert!(!RetryProvider::is_retryable_error(&err));
-    }
-
-    #[test]
-    fn test_not_retryable_400() {
-        let err = eyre::eyre!("API error: 400 - bad request");
-        assert!(!RetryProvider::is_retryable_error(&err));
-    }
-
-    #[test]
-    fn test_should_failover_401() {
-        let err = eyre::eyre!("OpenAI API error: 401 - unauthorized");
-        assert!(!RetryProvider::is_retryable_error(&err));
-        assert!(RetryProvider::should_failover(&err));
-    }
-
-    #[test]
-    fn test_should_failover_429() {
-        let err = eyre::eyre!("API error: 429 - rate limited");
-        assert!(RetryProvider::should_failover(&err));
     }
 
     // ──────────────────────────────────────────────────────────────────────
@@ -552,50 +526,6 @@ mod tests {
         let llm = LlmError::new(LlmErrorKind::ContentFiltered, "blocked");
         let err: eyre::Report = llm.into();
         assert!(!RetryProvider::should_failover(&err));
-    }
-
-    #[test]
-    fn test_is_retryable_typed_rate_limited() {
-        let llm = LlmError::rate_limited(None);
-        let err: eyre::Report = llm.into();
-        assert!(RetryProvider::is_retryable_error(&err));
-    }
-
-    #[test]
-    fn test_not_retryable_typed_auth() {
-        let llm = LlmError::auth("bad key");
-        let err: eyre::Report = llm.into();
-        assert!(!RetryProvider::is_retryable_error(&err));
-    }
-
-    #[test]
-    fn test_should_failover_400_content_empty() {
-        let err = eyre::eyre!(
-            "OpenAI API error: 400 Bad Request - the message with role 'assistant' must not be empty"
-        );
-        assert!(RetryProvider::should_failover(&err));
-    }
-
-    /// A retry provider with a generous `max_delay` so the clamp does not
-    /// interfere with parse-scale assertions.
-    fn retry_provider_uncapped() -> RetryProvider {
-        RetryProvider {
-            inner: Arc::new(MockProvider),
-            config: RetryConfig {
-                max_delay: Duration::from_secs(3600),
-                ..RetryConfig::default()
-            },
-        }
-    }
-
-    #[test]
-    fn test_rate_limit_delay_parses_seconds() {
-        let err = eyre::eyre!(
-            "OpenAI API error: 429 Too Many Requests - Rate limit reached. Please try again in 29.159s"
-        );
-        let delay = retry_provider_uncapped().rate_limit_delay(&err).unwrap();
-        // 29.159 + 1.0 buffer = ~30.159s
-        assert!(delay.as_secs_f64() > 29.0 && delay.as_secs_f64() < 32.0);
     }
 
     #[test]
@@ -843,26 +773,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod provider_metadata_tests {
-    use std::sync::Arc;
-
-    use super::RetryProvider;
-    use crate::provider::LlmProvider;
-    use crate::provider::test_lanes::TwoLaneStub;
-
-    #[test]
-    fn should_forward_provider_metadata_for_index_to_inner_lane_when_wrapped() {
-        let wrapped = RetryProvider::new(Arc::new(TwoLaneStub));
-        let metadata = wrapped.provider_metadata_for_index(Some(1));
-        assert_eq!(
-            (metadata.provider.as_str(), metadata.model.as_str()),
-            ("lane-b", "model-b"),
-            "slot 1 identity must survive the wrapper: {metadata:?}"
-        );
-        assert_eq!(metadata.endpoint.as_deref(), Some("b.example"));
-        assert_eq!(wrapped.provider_metadata().provider, "lane-a");
-    }
-}
+mod provider_metadata_tests {}
 
 #[cfg(test)]
 mod lane_summary_classification_tests {

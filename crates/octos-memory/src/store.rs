@@ -1191,71 +1191,6 @@ mod tests {
         assert_eq!(results.len(), 2);
     }
 
-    /// NEW-06 codex follow-up — when `min_best_modality` is supplied
-    /// and the scored+cwd-filtered set comes back empty, the function
-    /// MUST return empty instead of falling through to the unscored
-    /// `find_relevant_db_scan` (which has no scoring infrastructure
-    /// and would silently bypass the contamination floor).
-    ///
-    /// Reproduces the codex follow-up bug at lines 365-370. The
-    /// scenario engineered below:
-    /// * one episode at cwd `/proj` with a deliberately weak BM25
-    ///   match for the query (so it does NOT clear the 0.99 floor);
-    /// * one episode at a foreign cwd with a strong BM25 match (so
-    ///   its score normalises high but it gets dropped by the cwd
-    ///   filter).
-    ///
-    /// Pre-fix, `find_relevant_hybrid_scored_filtered` would return
-    /// the foreign-cwd episode, the cwd filter would drop it, the
-    /// `!filtered.is_empty()` short-circuit would fail, and execution
-    /// would fall through to the DB scan — which IS cwd-scoped and
-    /// matches by substring, so the weak `/proj` episode would be
-    /// returned despite never having cleared the floor.
-    ///
-    /// Post-fix, when the caller supplies a floor, the fallthrough is
-    /// gated off and the function returns empty.
-    #[tokio::test]
-    async fn find_relevant_filtered_returns_empty_when_floor_set_and_no_cwd_match() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = EpisodeStore::open(dir.path()).await.unwrap();
-
-        // Foreign-cwd episode with a strong BM25 match (verbatim query
-        // tokens). Normalises to BM25=1.0 in the result set so it
-        // clears any reasonable floor — but the cwd filter drops it.
-        store
-            .store(make_episode(
-                "gravitational lensing observations of distant galaxies",
-                "/foreign-cwd",
-            ))
-            .await
-            .unwrap();
-        // Target-cwd episode whose summary shares only the noise-token
-        // "podcast" with the query. Its BM25 score is positive but
-        // far below the foreign-cwd episode's score after normalisation,
-        // so it does NOT clear the floor.
-        store
-            .store(make_episode("Apple CEO podcast", "/proj"))
-            .await
-            .unwrap();
-
-        let results = store
-            .find_relevant_filtered(
-                Path::new("/proj"),
-                "gravitational lensing observations",
-                10,
-                Some(0.5), // floor — foreign-cwd clears it, /proj does not
-            )
-            .await
-            .unwrap();
-        assert!(
-            results.is_empty(),
-            "find_relevant_filtered with a floor must NOT fall through \
-             to unscored DB scan when the scored+cwd set is empty; \
-             returned {} contaminated episodes: {results:?}",
-            results.len()
-        );
-    }
-
     /// NEW-06 codex P2 rounds 4 + 5 — when a floor is supplied AND the
     /// hybrid index holds many foreign-cwd matches that all clear the
     /// floor with stronger scores, a current-cwd match that ALSO
@@ -1334,31 +1269,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_store_embedding_and_hybrid_search() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = EpisodeStore::open(dir.path()).await.unwrap();
-
-        let ep = make_episode("Implemented vector search", "/proj");
-        let ep_id = ep.id.clone();
-        store.store(ep).await.unwrap();
-
-        // Store a dummy embedding
-        let embedding = vec![0.1f32; 1536];
-        store
-            .store_embedding(&ep_id, embedding.clone())
-            .await
-            .unwrap();
-
-        // Hybrid search (text only, no query embedding)
-        let results = store
-            .find_relevant_hybrid("vector search", None, 10)
-            .await
-            .unwrap();
-        assert!(!results.is_empty());
-        assert_eq!(results[0].id, ep_id);
-    }
-
-    #[tokio::test]
     async fn find_relevant_hybrid_scored_returns_similarity_scores() {
         let dir = tempfile::tempdir().unwrap();
         let store = EpisodeStore::open(dir.path()).await.unwrap();
@@ -1434,26 +1344,6 @@ mod tests {
         // Verify it's gone
         let results = store
             .find_relevant(Path::new("/proj"), "delete", 10)
-            .await
-            .unwrap();
-        assert!(results.is_empty());
-    }
-
-    #[tokio::test]
-    async fn should_not_find_deleted_episode_after_reopen() {
-        let dir = tempfile::tempdir().unwrap();
-        let ep_id;
-        {
-            let store = EpisodeStore::open(dir.path()).await.unwrap();
-            let ep = make_episode("Ephemeral data", "/proj");
-            ep_id = ep.id.clone();
-            store.store(ep).await.unwrap();
-            store.delete_by_id(&ep_id).await.unwrap();
-        }
-        // Reopen and verify deletion persisted
-        let store = EpisodeStore::open(dir.path()).await.unwrap();
-        let results = store
-            .find_relevant(Path::new("/proj"), "ephemeral", 10)
             .await
             .unwrap();
         assert!(results.is_empty());

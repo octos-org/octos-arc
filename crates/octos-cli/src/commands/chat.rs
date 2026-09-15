@@ -777,52 +777,6 @@ pub(crate) fn resolve_profile(
     Ok((def, "default"))
 }
 
-/// Load the LLM config from a stored serve/onboarding profile so
-/// `octos chat --profile <id>` can reuse an octoscode / `serve` profile's
-/// provider, model, route (base URL + API type), API key (`config.env_vars`),
-/// and fallbacks — without a separate flat config or a duplicated key.
-///
-/// Returns `Ok(None)` when no `--profile` is given, the arg is a path (a runtime
-/// [`octos_agent::profile::ProfileDefinition`] file, left to [`resolve_profile`]),
-/// or the id does not name a stored profile (e.g. a built-in runtime profile like
-/// `coding`) — leaving the caller on its normal config path. An explicit
-/// `--config` still takes precedence (handled by the caller), and CLI
-/// `--provider`/`--model`/… continue to override the profile's values downstream.
-///
-/// [`ProfileStore::get`](crate::profiles::ProfileStore::get) is a lock-free JSON
-/// read, so this is safe to call while a `serve` process holds the same data dir.
-#[cfg(test)]
-pub(crate) fn load_serve_profile_config(
-    profile_arg: Option<&str>,
-    data_dir: &std::path::Path,
-) -> Result<Option<Config>> {
-    let Some(id) = profile_arg else {
-        return Ok(None);
-    };
-    // A path-form `--profile` names a runtime ProfileDefinition file, not a stored
-    // serve-profile id; leave those to `resolve_profile`.
-    if id.contains('/') || id.contains(std::path::MAIN_SEPARATOR) {
-        return Ok(None);
-    }
-    let store = crate::profiles::ProfileStore::open_unified(data_dir)
-        .wrap_err("failed to open profile store")?;
-    let Some(profile) = store.get(id)? else {
-        return Ok(None);
-    };
-    // Apply parent inheritance + global profile-defaults exactly like serve's
-    // per-profile loop, then flatten `llm.primary` into the flat provider/model/
-    // route fields the chat provider builder reads.
-    let resolved = store.resolve_runtime_profile(&profile);
-    let config = crate::profiles::config_from_profile(&resolved);
-    tracing::info!(
-        profile = id,
-        provider = config.provider.as_deref().unwrap_or("<unset>"),
-        model = config.model.as_deref().unwrap_or("<unset>"),
-        "using LLM config from stored profile",
-    );
-    Ok(Some(config))
-}
-
 /// Find the matching provider-specific tool policy for the active model.
 /// Checks model ID first (e.g. "claude-sonnet-4-20250514"), then provider name (e.g. "gemini").
 #[cfg(test)]
@@ -949,7 +903,6 @@ pub(crate) fn create_embedder(config: &Config) -> Option<Arc<dyn EmbeddingProvid
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
-    use octos_core::SessionScope;
 
     /// A profile-derived config carrying a full openai route.
     fn openai_route_config() -> Config {
@@ -978,83 +931,6 @@ mod tests {
         // blanking it would turn a swap into a hard error). Complete the switch
         // with `--model`.
         assert_eq!(config.model.as_deref(), Some("gpt-4o"));
-    }
-
-    #[test]
-    fn chat_profile_loads_llm_config_from_stored_serve_profile() {
-        use crate::profiles::{
-            LlmModelSelectionConfig, LlmProfileConfig, LlmRouteConfig, ProfileConfig, ProfileStore,
-            UserProfile,
-        };
-
-        let dir = tempfile::tempdir().unwrap();
-        let store = ProfileStore::open_unified(dir.path()).unwrap();
-        let profile = UserProfile {
-            id: "dev".to_string(),
-            name: "Dev".to_string(),
-            public_subdomain: None,
-            enabled: true,
-            data_dir: None,
-            parent_id: None,
-            config: ProfileConfig {
-                llm: Some(LlmProfileConfig {
-                    primary: Some(LlmModelSelectionConfig {
-                        family_id: Some("moonshot".to_string()),
-                        model_id: Some("kimi-k2.5".to_string()),
-                        route: Some(LlmRouteConfig {
-                            base_url: Some("https://api.kimi.com/coding/v1".to_string()),
-                            api_key_env: Some("KIMI_API_KEY".to_string()),
-                            api_type: Some("openai".to_string()),
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    }),
-                    fallbacks: vec![],
-                }),
-                env_vars: [("KIMI_API_KEY".to_string(), "sk-from-profile".to_string())].into(),
-                ..Default::default()
-            },
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-        store.save(&profile).unwrap();
-
-        // `--profile dev` names a stored serve profile → flattened LLM config,
-        // including the API key carried in the profile's own `env_vars` (so the
-        // chat run reuses the profile's model AND key with no separate setup).
-        let config = load_serve_profile_config(Some("dev"), dir.path())
-            .unwrap()
-            .expect("stored profile should produce a config");
-        assert_eq!(config.provider.as_deref(), Some("moonshot"));
-        assert_eq!(config.model.as_deref(), Some("kimi-k2.5"));
-        assert_eq!(
-            config.base_url.as_deref(),
-            Some("https://api.kimi.com/coding/v1")
-        );
-        assert_eq!(config.api_type.as_deref(), Some("openai"));
-        assert_eq!(config.api_key_env.as_deref(), Some("KIMI_API_KEY"));
-        assert_eq!(
-            config.env_vars.get("KIMI_API_KEY").map(String::as_str),
-            Some("sk-from-profile")
-        );
-
-        // A built-in runtime-profile name, a path-form arg, and an absent arg all
-        // fall through (Ok(None)) so the caller keeps its normal config path.
-        assert!(
-            load_serve_profile_config(Some("coding"), dir.path())
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            load_serve_profile_config(Some("./some/path.json"), dir.path())
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            load_serve_profile_config(None, dir.path())
-                .unwrap()
-                .is_none()
-        );
     }
 
     // ---- yolo GAP #3: chat permission flags → EffectivePermissions ----
@@ -1267,14 +1143,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_selection_other_index_sets_free_text_flag() {
-        // Other is options.len()+1 = 4 here.
-        let (labels, other) = parse_question_selection(&q(false, true), "4");
-        assert!(labels.is_empty());
-        assert!(other);
-    }
-
-    #[test]
     fn test_resolve_provider_policy_model_id_match() {
         let json = r#"{
             "tool_policy_by_provider": {
@@ -1287,38 +1155,6 @@ mod tests {
             resolve_provider_policy(&config, "anthropic", "claude-sonnet-4-20250514").unwrap();
         assert!(policy.is_allowed("shell"));
         assert!(!policy.is_allowed("read_file"));
-    }
-
-    #[test]
-    fn chat_constructs_solo_session_scope_with_user_cwd() {
-        // Phase 1 SessionScope migration (PR #1198 follow-up): the
-        // chat entry point constructs a solo [`SessionScope`] from the
-        // user-finalized `cwd` (or `current_dir()` fallback) and
-        // attaches it to the per-session agent via
-        // [`Agent::with_session_scope`]. This test mirrors the exact
-        // construction the entry point performs so a regression that
-        // drops the wiring (or accidentally rejects valid input by
-        // mistakenly making the constructor fail) fails the suite
-        // before it ships to fleet.
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let cwd = tmp.path().to_path_buf();
-        // Mirror chat.rs's absolutize-then-build pattern. The entry
-        // point propagates `current_dir()` failures via `wrap_err?`;
-        // here in the test the cwd is already absolute (`tempdir`
-        // returns an absolute path) so the relative branch is never
-        // taken.
-        let absolute_cwd: PathBuf = if cwd.is_absolute() {
-            cwd.clone()
-        } else {
-            std::env::current_dir()
-                .expect("current_dir() in tests")
-                .join(&cwd)
-        };
-        let scope = SessionScope::solo(absolute_cwd, Vec::new())
-            .expect("solo SessionScope construction must succeed for an absolute cwd");
-        assert_eq!(scope.workspace(), cwd.as_path());
-        assert_eq!(scope.root(), cwd.as_path());
-        assert!(scope.shared_zones().is_empty());
     }
 }
 

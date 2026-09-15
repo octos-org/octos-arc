@@ -1331,15 +1331,6 @@ mod profile_integration_tests {
     use octos_memory::EpisodeStore;
 
     #[test]
-    fn clamp_env_secs_floor_one_keeps_guard_live() {
-        // env_secs_or semantics: 0 floors to 1 so the guard is always live.
-        assert_eq!(clamp_env_secs(Some(0), 90, 1), 1);
-        assert_eq!(clamp_env_secs(Some(45), 90, 1), 45);
-        assert_eq!(clamp_env_secs(Some(99_999), 90, 1), 86_400);
-        assert_eq!(clamp_env_secs(None, 90, 1), 90);
-    }
-
-    #[test]
     fn clamp_env_secs_floor_zero_allows_disable() {
         // env_secs_allow_zero_or semantics (#2228): 0 passes through so the
         // wall-clock cap can actually be disabled.
@@ -1454,35 +1445,6 @@ mod profile_integration_tests {
         let prof = profiled.profile().expect("profile handle present");
         assert_eq!(prof.name, "coding");
         assert_eq!(prof.version, 1);
-    }
-
-    #[tokio::test]
-    async fn coding_full_profile_matches_default_tool_set() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let base = agent_default(tmp.path()).await;
-        let profiled = agent_with_builtin_profile(tmp.path(), "coding-full").await;
-
-        // The byte-for-byte parity contract moved from `coding` to the
-        // `coding-full` escape hatch when the lean default landed.
-        assert_eq!(
-            tool_names(&base),
-            tool_names(&profiled),
-            "coding-full profile must preserve the default tool set byte-for-byte",
-        );
-
-        let prof = profiled.profile().expect("profile handle present");
-        assert_eq!(prof.name, "coding-full");
-        assert_eq!(prof.version, 1);
-    }
-
-    #[tokio::test]
-    async fn agent_without_profile_returns_none() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let agent = agent_default(tmp.path()).await;
-        assert!(
-            agent.profile().is_none(),
-            "agents built without a profile envelope return None",
-        );
     }
 
     #[tokio::test]

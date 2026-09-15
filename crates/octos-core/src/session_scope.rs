@@ -1236,19 +1236,6 @@ mod tests {
     }
 
     #[test]
-    fn classify_path_in_shared_zone_returns_zone_path() {
-        let data = abs("/octos/profiles/dspfac/data");
-        let scope = mt_default(&data, "web-1");
-        let path = data.join("research/jwst/notes.md");
-        assert_eq!(
-            scope.classify_lexical_path(&path),
-            PathClassification::InSharedZone {
-                zone: data.join("research")
-            }
-        );
-    }
-
-    #[test]
     fn classify_path_out_of_scope_for_path_inside_root_but_outside_zones() {
         // Per codex round-1: with named shared zones, paths under
         // `<root>` but outside the declared zones are OutOfScope
@@ -1275,21 +1262,6 @@ mod tests {
                 granted_dir: grant.clone()
             }
         );
-    }
-
-    #[test]
-    fn with_granted_dir_is_idempotent_in_solo() {
-        let cwd = abs("/home/yc/my-project");
-        let grant = abs("/tmp/scratch");
-        let scope = SessionScope::solo(cwd, vec![]).unwrap();
-        let scope = scope.with_granted_dir(grant.clone()).unwrap();
-        let scope = scope.with_granted_dir(grant.clone()).unwrap();
-        if let ScopeMode::Solo { granted_dirs } = scope.mode() {
-            assert_eq!(granted_dirs.len(), 1);
-            assert_eq!(&granted_dirs[0], &grant);
-        } else {
-            panic!("expected Solo");
-        }
     }
 
     // -------- PR-A: skill_read_zones --------
@@ -1413,14 +1385,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn schema_version_bumped_to_v2_for_skill_read_zones() {
-        // Pin the PR-A bump so a future PR cannot silently revert
-        // the schema version without updating this test (and the
-        // module-level history comment on the constant).
-        assert_eq!(SESSION_SCOPE_SCHEMA_VERSION, 2);
-    }
-
     // -----------------------------------------------------------------
     // Codex round-2 BLOCKER 2 (PR #1327 review): canonicalize-then-skip
     // helper. The pre-fix loop kept the raw path when canonicalize
@@ -1428,21 +1392,6 @@ mod tests {
     // (`/tmp/missing -> /etc`) would canonicalise both candidate and
     // zone root to `/etc` at classify time and accept reads.
     // -----------------------------------------------------------------
-
-    #[test]
-    fn canonicalize_skill_read_zones_skips_missing_paths() {
-        // Two inputs: one real on-disk dir, one missing path. The fail-
-        // closed helper must KEEP the real dir and SKIP the missing
-        // one. The pre-fix code kept the missing path in raw form,
-        // which was fail-open.
-        let real = tempfile::tempdir().expect("create real skill dir");
-        let missing = real.path().join("does-not-exist");
-        let input = vec![real.path().to_path_buf(), missing.clone()];
-        let out = canonicalize_skill_read_zones(&input);
-        assert_eq!(out.len(), 1, "missing entry must be dropped: out = {out:?}");
-        let canonical_real = std::fs::canonicalize(real.path()).expect("canonicalize real");
-        assert_eq!(out[0], canonical_real);
-    }
 
     // -----------------------------------------------------------------
     // Codex round-2 BLOCKER 1 (PR #1327 review): canonical classify

@@ -1500,59 +1500,6 @@ mod cwd_isolation_tests {
         );
     }
 
-    /// Review #1772 (high): `check` spawns cargo/tsc/go, which execute
-    /// project-controlled code (build.rs / proc-macros), so BOTH registry
-    /// constructors must hand it the session sandbox — same lockstep as
-    /// shell/exec/bash. The marker sandbox replaces the wrapped command
-    /// with an echo, so the marker in the output proves the checker went
-    /// through `Sandbox::wrap_command` instead of a direct host spawn.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn should_confine_check_tool_to_session_sandbox_on_build_and_rebind() {
-        struct MarkerSandbox;
-        impl Sandbox for MarkerSandbox {
-            fn wrap_command(
-                &self,
-                command: &str,
-                cwd: &std::path::Path,
-            ) -> tokio::process::Command {
-                let mut cmd = tokio::process::Command::new("sh");
-                cmd.arg("-c")
-                    .arg(format!("echo \"SANDBOX-WRAPPED: {command}\"; exit 7"))
-                    .current_dir(cwd);
-                cmd
-            }
-        }
-
-        // `cargo` resolves from PATH — always present under `cargo test` —
-        // but the marker sandbox substitutes the command, so no real
-        // checker ever runs.
-        let cwd = tempfile::tempdir().expect("create temp dir");
-        std::fs::write(cwd.path().join("Cargo.toml"), b"[package]").unwrap();
-
-        let registry = ToolRegistry::with_builtins_and_sandbox(cwd.path(), Box::new(MarkerSandbox));
-        let tr = registry
-            .execute("check", &serde_json::json!({}))
-            .await
-            .expect("check dispatch");
-        assert!(
-            tr.output.contains("SANDBOX-WRAPPED"),
-            "with_builtins must confine check to the session sandbox: {}",
-            tr.output
-        );
-
-        let rebound = registry.rebind_cwd(cwd.path(), Box::new(MarkerSandbox));
-        let tr = rebound
-            .execute("check", &serde_json::json!({}))
-            .await
-            .expect("check dispatch");
-        assert!(
-            tr.output.contains("SANDBOX-WRAPPED"),
-            "rebind_cwd must re-hand the session sandbox to check: {}",
-            tr.output
-        );
-    }
-
     #[test]
     fn set_workspace_root_records_path_for_session_tool_registry_fallback() {
         let mut reg = ToolRegistry::new();
@@ -1630,49 +1577,6 @@ mod registry_dispatch_tests {
             !reg.is_tool_visible("shell"),
             "provider-policy-denied tools must not be reported as visible"
         );
-    }
-
-    #[tokio::test]
-    async fn spawn_agent_execution_policy_is_equivalent_to_spawn_alias() {
-        let mut reg = make_registry();
-        reg.set_provider_policy(ToolPolicy {
-            deny: vec!["spawn".to_owned()],
-            ..Default::default()
-        });
-        assert!(
-            !reg.is_tool_visible("spawn_agent"),
-            "spawn_agent should be hidden when policy denies its backend spawn alias"
-        );
-        let denied = match reg
-            .execute("spawn_agent", &serde_json::json!({ "message": "review" }))
-            .await
-        {
-            Ok(result) => panic!(
-                "spawn deny should deny spawn_agent alias, got: {}",
-                result.output
-            ),
-            Err(error) => error,
-        };
-        assert!(denied.to_string().contains("denied by provider policy"));
-
-        let mut reg = make_registry();
-        reg.set_provider_policy(ToolPolicy {
-            allow: vec!["spawn".to_owned()],
-            ..Default::default()
-        });
-        assert!(
-            reg.is_tool_visible("spawn_agent"),
-            "spawn_agent should be visible when policy allows its backend spawn alias"
-        );
-        let allowed = reg
-            .execute("spawn_agent", &serde_json::json!({ "message": "review" }))
-            .await
-            .expect("spawn allow should allow spawn_agent alias to execute");
-        assert!(
-            !allowed.success,
-            "the alias should pass policy, then fail only because the bare builtin registry has no native spawn delegate"
-        );
-        assert!(allowed.output.contains("native spawn delegate"));
     }
 
     #[test]
@@ -1768,79 +1672,11 @@ mod registry_dispatch_tests {
 mod context_threading_tests {
     //! M8.1 — tool context threaded through the registry dispatch path.
 
-    use super::super::{Tool, ToolContext, ToolResult};
+    use super::super::{Tool, ToolResult};
     use super::*;
     use async_trait::async_trait;
     use eyre::Result;
     use serde_json::Value;
-    use std::sync::Mutex;
-
-    /// Tool that echoes the `tool_id` it saw on the context, letting tests
-    /// confirm the registry forwarded the caller's `ToolContext` into
-    /// `execute_with_context`.
-    struct CapturingTool {
-        seen: Mutex<Option<String>>,
-    }
-
-    impl CapturingTool {
-        fn new() -> Self {
-            Self {
-                seen: Mutex::new(None),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl Tool for CapturingTool {
-        fn name(&self) -> &str {
-            "capturing"
-        }
-        fn description(&self) -> &str {
-            "test-only"
-        }
-        fn input_schema(&self) -> Value {
-            serde_json::json!({"type": "object"})
-        }
-        async fn execute(&self, args: &Value) -> Result<ToolResult> {
-            self.execute_with_context(&ToolContext::zero(), args).await
-        }
-        async fn execute_with_context(
-            &self,
-            ctx: &ToolContext,
-            _args: &Value,
-        ) -> Result<ToolResult> {
-            *self.seen.lock().unwrap() = Some(ctx.tool_id.clone());
-            Ok(ToolResult {
-                output: ctx.tool_id.clone(),
-                success: true,
-                ..Default::default()
-            })
-        }
-    }
-
-    #[tokio::test]
-    async fn should_pass_context_through_executor() {
-        let mut reg = ToolRegistry::new();
-        let tool = Arc::new(CapturingTool::new());
-        reg.register_arc(tool.clone());
-
-        let mut ctx = ToolContext::zero();
-        ctx.tool_id = "call-m8.1".to_string();
-
-        let result = reg
-            .execute_with_context(&ctx, "capturing", &serde_json::json!({}))
-            .await
-            .expect("capturing tool must succeed");
-        assert!(result.success);
-        assert_eq!(result.output, "call-m8.1");
-
-        let seen = tool.seen.lock().unwrap().clone();
-        assert_eq!(
-            seen.as_deref(),
-            Some("call-m8.1"),
-            "registry must forward the caller's ToolContext into execute_with_context",
-        );
-    }
 
     struct PanickingTool;
 

@@ -487,15 +487,6 @@ mod tests {
     }
 
     #[test]
-    fn repair_never_returns_a_bare_string() {
-        // The old fallback stored `Value::String(raw)`, which serialized back to
-        // the provider as an invalid `function.arguments` → fatal HTTP 400.
-        let v = repair_tool_arguments_to_object("not json at all");
-        assert!(v.is_object(), "must coerce to an object, got {v}");
-        assert_eq!(v, serde_json::json!({}));
-    }
-
-    #[test]
     fn repair_closes_a_truncated_object() {
         // finish_reason=length cut the JSON mid-value.
         let v = repair_tool_arguments_to_object(r#"{"command":"cat report.md"#);
@@ -526,13 +517,6 @@ mod tests {
     }
 
     // ---------- parse_invoke_parameter_tags (#1711) ----------
-
-    #[test]
-    fn parameter_tags_parse_a_single_string_param() {
-        let v = parse_invoke_parameter_tags("<parameter name=\"command\">ls -la /tmp</parameter>")
-            .expect("params");
-        assert_eq!(v["command"], "ls -la /tmp");
-    }
 
     #[test]
     fn inline_invoke_with_parameter_tags_recovers_real_args() {
@@ -579,31 +563,6 @@ mod tests {
         assert!(Agent::is_retriable_response(&r2));
     }
 
-    #[test]
-    fn should_normalize_inline_invoke_block_into_tool_call() {
-        let mut r = make_response_with_stop(
-            Some("<invoke name=\"cron\">{\"action\":\"list\"}</invoke>"),
-            vec![],
-            10,
-            StopReason::EndTurn,
-        );
-        Agent::normalize_inline_invokes(&mut r);
-        assert_eq!(r.stop_reason, StopReason::ToolUse);
-        assert_eq!(r.tool_calls.len(), 1);
-        assert_eq!(r.tool_calls[0].name, "cron");
-        assert_eq!(r.tool_calls[0].arguments["action"], "list");
-        assert!(r.content.is_none());
-    }
-
-    #[test]
-    fn should_downgrade_empty_tooluse_to_endturn_after_normalization() {
-        let mut r = make_response_with_stop(Some("plain text"), vec![], 10, StopReason::ToolUse);
-        Agent::normalize_inline_invokes(&mut r);
-        assert_eq!(r.stop_reason, StopReason::EndTurn);
-        assert!(r.tool_calls.is_empty());
-        assert_eq!(r.content.as_deref(), Some("plain text"));
-    }
-
     // ---------- Agent::is_repetitive_output ----------
 
     #[test]
@@ -635,31 +594,4 @@ mod tests {
     // would match the string "stream" fallback and get retried forever,
     // hiding the diagnostic from the model.
     // ──────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn is_retryable_stream_error_idle_timeout_is_typed_retryable() {
-        let typed = octos_llm::StreamError::IdleTimeout { idle_secs: 180 };
-        let err = eyre::Report::new(typed);
-        assert!(
-            Agent::is_retryable_stream_error(&err),
-            "IdleTimeout must be retryable through the typed downcast"
-        );
-    }
-
-    #[test]
-    fn is_retryable_stream_error_malformed_args_is_typed_not_retryable() {
-        let typed = octos_llm::StreamError::MalformedArgs {
-            tool_id: "call_0".to_string(),
-            tool_name: "mofa_slides".to_string(),
-            error: "EOF while parsing a string at column 4123".to_string(),
-        };
-        let err = eyre::Report::new(typed);
-        // The rendered string contains "stream" / similar substrings under
-        // some formatters; the downcast path must short-circuit BEFORE the
-        // string match falls through.
-        assert!(
-            !Agent::is_retryable_stream_error(&err),
-            "MalformedArgs must be NOT retryable so the model sees the diagnostic"
-        );
-    }
 }

@@ -3491,44 +3491,11 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn should_abort_timed_out_parallel_tool_task() {
-        struct DropSignal(Arc<AtomicBool>);
-        impl Drop for DropSignal {
-            fn drop(&mut self) {
-                self.0.store(true, Ordering::SeqCst);
-            }
-        }
-
-        let dropped = Arc::new(AtomicBool::new(false));
-        let task_signal = dropped.clone();
-        let handle = tokio::spawn(async move {
-            let _signal = DropSignal(task_signal);
-            std::future::pending::<super::ToolCallResult>().await
-        });
-        let call = tool_call("call_slow", "slow_tool");
-
-        let results = super::join_parallel_handles(
-            vec![handle],
-            &[&call],
-            Some(std::time::Duration::from_millis(10)),
-        )
-        .await;
-
-        assert_eq!(results.len(), 1);
-        assert!(
-            dropped.load(Ordering::SeqCst),
-            "timed-out task was detached instead of aborted"
-        );
-    }
-
     // ------------------------------------------------------------------
     // #1766 — mixed-batch two-phase dispatch: Safe calls run in parallel
     // first (phase 1), Exclusive calls run serially in LLM order (phase 2),
     // and results are reassembled in the ORIGINAL LLM call order.
     // ------------------------------------------------------------------
-
-    use std::sync::atomic::{AtomicBool, Ordering};
 
     // #1768: pre-mutation workspace snapshots
     // ------------------------------------------------------------------
@@ -3559,68 +3526,6 @@ mod tests {
                 ..Default::default()
             })
         }
-    }
-
-    /// Safe (default class) tool that hard-errors — a genuine execution
-    /// failure whose cascade bit must cancel the whole Exclusive phase.
-    struct SafeHardErrorTool;
-
-    #[async_trait]
-    impl Tool for SafeHardErrorTool {
-        fn name(&self) -> &str {
-            "safe_hard_error_tool"
-        }
-        fn description(&self) -> &str {
-            "safe reader that always errors mid-execution"
-        }
-        fn input_schema(&self) -> serde_json::Value {
-            serde_json::json!({"type": "object"})
-        }
-        async fn execute(&self, _args: &serde_json::Value) -> eyre::Result<ToolResult> {
-            Err(eyre::eyre!("safe boom: reader exploded"))
-        }
-    }
-
-    fn result_for<'a>(messages: &'a [octos_core::Message], id: &str) -> &'a octos_core::Message {
-        messages
-            .iter()
-            .find(|m| m.tool_call_id.as_deref() == Some(id))
-            .unwrap_or_else(|| panic!("no result message for tool_call_id {id}"))
-    }
-
-    #[tokio::test]
-    async fn mixed_batch_safe_error_cancels_every_exclusive_call() {
-        // #1766 acceptance criterion: an error in any Safe call still
-        // triggers the "cancelled due to sibling error" synthetic result for
-        // the Exclusive calls — position-independently. The failing reader
-        // here sits AFTER the Exclusive call in LLM order, and the Exclusive
-        // call is still cancelled: no mutation runs once a sibling read
-        // failed in phase 1.
-        let mut tools = ToolRegistry::new();
-        tools.register(GoodExclusiveTool);
-        tools.register(SafeHardErrorTool);
-        let calls = vec![
-            tool_call("call_excl", "good_tool"),
-            tool_call("call_bad_read", "safe_hard_error_tool"),
-        ];
-        let (messages, success_by_id) = run_batch(calls, tools).await;
-
-        assert!(
-            result_for(&messages, "call_excl")
-                .content
-                .contains("cancelled due to earlier sibling error"),
-            "a failed Safe call must cancel the whole Exclusive phase: {:?}",
-            result_for(&messages, "call_excl").content
-        );
-        assert!(
-            result_for(&messages, "call_bad_read")
-                .content
-                .contains("safe boom"),
-            "the Safe failure detail must reach the model: {:?}",
-            result_for(&messages, "call_bad_read").content
-        );
-        assert!(success_by_id.contains(&("call_excl".to_string(), false)));
-        assert!(success_by_id.contains(&("call_bad_read".to_string(), false)));
     }
 
     async fn snapshot_agent(

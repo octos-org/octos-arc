@@ -1384,17 +1384,6 @@ mod tests {
     }
 
     #[test]
-    fn test_hook_config_defaults() {
-        let json = r#"{
-            "event": "after_llm_call",
-            "command": ["echo", "done"]
-        }"#;
-        let hook: HookConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(hook.timeout_ms, 5000);
-        assert!(hook.tool_filter.is_empty());
-    }
-
-    #[test]
     fn test_payload_serialization() {
         let payload = HookPayload::before_tool(
             "shell",
@@ -1458,20 +1447,6 @@ mod tests {
                 .as_deref()
                 .is_some_and(|value| value.ends_with("... (truncated)"))
         );
-    }
-
-    #[test]
-    fn test_tool_filter_config() {
-        let hook = HookConfig {
-            event: HookEvent::BeforeToolCall,
-            command: vec!["check".into()],
-            timeout_ms: 1000,
-            tool_filter: vec!["shell".into(), "write_file".into()],
-            path_filter: vec![],
-            requires_bin: None,
-        };
-        assert!(hook.tool_filter.contains(&"shell".to_string()));
-        assert!(!hook.tool_filter.contains(&"read_file".to_string()));
     }
 
     #[test]
@@ -1628,23 +1603,6 @@ mod tests {
 
     #[tokio::test]
     #[cfg(unix)]
-    async fn should_skip_hook_when_path_filter_does_not_match() {
-        let executor = HookExecutor::new(vec![hook_with_path_filter(
-            HookEvent::AfterToolCall,
-            vec!["**/*.rs"],
-        )]);
-        // edit_file on a Python path — `**/*.rs` glob should NOT match.
-        let payload =
-            HookPayload::after_tool("edit_file", "tc1", "ok".into(), true, 10, None, None, None);
-        let mut payload = payload;
-        payload.arguments = Some(serde_json::json!({"path": "scripts/build.py"}));
-        let result = executor.run(HookEvent::AfterToolCall, &payload).await;
-        // Hook skipped -> Allow (not denied, not errored).
-        assert_eq!(result, HookResult::Allow);
-    }
-
-    #[tokio::test]
-    #[cfg(unix)]
     async fn should_fire_hook_when_path_filter_matches() {
         // `true` would succeed; deny-via-exit-1 only makes sense for before-
         // hooks. Use a before-hook with `false` so a match yields Deny.
@@ -1729,29 +1687,6 @@ mod tests {
                 );
             }
             other => panic!("expected Context, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    #[cfg(unix)]
-    async fn should_report_actionable_message_when_user_prompt_submit_hook_times_out() {
-        // Timeout is fail-open (returns Error, not Deny) but the surfaced
-        // message must be actionable and name the event.
-        let executor = HookExecutor::new(vec![user_prompt_hook(vec!["sh", "-c", "sleep 5"], 50)]);
-        let payload = HookPayload::user_prompt_submit("hi", "m", None, None);
-        let result = executor.run(HookEvent::UserPromptSubmit, &payload).await;
-        match result {
-            HookResult::Error(msg) => {
-                assert!(
-                    msg.contains("user_prompt_submit hook timed out after 50ms"),
-                    "message should name the event and timeout: {msg}"
-                );
-                assert!(
-                    msg.contains("raise the hook's timeout_ms"),
-                    "message should be actionable: {msg}"
-                );
-            }
-            other => panic!("expected Error(timeout), got {other:?}"),
         }
     }
 

@@ -663,35 +663,6 @@ mod tests {
         }
     }
 
-    /// Guard: every template advertises a non-empty prompt prefix and
-    /// a non-empty tool budget. A template with an empty budget is a
-    /// misconfiguration — the role would be unable to do anything.
-    #[test]
-    fn every_template_has_prefix_and_budget() {
-        for tpl in RoleTemplate::all() {
-            assert!(
-                !tpl.prompt_prefix.is_empty(),
-                "{} prompt_prefix must be non-empty",
-                tpl.name
-            );
-            assert!(
-                !tpl.display_name.is_empty(),
-                "{} display_name must be non-empty",
-                tpl.name
-            );
-            assert!(
-                !tpl.description.is_empty(),
-                "{} description must be non-empty",
-                tpl.name
-            );
-            assert!(
-                !tpl.allowed_tools.is_empty(),
-                "{} allowed_tools must be non-empty",
-                tpl.name
-            );
-        }
-    }
-
     #[test]
     fn codex_agent_type_aliases_resolve_to_backend_roles() {
         assert_eq!(

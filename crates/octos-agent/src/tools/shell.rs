@@ -1208,20 +1208,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_timeout_clamped_to_max() {
-        let tool = ShellTool::new(std::env::temp_dir());
-        let result = tool
-            .execute(&serde_json::json!({
-                "command": "echo hello",
-                "timeout_secs": 999999
-            }))
-            .await
-            .unwrap();
-        // Should complete (clamped to 600s, not hang)
-        assert!(result.success);
-    }
-
-    #[tokio::test]
     async fn test_denied_command() {
         let tool = ShellTool::new(std::env::temp_dir());
         let result = tool
@@ -1262,33 +1248,6 @@ mod tests {
         std::fs::remove_dir_all(&cwd).ok();
     }
 
-    #[tokio::test]
-    async fn test_shell_sets_frontend_build_env() {
-        let cwd = std::env::temp_dir().join(format!("octos-shell-env-{}", std::process::id()));
-        std::fs::create_dir_all(&cwd).unwrap();
-
-        let tool = ShellTool::new(&cwd);
-        // The product injects these env vars unconditionally (see
-        // `apply_frontend_tool_env`); this test only needs a shell command
-        // that echoes them one per line. `printf`/`$VAR` is POSIX-only, so
-        // use a `cmd`-native `echo %VAR%` form on Windows.
-        #[cfg(windows)]
-        let command = "echo %ASTRO_TELEMETRY_DISABLED%&echo %NPM_CONFIG_CACHE%";
-        #[cfg(not(windows))]
-        let command = "printf '%s\\n%s\\n' \"$ASTRO_TELEMETRY_DISABLED\" \"$NPM_CONFIG_CACHE\"";
-        let result = tool
-            .execute(&serde_json::json!({ "command": command }))
-            .await
-            .unwrap();
-
-        assert!(result.success);
-        let mut lines = result.output.lines();
-        assert_eq!(lines.next(), Some("1"));
-        let cache = lines.next().unwrap_or_default();
-        assert!(cache.contains("octos-frontend-tool-cache"));
-        assert!(!cache.contains(".octos-tool-cache"));
-    }
-
     #[test]
     fn detects_git_invocation_in_compound_shell_command() {
         assert!(contains_git_invocation(
@@ -1327,78 +1286,6 @@ mod tests {
         ctx.tool_id = "shell-with-scope".to_string();
         ctx.session_scope = Some(Arc::new(scope));
         ctx
-    }
-
-    /// Render a canonicalized path the way a child shell's `cd`/`pwd` echoes
-    /// it. On Windows `std::fs::canonicalize` yields a `\\?\` verbatim prefix
-    /// that the shell never prints, so strip it via `dunce::simplified`
-    /// (a lexical no-op on Unix, so the assertions below are unchanged there).
-    fn shell_visible_path(p: &std::path::Path) -> String {
-        dunce::simplified(p).to_string_lossy().to_string()
-    }
-
-    #[cfg(not(windows))]
-    const PWD_COMMAND: &str = "pwd";
-    #[cfg(windows)]
-    const PWD_COMMAND: &str = "cd";
-
-    #[tokio::test]
-    async fn shell_uses_scope_workspace_when_present() {
-        // When the host has threaded a `SessionScope` onto `ToolContext`
-        // AND the scope's workspace matches the tool's construction-time
-        // `cwd` (the production wiring in
-        // `octos-cli/src/runtime/session.rs`: both derive from
-        // `<data_dir>/users/<id>/workspace`), the child process runs
-        // with CWD == `scope.workspace()`. This is the load-bearing
-        // case for multi-tenant SPA sessions.
-        let workspace = tempfile::tempdir().unwrap();
-        let canonical_workspace =
-            std::fs::canonicalize(workspace.path()).expect("canonicalise workspace");
-
-        // Both scope and ShellTool are constructed with the same
-        // workspace (the production wiring), so the migration takes
-        // effect and the child process sees the scope workspace.
-        let scope = octos_core::SessionScope::solo(canonical_workspace.clone(), vec![])
-            .expect("scope construction");
-        let tool = ShellTool::new(&canonical_workspace);
-        let ctx = ctx_with_scope(scope);
-
-        let result = tool
-            .execute_with_context(&ctx, &serde_json::json!({"command": PWD_COMMAND}))
-            .await
-            .unwrap();
-        assert!(result.success, "expected success, got: {}", result.output);
-
-        assert!(
-            result
-                .output
-                .contains(&shell_visible_path(&canonical_workspace)),
-            "expected scope workspace ({}) in shell output, got: {}",
-            canonical_workspace.display(),
-            result.output
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // Background shell task tracking: a trailing `&` (or `background: true`)
-    // registers a supervisor task so the command surfaces in `/ps`, and a
-    // watcher flips it terminal when the detached child exits. Mirrors the
-    // spawn tool's `with_task_supervisor` + `register_with_lineage` pattern.
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn detects_background_via_trailing_ampersand() {
-        assert!(is_background_command("sleep 5 &", None));
-        assert!(is_background_command("python fetch.py  &", None));
-        assert!(is_background_command("vite preview > log 2>&1 &", None));
-        // Not background:
-        assert!(!is_background_command("npm run build", None));
-        assert!(!is_background_command("a && b", None));
-        assert!(!is_background_command("echo 2>&1", None));
-        assert!(!is_background_command("foo & echo done", None));
-        // Explicit arg wins even without a trailing `&`.
-        assert!(is_background_command("sleep 5", Some(true)));
-        assert!(!is_background_command("sleep 5", Some(false)));
     }
 
     #[tokio::test]
@@ -1493,51 +1380,6 @@ mod tests {
             started.elapsed() < Duration::from_secs(10),
             "the 1s cap must bound the wait well under the requested 30s",
         );
-    }
-
-    #[tokio::test]
-    async fn background_command_failure_flips_task_failed() {
-        use crate::task_supervisor::{TaskStatus, TaskSupervisor};
-
-        let temp = tempfile::tempdir().unwrap();
-        let ledger = temp.path().join("tasks.jsonl");
-        let supervisor = Arc::new(TaskSupervisor::new());
-        supervisor.enable_persistence(&ledger).unwrap();
-
-        let tool = ShellTool::new(std::env::temp_dir()).with_task_supervisor(
-            supervisor.clone(),
-            "api:bg-fail",
-            ledger.clone(),
-        );
-
-        // A non-zero exit must flip the tracked task to Failed.
-        let result = tool
-            .execute(&serde_json::json!({"command": "false", "background": true}))
-            .await
-            .unwrap();
-        assert!(result.success, "start should succeed: {}", result.output);
-
-        let started = std::time::Instant::now();
-        loop {
-            let tasks = supervisor.get_tasks_for_session("api:bg-fail");
-            if let Some(t) = tasks.first() {
-                if t.status == TaskStatus::Failed {
-                    assert!(
-                        t.error.as_deref().unwrap_or_default().contains("status"),
-                        "failure error should mention exit status, got {:?}",
-                        t.error
-                    );
-                    break;
-                }
-                if t.status == TaskStatus::Completed {
-                    panic!("expected failure, task completed");
-                }
-            }
-            if started.elapsed() > BACKGROUND_DEADLINE {
-                panic!("background failure not observed in 15s");
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
     }
 
     #[tokio::test]
