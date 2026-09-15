@@ -184,9 +184,6 @@ pub const UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1: &str = "coding.autonomy.v1";
 /// Optional M15 feature flag for backend-owned agent lifecycle controls.
 pub const UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1: &str = "coding.agent_control.v1";
 
-/// Optional M15 feature flag for backend-owned product review workflows.
-pub const UI_PROTOCOL_FEATURE_REVIEW_START_V1: &str = "review.start.v1";
-
 /// Feature flag for backend-owned context generation, checkpoint, and
 /// compaction lifecycle inspection.
 pub const UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1: &str = "context.lifecycle.v1";
@@ -272,7 +269,6 @@ pub const UI_PROTOCOL_KNOWN_FEATURES: &[&str] = &[
     UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2,
     UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1,
     UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1,
-    UI_PROTOCOL_FEATURE_REVIEW_START_V1,
     UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1,
     UI_PROTOCOL_FEATURE_CONTEXT_SEMANTIC_CACHE_V1,
     UI_PROTOCOL_FEATURE_HARNESS_TASK_SUPERVISION_INSPECTION_V1,
@@ -295,14 +291,6 @@ fn method_capability_gate(method: &str) -> Option<&'static str> {
         methods::THREAD_GRAPH_GET => Some(UI_PROTOCOL_FEATURE_THREAD_GRAPH_V1),
         methods::TURN_STATE_GET => Some(UI_PROTOCOL_FEATURE_TURN_STATE_GET_V1),
         methods::LAUNCH_RESOLVE => Some(UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1),
-        methods::AGENT_LIST
-        | methods::AGENT_STATUS_READ
-        | methods::AGENT_OUTPUT_READ
-        | methods::AGENT_ARTIFACT_LIST
-        | methods::AGENT_ARTIFACT_READ
-        | methods::AGENT_INTERRUPT
-        | methods::AGENT_CLOSE => Some(UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1),
-        methods::REVIEW_START => Some(UI_PROTOCOL_FEATURE_REVIEW_START_V1),
         methods::USER_QUESTION_RESPOND => Some(UI_PROTOCOL_FEATURE_USER_QUESTION_V1),
         _ => None,
     }
@@ -955,25 +943,6 @@ pub mod methods {
     /// while the session's live turn, if any, keeps running.
     pub const SESSION_BTW: &str = "session/btw";
 
-    /// UPCR-2026-021 M15 agent inspection/control surface.
-    pub const AGENT_LIST: &str = "agent/list";
-    pub const AGENT_STATUS_READ: &str = "agent/status/read";
-    pub const AGENT_OUTPUT_READ: &str = "agent/output/read";
-    pub const AGENT_ARTIFACT_LIST: &str = "agent/artifact/list";
-    pub const AGENT_ARTIFACT_READ: &str = "agent/artifact/read";
-    /// #965 / UPCR-2026-019 — spec-canonical names for the same payloads
-    /// served by `agent/artifact/*`. Servers dispatch both into the same
-    /// handlers; clients can use either name (the `task/*` form is the
-    /// long-term direction per the M13 contract).
-    pub const AGENT_INTERRUPT: &str = "agent/interrupt";
-    pub const AGENT_CLOSE: &str = "agent/close";
-
-    /// Product-level automated code review workflow.
-    ///
-    /// This is not a generic child-agent control API. The backend owns the
-    /// review template and decides which specialist agents to launch.
-    pub const REVIEW_START: &str = "review/start";
-
     pub const TURN_STARTED: &str = "turn/started";
     pub const TURN_COMPLETED: &str = "turn/completed";
     pub const TURN_ERROR: &str = "turn/error";
@@ -1046,8 +1015,6 @@ pub mod methods {
     pub const CONTEXT_COMPACTION_STARTED: &str = "context/compaction_started";
     /// M16 `context.lifecycle.v1`: prompt normalization report notification.
     pub const CONTEXT_NORMALIZATION_REPORTED: &str = "context/normalization_reported";
-    /// Session-level whole-job orchestration status notification.
-    pub const SESSION_ORCHESTRATION: &str = "session/orchestration";
     /// #2019 `background/activity` — the HUMAN sink over background events
     /// that today only wake the model (monitor event lines, claimed fleet
     /// outbox events). Origin-attributed, durable, capped, and NEVER routed
@@ -1080,14 +1047,6 @@ pub const UI_PROTOCOL_COMMAND_METHODS: &[&str] = &[
     methods::SESSION_FORK,
     methods::THREAD_GRAPH_GET,
     methods::TURN_STATE_GET,
-    methods::AGENT_LIST,
-    methods::AGENT_STATUS_READ,
-    methods::AGENT_OUTPUT_READ,
-    methods::AGENT_ARTIFACT_LIST,
-    methods::AGENT_ARTIFACT_READ,
-    methods::AGENT_INTERRUPT,
-    methods::AGENT_CLOSE,
-    methods::REVIEW_START,
     methods::LAUNCH_RESOLVE,
 ];
 
@@ -1138,14 +1097,6 @@ pub const UI_PROTOCOL_FIRST_SERVER_METHODS: &[&str] = &[
     methods::SESSION_FORK,
     methods::THREAD_GRAPH_GET,
     methods::TURN_STATE_GET,
-    methods::AGENT_LIST,
-    methods::AGENT_STATUS_READ,
-    methods::AGENT_OUTPUT_READ,
-    methods::AGENT_ARTIFACT_LIST,
-    methods::AGENT_ARTIFACT_READ,
-    methods::AGENT_INTERRUPT,
-    methods::AGENT_CLOSE,
-    methods::REVIEW_START,
     methods::LAUNCH_RESOLVE,
 ];
 
@@ -1217,7 +1168,6 @@ impl UiProtocolCapabilities {
             UI_PROTOCOL_FEATURE_SPAWN_COMPLETE_V1,
             UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1,
             UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1,
-            UI_PROTOCOL_FEATURE_REVIEW_START_V1,
             UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1,
             UI_PROTOCOL_FEATURE_CONTEXT_SEMANTIC_CACHE_V1,
             UI_PROTOCOL_FEATURE_USER_QUESTION_V1,
@@ -3852,29 +3802,6 @@ impl UiProgressEvent {
     }
 }
 
-/// Session-level "whole job" orchestration status (`session/orchestration`
-/// notification). Lets a client render a single job-status indicator that stays
-/// active across the gap between a sub-agent's "task completed" and the master's
-/// re-entry turn — a gap the client cannot infer on its own because the
-/// master-continuation queue is server-side.
-///
-/// `active` is true when the session has any of: an in-flight turn, a running
-/// sub-agent, or a queued/in-flight master continuation. `phase` is a coarse
-/// human label ("working" / "orchestrating" / "re-entering"); `running_agents`
-/// is the count of non-terminal sub-agents. When `active` is false the client
-/// hides the indicator.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionOrchestrationEvent {
-    pub session_id: SessionKey,
-    pub active: bool,
-    #[serde(default)]
-    pub running_agents: u32,
-    #[serde(default)]
-    pub pending_continuations: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub phase: Option<String>,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TurnStartedEvent {
     pub session_id: SessionKey,
@@ -4869,11 +4796,6 @@ pub enum UiNotification {
     ContextCompactionStarted(ContextCompactionStartedEvent),
     /// M16: prompt normalization lifecycle event.
     ContextNormalizationReported(ContextNormalizationReportedEvent),
-    /// Session-level whole-job orchestration status. Emitted when the session's
-    /// orchestration state changes (turn active / sub-agents running / master
-    /// continuation pending), so a client can render a job indicator that stays
-    /// live across the sub-agent-complete → master-re-entry gap.
-    SessionOrchestration(SessionOrchestrationEvent),
     /// #2019: a background event that woke the model, surfaced to the HUMAN.
     /// See [`BackgroundActivityEvent`].
     BackgroundActivity(BackgroundActivityEvent),
@@ -4932,7 +4854,6 @@ impl UiNotification {
             Self::ContextCompactionCompleted(_) => methods::CONTEXT_COMPACTION_COMPLETED,
             Self::ContextCompactionStarted(_) => methods::CONTEXT_COMPACTION_STARTED,
             Self::ContextNormalizationReported(_) => methods::CONTEXT_NORMALIZATION_REPORTED,
-            Self::SessionOrchestration(_) => methods::SESSION_ORCHESTRATION,
             Self::BackgroundActivity(_) => methods::BACKGROUND_ACTIVITY,
             Self::Envelope(_) => methods::PROJECTION_ENVELOPE,
             Self::EnvelopeV2(_) => methods::PROJECTION_ENVELOPE,
@@ -4967,7 +4888,6 @@ impl UiNotification {
             Self::ContextCompactionCompleted(event) => &event.session_id,
             Self::ContextCompactionStarted(event) => &event.session_id,
             Self::ContextNormalizationReported(event) => &event.session_id,
-            Self::SessionOrchestration(event) => &event.session_id,
             Self::BackgroundActivity(event) => &event.session_id,
             Self::Envelope(event) => &event.session_id,
             Self::EnvelopeV2(event) => &event.session_id,
@@ -5089,7 +5009,6 @@ impl UiNotification {
             Self::ContextCompactionCompleted(params) => serde_json::to_value(params),
             Self::ContextCompactionStarted(params) => serde_json::to_value(params),
             Self::ContextNormalizationReported(params) => serde_json::to_value(params),
-            Self::SessionOrchestration(params) => serde_json::to_value(params),
             // #1801 v3: `topic` on the payload is the staged PEER's topic
             // (`peer-<slug>`), NOT this notification's routing topic — the
             // `stamp_topic_from_session` catch-all above leaves it alone,
@@ -5213,9 +5132,6 @@ impl UiNotification {
             methods::CONTEXT_NORMALIZATION_REPORTED => Ok(Self::ContextNormalizationReported(
                 decode_params(method, params)?,
             )),
-            methods::SESSION_ORCHESTRATION => {
-                Ok(Self::SessionOrchestration(decode_params(method, params)?))
-            }
             methods::BACKGROUND_ACTIVITY => {
                 Ok(Self::BackgroundActivity(decode_params(method, params)?))
             }

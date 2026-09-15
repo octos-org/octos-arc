@@ -6,7 +6,6 @@
 //! - Message protocol between agents
 //! - Context and result types
 
-pub mod app_ui;
 pub mod app_ui_codec;
 pub mod env_hygiene;
 mod error;

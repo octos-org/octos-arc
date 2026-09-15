@@ -38,17 +38,16 @@ use octos_core::ui_protocol::{
     UI_PROTOCOL_FEATURE_CONTEXT_SEMANTIC_CACHE_V1, UI_PROTOCOL_FEATURE_FILE_ATTACHED_V1,
     UI_PROTOCOL_FEATURE_PANE_SNAPSHOTS_V1, UI_PROTOCOL_FEATURE_PLAN_TODOS_V1,
     UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V1, UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2,
-    UI_PROTOCOL_FEATURE_REVIEW_START_V1, UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1,
-    UI_PROTOCOL_FEATURE_SESSION_SANDBOX_V1, UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1,
-    UI_PROTOCOL_FEATURE_SPAWN_COMPLETE_V1, UI_PROTOCOL_FEATURE_THREAD_GRAPH_V1,
-    UI_PROTOCOL_FEATURE_TURN_STATE_GET_V1, UI_PROTOCOL_FEATURE_TURN_STEER_DROPPED_V1,
-    UI_PROTOCOL_FEATURE_USER_QUESTION_V1, UiArtifactPaneItem, UiArtifactPaneSnapshot, UiCommand,
-    UiContextCompactionRecord, UiContextNormalizationReport, UiContextState, UiCursor,
-    UiFileMutationNotice, UiGitHistoryItem, UiGitPaneSnapshot, UiGitStatusItem, UiNotification,
-    UiPaneSnapshot, UiPaneSnapshotLimitation, UiProtocolCapabilities, UiRpcResult,
-    UiWorkspacePaneEntry, UiWorkspacePaneSnapshot, UnsupportedCapabilityReport,
-    UserQuestionRequestedEvent, UserQuestionRespondParams, approval_cancelled_reasons,
-    approval_kinds, hydrate_sections, thread_status,
+    UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1, UI_PROTOCOL_FEATURE_SESSION_SANDBOX_V1,
+    UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1, UI_PROTOCOL_FEATURE_SPAWN_COMPLETE_V1,
+    UI_PROTOCOL_FEATURE_THREAD_GRAPH_V1, UI_PROTOCOL_FEATURE_TURN_STATE_GET_V1,
+    UI_PROTOCOL_FEATURE_TURN_STEER_DROPPED_V1, UI_PROTOCOL_FEATURE_USER_QUESTION_V1,
+    UiArtifactPaneItem, UiArtifactPaneSnapshot, UiCommand, UiContextCompactionRecord,
+    UiContextNormalizationReport, UiContextState, UiCursor, UiFileMutationNotice, UiGitHistoryItem,
+    UiGitPaneSnapshot, UiGitStatusItem, UiNotification, UiPaneSnapshot, UiPaneSnapshotLimitation,
+    UiProtocolCapabilities, UiRpcResult, UiWorkspacePaneEntry, UiWorkspacePaneSnapshot,
+    UnsupportedCapabilityReport, UserQuestionRequestedEvent, UserQuestionRespondParams,
+    approval_cancelled_reasons, approval_kinds, hydrate_sections, thread_status,
 };
 
 use octos_core::{
@@ -231,7 +230,6 @@ const APPUI_METHOD_PROFILE_SKILLS_REMOVE: &str = "profile/skills/remove";
 /// cloud deployments reject with `profile_local_unsupported` so TUI clients
 /// see the same typed shape they get from `profile/local/create`.
 const APPUI_METHOD_ONBOARDING_WORKSPACE_PROBE: &str = "onboarding/workspace_probe";
-const APPUI_METHOD_REVIEW_START: &str = octos_core::ui_protocol::methods::REVIEW_START;
 
 /// The canonical model catalog — the single source of truth for provisionable
 /// models (`model_catalog.json`). Compiled in so onboarding always has the full
@@ -1196,8 +1194,6 @@ struct ConnectionUiFeatures {
     coding_autonomy_v1: bool,
     /// UPCR-2026-021 M15 agent lifecycle inspection/control group.
     coding_agent_control_v1: bool,
-    /// UPCR-2026-019 typed backend-owned product review workflow.
-    review_start_v1: bool,
     /// M16 backend-owned context generation/checkpoint/compaction lifecycle.
     context_lifecycle_v1: bool,
     /// UPCR-2026-029 additive semantic-context/provider-cache diagnostics.
@@ -1257,7 +1253,6 @@ impl ConnectionUiFeatures {
             projection_envelope_v2: false,
             coding_autonomy_v1: true,
             coding_agent_control_v1: true,
-            review_start_v1: true,
             context_lifecycle_v1: true,
             // Cache diagnostics are strictly opt-in. Stdio sends a server
             // capability slice before `client_hello`, so enabling this by
@@ -1297,7 +1292,6 @@ impl ConnectionUiFeatures {
             projection_envelope_v2: has(UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2),
             coding_autonomy_v1: has(UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1),
             coding_agent_control_v1: has(UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1),
-            review_start_v1: has(UI_PROTOCOL_FEATURE_REVIEW_START_V1),
             context_lifecycle_v1: has(UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1),
             context_semantic_cache_v1: has(UI_PROTOCOL_FEATURE_CONTEXT_SEMANTIC_CACHE_V1),
             user_question_v1: has(UI_PROTOCOL_FEATURE_USER_QUESTION_V1),
@@ -1375,9 +1369,6 @@ impl ConnectionUiFeatures {
             if self.context_semantic_cache_v1 {
                 requested.push(UI_PROTOCOL_FEATURE_CONTEXT_SEMANTIC_CACHE_V1);
             }
-        }
-        if self.review_start_v1 {
-            requested.push(UI_PROTOCOL_FEATURE_REVIEW_START_V1);
         }
         if self.user_question_v1 {
             requested.push(UI_PROTOCOL_FEATURE_USER_QUESTION_V1);
@@ -9257,7 +9248,7 @@ fn route_rpc_command(
 /// feature won't dispatch), while adding it here without a matching arm panics
 /// the `unreachable!`.
 fn raw_method_is_dispatched(method: &str, _stdio_transport: bool) -> bool {
-    if method == APPUI_METHOD_REVIEW_START || method == APPUI_METHOD_TURN_STEER {
+    if method == APPUI_METHOD_TURN_STEER {
         return true;
     }
     if matches!(
@@ -17559,7 +17550,7 @@ fn classify_runtime_error_message(error: &eyre::Report) -> String {
 /// UPCR-2026-014 follow-up (issue #1332): optional token + session_result
 /// payload threaded from the agent-task `done` event into the lifecycle
 /// terminal emit. Missing on paths with no LLM token data (M9 fixture,
-/// slash-command shortcut, review/start).
+/// slash-command shortcut).
 #[derive(Debug, Default, Clone)]
 struct TurnCompletionDetails {
     cursor: Option<UiCursor>,
@@ -17583,8 +17574,8 @@ struct TurnCompletionDetails {
 /// `Completed`, except `token_usage`, which also accompanies an error.
 /// Populated on the standalone-turn path
 /// from `done` (input/output tokens + cursor + per-row identity); left as
-/// `None` for paths that do not run the LLM (slash command, review/start
-/// scatter-join, M9 fixture replays).
+/// `None` for paths that do not run the LLM (slash command,
+/// M9 fixture replays).
 #[allow(clippy::too_many_arguments)]
 /// #48b — the Errored-terminal observability decision: returns the
 /// `malformed_exhausted` event DETAIL (the marker's payload — from just
@@ -20015,9 +20006,6 @@ fn ledger_event_cursor(event: &UiProtocolLedgerEvent) -> Option<UiCursor> {
             | UiNotification::ContextCompactionCompleted(_)
             | UiNotification::ContextCompactionStarted(_)
             | UiNotification::ContextNormalizationReported(_)
-            // Whole-job orchestration status is a stateless lifecycle push
-            // (no durable cursor of its own).
-            | UiNotification::SessionOrchestration(_)
             // #2019: the human sink carries an origin + text + timestamp, not
             // a replay cursor; the surrounding ledger event's cursor is what
             // a reconnecting client resumes from.

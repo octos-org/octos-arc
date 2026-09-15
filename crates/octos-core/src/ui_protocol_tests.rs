@@ -128,17 +128,6 @@ fn profile_local_create_params_legacy_shape_still_deserializes() {
 // ----- UPCR-2026-007: capability advertisement on `SessionOpened` -----
 
 #[test]
-fn negotiated_capabilities_advertise_agent_artifact_methods_when_agent_control_requested() {
-    let capabilities = UiProtocolCapabilities::for_negotiated_features([
-        UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1,
-        UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1,
-    ]);
-    assert!(capabilities.supports_feature(UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1));
-    assert!(capabilities.supports_method(methods::AGENT_ARTIFACT_LIST));
-    assert!(capabilities.supports_method(methods::AGENT_ARTIFACT_READ));
-}
-
-#[test]
 fn unknown_typed_approval_kind_decodes_for_generic_fallback() {
     let value = json!({
         "session_id": "local:demo",
