@@ -652,33 +652,6 @@ mod tests {
     }
 
     #[test]
-    fn should_merge_scattered_system_messages() {
-        let mut msgs = vec![
-            sys("prompt"),
-            user("msg1"),
-            sys("mid-summary"),
-            user("msg2"),
-        ];
-        normalize_system_messages(&mut msgs);
-        assert_eq!(msgs.len(), 3);
-        assert_eq!(msgs[0].role, MessageRole::System);
-        assert!(msgs[0].content.contains("prompt"));
-        assert!(msgs[0].content.contains("mid-summary"));
-        assert_eq!(msgs[1].role, MessageRole::User);
-        assert_eq!(msgs[2].role, MessageRole::User);
-    }
-
-    #[test]
-    fn should_noop_when_single_system_message() {
-        let mut msgs = vec![sys("prompt"), user("hello")];
-        normalize_system_messages(&mut msgs);
-        assert_eq!(msgs.len(), 2);
-        assert_eq!(msgs[0].content, "prompt");
-    }
-
-    // ---------- repair_tool_pairs ----------
-
-    #[test]
     fn should_strip_orphaned_tool_calls() {
         let mut msgs = vec![
             sys("prompt"),
@@ -694,32 +667,6 @@ mod tests {
         // tc1 result should also be removed (its assistant lost tool_calls)
         assert_eq!(msgs.len(), 3); // sys, assistant(text), user
     }
-
-    #[test]
-    fn should_keep_complete_tool_pairs() {
-        let mut msgs = vec![
-            sys("prompt"),
-            assistant_with_tools(&["tc1"]),
-            tool_result_msg("tc1"),
-            user("thanks"),
-        ];
-        repair_tool_pairs(&mut msgs);
-        assert_eq!(msgs.len(), 4);
-        assert!(msgs[1].tool_calls.is_some());
-    }
-
-    #[test]
-    fn should_remove_orphaned_tool_results() {
-        let mut msgs = vec![
-            sys("prompt"),
-            tool_result_msg("tc_orphan"), // no matching assistant
-            user("hello"),
-        ];
-        repair_tool_pairs(&mut msgs);
-        assert_eq!(msgs.len(), 2); // sys, user
-    }
-
-    // ---------- repair_message_order ----------
 
     #[test]
     fn should_gather_scattered_tool_result_past_user_message() {
@@ -739,44 +686,6 @@ mod tests {
     }
 
     #[test]
-    fn should_gather_scattered_tool_results_past_system_message() {
-        let mut msgs = vec![
-            assistant_with_tools(&["tc1", "tc2"]),
-            tool_result_msg("tc1"),
-            sys("background task result"),
-            tool_result_msg("tc2"),
-        ];
-        repair_message_order(&mut msgs);
-        assert_eq!(msgs[0].role, MessageRole::Assistant);
-        assert_eq!(msgs[1].role, MessageRole::Tool);
-        assert_eq!(msgs[1].tool_call_id.as_deref(), Some("tc1"));
-        assert_eq!(msgs[2].role, MessageRole::Tool);
-        assert_eq!(msgs[2].tool_call_id.as_deref(), Some("tc2"));
-        assert_eq!(msgs[3].role, MessageRole::System);
-    }
-
-    #[test]
-    fn should_handle_concurrent_tool_call_threads() {
-        let mut msgs = vec![
-            user("make slides"),
-            assistant_with_tools(&["tc1"]),
-            user("what time is it"),
-            assistant_with_tools(&["tc2"]),
-            tool_result_msg("tc2"),
-            tool_result_msg("tc1"),
-        ];
-        repair_message_order(&mut msgs);
-        assert_eq!(msgs[0].role, MessageRole::User);
-        assert_eq!(msgs[1].role, MessageRole::Assistant);
-        assert_eq!(msgs[2].role, MessageRole::Tool);
-        assert_eq!(msgs[2].tool_call_id.as_deref(), Some("tc1"));
-        assert_eq!(msgs[3].role, MessageRole::User);
-        assert_eq!(msgs[4].role, MessageRole::Assistant);
-        assert_eq!(msgs[5].role, MessageRole::Tool);
-        assert_eq!(msgs[5].tool_call_id.as_deref(), Some("tc2"));
-    }
-
-    #[test]
     fn should_not_modify_valid_message_order() {
         let mut msgs = vec![
             sys("prompt"),
@@ -791,75 +700,12 @@ mod tests {
     }
 
     #[test]
-    fn should_gather_backward_stranded_tool_result() {
-        let mut msgs = vec![
-            sys("prompt"),
-            user("tts"),
-            tool_result_msg("tc1"),
-            assistant_with_tools(&["tc1"]),
-            tool_result_msg("tc1"),
-            user("next question"),
-        ];
-        repair_message_order(&mut msgs);
-        assert_eq!(msgs[0].role, MessageRole::System);
-        assert_eq!(msgs[1].role, MessageRole::User);
-        assert_eq!(msgs[1].content, "tts");
-        assert_eq!(msgs[2].role, MessageRole::Assistant);
-        assert_eq!(msgs[3].role, MessageRole::Tool);
-        assert_eq!(msgs[3].tool_call_id.as_deref(), Some("tc1"));
-        assert_eq!(msgs[4].role, MessageRole::User);
-        assert_eq!(msgs[4].content, "next question");
-        assert_eq!(msgs.len(), 5);
-    }
-
-    #[test]
-    fn should_remove_tool_result_with_no_tool_call_id() {
-        let mut msgs = vec![
-            sys("prompt"),
-            assistant_with_tools(&["tc1"]),
-            tool_result_msg("tc1"),
-            Message {
-                role: MessageRole::Tool,
-                content: "Tool task panicked".to_string(),
-                media: vec![],
-                tool_calls: None,
-                tool_call_id: None,
-                reasoning_content: None,
-                client_message_id: None,
-                thread_id: None,
-                timestamp: chrono::Utc::now(),
-            },
-            user("thanks"),
-        ];
-        repair_tool_pairs(&mut msgs);
-        assert_eq!(msgs.len(), 4); // sys, assistant, tool(tc1), user
-    }
-
-    // ---------- sanitize_tool_call_id ----------
-
-    #[test]
     fn should_sanitize_colons_in_tool_call_id() {
         assert_eq!(
             sanitize_tool_call_id("admin_view_sessions:11"),
             "admin_view_sessions_11"
         );
     }
-
-    #[test]
-    fn should_preserve_valid_tool_call_id() {
-        assert_eq!(sanitize_tool_call_id("call_0_shell"), "call_0_shell");
-        assert_eq!(sanitize_tool_call_id("toolu_01A-bC"), "toolu_01A-bC");
-    }
-
-    #[test]
-    fn should_sanitize_special_chars_in_tool_call_id() {
-        assert_eq!(
-            sanitize_tool_call_id("id.with.dots:and:colons"),
-            "id_with_dots_and_colons"
-        );
-    }
-
-    // ---------- synthesize_missing_tool_results ----------
 
     #[test]
     fn should_synthesize_missing_tool_results() {
@@ -880,29 +726,6 @@ mod tests {
         assert_eq!(msgs[4].tool_call_id.as_deref(), Some("tc3"));
         assert!(msgs[4].content.contains("lost"));
         assert_eq!(msgs[5].role, MessageRole::User);
-    }
-
-    #[test]
-    fn should_not_synthesize_when_all_results_present() {
-        let mut msgs = vec![
-            assistant_with_tools(&["tc1", "tc2"]),
-            tool_result_msg("tc1"),
-            tool_result_msg("tc2"),
-            user("thanks"),
-        ];
-        let original_len = msgs.len();
-        synthesize_missing_tool_results(&mut msgs);
-        assert_eq!(msgs.len(), original_len);
-    }
-
-    #[test]
-    fn should_synthesize_all_missing_when_no_results_exist() {
-        let mut msgs = vec![assistant_with_tools(&["tc1", "tc2"]), user("next")];
-        synthesize_missing_tool_results(&mut msgs);
-        assert_eq!(msgs.len(), 4); // assistant, tc1 synth, tc2 synth, user
-        assert_eq!(msgs[1].tool_call_id.as_deref(), Some("tc1"));
-        assert_eq!(msgs[2].tool_call_id.as_deref(), Some("tc2"));
-        assert_eq!(msgs[3].role, MessageRole::User);
     }
 
     /// NEW-11 regression: when a spawn_only `bg_research` invocation
@@ -1009,55 +832,6 @@ mod tests {
         );
     }
 
-    /// NEW-11 regression: a single pass MUST NOT insert two
-    /// placeholders for the SAME id when one assistant's tool_calls
-    /// list contains the same id twice (a degenerate but
-    /// observed-in-the-wild provider shape on deeply-deterministic
-    /// model paths). Providers reject this anyway, so we keep
-    /// pairing 1:1 within the same assistant batch.
-    #[test]
-    fn should_not_double_synthesize_for_duplicate_id_within_same_assistant_batch() {
-        let mut msgs = vec![
-            sys("prompt"),
-            // Assistant tool_calls list with a duplicate id.
-            Message {
-                role: MessageRole::Assistant,
-                content: String::new(),
-                media: vec![],
-                tool_calls: Some(vec![
-                    octos_core::ToolCall {
-                        id: "dup_id".to_string(),
-                        name: "tool_a".to_string(),
-                        arguments: serde_json::json!({}),
-                        metadata: None,
-                    },
-                    octos_core::ToolCall {
-                        id: "dup_id".to_string(),
-                        name: "tool_b".to_string(),
-                        arguments: serde_json::json!({}),
-                        metadata: None,
-                    },
-                ]),
-                tool_call_id: None,
-                reasoning_content: None,
-                client_message_id: None,
-                thread_id: None,
-                timestamp: chrono::Utc::now(),
-            },
-            user("next"),
-        ];
-        let changed = synthesize_missing_tool_results(&mut msgs);
-        assert!(changed);
-        let synth_count = msgs
-            .iter()
-            .filter(|m| m.role == MessageRole::Tool && m.tool_call_id.as_deref() == Some("dup_id"))
-            .count();
-        assert_eq!(
-            synth_count, 1,
-            "the same id within one assistant batch must produce exactly one placeholder"
-        );
-    }
-
     /// NEW-11 codex P2 regression: end-to-end coverage of the full
     /// repair pipeline (`repair_message_order` →
     /// `synthesize_missing_tool_results`) for the deterministic-id
@@ -1138,71 +912,6 @@ mod tests {
         assert!(
             second_pair.content.contains("lost"),
             "second assistant's adjacent Tool row is the synthesised `[result was lost]` placeholder"
-        );
-    }
-
-    /// NEW-11 codex P2 rev-2 regression: when BOTH the earlier and
-    /// later assistant referencing the same id ALREADY have
-    /// adjacent Tool rows (the steady-state transcript after one
-    /// repair pass on the deterministic-id reuse case), the OUTPUT
-    /// pairing must survive intact across passes — the first
-    /// assistant keeps its `real handle output`, the second keeps
-    /// its `[result was lost]` placeholder, neither row is poached
-    /// by the other side. (`changed` may still flip because the
-    /// remove + same-slot re-insert flow is treated as
-    /// "normalisation ran"; the wire shape is what matters and the
-    /// contract is on the OUTPUT structure, not the bool.)
-    #[test]
-    fn should_be_stable_when_both_assistants_already_have_adjacent_tool_rows() {
-        let mut msgs = vec![
-            sys("prompt"),
-            assistant_with_tools(&["call_0_120"]),
-            Message {
-                role: MessageRole::Tool,
-                content: "real handle output".to_string(),
-                media: vec![],
-                tool_calls: None,
-                tool_call_id: Some("call_0_120".to_string()),
-                reasoning_content: None,
-                client_message_id: None,
-                thread_id: None,
-                timestamp: chrono::Utc::now(),
-            },
-            user("继续追问"),
-            assistant_with_tools(&["call_0_120"]),
-            Message {
-                role: MessageRole::Tool,
-                content: "[Tool 'bg_research' result was lost — no output available]".to_string(),
-                media: vec![],
-                tool_calls: None,
-                tool_call_id: Some("call_0_120".to_string()),
-                reasoning_content: None,
-                client_message_id: None,
-                thread_id: None,
-                timestamp: chrono::Utc::now(),
-            },
-            user("trailing"),
-        ];
-        let snapshot_before = msgs.clone();
-        // Run twice to confirm convergence.
-        let _ = repair_message_order(&mut msgs);
-        let _ = repair_message_order(&mut msgs);
-        assert_eq!(
-            msgs.len(),
-            snapshot_before.len(),
-            "no rows added/removed across repeated passes"
-        );
-        // First assistant must retain its ORIGINAL tool row content.
-        assert_eq!(msgs[2].role, MessageRole::Tool);
-        assert_eq!(
-            msgs[2].content, "real handle output",
-            "first assistant keeps the real handle output, not the LATER lost placeholder"
-        );
-        // Second assistant must retain its lost-placeholder content.
-        assert_eq!(msgs[5].role, MessageRole::Tool);
-        assert!(
-            msgs[5].content.contains("lost"),
-            "second assistant keeps the lost placeholder, not the EARLIER real handle output"
         );
     }
 

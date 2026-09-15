@@ -1673,16 +1673,6 @@ impl TaskSupervisor {
         }
     }
 
-    /// Install a missed-restore hook for tests. See
-    /// [`Self::run_restore_notify_hook`].
-    #[cfg(test)]
-    pub(crate) fn set_restore_notify_hook_for_test(&self, hook: impl Fn() + Send + Sync + 'static) {
-        *self
-            .restore_notify_hook
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(hook));
-    }
-
     /// #2056 round 3 — THE install path for the restore observer, shared by
     /// [`Self::set_on_restore`] and observer inheritance so neither can bypass
     /// the missed-restore handshake. Installing and taking the pending mark

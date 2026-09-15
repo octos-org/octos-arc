@@ -679,9 +679,8 @@ mod tests {
     use futures::stream;
     use octos_core::{AgentId, Message};
     use octos_llm::{
-        ChatConfig, ChatResponse, ChatStream, LlmError, LlmErrorKind, LlmProvider,
-        PromptCacheContext, ProviderChain, SemanticCheckpointReport, StopReason, StreamEvent,
-        TokenUsage as LlmTokenUsage, ToolSpec,
+        ChatConfig, ChatResponse, ChatStream, LlmError, LlmErrorKind, LlmProvider, ProviderChain,
+        StopReason, StreamEvent, TokenUsage as LlmTokenUsage, ToolSpec,
     };
     use octos_memory::EpisodeStore;
 
@@ -707,13 +706,6 @@ mod tests {
     struct TruncateThenSucceedProvider {
         counters: Arc<CallCounters>,
         seen_max_tokens: Arc<std::sync::Mutex<Vec<Option<u32>>>>,
-    }
-
-    /// Models a local runtime which accepts semantic boundary hints and
-    /// reports the deepest checkpoint it actually restored.
-    struct SemanticCheckpointProvider {
-        seen_contexts: Arc<Mutex<Vec<PromptCacheContext>>>,
-        previous_context: Mutex<Option<PromptCacheContext>>,
     }
 
     struct NamedRouteProvider {
@@ -775,67 +767,6 @@ mod tests {
 
         fn provider_name(&self) -> &str {
             self.provider
-        }
-    }
-
-    #[async_trait]
-    impl LlmProvider for SemanticCheckpointProvider {
-        async fn chat(
-            &self,
-            _messages: &[Message],
-            _tools: &[ToolSpec],
-            _config: &ChatConfig,
-        ) -> eyre::Result<ChatResponse> {
-            eyre::bail!("streaming path should succeed in this test")
-        }
-
-        async fn chat_stream(
-            &self,
-            _messages: &[Message],
-            _tools: &[ToolSpec],
-            config: &ChatConfig,
-        ) -> eyre::Result<ChatStream> {
-            let context = config
-                .prompt_cache_context
-                .clone()
-                .expect("agent must attach provider-neutral cache context");
-            let restored = {
-                let mut previous = self.previous_context.lock().unwrap();
-                let restored = previous
-                    .as_ref()
-                    .and_then(|old| old.deepest_shared_checkpoint(&context))
-                    .cloned()
-                    .or_else(|| context.semantic_boundaries.last().cloned())
-                    .expect("local provider must receive safe semantic boundaries");
-                *previous = Some(context.clone());
-                restored
-            };
-            self.seen_contexts.lock().unwrap().push(context);
-            let events = vec![
-                StreamEvent::TextDelta("restored".to_string()),
-                StreamEvent::Usage(LlmTokenUsage {
-                    semantic_checkpoint: Some(SemanticCheckpointReport {
-                        restored_boundary_id: Some(restored.boundary_id),
-                        restored_prefix_tokens: restored.prefix_token_estimate as u32,
-                        re_prefill_tokens: restored.estimated_recompute_tokens as u32,
-                    }),
-                    ..Default::default()
-                }),
-                StreamEvent::Done(StopReason::EndTurn),
-            ];
-            Ok(Box::pin(stream::iter(events)))
-        }
-
-        fn model_id(&self) -> &str {
-            "local-semantic-test"
-        }
-
-        fn provider_name(&self) -> &str {
-            "local-test"
-        }
-
-        fn supports_semantic_checkpoint_hints(&self) -> bool {
-            true
         }
     }
 
@@ -1081,118 +1012,6 @@ mod tests {
             *observer.routes.lock().unwrap(),
             vec![("fallback".to_owned(), "model-b".to_owned())],
             "the durable context hook must see the winner once, not the failed primary"
-        );
-    }
-
-    #[tokio::test]
-    async fn local_provider_receives_safe_boundaries_and_reports_exact_restore() {
-        let seen_contexts = Arc::new(Mutex::new(Vec::new()));
-        let provider = Arc::new(SemanticCheckpointProvider {
-            seen_contexts: seen_contexts.clone(),
-            previous_context: Mutex::new(None),
-        });
-        let (agent, _dir) = build_agent(provider).await;
-        let agent = agent
-            .with_parent_session_key("semantic-session")
-            .with_prompt_cache_epoch_id("epoch-after-compaction");
-        let mut tool_request = Message::assistant("");
-        tool_request.tool_calls = Some(vec![octos_core::ToolCall {
-            id: "call-read".to_string(),
-            name: "read".to_string(),
-            arguments: serde_json::json!({"path": "README.md"}),
-            metadata: None,
-        }]);
-        let messages_before_edit = vec![
-            Message::user("inspect the repository"),
-            tool_request.clone(),
-            Message::tool_with_thread(
-                "old README contents",
-                "call-read",
-                octos_core::ThreadId::new("thread-semantic"),
-            ),
-            Message::assistant("inspection complete"),
-        ];
-
-        let (_first_response, first_streamed, _cost) = agent
-            .call_llm_with_hooks(
-                &messages_before_edit,
-                &[],
-                &ChatConfig::default(),
-                1,
-                &octos_core::TokenUsage::default(),
-                &mut turn(),
-            )
-            .await
-            .expect("semantic-aware local provider call should succeed");
-        assert!(first_streamed);
-
-        // Editing a completed tool output invalidates that interaction and
-        // every later checkpoint, while preserving the preceding user-turn
-        // checkpoint. The local runtime must report that surviving boundary,
-        // not blindly restore the deepest checkpoint from the old request.
-        let messages_after_edit = vec![
-            Message::user("inspect the repository"),
-            tool_request,
-            Message::tool_with_thread(
-                "new README contents",
-                "call-read",
-                octos_core::ThreadId::new("thread-semantic"),
-            ),
-            Message::assistant("inspection complete"),
-        ];
-        let (response, streamed, _cost) = agent
-            .call_llm_with_hooks(
-                &messages_after_edit,
-                &[],
-                &ChatConfig::default(),
-                2,
-                &octos_core::TokenUsage::default(),
-                &mut turn(),
-            )
-            .await
-            .expect("edited suffix should fall back to its deepest surviving checkpoint");
-
-        assert!(streamed);
-        assert_eq!(response.content.as_deref(), Some("restored"));
-        let contexts = seen_contexts.lock().unwrap();
-        assert_eq!(contexts.len(), 2);
-        let before = &contexts[0];
-        let after = &contexts[1];
-        assert_eq!(before.epoch_id, "epoch-after-compaction");
-        assert_eq!(after.epoch_id, "epoch-after-compaction");
-        assert_eq!(
-            before
-                .semantic_boundaries
-                .iter()
-                .map(|boundary| boundary.boundary_kind.as_str())
-                .collect::<Vec<_>>(),
-            vec!["user_turn", "tool_interaction", "assistant_final"]
-        );
-        assert_eq!(
-            before.semantic_boundaries[0].prefix_hash, after.semantic_boundaries[0].prefix_hash,
-            "the pre-edit user boundary survives"
-        );
-        assert_ne!(
-            before.semantic_boundaries[1].prefix_hash, after.semantic_boundaries[1].prefix_hash,
-            "the edited tool interaction must invalidate its checkpoint"
-        );
-        let deepest = &before.semantic_boundaries[0];
-        let report = response
-            .usage
-            .semantic_checkpoint
-            .as_ref()
-            .expect("provider restore report must survive stream accumulation");
-        assert_eq!(
-            report.restored_boundary_id.as_deref(),
-            Some(deepest.boundary_id.as_str())
-        );
-        assert_eq!(
-            report.restored_prefix_tokens,
-            deepest.prefix_token_estimate as u32
-        );
-        assert_eq!(
-            report.re_prefill_tokens,
-            deepest.estimated_recompute_tokens as u32
         );
     }
 

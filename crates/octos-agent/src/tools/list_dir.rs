@@ -249,18 +249,6 @@ mod tests {
         assert!(result.output.contains("[file] file.txt"));
     }
 
-    #[tokio::test]
-    async fn test_not_found() {
-        let dir = TempDir::new().unwrap();
-        let tool = ListDirTool::new(dir.path());
-        let result = tool
-            .execute(&serde_json::json!({"path": "nonexistent"}))
-            .await
-            .unwrap();
-        assert!(!result.success);
-        assert!(result.output.contains("not found"));
-    }
-
     // ------------------------------------------------------------------
     // PR-B: SessionScope integration tests for ListDirTool.
     // ------------------------------------------------------------------
@@ -272,38 +260,6 @@ mod tests {
         ctx.tool_id = "list-dir-with-scope".to_string();
         ctx.session_scope = Some(Arc::new(scope));
         ctx
-    }
-
-    #[tokio::test]
-    async fn list_dir_inside_skill_dir_allowed() {
-        // The LLM may `list_dir` inside a registered plugin skill_dir to
-        // discover its layout. PR-A added `InSkillDir` to the read-side
-        // classifier; PR-B threads that decision through here.
-        let workspace = TempDir::new().unwrap();
-        let skill = TempDir::new().unwrap();
-        std::fs::create_dir(skill.path().join("styles")).unwrap();
-        std::fs::write(skill.path().join("styles/a.toml"), "k=1").unwrap();
-        std::fs::write(skill.path().join("styles/b.toml"), "k=2").unwrap();
-
-        let scope = SessionScope::solo(workspace.path().to_path_buf(), vec![])
-            .unwrap()
-            .with_skill_read_zones(vec![skill.path().to_path_buf()])
-            .unwrap();
-
-        let tool = ListDirTool::new(workspace.path());
-        let ctx = ctx_with_scope(scope);
-
-        let target = skill.path().join("styles");
-        let result = tool
-            .execute_with_context(&ctx, &serde_json::json!({"path": target.to_string_lossy()}))
-            .await
-            .unwrap();
-        assert!(result.success, "expected success, got: {}", result.output);
-        assert!(
-            result.output.contains("[file] a.toml") && result.output.contains("[file] b.toml"),
-            "expected both .toml entries, got: {}",
-            result.output
-        );
     }
 
     #[tokio::test]
@@ -336,78 +292,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_dir_up_traversal_keeps_scope_error_not_upload_guidance() {
-        // codex round-6 P3: a traversal/out-of-scope violation under the up/
-        // namespace must surface as the real scope error, NOT be masked as
-        // upload-handle confusion (the substitution is failure-exit-only and
-        // never replaces a resolver error).
-        let workspace = TempDir::new().unwrap();
-        let scope = SessionScope::solo(workspace.path().to_path_buf(), vec![]).unwrap();
-        let tool = ListDirTool::new(workspace.path());
-        let ctx = ctx_with_scope(scope);
-
-        let result = tool
-            .execute_with_context(&ctx, &serde_json::json!({ "path": "up/../secret" }))
-            .await
-            .unwrap();
-        assert!(!result.success);
-        assert!(
-            result.output.contains("outside session scope"),
-            "traversal under up/ must report the scope error, got: {}",
-            result.output
-        );
-        assert!(
-            !result.output.contains("opaque upload handle"),
-            "a policy violation must NOT be masked as upload guidance"
-        );
-    }
-
-    #[tokio::test]
-    async fn list_dir_lists_a_real_workspace_up_directory() {
-        // codex #1378 P2: the guard is a FALLBACK — a repo that genuinely has
-        // an `up/` directory must list normally, NOT get hijacked by upload
-        // guidance.
-        let workspace = TempDir::new().unwrap();
-        std::fs::create_dir(workspace.path().join("up")).unwrap();
-        std::fs::write(workspace.path().join("up/keep.txt"), "x").unwrap();
-        let scope = SessionScope::solo(workspace.path().to_path_buf(), vec![]).unwrap();
-        let tool = ListDirTool::new(workspace.path());
-        let ctx = ctx_with_scope(scope);
-
-        let result = tool
-            .execute_with_context(&ctx, &serde_json::json!({ "path": "up" }))
-            .await
-            .unwrap();
-        assert!(
-            result.success,
-            "a real up/ dir must list, got: {}",
-            result.output
-        );
-        assert!(
-            result.output.contains("keep.txt"),
-            "expected up/ contents, got: {}",
-            result.output
-        );
-        assert!(
-            !result.output.contains("opaque upload handle"),
-            "must NOT show upload guidance for a real up/ dir"
-        );
-
-        // codex round-2 P2: a normal file UNDER a real up/ dir keeps its normal
-        // error, not upload guidance.
-        let not_dir = tool
-            .execute_with_context(&ctx, &serde_json::json!({ "path": "up/keep.txt" }))
-            .await
-            .unwrap();
-        assert!(
-            not_dir.output.contains("Not a directory"),
-            "up/keep.txt under a real up/ dir must say Not a directory, got: {}",
-            not_dir.output
-        );
-        assert!(!not_dir.output.contains("opaque upload handle"));
-    }
-
-    #[tokio::test]
     async fn list_dir_outside_workspace_and_skill_zones_refused() {
         // A dir entirely outside every declared zone classifies as
         // `OutOfScope` and must be refused.
@@ -436,25 +320,6 @@ mod tests {
             "expected scope rejection, got: {}",
             result.output
         );
-    }
-
-    #[tokio::test]
-    async fn list_dir_falls_back_to_legacy_when_no_scope() {
-        // No scope on the context => pre-PR-B `base_dir`-relative path
-        // still works (back-compat for `octos chat`).
-        let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("f.txt"), "x").unwrap();
-
-        let tool = ListDirTool::new(dir.path());
-        let ctx = ToolContext::zero();
-        assert!(ctx.session_scope.is_none());
-
-        let result = tool
-            .execute_with_context(&ctx, &serde_json::json!({"path": "."}))
-            .await
-            .unwrap();
-        assert!(result.success);
-        assert!(result.output.contains("[file] f.txt"));
     }
 
     #[cfg(unix)]

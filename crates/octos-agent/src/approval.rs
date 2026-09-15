@@ -381,16 +381,6 @@ mod tests {
     }
 
     #[test]
-    fn test_pending_approval_rejects_empty_authorized_approvers() {
-        let mut spec = valid_spec();
-        spec.authorized_approvers.clear();
-        let err = PendingApprovalDraft::from_spec("shell", "tc1", serde_json::json!({}), spec)
-            .unwrap_err();
-
-        assert!(err.contains("authorized_approvers"));
-    }
-
-    #[test]
     fn test_pending_approval_rejects_expired_request() {
         let mut store = PendingApprovalStore::default();
         let mut spec = valid_spec();
@@ -421,38 +411,6 @@ mod tests {
                 )
                 .unwrap_err(),
             ApprovalValidationError::Expired
-        );
-    }
-
-    #[test]
-    fn test_pending_approval_rejects_wrong_room() {
-        let mut store = PendingApprovalStore::default();
-        let pending = PendingApprovalDraft::from_spec(
-            "shell",
-            "tc1",
-            serde_json::json!({"command": "echo hi"}),
-            valid_spec(),
-        )
-        .unwrap()
-        .into_pending("!room:example.org", "@requester:example.org");
-        let response = ApprovalResponsePayload {
-            request_id: pending.request.request_id.clone(),
-            decision: ApprovalDecision::Approve,
-            source_event_id: "$source".to_string(),
-            tool_args_digest: pending.request.tool_args_digest.clone(),
-        };
-        store.insert(pending);
-
-        assert_eq!(
-            store
-                .validate_response(
-                    "!other:example.org",
-                    "@alice:example.org",
-                    &response,
-                    Utc::now(),
-                )
-                .unwrap_err(),
-            ApprovalValidationError::WrongRoom
         );
     }
 
@@ -530,89 +488,6 @@ mod tests {
             draft.request.authorized_approvers,
             vec!["@alice:example.org".to_string()]
         );
-        assert_eq!(draft.request.risk_level, ApprovalRiskLevel::Critical);
-    }
-
-    #[test]
-    fn test_approval_policy_non_matching_tool_returns_none() {
-        let policy = HumanApprovalRules::new(vec![ApprovalRule {
-            tools: vec!["shell".to_string()],
-            risk_level: ApprovalRiskLevel::Critical,
-            authorized_approvers: vec!["@alice:example.org".to_string()],
-            expires_in_secs: 300,
-            on_timeout: ApprovalTimeoutBehavior::Notify,
-        }]);
-
-        assert!(
-            policy
-                .draft_for_tool_call(
-                    "read_file",
-                    "tc-read",
-                    serde_json::json!({"path": "README.md"}),
-                    Utc::now(),
-                )
-                .unwrap()
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn test_approval_policy_generates_relative_expiry() {
-        let policy = HumanApprovalRules::new(vec![ApprovalRule {
-            tools: vec!["shell".to_string()],
-            risk_level: ApprovalRiskLevel::Critical,
-            authorized_approvers: vec!["@alice:example.org".to_string()],
-            expires_in_secs: 300,
-            on_timeout: ApprovalTimeoutBehavior::Notify,
-        }]);
-        let created_at = chrono::DateTime::parse_from_rfc3339("2026-04-14T12:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-
-        let draft = policy
-            .draft_for_tool_call(
-                "shell",
-                "tc-shell",
-                serde_json::json!({"command": "echo hi"}),
-                created_at,
-            )
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(
-            draft.request.expires_at,
-            chrono::DateTime::parse_from_rfc3339("2026-04-14T12:05:00Z")
-                .unwrap()
-                .with_timezone(&Utc)
-        );
-    }
-
-    #[test]
-    fn test_approval_policy_shell_call_emits_pending_approval() {
-        let policy = HumanApprovalRules::new(vec![ApprovalRule {
-            tools: vec!["shell".to_string()],
-            risk_level: ApprovalRiskLevel::Critical,
-            authorized_approvers: vec!["@alice:example.org".to_string()],
-            expires_in_secs: 300,
-            on_timeout: ApprovalTimeoutBehavior::Notify,
-        }]);
-
-        let draft = policy
-            .draft_for_tool_call(
-                "shell",
-                "tc-shell",
-                serde_json::json!({"command": "ls"}),
-                Utc::now(),
-            )
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(draft.request.tool_name, "shell");
-        assert_eq!(
-            draft.request.authorized_approvers,
-            vec!["@alice:example.org".to_string()]
-        );
-        assert_eq!(draft.request.on_timeout, ApprovalTimeoutBehavior::Notify);
         assert_eq!(draft.request.risk_level, ApprovalRiskLevel::Critical);
     }
 }

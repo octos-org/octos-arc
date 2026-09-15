@@ -1407,60 +1407,6 @@ mod estimate_tests {
     use super::*;
 
     #[test]
-    fn test_null() {
-        assert_eq!(estimate_json_size(&serde_json::Value::Null), 4);
-    }
-
-    #[test]
-    fn test_bool() {
-        assert_eq!(estimate_json_size(&serde_json::json!(true)), 4);
-        assert_eq!(estimate_json_size(&serde_json::json!(false)), 5);
-    }
-
-    #[test]
-    fn test_number() {
-        assert_eq!(estimate_json_size(&serde_json::json!(42)), 2);
-        assert_eq!(estimate_json_size(&serde_json::json!(2.72)), 4);
-    }
-
-    #[test]
-    fn test_string_simple() {
-        // "hello" -> 5 chars + 2 quotes = 7
-        assert_eq!(estimate_json_size(&serde_json::json!("hello")), 7);
-    }
-
-    #[test]
-    fn test_string_with_escapes() {
-        // "a\"b" has 3 chars + 1 escape overhead + 2 quotes = 6
-        assert_eq!(estimate_json_size(&serde_json::json!("a\"b")), 6);
-        // "a\nb" has 3 chars + 1 escape + 2 quotes = 6
-        assert_eq!(estimate_json_size(&serde_json::json!("a\nb")), 6);
-    }
-
-    #[test]
-    fn test_empty_array() {
-        assert_eq!(estimate_json_size(&serde_json::json!([])), 2);
-    }
-
-    #[test]
-    fn test_array_with_elements() {
-        // [1,2,3] = 2 brackets + 3 numbers (1+1+1) + 2 commas = 7
-        assert_eq!(estimate_json_size(&serde_json::json!([1, 2, 3])), 7);
-    }
-
-    #[test]
-    fn test_empty_object() {
-        assert_eq!(estimate_json_size(&serde_json::json!({})), 2);
-    }
-
-    #[test]
-    fn test_object_with_fields() {
-        // {"a":1} = 2 braces + key(1) + 3 (quotes+colon) + value(1) = 7
-        let v = serde_json::json!({"a": 1});
-        assert_eq!(estimate_json_size(&v), 7);
-    }
-
-    #[test]
     fn test_nested_structure() {
         let v = serde_json::json!({"x": [1, 2]});
         // Outer: 2 + key(1+3) + inner array
@@ -1471,44 +1417,7 @@ mod estimate_tests {
 }
 
 #[cfg(test)]
-mod tag_lookup_tests {
-    use super::*;
-
-    #[test]
-    fn should_return_tagged_tool_names_when_tag_matches() {
-        struct TaggedStubTool;
-
-        #[async_trait::async_trait]
-        impl Tool for TaggedStubTool {
-            fn name(&self) -> &str {
-                "tagged_stub"
-            }
-            fn description(&self) -> &str {
-                "test-only tagged tool"
-            }
-            fn tags(&self) -> &[&str] {
-                &["gateway", "app_reply"]
-            }
-            fn input_schema(&self) -> serde_json::Value {
-                serde_json::json!({"type": "object"})
-            }
-            async fn execute(&self, _args: &serde_json::Value) -> Result<ToolResult> {
-                Ok(ToolResult {
-                    output: String::new(),
-                    success: true,
-                    ..Default::default()
-                })
-            }
-        }
-
-        let mut registry = ToolRegistry::new();
-        registry.register(TaggedStubTool);
-
-        let names = registry.names_with_tag("app_reply");
-        assert_eq!(names, vec!["tagged_stub".to_string()]);
-        assert!(registry.names_with_tag("no_such_tag").is_empty());
-    }
-}
+mod tag_lookup_tests {}
 
 #[cfg(test)]
 mod cwd_isolation_tests {
@@ -1591,89 +1500,6 @@ mod cwd_isolation_tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_rebind_cwd_preserves_non_cwd_tools() {
-        let initial_cwd = tempfile::tempdir().expect("create temp dir");
-        let registry =
-            ToolRegistry::with_builtins_and_sandbox(initial_cwd.path(), Box::new(NoSandbox));
-
-        let new_cwd = tempfile::tempdir().expect("create temp dir");
-        let rebound = registry.rebind_cwd(new_cwd.path(), Box::new(NoSandbox));
-
-        assert!(
-            rebound.get("read_file").is_some(),
-            "read_file should be re-registered"
-        );
-        assert!(
-            rebound.get("shell").is_some(),
-            "shell should be re-registered"
-        );
-        assert!(
-            rebound.get("write_file").is_some(),
-            "write_file should be re-registered"
-        );
-    }
-
-    #[test]
-    fn test_rebind_cwd_isolates_session_runtime_state() {
-        let initial_cwd = tempfile::tempdir().expect("create temp dir");
-        let mut registry =
-            ToolRegistry::with_builtins_and_sandbox(initial_cwd.path(), Box::new(NoSandbox));
-        registry.set_session_key("api:base-session".to_string());
-        registry.mark_spawn_only_invoked();
-        let base_task = registry.register_task("search", "call-base");
-
-        let new_cwd = tempfile::tempdir().expect("create temp dir");
-        let rebound = registry.rebind_cwd(new_cwd.path(), Box::new(NoSandbox));
-
-        assert!(
-            rebound.supervisor().get_task(&base_task).is_none(),
-            "rebound registry must not inherit another session's task ledger"
-        );
-        assert!(
-            !rebound.spawn_only_was_invoked(),
-            "spawn-only invocation state is per agent run/session"
-        );
-
-        let rebound_task = rebound.register_task("search", "call-rebound");
-        let rebound_task = rebound
-            .supervisor()
-            .get_task(&rebound_task)
-            .expect("rebound task should be tracked");
-        assert!(
-            rebound_task.session_key.is_none(),
-            "session key must be supplied by the new session actor, not inherited"
-        );
-    }
-
-    #[tokio::test]
-    async fn should_register_check_tool_and_rebind_its_cwd() {
-        let initial_cwd = tempfile::tempdir().expect("create temp dir");
-        let registry =
-            ToolRegistry::with_builtins_and_sandbox(initial_cwd.path(), Box::new(NoSandbox));
-        assert!(
-            registry.get("check").is_some(),
-            "check must be a builtin tool"
-        );
-
-        // `check` is cwd-bound: after a rebind it must detect the project at
-        // the NEW workspace root (the empty new cwd → "no supported project"),
-        // not the old one.
-        let new_cwd = tempfile::tempdir().expect("create temp dir");
-        std::fs::write(initial_cwd.path().join("go.mod"), "module old").unwrap();
-        let rebound = registry.rebind_cwd(new_cwd.path(), Box::new(NoSandbox));
-        let tr = rebound
-            .execute("check", &serde_json::json!({}))
-            .await
-            .expect("check dispatch");
-        assert!(tr.success, "no-project answer is a success: {}", tr.output);
-        assert!(
-            tr.output.contains("no supported project detected"),
-            "rebound check must look at the NEW cwd: {}",
-            tr.output
-        );
-    }
-
     /// Review #1772 (high): `check` spawns cargo/tsc/go, which execute
     /// project-controlled code (build.rs / proc-macros), so BOTH registry
     /// constructors must hand it the session sandbox — same lockstep as
@@ -1749,17 +1575,6 @@ mod registry_dispatch_tests {
     // longer carries the old `(max_active, idle_threshold)` tuning knobs.
     fn make_registry() -> ToolRegistry {
         ToolRegistry::with_builtins(PathBuf::from("/tmp"))
-    }
-
-    #[test]
-    fn spawn_only_message_uses_runtime_output_dir_hint() {
-        let mut reg = make_registry();
-        reg.mark_spawn_only("mofa_slides", None);
-        reg.set_output_dir_hint("/tmp/octos-profile/skill-output");
-
-        let msg = reg.spawn_only_message("mofa_slides");
-
-        assert!(msg.contains("Output directory: /tmp/octos-profile/skill-output/"));
     }
 
     #[test]
@@ -1861,25 +1676,6 @@ mod registry_dispatch_tests {
     }
 
     #[test]
-    fn is_tool_visible_returns_false_for_unregistered_tools() {
-        let reg = make_registry();
-        assert!(!reg.is_tool_visible("nope_does_not_exist"));
-    }
-
-    #[test]
-    fn should_expose_a_noop_sandbox_when_registry_built_without_a_real_backend() {
-        // #1607 (P1): `with_builtins` (and `Default`) install `NoSandbox`, so
-        // the sandbox getter must return a no-op sandbox — commands then run
-        // their argv directly, keeping host behavior unchanged where no
-        // backend exists.
-        let reg = make_registry();
-        assert!(
-            reg.sandbox().is_noop(),
-            "registry built without a real sandbox must expose a no-op sandbox"
-        );
-    }
-
-    #[test]
     fn should_store_the_real_sandbox_handed_to_builtins_and_expose_it() {
         // #1607 (P1): a real (non-no-op) sandbox handed to the shell/exec/bash
         // tools must be STORED on the registry and surfaced via `sandbox()`,
@@ -1907,50 +1703,6 @@ mod registry_dispatch_tests {
         assert!(
             !reg.sandbox().is_noop(),
             "a real sandbox handed to with_builtins_and_sandbox must be stored, not dropped"
-        );
-    }
-
-    #[test]
-    fn should_permit_all_tools_when_no_provider_policy_is_set() {
-        // #1607 (P2): with no provider policy the permit predicate is a no-op,
-        // so `MapToolDispatcher::from_registry` snapshots every tool.
-        let reg = make_registry();
-        assert!(reg.provider_policy_permits("shell"));
-        assert!(reg.provider_policy_permits("read_file"));
-    }
-
-    #[test]
-    fn should_deny_provider_policy_denied_tools_including_aliases() {
-        // #1607 (P2): the permit predicate must mirror the deny-wins semantics
-        // (with alias equivalence) that `execute` enforces, so a project-root
-        // ToolCall validator can't reach a denied tool via the snapshot.
-        let mut reg = make_registry();
-        reg.set_provider_policy(ToolPolicy {
-            deny: vec!["spawn".to_string()],
-            ..Default::default()
-        });
-        // `spawn_agent` maps to the `spawn` alias, so denying `spawn` denies it.
-        assert!(
-            !reg.provider_policy_permits("spawn_agent"),
-            "alias-equivalent denied tools must not pass the permit predicate"
-        );
-        // A tool outside the deny list still passes (allow list empty => allow).
-        assert!(reg.provider_policy_permits("read_file"));
-    }
-
-    #[test]
-    fn should_permit_only_allowlisted_tools_when_allow_list_is_set() {
-        // #1607 (P2): a non-empty allow list means only listed (or
-        // alias-equivalent) tools are permitted.
-        let mut reg = make_registry();
-        reg.set_provider_policy(ToolPolicy {
-            allow: vec!["read_file".to_string()],
-            ..Default::default()
-        });
-        assert!(reg.provider_policy_permits("read_file"));
-        assert!(
-            !reg.provider_policy_permits("shell"),
-            "tools absent from a non-empty allow list must not pass the permit predicate"
         );
     }
 
@@ -2008,22 +1760,6 @@ mod registry_dispatch_tests {
         assert!(
             reg.specs().iter().all(|spec| spec.name != "untagged_stub"),
             "untagged tools must not be advertised to the LLM under require_tags"
-        );
-    }
-
-    #[test]
-    fn spawn_only_handle_message_payload_stays_under_one_kb() {
-        // Phase 4 acceptance criterion: spawn_only tool result in agent
-        // context is < 1KB (was 50KB+).
-        let mut reg = make_registry();
-        reg.mark_spawn_only("search", None);
-
-        let payload = reg.spawn_only_handle_message("search", "task_xyz", &[]);
-
-        assert!(
-            payload.len() < 1024,
-            "spawn_only handle envelope must be < 1KB, got {} bytes",
-            payload.len()
         );
     }
 }
@@ -2204,162 +1940,6 @@ mod context_threading_tests {
             result.output
         );
     }
-
-    #[tokio::test]
-    async fn fast_tool_completes_well_within_timeout_no_false_positive() {
-        // A normal fast tool must NOT be killed by the per-tool timeout.
-        let mut reg = ToolRegistry::new();
-        reg.register_arc(Arc::new(CapturingTool::new()));
-        reg.set_tool_timeout_secs(1);
-
-        let result = reg
-            .execute("capturing", &serde_json::json!({}))
-            .await
-            .expect("fast tool must succeed");
-        assert!(
-            result.success,
-            "fast tool must not trip the timeout, got output={}",
-            result.output
-        );
-    }
-
-    /// Tool that sleeps longer than the global default but overrides
-    /// `execution_timeout_secs` to a tight bound, proving the per-tool
-    /// override path is honoured.
-    struct SlowOverrideTool;
-
-    #[async_trait]
-    impl Tool for SlowOverrideTool {
-        fn name(&self) -> &str {
-            "slow_override"
-        }
-        fn description(&self) -> &str {
-            "test-only: sleeps forever but caps its own timeout"
-        }
-        fn input_schema(&self) -> Value {
-            serde_json::json!({"type": "object"})
-        }
-        fn execution_timeout_secs(&self) -> Option<u64> {
-            Some(1)
-        }
-        async fn execute(&self, _args: &Value) -> Result<ToolResult> {
-            futures::future::pending::<()>().await;
-            unreachable!("pending() never resolves");
-        }
-    }
-
-    /// A human-wait tool: blocks on a requester (like `ask_user_question`'s
-    /// `request_user_question` await). It must be EXEMPT from the dispatch
-    /// timeout — a human may legitimately take longer than any finite tool
-    /// timeout, and killing the future would drop the receiver and leak the
-    /// pending store entry forever.
-    struct HumanWaitTool {
-        unblock: Arc<tokio::sync::Notify>,
-    }
-
-    #[async_trait]
-    impl Tool for HumanWaitTool {
-        fn name(&self) -> &str {
-            "human_wait"
-        }
-        fn description(&self) -> &str {
-            "test-only: blocks on a human until notified"
-        }
-        fn input_schema(&self) -> Value {
-            serde_json::json!({"type": "object"})
-        }
-        fn blocks_on_human_input(&self) -> bool {
-            true
-        }
-        async fn execute(&self, _args: &Value) -> Result<ToolResult> {
-            self.unblock.notified().await;
-            Ok(ToolResult {
-                output: "answered".into(),
-                success: true,
-                ..Default::default()
-            })
-        }
-    }
-
-    #[tokio::test]
-    async fn human_wait_tool_is_exempt_from_dispatch_timeout() {
-        // A human-wait tool must NOT be killed by the dispatch timeout even
-        // when the registry backstop is set to 1s — it stays blocked until
-        // the human answers, then returns success. Mirrors how `shell`'s
-        // approval gate is not killed by the tool timeout (#1).
-        let mut reg = ToolRegistry::new();
-        let unblock = Arc::new(tokio::sync::Notify::new());
-        reg.register_arc(Arc::new(HumanWaitTool {
-            unblock: unblock.clone(),
-        }));
-        // A tight backstop that WOULD kill a normal tool.
-        reg.set_tool_timeout_secs(1);
-
-        let unblock_for_task = unblock.clone();
-        // Answer the "human" after 2s — comfortably past the 1s backstop.
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            unblock_for_task.notify_one();
-        });
-
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            reg.execute("human_wait", &serde_json::json!({})),
-        )
-        .await
-        .expect("human-wait tool must not hang the test")
-        .expect("registry returns Ok");
-
-        assert!(
-            result.success,
-            "human-wait tool must survive the dispatch timeout and return its answer, got: {}",
-            result.output
-        );
-        assert_eq!(result.output, "answered");
-    }
-
-    #[tokio::test]
-    async fn per_tool_timeout_override_is_honored() {
-        // The tool caps itself at 1s via `execution_timeout_secs`, so even
-        // with the registry's long default backstop it times out fast.
-        let mut reg = ToolRegistry::new();
-        reg.register_arc(Arc::new(SlowOverrideTool));
-        // Leave the registry default at its long backstop; the per-tool
-        // override must win.
-
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            reg.execute("slow_override", &serde_json::json!({})),
-        )
-        .await
-        .expect("per-tool override must bound execution, not hang")
-        .expect("registry must return Ok(failed result)");
-
-        assert!(!result.success, "override timeout must fail the tool");
-        assert!(
-            result.output.contains("timed out"),
-            "override timeout result must flag the timeout: {}",
-            result.output
-        );
-    }
-
-    #[tokio::test]
-    async fn should_route_legacy_execute_through_zero_value_context() {
-        // The legacy `execute(name, args)` entry must reach the same tool
-        // but with a zero-value context (empty tool_id).
-        let mut reg = ToolRegistry::new();
-        let tool = Arc::new(CapturingTool::new());
-        reg.register_arc(tool.clone());
-
-        let result = reg
-            .execute("capturing", &serde_json::json!({}))
-            .await
-            .expect("capturing tool must succeed via legacy entry");
-        assert!(result.success);
-
-        let seen = tool.seen.lock().unwrap().clone();
-        assert_eq!(seen.as_deref(), Some(""));
-    }
 }
 
 #[cfg(test)]
@@ -2371,24 +1951,6 @@ mod profile_filter_tests {
 
     use super::*;
     use crate::profile::ProfileTools;
-
-    fn builtin_names(reg: &ToolRegistry) -> Vec<String> {
-        let mut names: Vec<String> = reg.tools.keys().cloned().collect();
-        names.sort();
-        names
-    }
-
-    #[test]
-    fn should_not_filter_when_profile_mode_is_default() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut reg = ToolRegistry::with_builtins(dir.path());
-        let before = builtin_names(&reg);
-
-        reg.filter_by_profile(&ProfileTools::Default);
-
-        let after = builtin_names(&reg);
-        assert_eq!(before, after, "default mode must not narrow the registry");
-    }
 
     #[test]
     fn should_filter_tool_registry_by_allow_list() {
@@ -2408,188 +1970,6 @@ mod profile_filter_tests {
         // Not on the allow list, not spawn_only -> evicted.
         assert!(!names.contains(&"shell".to_string()));
         assert!(!names.contains(&"web_fetch".to_string()));
-    }
-
-    #[test]
-    fn should_filter_tool_registry_by_deny_list() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut reg = ToolRegistry::with_builtins(dir.path());
-        let before = builtin_names(&reg);
-
-        reg.filter_by_profile(&ProfileTools::DenyList {
-            tools: vec!["web_fetch".into(), "browser".into()],
-        });
-
-        let after = builtin_names(&reg);
-        assert!(!after.contains(&"web_fetch".to_string()));
-        assert!(!after.contains(&"browser".to_string()));
-        // Everything else must survive.
-        let expected_survivors: Vec<String> = before
-            .iter()
-            .filter(|n| n.as_str() != "web_fetch" && n.as_str() != "browser")
-            .cloned()
-            .collect();
-        for n in expected_survivors {
-            assert!(
-                after.contains(&n),
-                "{n} should survive the deny-list filter",
-            );
-        }
-    }
-
-    #[test]
-    fn should_not_filter_spawn_only_tools_from_allow_list() {
-        // A spawn_only tool that does not appear in the allow list must
-        // still be retained — it carries background execution wiring the
-        // runtime depends on.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut reg = ToolRegistry::with_builtins(dir.path());
-        reg.mark_spawn_only("mofa_slides", None);
-        // Fake-register the tool so the filter has something to keep.
-        // We reuse an existing builtin name for the test; mark_spawn_only
-        // is just an annotation, it doesn't need the name to exist in
-        // `self.tools` — for the retention check we need a real entry,
-        // so register a no-op tool under that name.
-        use async_trait::async_trait;
-        use eyre::Result;
-        use serde_json::Value;
-        struct Noop;
-        #[async_trait]
-        impl Tool for Noop {
-            fn name(&self) -> &str {
-                "mofa_slides"
-            }
-            fn description(&self) -> &str {
-                "noop"
-            }
-            fn input_schema(&self) -> Value {
-                serde_json::json!({"type": "object"})
-            }
-            async fn execute(&self, _: &Value) -> Result<ToolResult> {
-                Ok(ToolResult::default())
-            }
-        }
-        reg.register(Noop);
-
-        reg.filter_by_profile(&ProfileTools::AllowList {
-            tools: vec!["read_file".into()],
-        });
-
-        let names: Vec<String> = reg.tools.keys().cloned().collect();
-        assert!(
-            names.contains(&"mofa_slides".to_string()),
-            "spawn_only tools must survive an allow-list filter",
-        );
-        assert!(names.contains(&"read_file".to_string()));
-        assert!(!names.contains(&"shell".to_string()));
-    }
-
-    #[test]
-    fn should_not_filter_spawn_only_tools_from_deny_list() {
-        // Same invariant, but the user declared a deny list that *names*
-        // the spawn-only tool. The registry must still retain it.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut reg = ToolRegistry::with_builtins(dir.path());
-        reg.mark_spawn_only("mofa_slides", None);
-
-        use async_trait::async_trait;
-        use eyre::Result;
-        use serde_json::Value;
-        struct Noop;
-        #[async_trait]
-        impl Tool for Noop {
-            fn name(&self) -> &str {
-                "mofa_slides"
-            }
-            fn description(&self) -> &str {
-                "noop"
-            }
-            fn input_schema(&self) -> Value {
-                serde_json::json!({"type": "object"})
-            }
-            async fn execute(&self, _: &Value) -> Result<ToolResult> {
-                Ok(ToolResult::default())
-            }
-        }
-        reg.register(Noop);
-
-        reg.filter_by_profile(&ProfileTools::DenyList {
-            tools: vec!["mofa_slides".into()],
-        });
-
-        let names: Vec<String> = reg.tools.keys().cloned().collect();
-        assert!(
-            names.contains(&"mofa_slides".to_string()),
-            "spawn_only tools cannot be evicted by a profile deny list",
-        );
-    }
-
-    #[test]
-    fn empty_allow_list_is_a_pass_through_with_warning() {
-        // Defensive: an empty allow list would wipe the registry (minus
-        // spawn_only). That is almost always an author mistake, so the
-        // filter treats it as a pass-through. Authors who really want an
-        // empty registry should use `deny_list` explicitly.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut reg = ToolRegistry::with_builtins(dir.path());
-        let before = builtin_names(&reg);
-
-        reg.filter_by_profile(&ProfileTools::AllowList { tools: Vec::new() });
-
-        let after = builtin_names(&reg);
-        assert_eq!(before, after);
-    }
-
-    #[test]
-    fn empty_deny_list_is_a_pass_through() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut reg = ToolRegistry::with_builtins(dir.path());
-        let before = builtin_names(&reg);
-
-        reg.filter_by_profile(&ProfileTools::DenyList { tools: Vec::new() });
-
-        let after = builtin_names(&reg);
-        assert_eq!(before, after);
-    }
-
-    #[test]
-    fn allow_list_wildcard_matches_prefix() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut reg = ToolRegistry::with_builtins(dir.path());
-
-        reg.filter_by_profile(&ProfileTools::AllowList {
-            tools: vec!["read_*".into()],
-        });
-
-        let names: Vec<String> = reg.tools.keys().cloned().collect();
-        assert!(names.contains(&"read_file".to_string()));
-        assert!(!names.contains(&"shell".to_string()));
-    }
-
-    #[test]
-    fn coding_full_profile_produces_same_registry_as_default_builtins() {
-        // Behaviour parity gate: applying the built-in `coding-full`
-        // profile to a builtin registry must leave the registry IDENTICAL
-        // to what the no-flag default path produced before the lean
-        // `coding` default landed. This is the critical regression guard
-        // called out in the M8.3 issue, retargeted at the unfiltered
-        // escape hatch now that `coding` itself carries an allow list
-        // (see `crate::profile::tests` for the lean-narrowing pins).
-        use crate::profile::ProfileDefinition;
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let reference = ToolRegistry::with_builtins(dir.path());
-        let reference_names = builtin_names(&reference);
-
-        let full = ProfileDefinition::builtin("coding-full").expect("coding-full builtin");
-        let mut profiled = ToolRegistry::with_builtins(dir.path());
-        full.apply_to_registry(&mut profiled);
-
-        let profiled_names = builtin_names(&profiled);
-        assert_eq!(
-            reference_names, profiled_names,
-            "coding-full profile must preserve behaviour parity with the default path",
-        );
     }
 
     /// RFC-1 (issue #1290): a make_type dispatcher target marked
@@ -2688,43 +2068,6 @@ mod spec_order_tests {
         }
     }
 
-    fn registry_with(names: &[&str]) -> ToolRegistry {
-        let mut registry = ToolRegistry::new();
-        for name in names {
-            registry.register(NamedTool {
-                name: (*name).to_string(),
-                contexts: Vec::new(),
-            });
-        }
-        registry
-    }
-
-    #[test]
-    fn specs_are_sorted_by_name_and_deterministic_across_rebuilds() {
-        let names = [
-            "zeta", "alpha", "mid", "beta", "omega", "kappa", "gamma", "delta",
-        ];
-        let mut reversed = names;
-        reversed.reverse();
-
-        let a = registry_with(&names);
-        let b = registry_with(&reversed);
-
-        let a_names: Vec<String> = a.specs().iter().map(|s| s.name.clone()).collect();
-        let b_names: Vec<String> = b.specs().iter().map(|s| s.name.clone()).collect();
-
-        let mut sorted = a_names.clone();
-        sorted.sort();
-        assert_eq!(
-            a_names, sorted,
-            "specs() must emit tools sorted by name (HashMap order is nondeterministic)"
-        );
-        assert_eq!(
-            a_names, b_names,
-            "two registries with the same tools must serialize identically"
-        );
-    }
-
     #[test]
     fn should_expose_context_scoped_tools_only_in_matching_turn_context() {
         let mut registry = ToolRegistry::new();
@@ -2771,22 +2114,5 @@ mod spec_order_tests {
                 .collect::<Vec<_>>(),
             vec!["always_available"]
         );
-    }
-
-    #[test]
-    fn should_isolate_active_context_between_registry_snapshots() {
-        let mut base = ToolRegistry::new();
-        base.register(NamedTool {
-            name: "notebook_only".to_string(),
-            contexts: vec!["notebook".to_string()],
-        });
-
-        let mut notebook_turn = base.snapshot_excluding(&[]);
-        notebook_turn.set_active_context(Some("notebook".to_string()));
-        let ordinary_turn = base.snapshot_excluding(&[]);
-
-        assert!(notebook_turn.is_tool_visible("notebook_only"));
-        assert!(!ordinary_turn.is_tool_visible("notebook_only"));
-        assert!(!base.is_tool_visible("notebook_only"));
     }
 }

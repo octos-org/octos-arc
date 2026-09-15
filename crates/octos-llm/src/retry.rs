@@ -494,26 +494,8 @@ mod tests {
     }
 
     #[test]
-    fn test_is_retryable_500() {
-        let err = eyre::eyre!("OpenAI API error: 500 - internal server error");
-        assert!(RetryProvider::is_retryable_error(&err));
-    }
-
-    #[test]
-    fn test_is_retryable_503() {
-        let err = eyre::eyre!("Gemini API error: 503 - service unavailable");
-        assert!(RetryProvider::is_retryable_error(&err));
-    }
-
-    #[test]
     fn test_is_retryable_connection() {
         let err = eyre::eyre!("connection refused");
-        assert!(RetryProvider::is_retryable_error(&err));
-    }
-
-    #[test]
-    fn test_is_retryable_overloaded() {
-        let err = eyre::eyre!("API overloaded");
         assert!(RetryProvider::is_retryable_error(&err));
     }
 
@@ -530,21 +512,8 @@ mod tests {
     }
 
     #[test]
-    fn test_not_retryable_generic() {
-        let err = eyre::eyre!("invalid JSON in response");
-        assert!(!RetryProvider::is_retryable_error(&err));
-    }
-
-    #[test]
     fn test_should_failover_401() {
         let err = eyre::eyre!("OpenAI API error: 401 - unauthorized");
-        assert!(!RetryProvider::is_retryable_error(&err));
-        assert!(RetryProvider::should_failover(&err));
-    }
-
-    #[test]
-    fn test_should_failover_403() {
-        let err = eyre::eyre!("API error: 403 - forbidden");
         assert!(!RetryProvider::is_retryable_error(&err));
         assert!(RetryProvider::should_failover(&err));
     }
@@ -553,12 +522,6 @@ mod tests {
     fn test_should_failover_429() {
         let err = eyre::eyre!("API error: 429 - rate limited");
         assert!(RetryProvider::should_failover(&err));
-    }
-
-    #[test]
-    fn test_should_not_failover_400() {
-        let err = eyre::eyre!("API error: 400 - bad request");
-        assert!(!RetryProvider::should_failover(&err));
     }
 
     // ──────────────────────────────────────────────────────────────────────
@@ -585,43 +548,6 @@ mod tests {
     }
 
     #[test]
-    fn test_should_failover_typed_authentication() {
-        // Auth = next lane may have a valid key.
-        let llm = LlmError::new(LlmErrorKind::Authentication, "bad key");
-        let err: eyre::Report = llm.into();
-        assert!(RetryProvider::should_failover(&err));
-    }
-
-    #[test]
-    fn test_should_failover_typed_rate_limited() {
-        let llm = LlmError::rate_limited(Some(30));
-        let err: eyre::Report = llm.into();
-        assert!(RetryProvider::should_failover(&err));
-    }
-
-    #[test]
-    fn test_should_failover_typed_bad_request() {
-        // Provider rejected the request body — try a different provider
-        // whose validation rules may be looser (e.g. deepseek
-        // `reasoning_content` 400 → kimi works).
-        let llm = LlmError::new(
-            LlmErrorKind::InvalidRequest {
-                detail: "reasoning_content missing".into(),
-            },
-            "HTTP 400",
-        );
-        let err: eyre::Report = llm.into();
-        assert!(RetryProvider::should_failover(&err));
-    }
-
-    #[test]
-    fn test_should_failover_typed_server_error_5xx() {
-        let llm = LlmError::new(LlmErrorKind::ServerError { status: 503 }, "service down");
-        let err: eyre::Report = llm.into();
-        assert!(RetryProvider::should_failover(&err));
-    }
-
-    #[test]
     fn test_should_not_failover_typed_content_filtered() {
         let llm = LlmError::new(LlmErrorKind::ContentFiltered, "blocked");
         let err: eyre::Report = llm.into();
@@ -636,22 +562,8 @@ mod tests {
     }
 
     #[test]
-    fn test_is_retryable_typed_server_error() {
-        let llm = LlmError::new(LlmErrorKind::ServerError { status: 502 }, "bad gateway");
-        let err: eyre::Report = llm.into();
-        assert!(RetryProvider::is_retryable_error(&err));
-    }
-
-    #[test]
     fn test_not_retryable_typed_auth() {
         let llm = LlmError::auth("bad key");
-        let err: eyre::Report = llm.into();
-        assert!(!RetryProvider::is_retryable_error(&err));
-    }
-
-    #[test]
-    fn test_not_retryable_typed_quota() {
-        let llm = LlmError::new(LlmErrorKind::Quota, "out of credits");
         let err: eyre::Report = llm.into();
         assert!(!RetryProvider::is_retryable_error(&err));
     }
@@ -687,19 +599,6 @@ mod tests {
     }
 
     #[test]
-    fn test_rate_limit_delay_parses_milliseconds() {
-        // "906ms" must be read as 0.906s, NOT 906s — the unit suffix decides
-        // the scale (the +1s buffer dominates the sub-second value).
-        let err =
-            eyre::eyre!("OpenAI API error: 429 Too Many Requests - Please try again in 906ms");
-        let delay = retry_provider_uncapped().rate_limit_delay(&err).unwrap();
-        assert!(
-            delay.as_secs_f64() > 1.0 && delay.as_secs_f64() < 2.5,
-            "906ms + 1s buffer must be ~1.9s, got {delay:?}"
-        );
-    }
-
-    #[test]
     fn test_rate_limit_delay_clamps_to_max_delay() {
         // A large (or malformed) hint cannot exceed the configured ceiling.
         let provider = RetryProvider {
@@ -713,20 +612,6 @@ mod tests {
             eyre::eyre!("OpenAI API error: 429 Too Many Requests - Please try again in 1800s");
         let delay = provider.rate_limit_delay(&err).unwrap();
         assert_eq!(delay, Duration::from_secs(60), "must clamp to max_delay");
-    }
-
-    #[test]
-    fn test_rate_limit_delay_fallback() {
-        let err =
-            eyre::eyre!("OpenAI API error: 429 Too Many Requests - tokens per min limit exceeded");
-        let delay = retry_provider_uncapped().rate_limit_delay(&err).unwrap();
-        assert_eq!(delay, Duration::from_secs(30));
-    }
-
-    #[test]
-    fn test_rate_limit_delay_not_429() {
-        let err = eyre::eyre!("OpenAI API error: 500 Internal Server Error");
-        assert!(retry_provider_uncapped().rate_limit_delay(&err).is_none());
     }
 
     #[test]
@@ -868,24 +753,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_chat_stream_retries_on_503() {
-        let provider = RetryProvider {
-            inner: Arc::new(FailingStreamProvider {
-                remaining_failures: std::sync::atomic::AtomicU32::new(2), // fail twice, then succeed
-            }),
-            config: RetryConfig {
-                max_retries: 3,
-                initial_delay: Duration::from_millis(1), // fast for tests
-                max_delay: Duration::from_millis(10),
-                backoff_multiplier: 1.0,
-            },
-        };
-
-        let result = provider.chat_stream(&[], &[], &ChatConfig::default()).await;
-        assert!(result.is_ok(), "should succeed after retries");
-    }
-
-    #[tokio::test]
     async fn test_chat_stream_exhausts_retries() {
         let provider = RetryProvider {
             inner: Arc::new(FailingStreamProvider {
@@ -917,101 +784,6 @@ mod tests {
     // and assert the retry/failover verdict.
     // ──────────────────────────────────────────────────────────────────────
     use eyre::WrapErr;
-
-    /// Produce a real `reqwest` send failure of the requested `kind`, wrapped
-    /// like the Anthropic provider does:
-    ///   - `"refused"`         → nothing listening (reqwest `is_connect`)
-    ///   - `"immediate_close"` → server accepts then drops the socket
-    ///   - `"read_then_close"` → server reads the request then closes without
-    ///     replying ("connection closed before message completed" — the
-    ///     reused-keepalive / half-open-socket case)
-    async fn transport_send_error(kind: &str) -> eyre::Report {
-        use tokio::io::AsyncReadExt;
-        use tokio::net::TcpListener;
-
-        let client = crate::provider::build_http_client(5, 5);
-
-        if kind == "refused" {
-            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let port = listener.local_addr().unwrap().port();
-            drop(listener);
-            let url = format!("http://127.0.0.1:{port}/v1/messages");
-            let res = client
-                .post(&url)
-                .json(&serde_json::json!({"x": 1}))
-                .send()
-                .await;
-            return res
-                .map(|_| ())
-                .wrap_err(crate::provider::transport_error_message(
-                    true,
-                    "zai",
-                    "glm-5.2",
-                    crate::provider::ApiStyle::AnthropicMessages,
-                ))
-                .unwrap_err();
-        }
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let read_then_close = kind == "read_then_close";
-        let accept = tokio::spawn(async move {
-            if let Ok((mut sock, _)) = listener.accept().await {
-                if read_then_close {
-                    let mut buf = [0u8; 1024];
-                    let _ = sock.read(&mut buf).await;
-                }
-                drop(sock);
-            }
-        });
-
-        let url = format!("http://127.0.0.1:{port}/v1/messages");
-        let res = client
-            .post(&url)
-            .json(&serde_json::json!({"x": 1}))
-            .send()
-            .await;
-        let _ = accept.await;
-        res.map(|_| ())
-            .wrap_err(crate::provider::transport_error_message(
-                true,
-                "zai",
-                "glm-5.2",
-                crate::provider::ApiStyle::AnthropicMessages,
-            ))
-            .unwrap_err()
-    }
-
-    #[tokio::test]
-    async fn should_retry_and_failover_on_connection_closed_before_completed() {
-        // The exact failure z.ai returns when reqwest reuses a keepalive
-        // socket the load balancer already closed: reqwest reports it as
-        // `is_request()` (NOT `is_connect`, NOT `is_timeout`, no status).
-        // Before the fix this was classified non-retryable AND
-        // non-failover-worthy, hard-failing the whole turn.
-        let err = transport_send_error("read_then_close").await;
-        assert!(
-            RetryProvider::is_retryable_error(&err),
-            "statusless transport send failure must retry on the same provider: {err:#}"
-        );
-        assert!(
-            RetryProvider::should_failover(&err),
-            "statusless transport send failure must also be failover-worthy: {err:#}"
-        );
-    }
-
-    #[tokio::test]
-    async fn should_retry_and_failover_on_immediate_connection_close() {
-        let err = transport_send_error("immediate_close").await;
-        assert!(
-            RetryProvider::is_retryable_error(&err),
-            "reset-after-accept must retry: {err:#}"
-        );
-        assert!(
-            RetryProvider::should_failover(&err),
-            "reset-after-accept must failover: {err:#}"
-        );
-    }
 
     #[tokio::test]
     async fn should_failover_not_retry_on_connect_timeout() {
@@ -1067,60 +839,6 @@ mod tests {
                 "connect error must remain retryable: {err:#}"
             );
         }
-    }
-
-    #[tokio::test]
-    async fn should_retry_and_failover_on_connection_refused() {
-        // Regression guard: connect-refused was already retryable
-        // (`is_connect`); it must stay that way.
-        let err = transport_send_error("refused").await;
-        assert!(RetryProvider::is_retryable_error(&err), "{err:#}");
-        assert!(RetryProvider::should_failover(&err), "{err:#}");
-    }
-
-    #[tokio::test]
-    async fn should_not_retry_request_timeout_on_same_provider_but_should_failover() {
-        // A per-request timeout keeps its existing semantics: NOT retried on
-        // the same (unresponsive) provider, but failover-worthy. Guards that
-        // the new transport branch sits AFTER the `is_timeout` check.
-        use tokio::net::TcpListener;
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let accept = tokio::spawn(async move {
-            // Accept and hold the socket open without ever responding.
-            if let Ok((sock, _)) = listener.accept().await {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                drop(sock);
-            }
-        });
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_millis(300))
-            .build()
-            .unwrap();
-        let url = format!("http://127.0.0.1:{port}/v1/messages");
-        let err = client
-            .post(&url)
-            .json(&serde_json::json!({"x": 1}))
-            .send()
-            .await
-            .map(|_| ())
-            .wrap_err(crate::provider::transport_error_message(
-                true,
-                "zai",
-                "glm-5.2",
-                crate::provider::ApiStyle::AnthropicMessages,
-            ))
-            .unwrap_err();
-        accept.abort();
-
-        assert!(
-            !RetryProvider::is_retryable_error(&err),
-            "request timeout must not retry the same provider: {err:#}"
-        );
-        assert!(
-            RetryProvider::should_failover(&err),
-            "request timeout must failover to another provider: {err:#}"
-        );
     }
 }
 

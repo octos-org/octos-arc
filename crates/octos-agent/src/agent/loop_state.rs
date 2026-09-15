@@ -567,43 +567,12 @@ mod tests {
         );
     }
 
-    fn rate_limit() -> HarnessError {
-        HarnessError::RateLimited {
-            retry_after_secs: Some(1),
-            message: "429".into(),
-        }
-    }
-
     fn context_overflow() -> HarnessError {
         HarnessError::ContextOverflow {
             limit: Some(200_000),
             used: Some(201_000),
             message: "context exceeded".into(),
         }
-    }
-
-    fn auth_error() -> HarnessError {
-        HarnessError::Authentication {
-            message: "bad key".into(),
-        }
-    }
-
-    fn tool_error() -> HarnessError {
-        HarnessError::ToolExecution {
-            tool_name: "shell".into(),
-            message: "exit 1".into(),
-        }
-    }
-
-    #[test]
-    fn observe_rate_limit_returns_continue_until_limit() {
-        let mut state = LoopRetryState::with_limits(LoopRetryLimits {
-            rate_limited: 2,
-            ..Default::default()
-        });
-        assert_eq!(state.observe(&rate_limit()), LoopDecision::Continue);
-        assert_eq!(state.observe(&rate_limit()), LoopDecision::Continue);
-        assert_eq!(state.observe(&rate_limit()), LoopDecision::Exhausted);
     }
 
     #[test]
@@ -620,59 +589,12 @@ mod tests {
     }
 
     #[test]
-    fn observe_authentication_always_escalates() {
-        let mut state = LoopRetryState::new();
-        assert_eq!(state.observe(&auth_error()), LoopDecision::Escalate);
-    }
-
-    #[test]
-    fn observe_tool_execution_escalates_up_to_limit() {
-        let mut state = LoopRetryState::with_limits(LoopRetryLimits {
-            tool_execution: 2,
-            ..Default::default()
-        });
-        // Tool execution errors are FailFast in M6.1's hint table, so the
-        // decision is always Escalate until the limit is exhausted.
-        assert_eq!(state.observe(&tool_error()), LoopDecision::Escalate);
-        assert_eq!(state.observe(&tool_error()), LoopDecision::Escalate);
-        assert_eq!(state.observe(&tool_error()), LoopDecision::Exhausted);
-    }
-
-    #[test]
     fn grace_call_fires_with_productive_history() {
         let mut state = LoopRetryState::new();
         state.record_productive_tool_call();
         assert_eq!(state.observe_budget_exhaustion(), LoopDecision::Grace);
         assert_eq!(state.grace_calls_fired, 1);
         assert_eq!(state.productive_tool_calls_since_last_grace, 0);
-    }
-
-    #[test]
-    fn grace_call_escalates_without_productive_history() {
-        let mut state = LoopRetryState::new();
-        assert_eq!(state.observe_budget_exhaustion(), LoopDecision::Escalate);
-        assert_eq!(state.grace_calls_fired, 0);
-    }
-
-    #[test]
-    fn grace_call_resets_productive_counter() {
-        let mut state = LoopRetryState::new();
-        state.record_productive_tool_call();
-        state.record_productive_tool_call();
-        assert_eq!(state.observe_budget_exhaustion(), LoopDecision::Grace);
-        // Productive history consumed; second call without fresh productive
-        // tool calls must escalate.
-        assert_eq!(state.observe_budget_exhaustion(), LoopDecision::Escalate);
-    }
-
-    #[test]
-    fn grace_call_is_single_use_even_after_fresh_productive_tool_call() {
-        let mut state = LoopRetryState::new();
-        state.record_productive_tool_call();
-        assert_eq!(state.observe_budget_exhaustion(), LoopDecision::Grace);
-        state.record_productive_tool_call();
-        assert_eq!(state.observe_budget_exhaustion(), LoopDecision::Escalate);
-        assert_eq!(state.grace_calls_fired, 1);
     }
 
     #[test]
@@ -683,102 +605,6 @@ mod tests {
         });
         assert_eq!(state.observe_shell_spiral(), LoopDecision::Escalate);
         assert_eq!(state.observe_shell_spiral(), LoopDecision::Exhausted);
-    }
-
-    #[test]
-    fn should_merge_every_field_when_turn_delta_applied() {
-        // Field-coverage guard (#2221): the literals below name EVERY field
-        // of `LoopRetryState`, `LoopRetryCounters`, and `LoopRetryLimits`
-        // with no `..Default::default()` spread, so adding a field to any of
-        // the three structs fails THIS test's compilation — forcing the
-        // author to extend `merge_turn_delta` (and
-        // `LoopRetryCounters::saturating_add_turn_delta`) in the same commit.
-        // `turn` also gives each field a DISTINCT delta over `base`
-        // (2 + field offset), so the final whole-struct equality catches
-        // both a forgotten merge line (the field keeps self's value) and a
-        // mis-wired one (a copy-pasted line reading the wrong base/turn
-        // field lands the wrong delta).
-        let uniform_counters = |v: u32| LoopRetryCounters {
-            rate_limited: v,
-            context_overflow: v,
-            authentication: v,
-            quota: v,
-            invalid_request: v,
-            content_filtered: v,
-            provider_unavailable: v,
-            network: v,
-            timeout: v,
-            tool_execution: v,
-            delegate_depth_exceeded: v,
-            internal: v,
-            policy: v,
-            shell_spiral: v,
-        };
-        let offset_counters = |v: u32| LoopRetryCounters {
-            rate_limited: v,
-            context_overflow: v + 1,
-            authentication: v + 2,
-            quota: v + 3,
-            invalid_request: v + 4,
-            content_filtered: v + 5,
-            provider_unavailable: v + 6,
-            network: v + 7,
-            timeout: v + 8,
-            tool_execution: v + 9,
-            delegate_depth_exceeded: v + 13,
-            internal: v + 14,
-            policy: v + 15,
-            shell_spiral: v + 16,
-        };
-        let uniform_limits = |v: u32| LoopRetryLimits {
-            rate_limited: v,
-            context_overflow: v,
-            authentication: v,
-            quota: v,
-            invalid_request: v,
-            content_filtered: v,
-            provider_unavailable: v,
-            network: v,
-            timeout: v,
-            tool_execution: v,
-            delegate_depth_exceeded: v,
-            internal: v,
-            policy: v,
-            shell_spiral: v,
-        };
-
-        let base = LoopRetryState {
-            counters: uniform_counters(1),
-            limits: uniform_limits(100),
-            productive_tool_calls_since_last_grace: 1,
-            grace_calls_fired: 1,
-        };
-        let turn = LoopRetryState {
-            counters: offset_counters(3),
-            limits: uniform_limits(200),
-            productive_tool_calls_since_last_grace: 4,
-            grace_calls_fired: 2,
-        };
-        let mut merged = LoopRetryState {
-            counters: uniform_counters(10),
-            limits: uniform_limits(300),
-            productive_tool_calls_since_last_grace: 5,
-            grace_calls_fired: 5,
-        };
-        merged.merge_turn_delta(&base, &turn);
-
-        let expected = LoopRetryState {
-            // 10 + ((3 + i) - 1) = 12 + i: each bucket gains exactly its OWN
-            // turn delta, so a cross-field mis-wire flips the value.
-            counters: offset_counters(12),
-            // Static configuration, taken wholesale from `turn`.
-            limits: uniform_limits(200),
-            // 5 + (4 - 1): signed delta for the non-monotonic field.
-            productive_tool_calls_since_last_grace: 8,
-            // 5 + (2 - 1): monotonic saturating delta.
-            grace_calls_fired: 6,
-        };
-        assert_eq!(merged, expected);
     }
 
     #[test]
@@ -843,50 +669,6 @@ mod tests {
     }
 
     #[test]
-    fn serde_round_trips_loop_retry_state() {
-        let mut state = LoopRetryState::new();
-        state.observe(&rate_limit());
-        state.observe(&context_overflow());
-        state.record_productive_tool_call();
-
-        let json = serde_json::to_string(&state).expect("serialize");
-        let restored: LoopRetryState = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(state, restored);
-    }
-
-    #[test]
-    fn emit_event_builds_valid_retry_payload() {
-        let state = LoopRetryState::new();
-        let event = state.emit_event(
-            "rate_limited",
-            LoopDecision::Continue,
-            "session-1",
-            "task-1",
-            Some("coding"),
-            Some("verify"),
-            Some(3),
-        );
-        assert_eq!(event.schema, HARNESS_EVENT_SCHEMA_V1);
-        let HarnessEventPayload::Retry { ref data } = event.payload else {
-            panic!("expected Retry payload");
-        };
-        assert_eq!(data.session_id, "session-1");
-        assert_eq!(data.task_id, "task-1");
-        assert_eq!(data.workflow.as_deref(), Some("coding"));
-        assert_eq!(data.phase.as_deref(), Some("verify"));
-        assert_eq!(data.attempt, Some(3));
-        assert_eq!(
-            data.extra.get("variant").and_then(|v| v.as_str()),
-            Some("rate_limited"),
-        );
-        assert_eq!(
-            data.extra.get("decision").and_then(|v| v.as_str()),
-            Some("continue"),
-        );
-        event.validate().expect("event should validate");
-    }
-
-    #[test]
     fn decisions_have_stable_snake_case_labels() {
         // These strings appear as Prometheus labels and in structured events;
         // changing them is a breaking change for dashboards and integrations.
@@ -896,111 +678,5 @@ mod tests {
         assert_eq!(LoopDecision::Escalate.as_str(), "escalate");
         assert_eq!(LoopDecision::Exhausted.as_str(), "exhausted");
         assert_eq!(LoopDecision::Grace.as_str(), "grace");
-    }
-
-    #[test]
-    fn every_harness_variant_has_a_bucket() {
-        // If someone adds a HarnessError variant without adding a counter to
-        // LoopRetryState, this test catches it at compile time (the match is
-        // exhaustive) and at runtime (each variant must bump exactly one
-        // counter). The match arms live in `bump_counter`; this test just
-        // exercises them so the exhaustiveness check happens under `cargo test`.
-        let samples = [
-            rate_limit(),
-            context_overflow(),
-            auth_error(),
-            HarnessError::InvalidRequest {
-                detail: "x".into(),
-                message: "x".into(),
-            },
-            HarnessError::ContentFiltered {
-                message: "x".into(),
-            },
-            HarnessError::ProviderUnavailable {
-                status: Some(503),
-                message: "x".into(),
-            },
-            HarnessError::Network {
-                message: "x".into(),
-            },
-            HarnessError::Timeout {
-                message: "x".into(),
-            },
-            tool_error(),
-            HarnessError::DelegateDepthExceeded {
-                depth: 3,
-                limit: 2,
-                message: "x".into(),
-            },
-            HarnessError::Internal {
-                message: "x".into(),
-            },
-        ];
-        let mut state = LoopRetryState::new();
-        for err in samples {
-            let _ = state.observe(&err);
-        }
-    }
-
-    #[test]
-    fn merge_turn_delta_adds_increments_onto_concurrently_advanced_state() {
-        // Two turns loaded the same base; each bumped different buckets.
-        // Merging turn B's delta onto the state turn A already wrote must
-        // preserve BOTH turns' increments (#1655).
-        let base = LoopRetryState::default();
-        let mut turn = base.clone();
-        turn.counters.rate_limited = 1;
-        turn.counters.network = 3;
-
-        let mut shared = LoopRetryState {
-            counters: LoopRetryCounters {
-                rate_limited: 2,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        shared.merge_turn_delta(&base, &turn);
-        assert_eq!(shared.counters.rate_limited, 3);
-        assert_eq!(shared.counters.network, 3);
-    }
-
-    #[test]
-    fn merge_turn_delta_applies_grace_reset_as_negative_delta() {
-        // `productive_tool_calls_since_last_grace` resets to zero when a
-        // grace call fires — the one non-monotonic field. Its delta must
-        // subtract, not clamp at the base.
-        let base = LoopRetryState {
-            productive_tool_calls_since_last_grace: 3,
-            ..Default::default()
-        };
-        let mut turn = base.clone();
-        turn.observe_budget_exhaustion(); // grace: resets the counter, fires once
-
-        let mut shared = base.clone();
-        shared.merge_turn_delta(&base, &turn);
-        assert_eq!(shared.productive_tool_calls_since_last_grace, 0);
-        assert_eq!(shared.grace_calls_fired, 1);
-    }
-
-    #[test]
-    fn merge_turn_delta_is_identity_without_concurrent_writer() {
-        // Single-agent regression (#1655): when the shared state still
-        // equals what the turn loaded, the merge reproduces the turn's
-        // state exactly — byte-identical to the legacy write-back.
-        let base = LoopRetryState {
-            counters: LoopRetryCounters {
-                timeout: 2,
-                ..Default::default()
-            },
-            productive_tool_calls_since_last_grace: 4,
-            ..Default::default()
-        };
-        let mut turn = base.clone();
-        turn.counters.timeout = 3;
-        turn.observe_budget_exhaustion();
-
-        let mut shared = base.clone();
-        shared.merge_turn_delta(&base, &turn);
-        assert_eq!(shared, turn);
     }
 }

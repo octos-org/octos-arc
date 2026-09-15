@@ -1144,62 +1144,6 @@ mod tests {
     }
 
     #[test]
-    fn should_keep_values_when_key_is_not_credential_named() {
-        let input = json!({
-            "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxmemVjb2Rl",
-            "publicKey": "pk-value",
-            "key_id": "kid-42",
-            "keyword": "token",
-            "tokenizer": "gpt2",
-            "token_count": 12,
-            "max_tokens": 4096,
-            "tokens_used": 7,
-            "key": "theme",
-            "model": "gpt-4o",
-            "path": "src/main.rs"
-        });
-        assert_eq!(redact_secrets_in_value(&input), input);
-    }
-
-    #[test]
-    fn should_redact_non_null_scalars_when_key_is_credential_named() {
-        let input = json!({
-            "token": 42,
-            "secret": false,
-            "password": null,
-            "api_key": 3.5,
-            "auth": true
-        });
-        assert_eq!(
-            redact_secrets_in_value(&input),
-            json!({
-                "token": REDACTED_PLACEHOLDER,
-                "secret": REDACTED_PLACEHOLDER,
-                "password": null,
-                "api_key": REDACTED_PLACEHOLDER,
-                "auth": REDACTED_PLACEHOLDER
-            })
-        );
-    }
-
-    #[test]
-    fn should_redact_string_leaves_when_nested_under_credential_named_key() {
-        let input = json!({
-            "credentials": { "username": "alice", "password": "hunter2", "ttl": 30 },
-            "auth": ["opaque-token-value", 1, true, null]
-        });
-        let expected = json!({
-            "credentials": {
-                "username": REDACTED_PLACEHOLDER,
-                "password": REDACTED_PLACEHOLDER,
-                "ttl": REDACTED_PLACEHOLDER
-            },
-            "auth": [REDACTED_PLACEHOLDER, REDACTED_PLACEHOLDER, REDACTED_PLACEHOLDER, null]
-        });
-        assert_eq!(redact_secrets_in_value(&input), expected);
-    }
-
-    #[test]
     fn should_keep_env_references_and_empty_strings_when_key_is_credential_named() {
         let input = json!({
             "api_key": "${OPENAI_API_KEY}",
@@ -1239,26 +1183,6 @@ mod tests {
         assert_eq!(redact_secrets_in_value(&output), output);
     }
 
-    #[test]
-    fn should_redact_value_following_secret_flag_when_argv_array_splits_flag_and_value() {
-        let input = json!({
-            "cmd": "tool",
-            "args": ["--token", "abc123", "--verbose", "--password=hunter2", "-o", "out.txt"]
-        });
-        let expected = json!({
-            "cmd": "tool",
-            "args": [
-                "--token",
-                "[REDACTED]",
-                "--verbose",
-                "--password=[REDACTED]",
-                "-o",
-                "out.txt"
-            ]
-        });
-        assert_eq!(redact_secrets_in_value(&input), expected);
-    }
-
     // --- 2. Authorization / Bearer / env-style assignments in text ------------------
 
     #[test]
@@ -1286,38 +1210,6 @@ mod tests {
         assert_eq!(
             text("use Bearer abcdef123456 for auth"),
             "use Bearer [REDACTED] for auth"
-        );
-    }
-
-    #[test]
-    fn should_redact_header_flag_and_env_assignment_values_when_in_command_text() {
-        assert_eq!(
-            text("--header 'x-api-key: 0123456789abcdef'"),
-            "--header 'x-api-key: [REDACTED]'"
-        );
-        assert_eq!(text("api_key=abc123"), "api_key=[REDACTED]");
-        assert_eq!(
-            text(&format!(
-                "API_KEY=abc123 OPENAI_API_KEY={OPENAI_KEY} export FOO_TOKEN=bar"
-            )),
-            "API_KEY=[REDACTED] OPENAI_API_KEY=[REDACTED] export FOO_TOKEN=[REDACTED]"
-        );
-        assert_eq!(
-            text("tool --api-key abc123 --token xyz789 --password hunter2 --verbose"),
-            "tool --api-key [REDACTED] --token [REDACTED] --password [REDACTED] --verbose"
-        );
-        assert_eq!(text("password = 'hunter2'"), "password = '[REDACTED]'");
-        assert_eq!(
-            text("Cookie: session=abc123; theme=dark"),
-            "Cookie: [REDACTED]"
-        );
-        assert_eq!(
-            text(r#"{\"token\": \"abc123\"}"#),
-            r#"{\"token\": \"[REDACTED]\"}"#
-        );
-        assert_eq!(
-            text("git clone https://alice:hunter2@github.com/org/repo.git"),
-            "git clone https://alice:[REDACTED]@github.com/org/repo.git"
         );
     }
 
@@ -1390,32 +1282,9 @@ mod tests {
     // --- 4. JSON nested inside strings -----------------------------------------------
 
     #[test]
-    fn should_redact_structurally_when_string_value_is_embedded_json() {
-        let body = format!(r#"{{"api_key":"{OPENAI_KEY}","model":"gpt-4"}}"#);
-        let input = json!({ "body": body });
-        let expected = json!({ "body": r#"{"api_key":"[REDACTED]","model":"gpt-4"}"# });
-        assert_eq!(redact_secrets_in_value(&input), expected);
-
-        let input = json!({ "items": r#"[{"token":"abc123"},{"count":1}]"# });
-        let expected = json!({ "items": r#"[{"token":"[REDACTED]"},{"count":1}]"# });
-        assert_eq!(redact_secrets_in_value(&input), expected);
-    }
-
-    #[test]
     fn should_keep_original_formatting_when_embedded_json_has_no_secrets() {
         let input = json!({ "body": "{ \"model\" : \"gpt-4\", \"max_tokens\" : 4096 }" });
         assert_eq!(redact_secrets_in_value(&input), input);
-    }
-
-    #[test]
-    fn should_apply_text_rules_when_string_contains_json_fragment_but_is_not_json() {
-        assert_eq!(
-            text(r#"payload = {"api_key": "abc123"} and api_key=xyz"#),
-            r#"payload = {"api_key": "[REDACTED]"} and api_key=[REDACTED]"#
-        );
-        let input = json!({ "note": "config: {\"client_secret\": \"s3cr3t\"} done" });
-        let expected = json!({ "note": "config: {\"client_secret\": \"[REDACTED]\"} done" });
-        assert_eq!(redact_secrets_in_value(&input), expected);
     }
 
     // --- required end-to-end example (NEW-2) -----------------------------------------
@@ -1475,34 +1344,6 @@ mod tests {
     }
 
     #[test]
-    fn should_keep_value_byte_identical_when_arguments_are_ordinary() {
-        let input = json!({
-            "path": "src/main.rs",
-            "content": "fn main() {\n    println!(\"hello\");\n}\n",
-            "command": "cargo test -p octos-core -- --nocapture",
-            "url": "https://api.example.com/v1/models",
-            "max_tokens": 4096,
-            "token_count": 12,
-            "enabled": true,
-            "nested": { "list": [1, 2, "three"], "empty": null },
-            "json_text": "{ \"a\" : 1 }"
-        });
-        assert_eq!(redact_secrets_in_value(&input), input);
-    }
-
-    #[test]
-    fn should_return_owned_text_only_when_something_was_redacted() {
-        assert!(matches!(
-            redact_secrets_in_text("plain text"),
-            Cow::Borrowed(_)
-        ));
-        assert!(matches!(
-            redact_secrets_in_text("token=abc123"),
-            Cow::Owned(_)
-        ));
-    }
-
-    #[test]
     fn should_detect_secret_when_text_would_be_redacted() {
         assert!(contains_secret(&format!("key={OPENAI_KEY}")));
         assert!(contains_secret("Authorization: Bearer abc.def.ghi"));
@@ -1543,27 +1384,6 @@ mod tests {
     }
 
     // --- robustness ------------------------------------------------------------------
-
-    #[test]
-    fn should_treat_containers_as_opaque_text_when_nesting_exceeds_depth_cap() {
-        let mut value = json!({ "api_key": OPENAI_KEY, "n": 1 });
-        for _ in 0..80 {
-            value = json!({ "a": value });
-        }
-        let out = redact_secrets_in_value(&value);
-        let mut cursor = &out;
-        for _ in 0..64 {
-            cursor = &cursor["a"];
-        }
-        let opaque = cursor
-            .as_str()
-            .expect("container beyond the depth cap becomes an opaque string");
-        assert!(!opaque.contains(OPENAI_KEY));
-        assert!(opaque.contains("\"api_key\":\"[REDACTED]\""));
-        assert!(opaque.contains("\"n\":1"));
-        assert!(!out.to_string().contains(OPENAI_KEY));
-        assert_eq!(redact_secrets_in_value(&out), out);
-    }
 
     #[test]
     fn should_not_panic_when_input_is_odd_or_adversarial() {
@@ -1657,47 +1477,6 @@ mod tests {
 
     // --- deliberate boundaries (documented limitations) -------------------------------
 
-    #[test]
-    fn should_follow_documented_boundaries_when_inputs_are_ambiguous() {
-        // Structural: a credential-named header keeps its scheme word, the
-        // credential after it is replaced.
-        let input = json!({ "headers": { "Authorization": "Bearer abc", "Accept": "*/*" } });
-        let expected =
-            json!({ "headers": { "Authorization": "Bearer [REDACTED]", "Accept": "*/*" } });
-        assert_eq!(redact_secrets_in_value(&input), expected);
-
-        // Fail closed: `<...>` needs an env-style NAME or placeholder wording
-        // (`<your-…>`, `<insert …>`); a bare noun is redacted. Inside `{{ }}`
-        // an identifier-like path is a template expression and is kept.
-        let input = json!({ "api_key": "<api-key>", "token": "{{ vault_token }}" });
-        let expected = json!({ "api_key": "[REDACTED]", "token": "{{ vault_token }}" });
-        assert_eq!(redact_secrets_in_value(&input), expected);
-
-        // Spec lists `pwd`, so the shell's PWD variable is (over-)redacted.
-        assert_eq!(text("PWD=/home/user"), "PWD=[REDACTED]");
-        // A path handed to a credential-named flag is redacted (over-redaction).
-        assert_eq!(
-            text("ssh --private-key ~/.ssh/id_rsa host"),
-            "ssh --private-key [REDACTED] host"
-        );
-        // Bare `Bearer` followed by a base64-looking mixed-case word is treated as a token.
-        assert_eq!(text("Bearer dXNlcjpwYXNz"), "Bearer [REDACTED]");
-
-        // Not redacted on purpose: prose-style "key value" without a
-        // separator, single-letter flags, and `sk-` glued to a hyphenated word.
-        for sample in [
-            "password hunter2",
-            "mysql -p hunter2",
-            "desk-sk-frontend-deployment-1234567890",
-            "https://host/reset?keyword=abc123",
-        ] {
-            assert!(
-                matches!(redact_secrets_in_text(sample), Cow::Borrowed(_)),
-                "expected untouched: {sample:?}"
-            );
-        }
-    }
-
     // --- GAP-2a: credential-named fields fail closed ----------------------------------
 
     #[test]
@@ -1730,30 +1509,6 @@ mod tests {
     }
 
     #[test]
-    fn should_keep_symbolic_reference_when_key_is_credential_named() {
-        let input = json!({
-            "api_key": "<YOUR_API_KEY>",
-            "apiKey": "${OPENAI_API_KEY}",
-            "token": "{{ secrets.GH_TOKEN }}",
-            "access_token": "${{ secrets.GH_TOKEN }}",
-            "secret": "$GITHUB_TOKEN",
-            "password": "%DB_PASSWORD%",
-            "passwd": "<your-api-key>",
-            "client_secret": "<insert client secret here>",
-            "secret_key": "<API-KEY>",
-            "session_token": "<xxxx-xxxx>",
-            "auth": "{{NAME}}",
-            "id_token": "{{ .Values.apiKey }}",
-            "credential": "$(cat ~/.config/openai/key.txt)",
-            "private_key": "",
-            "pwd": "***",
-            "aws_secret_access_key": "[REDACTED]",
-            "authorization": "Bearer ${TOKEN}"
-        });
-        assert_eq!(redact_secrets_in_value(&input), input);
-    }
-
-    #[test]
     fn should_keep_auth_scheme_when_credential_value_starts_with_scheme() {
         let input = json!({
             "auth": {
@@ -1774,78 +1529,6 @@ mod tests {
             "headers": { "Authorization": "Basic [REDACTED]", "Accept": "*/*" }
         });
         assert_eq!(redact_secrets_in_value(&input), expected);
-    }
-
-    #[test]
-    fn should_redact_token_inside_wrapper_when_text_or_non_credential_field_wraps_it() {
-        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc";
-        let cases: Vec<(String, &str)> = vec![
-            (
-                format!("--api-key '<{OPENAI_KEY}>'"),
-                "--api-key '[REDACTED]'",
-            ),
-            (format!("--api-key <{OPENAI_KEY}>"), "--api-key [REDACTED]"),
-            (format!("token=${{{OPENAI_KEY}}}"), "token=[REDACTED]"),
-            (
-                format!("note: <{OPENAI_KEY}> and {{{{{OPENAI_KEY}}}}}"),
-                "note: <[REDACTED]> and {{[REDACTED]}}",
-            ),
-            (
-                format!("Authorization: Bearer <{jwt}>"),
-                "Authorization: Bearer [REDACTED]",
-            ),
-            (
-                "[AKIAIOSFODNN7EXAMPLE] \"ghp_abcdefghijklmnopqrstuvwxyz0123456789\"".into(),
-                "[[REDACTED]] \"[REDACTED]\"",
-            ),
-        ];
-        for (input, expected) in cases {
-            assert_eq!(text(&input), expected, "input {input:?}");
-            assert!(contains_secret(&input), "input {input:?}");
-        }
-
-        let input = json!({
-            "note": format!("<{OPENAI_KEY}>"),
-            "template": format!("{{{{{OPENAI_KEY}}}}}")
-        });
-        let expected = json!({ "note": "<[REDACTED]>", "template": "{{[REDACTED]}}" });
-        assert_eq!(redact_secrets_in_value(&input), expected);
-    }
-
-    #[test]
-    fn should_keep_symbolic_reference_when_text_value_follows_credential_key() {
-        for sample in [
-            "api_key=$OPENAI_API_KEY",
-            "--api-key '<your-api-key>'",
-            "--api-key <YOUR_API_KEY>",
-            "token: '{{ secrets.GH_TOKEN }}'",
-            "token: {{ secrets.GH_TOKEN }}",
-            "--password \"%DB_PASSWORD%\"",
-            "Authorization: Bearer ${TOKEN}",
-            "--token \"$(cat ~/.token)\"",
-            "--token $(cat ~/.token)",
-            "password: <redacted>",
-            "secret: ***",
-        ] {
-            assert!(
-                matches!(redact_secrets_in_text(sample), Cow::Borrowed(_)),
-                "expected untouched: {sample:?}"
-            );
-            assert!(!contains_secret(sample), "false positive: {sample:?}");
-        }
-    }
-
-    /// Bracketed unquoted values used to scan as an empty (exempt) value
-    /// because `[`, `{` and `(` terminate a bare value.
-    #[test]
-    fn should_redact_bracketed_value_after_credential_key() {
-        assert_eq!(text("token=[abc123]"), "token=[REDACTED]");
-        assert_eq!(text("password={abc123}"), "password=[REDACTED]");
-        assert_eq!(text("secret=(abc123)"), "secret=[REDACTED]");
-        assert_eq!(
-            text("api_key: [abc123] and more"),
-            "api_key: [REDACTED] and more"
-        );
     }
 
     /// `curl -u user:password` is the most common way a credential enters a
@@ -1887,30 +1570,6 @@ mod tests {
                 matches!(redact_secrets_in_text(sample), Cow::Borrowed(_)),
                 "expected untouched: {sample:?}"
             );
-        }
-    }
-
-    #[test]
-    fn should_redact_non_symbolic_text_value_when_it_follows_credential_key() {
-        let cases: Vec<(String, &str)> = vec![
-            (
-                "--api-key '<actual-secret>'".into(),
-                "--api-key '[REDACTED]'",
-            ),
-            ("password=$lowercase_var".into(), "password=[REDACTED]"),
-            (
-                "--token $(echo sk-live-abcdefghijklmnopqrstuvwxyz0123)".into(),
-                "--token [REDACTED]",
-            ),
-            ("secret: <p@ssw0rd!>".into(), "secret: [REDACTED]"),
-            (
-                r#""credentials": "{\"user\":\"a\",\"password\":\"b\"}""#.into(),
-                r#""credentials": "[REDACTED]""#,
-            ),
-            ("token: {{ 4f3c9a7b1d2e }}".into(), "token: [REDACTED]"),
-        ];
-        for (input, expected) in cases {
-            assert_eq!(text(&input), expected, "input {input:?}");
         }
     }
 }

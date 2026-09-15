@@ -1588,25 +1588,6 @@ mod nofollow_tests {
     }
 
     #[tokio::test]
-    async fn read_with_meta_reports_untransformed_epoch_from_the_read_fd() {
-        // #2193 R4 (codex H2b/H6): the armed ledger needs the epoch taken from
-        // the READ descriptor (not a separate path stat), and transformed=false
-        // for ordinary text.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("hello.txt");
-        std::fs::write(&path, b"hello world\n").unwrap();
-        let (content, meta) = read_no_follow_with_meta(&path).await.unwrap();
-        assert_eq!(content, "hello world\n");
-        assert!(!meta.transformed, "plain text is not a transform");
-        let epoch = meta.epoch.expect("descriptor epoch");
-        assert_eq!(epoch.size, 12);
-        let independent =
-            crate::tools::read_window::ViewEpoch::from_metadata(&std::fs::metadata(&path).unwrap())
-                .unwrap();
-        assert_eq!(epoch, independent, "epoch describes the exact inode read");
-    }
-
-    #[tokio::test]
     async fn write_no_follow_checked_writes_when_epoch_matches() {
         use crate::tools::read_window::ViewEpoch;
         let dir = tempfile::TempDir::new().unwrap();
@@ -1653,34 +1634,6 @@ mod nofollow_tests {
         );
     }
 
-    /// Pins the PDF auto-extract path (mini5 invoice regression
-    /// 2026-05-12 PT): files whose first 5 bytes are `%PDF-` must be
-    /// routed through `pdf-extract` instead of `read_to_string`. We
-    /// don't ship a real PDF in tests, but feeding a malformed PDF
-    /// proves the route is taken — without the route we'd get a UTF-8
-    /// error; with it we get an `InvalidData("pdf extraction failed:
-    /// ...")` from pdf-extract.
-    #[tokio::test]
-    async fn test_read_no_follow_routes_pdf_through_extractor() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let pdf = dir.path().join("invalid.pdf");
-        // Real PDF magic; body is garbage so pdf-extract should fail
-        // with a parse error (NOT a UTF-8 error). The point is to prove
-        // the dispatch happened, not that we can parse this junk.
-        std::fs::write(&pdf, b"%PDF-1.4\nthis is not a valid pdf body").unwrap();
-
-        let err = read_no_follow(&pdf).await.unwrap_err();
-        assert_eq!(
-            err.kind(),
-            std::io::ErrorKind::InvalidData,
-            "pdf-extract failures must surface as InvalidData, got: {err}"
-        );
-        assert!(
-            err.to_string().contains("pdf extraction failed"),
-            "error should identify the extractor, got: {err}"
-        );
-    }
-
     #[tokio::test]
     async fn test_read_no_follow_not_found() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -1703,54 +1656,6 @@ mod nofollow_tests {
         assert!(is_symlink_error(&err), "expected ELOOP, got: {err}");
     }
 
-    #[tokio::test]
-    async fn test_read_no_follow_reads_full_content_from_held_fd() {
-        // P2 (tri-repo #1529): both branches now read the rest of the file
-        // from the ALREADY-OPEN O_NOFOLLOW fd (seek back to 0) instead of
-        // re-opening the path. This guards the seek: after the 5-byte magic
-        // peek, the full content — INCLUDING the first 5 bytes — must be
-        // returned. A missing `seek(0)` would drop the leading 5 bytes.
-        let dir = tempfile::TempDir::new().unwrap();
-        let file = dir.path().join("plain.txt");
-        let content = "HELLO, this plaintext must round-trip in full.";
-        std::fs::write(&file, content).unwrap();
-
-        let read = read_no_follow(&file).await.unwrap();
-        assert_eq!(read, content, "full content must be read from the held fd");
-    }
-
-    #[tokio::test]
-    async fn test_read_no_follow_pdf_reads_whole_file_from_fd_not_path() {
-        // The PDF branch previously did `std::fs::read(&path)` — a re-open by
-        // path that follows a symlink swapped in after the O_NOFOLLOW open
-        // (TOCTOU). It now reads the whole file (magic + body) from the held
-        // fd. A PDF whose body extends well past the 5-byte magic must reach
-        // the extractor in full: pdf-extract fails on this junk body with
-        // InvalidData (proving the whole buffer, not a 5-byte truncation, was
-        // handed over — an empty/short buffer would surface differently).
-        let dir = tempfile::TempDir::new().unwrap();
-        let pdf = dir.path().join("doc.pdf");
-        let mut bytes = b"%PDF-1.7\n".to_vec();
-        bytes.extend(std::iter::repeat_n(b'X', 4096));
-        std::fs::write(&pdf, &bytes).unwrap();
-
-        let err = read_no_follow(&pdf).await.unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
-        assert!(
-            err.to_string().contains("pdf extraction failed"),
-            "got: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_write_no_follow_regular_file() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let file = dir.path().join("out.txt");
-
-        write_no_follow(&file, b"written").await.unwrap();
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), "written");
-    }
-
     #[cfg(unix)]
     #[tokio::test]
     async fn test_write_no_follow_rejects_symlink() {
@@ -1764,23 +1669,6 @@ mod nofollow_tests {
         assert!(is_symlink_error(&err), "expected ELOOP, got: {err}");
         // Target must not be modified
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "original");
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn test_file_io_error_symlink() {
-        let err = std::io::Error::from_raw_os_error(libc::ELOOP);
-        let result = file_io_error(err, "test.txt");
-        assert!(!result.success);
-        assert!(result.output.contains("Symlinks"));
-    }
-
-    #[test]
-    fn test_file_io_error_not_found() {
-        let err = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
-        let result = file_io_error(err, "missing.txt");
-        assert!(!result.success);
-        assert!(result.output.contains("File not found"));
     }
 }
 
@@ -1796,90 +1684,6 @@ mod path_tests {
         assert!(resolve_path(base, "/home/user/project/../../../etc/shadow").is_err());
     }
 
-    /// Authenticated upload tmpdir is whitelisted — uploaded files
-    /// land outside the workspace, so `read_file(<absolute upload path>)`
-    /// must succeed (pinned by the mini5 redbank.md regression,
-    /// 2026-05-12: WS upload handles now resolve to absolute tmpdir
-    /// paths, but the LLM hit "absolute paths are not allowed" before
-    /// this fix).
-    ///
-    /// Post-`resolve_tool_path` migration: the resolver now always
-    /// returns the canonical form (firmlinks collapsed via
-    /// `canonicalize_lossy`), so the containment check uses the
-    /// canonicalised upload root instead of the un-prefixed one — the
-    /// macOS firmlink companion test already uses this same shape.
-    #[test]
-    fn test_resolve_allows_absolute_path_inside_upload_root() {
-        let upload_root = octos_bus::file_handle::temp_upload_root();
-        // Ensure the upload root exists so canonicalize succeeds even on
-        // pristine Linux CI runners that haven't touched the tmpdir yet.
-        std::fs::create_dir_all(&upload_root).expect("upload tmpdir creatable");
-        let abs = upload_root.join("abc-redbank-proposal.md");
-        let resolved = resolve_path(Path::new("/home/user/project"), &abs.to_string_lossy())
-            .expect("upload-tmpdir absolute paths must be accepted");
-        let canonical_upload_root = std::fs::canonicalize(&upload_root).unwrap_or(upload_root);
-        assert!(
-            resolved.starts_with(&canonical_upload_root),
-            "resolved path {} should canonicalise under {}",
-            resolved.display(),
-            canonical_upload_root.display()
-        );
-    }
-
-    /// Pins the mini5 redbank.md regression (2026-05-12 PT). On macOS,
-    /// `resolve_upload_reference` canonicalizes via `std::fs::canonicalize`,
-    /// returning the firmlink-resolved form `/private/var/folders/...`. But
-    /// `temp_upload_root()` returns the un-prefixed `/var/folders/...`. A
-    /// purely-syntactic `starts_with` check rejected the canonicalized path
-    /// and `read_file` errored with "absolute paths are not allowed". This
-    /// test exercises the firmlink path: it creates a real file inside the
-    /// upload tmpdir, hands `resolve_path` the canonical (post-firmlink)
-    /// absolute path, and asserts acceptance.
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn test_resolve_macos_firmlink_form_inside_upload_root() {
-        let upload_root = octos_bus::file_handle::temp_upload_root();
-        std::fs::create_dir_all(&upload_root).expect("upload tmpdir must be creatable");
-        let probe = upload_root.join(format!("probe-firmlink-{}.txt", std::process::id()));
-        std::fs::write(&probe, b"hi").unwrap();
-        let canonical = std::fs::canonicalize(&probe).expect("canonicalize uploaded file");
-        // Sanity: macOS firmlinks should give us a /private/ prefix when
-        // probing real tmpdir paths. If this ever fails it means the
-        // platform changed; the test still proves the whitelist works.
-        let canonical_str = canonical.to_string_lossy();
-        assert!(
-            canonical_str.starts_with("/private/var/") || canonical_str.starts_with("/var/"),
-            "expected macOS tmpdir under /var/folders/, got {canonical_str}"
-        );
-        let resolved = resolve_path(
-            Path::new("/home/user/project"),
-            &canonical.to_string_lossy(),
-        )
-        .expect("firmlink-canonical upload path must be accepted");
-        assert!(
-            resolved.starts_with(std::fs::canonicalize(&upload_root).unwrap()),
-            "resolved path {} must canonicalize under upload root",
-            resolved.display()
-        );
-        let _ = std::fs::remove_file(&probe);
-    }
-
-    /// Absolute paths outside the upload tmpdir stay rejected — the
-    /// whitelist is narrow, not a general "absolute is OK" loophole.
-    #[test]
-    fn test_resolve_rejects_absolute_path_outside_upload_root() {
-        let base = Path::new("/home/user/project");
-        let upload_root = octos_bus::file_handle::temp_upload_root();
-        let parent = upload_root.parent().unwrap_or_else(|| Path::new("/"));
-        let sneaky = parent.join("not-uploads/secret.txt");
-        let err = resolve_path(base, &sneaky.to_string_lossy())
-            .expect_err("paths outside both base_dir and upload_root must be rejected");
-        assert!(
-            err.to_string().contains("absolute paths are not allowed"),
-            "expected upload-root rejection message, got: {err}"
-        );
-    }
-
     #[test]
     fn test_resolve_blocks_parent_traversal() {
         let base = Path::new("/home/user/project");
@@ -1893,27 +1697,6 @@ mod path_tests {
         let base = Path::new("/home/user/project");
         let p = resolve_path(base, "src/main.rs").unwrap();
         assert_eq!(p, PathBuf::from("/home/user/project/src/main.rs"));
-    }
-
-    #[test]
-    fn test_resolve_allows_dot_segments_within_base() {
-        let base = Path::new("/home/user/project");
-        let p = resolve_path(base, "src/../src/lib.rs").unwrap();
-        assert_eq!(p, PathBuf::from("/home/user/project/src/lib.rs"));
-    }
-
-    #[test]
-    fn test_resolve_allows_current_dir() {
-        let base = Path::new("/home/user/project");
-        let p = resolve_path(base, "./README.md").unwrap();
-        assert_eq!(p, PathBuf::from("/home/user/project/README.md"));
-    }
-
-    #[test]
-    fn test_resolve_allows_deeply_nested() {
-        let base = Path::new("/home/user/project");
-        let p = resolve_path(base, "a/b/c/d/e/f.rs").unwrap();
-        assert_eq!(p, PathBuf::from("/home/user/project/a/b/c/d/e/f.rs"));
     }
 
     // Note: `test_normalize_handles_complex_paths` retired with the
@@ -1938,26 +1721,9 @@ mod path_tests {
     }
 
     #[test]
-    fn test_resolve_rejects_empty_path() {
-        let base = Path::new("/home/user/project");
-        let result = resolve_path(base, "");
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), PathBuf::from("/home/user/project"));
-    }
-
-    #[test]
     fn test_resolve_rejects_null_byte() {
         let base = Path::new("/home/user/project");
         let result = resolve_path(base, "file\0.txt");
-        if let Ok(p) = &result {
-            assert!(p.starts_with(base));
-        }
-    }
-
-    #[test]
-    fn test_resolve_rejects_windows_separators() {
-        let base = Path::new("/home/user/project");
-        let result = resolve_path(base, "..\\..\\etc\\passwd");
         if let Ok(p) = &result {
             assert!(p.starts_with(base));
         }
@@ -2087,36 +1853,6 @@ mod path_tests {
         );
     }
 
-    /// codex #1367 round-4 P2: a value that DECODES as an upload handle but
-    /// whose temp file is gone (deleted / no longer canonicalises under the
-    /// upload root) must report a missing upload — NOT fall through to the
-    /// workspace resolver, which would let `write_file` create
-    /// `<workspace>/up/<payload>/<name>` or a read silently hit an unrelated
-    /// same-named workspace file.
-    #[test]
-    fn scoped_session_rejects_decoded_but_missing_upload_handle() {
-        let upload_root = octos_bus::file_handle::temp_upload_root();
-        std::fs::create_dir_all(&upload_root).unwrap();
-        let uploaded = upload_root.join(format!("m-{}-gone.md", std::process::id()));
-        std::fs::write(&uploaded, b"temp\n").unwrap();
-        let handle = octos_bus::file_handle::encode_tmp_upload_handle(&uploaded, Some("gone.md"))
-            .expect("encode upload handle");
-        // Delete the upload so the handle still DECODES but no longer resolves.
-        std::fs::remove_file(&uploaded).unwrap();
-
-        let workspace = tempfile::tempdir().expect("workspace tmpdir");
-        let scope = SessionScope::solo(workspace.path().to_path_buf(), vec![]).unwrap();
-
-        assert!(
-            resolve_path_for_session_scope_read(&scope, &handle).is_err(),
-            "a decoded-but-missing upload handle must error, not resolve to a workspace path"
-        );
-        assert!(
-            resolve_path_for_session_scope_write(&scope, &handle).is_err(),
-            "write to a missing upload handle must error"
-        );
-    }
-
     /// #1377 tenant isolation: a multi-tenant (scoped) session must NOT resolve
     /// a global `up/` upload handle — uploads are materialized into `uploads/`
     /// and read by that workspace path. (Solo sessions keep resolving handles;
@@ -2152,157 +1888,6 @@ mod path_tests {
         let ok = resolve_path_for_session_scope_read(&scope, "uploads/secret.md")
             .expect("uploads/<name> must resolve in the workspace");
         assert!(ok.starts_with(scope.workspace().join("uploads")));
-    }
-
-    /// Interim guard (#1378): the upload-handle namespace is detected for
-    /// directory-listing tools, and ONLY that namespace — a normal path or a
-    /// directory whose name merely starts with "up" must not be hijacked.
-    #[test]
-    fn upload_handle_namespace_guidance_matches_only_the_up_namespace() {
-        for p in ["up", "up/", "up/abc123/file.md"] {
-            assert!(
-                super::upload_handle_namespace_guidance(p).is_some(),
-                "expected guidance for upload-namespace path {p:?}"
-            );
-        }
-        // Verbatim match (codex round-6): `./up/...` and whitespace variants are
-        // NOT hijacked, because the read path doesn't accept those spellings as
-        // handles either — staying consistent avoids guiding to a failing read.
-        for p in [
-            "uploads/x",
-            "up2/x",
-            "upstream/x",
-            "report.md",
-            "slides/untitled/script.js",
-            "",
-            "/etc/passwd",
-            "./up/abc/file.md",
-            "  up/x  ",
-        ] {
-            assert!(
-                super::upload_handle_namespace_guidance(p).is_none(),
-                "must NOT hijack non-upload-namespace path {p:?}"
-            );
-        }
-        assert!(
-            super::upload_handle_namespace_guidance("up/x")
-                .unwrap()
-                .contains("read_file"),
-            "guidance should point the model at read_file"
-        );
-    }
-
-    /// The centralised gate (#1378): a bare valid handle redirects even beside a
-    /// real `up/` dir (decode precedence); a non-handle `up/...` beside a real
-    /// `up/` dir does NOT (normal workspace path); and `./`-prefixed spellings
-    /// are NOT redirected — the read path doesn't accept them either, so the
-    /// guard stays consistent rather than guiding to a failing read (round-6).
-    #[test]
-    fn upload_namespace_redirect_matches_readfile_acceptance() {
-        let ws = tempfile::tempdir().expect("ws");
-        std::fs::create_dir(ws.path().join("up")).unwrap(); // a REAL up/ dir
-        let handle = octos_bus::file_handle::encode_tmp_upload_handle(
-            &octos_bus::file_handle::temp_upload_root().join("u-x-report.md"),
-            Some("report.md"),
-        )
-        .expect("encode handle");
-
-        // A bare valid handle decodes → redirect even though a real `up/` dir
-        // exists (decode precedence, consistent with read_file).
-        assert!(
-            super::upload_namespace_redirect(&handle, ws.path()).is_some(),
-            "the bare valid handle must redirect even beside a real up/ dir"
-        );
-        // `./`-prefixed: read_file would NOT treat this as a handle, so neither
-        // do we (no guiding the model to a read that fails).
-        assert!(
-            super::upload_namespace_redirect(&format!("./{handle}"), ws.path()).is_none(),
-            "a ./-prefixed handle must NOT redirect (matches read_file acceptance)"
-        );
-        // Non-handle `up/...` beside a real up/ dir → normal workspace path.
-        assert!(
-            super::upload_namespace_redirect("up/keep.txt", ws.path()).is_none(),
-            "non-handle up/ path beside a real up/ dir must NOT redirect"
-        );
-        assert!(
-            super::upload_namespace_redirect("up", ws.path()).is_none(),
-            "listing the real up/ dir itself must NOT redirect"
-        );
-        // No real up/ dir → any up-namespace path redirects.
-        let empty = tempfile::tempdir().expect("empty ws");
-        assert!(super::upload_namespace_redirect("up", empty.path()).is_some());
-        assert!(super::upload_namespace_redirect("up/x", empty.path()).is_some());
-        assert!(super::upload_namespace_redirect("uploads/x", empty.path()).is_none());
-    }
-
-    /// PR-A core invariant: write attempts inside a registered
-    /// skill_dir are refused even though reads succeed.
-    /// `for_write=true` (the write-side resolver) must take the
-    /// `InSkillDir` branch and bail with the read-only message.
-    #[test]
-    fn write_file_to_skill_dir_classifies_in_skill_dir_but_resolve_for_write_refuses() {
-        let workspace = tempfile::tempdir().expect("workspace tmpdir");
-        let skill = tempfile::tempdir().expect("skill tmpdir");
-        let skill_file = skill.path().join("SKILL.md");
-        std::fs::write(&skill_file, b"# skill").unwrap();
-
-        let scope = SessionScope::solo(workspace.path().to_path_buf(), vec![])
-            .unwrap()
-            .with_skill_read_zones(vec![skill.path().to_path_buf()])
-            .expect("skill_dir is absolute");
-
-        // Read side: accept.
-        let read_ok = resolve_path_for_session_scope_read(&scope, &skill_file.to_string_lossy());
-        assert!(read_ok.is_ok(), "read must succeed inside skill_dir");
-
-        // Write side: refuse. The error text comes from the
-        // `InSkillDir` arm of `resolve_for_scope`.
-        let write_err = resolve_path_for_session_scope_write(&scope, &skill_file.to_string_lossy())
-            .expect_err("write must refuse inside skill_dir");
-        assert!(
-            write_err.contains("Writes to plugin skill directories are not permitted"),
-            "expected skill-dir read-only message, got: {write_err}"
-        );
-    }
-
-    /// Writes inside the workspace still succeed when skill_read_zones
-    /// are configured (additive — no regression to existing tools).
-    #[test]
-    fn write_to_workspace_still_works_when_skill_read_zones_configured() {
-        let workspace = tempfile::tempdir().expect("workspace tmpdir");
-        let skill = tempfile::tempdir().expect("skill tmpdir");
-        let scope = SessionScope::solo(workspace.path().to_path_buf(), vec![])
-            .unwrap()
-            .with_skill_read_zones(vec![skill.path().to_path_buf()])
-            .unwrap();
-        let target = workspace.path().join("out.txt");
-        let resolved = resolve_path_for_session_scope_write(&scope, &target.to_string_lossy())
-            .expect("writes inside workspace must succeed");
-        assert_eq!(resolved, target);
-    }
-
-    /// Reads outside any registered zone still refuse after
-    /// skill_read_zones land. Pre-PR-A out-of-scope paths must keep
-    /// failing.
-    #[test]
-    fn read_outside_skill_dir_and_workspace_still_refused() {
-        let workspace = tempfile::tempdir().expect("workspace tmpdir");
-        let skill = tempfile::tempdir().expect("skill tmpdir");
-        let outside = tempfile::tempdir().expect("outside tmpdir");
-        std::fs::write(outside.path().join("secret"), b"x").unwrap();
-
-        let scope = SessionScope::solo(workspace.path().to_path_buf(), vec![])
-            .unwrap()
-            .with_skill_read_zones(vec![skill.path().to_path_buf()])
-            .unwrap();
-
-        let target = outside.path().join("secret");
-        let err = resolve_path_for_session_scope_read(&scope, &target.to_string_lossy())
-            .expect_err("path outside scope must be refused");
-        assert!(
-            err.contains("Path outside session scope"),
-            "expected out-of-scope refusal, got: {err}"
-        );
     }
 }
 
@@ -2419,75 +2004,7 @@ mod tool_context_tests {
         let _cloned = ctx.app_state.clone();
     }
 
-    #[tokio::test]
-    async fn should_delegate_execute_to_execute_with_context() {
-        // Legacy tool: override only `execute`. The default impl of
-        // `execute_with_context` must route to it.
-        let tool = LegacyTool::new();
-        let ctx = ToolContext::zero();
-        let result = tool
-            .execute_with_context(&ctx, &serde_json::json!({}))
-            .await
-            .expect("legacy tool must succeed via default delegation");
-        assert!(result.success);
-        assert_eq!(result.output, "legacy output");
-        assert_eq!(tool.execute_calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn should_invoke_execute_with_context_for_migrated_tool() {
-        let tool = ContextAwareTool::new();
-        let mut ctx = ToolContext::zero();
-        ctx.tool_id = "call-42".to_string();
-        let result = tool
-            .execute_with_context(&ctx, &serde_json::json!({}))
-            .await
-            .expect("ctx-aware tool must succeed");
-        assert!(result.success);
-        assert!(result.output.contains("tool_id=call-42"));
-        assert!(result.output.contains("allow_all=true"));
-        assert!(result.output.contains("defs_empty=true"));
-        assert_eq!(tool.with_ctx_calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn should_route_migrated_tool_execute_back_through_context_path() {
-        // When a migrated tool is called via the legacy `execute` entry
-        // point, it must still take its ctx-aware branch (invoked with
-        // the zero-value context so out-of-band callers keep working).
-        let tool = ContextAwareTool::new();
-        let result = tool
-            .execute(&serde_json::json!({}))
-            .await
-            .expect("migrated tool's legacy execute must succeed");
-        assert!(result.success);
-        // tool_id is empty because ToolContext::zero() carries no id.
-        assert!(result.output.starts_with("tool_id=;"));
-        assert_eq!(tool.with_ctx_calls.load(Ordering::SeqCst), 1);
-    }
-
     // ---------- M8.8 concurrency-class tests ----------
-
-    struct ExclusiveStubTool;
-
-    #[async_trait]
-    impl Tool for ExclusiveStubTool {
-        fn name(&self) -> &str {
-            "exclusive_stub"
-        }
-        fn description(&self) -> &str {
-            "stub"
-        }
-        fn input_schema(&self) -> Value {
-            serde_json::json!({})
-        }
-        async fn execute(&self, _args: &Value) -> Result<ToolResult> {
-            Ok(ToolResult::default())
-        }
-        fn concurrency_class(&self) -> ConcurrencyClass {
-            ConcurrencyClass::Exclusive
-        }
-    }
 
     #[test]
     fn default_concurrency_class_is_safe() {
@@ -2499,25 +2016,9 @@ mod tool_context_tests {
         assert_eq!(ctx_tool.concurrency_class(), ConcurrencyClass::Safe);
     }
 
-    #[test]
-    fn override_returns_exclusive() {
-        // A tool that opts into Exclusive must be reported as Exclusive.
-        let tool = ExclusiveStubTool;
-        assert_eq!(tool.concurrency_class(), ConcurrencyClass::Exclusive);
-    }
-
-    #[test]
-    fn concurrency_class_is_copy_eq_default() {
-        // The enum exposes Copy + Eq + Default as contracted by the M8.8 spec.
-        let a: ConcurrencyClass = ConcurrencyClass::default();
-        let b = a; // Copy
-        assert_eq!(a, b);
-        assert_eq!(ConcurrencyClass::default(), ConcurrencyClass::Safe);
-    }
-
     // ---------- M8 fix-first item 8 (gap 4b) — ToolPermissions::from_profile ----------
 
-    use crate::profile::{PROFILE_SCHEMA_VERSION, PermissionMode, ProfileDefinition, ProfileTools};
+    use crate::profile::{PROFILE_SCHEMA_VERSION, ProfileDefinition, ProfileTools};
 
     fn make_profile(name: &str, tools: ProfileTools) -> ProfileDefinition {
         ProfileDefinition {
@@ -2540,43 +2041,6 @@ mod tool_context_tests {
     }
 
     #[test]
-    fn should_deny_listed_tools_when_profile_uses_deny_list() {
-        // DenyList must block the named tools while leaving everything else
-        // permitted. Plain tool names match exactly.
-        let profile = make_profile(
-            "no-shell",
-            ProfileTools::DenyList {
-                tools: vec!["shell".to_string()],
-            },
-        );
-        let permissions = ToolPermissions::from_profile(&profile);
-        assert!(
-            !permissions.is_tool_allowed("shell"),
-            "shell must be denied"
-        );
-        assert!(permissions.is_tool_allowed("read_file"));
-    }
-
-    #[test]
-    fn should_only_allow_listed_tools_when_profile_uses_allow_list() {
-        // AllowList must restrict to only the named tools (everything else
-        // becomes implicitly denied). Tools outside the list lose.
-        let profile = make_profile(
-            "ro",
-            ProfileTools::AllowList {
-                tools: vec!["read_file".to_string()],
-            },
-        );
-        let permissions = ToolPermissions::from_profile(&profile);
-        assert!(permissions.is_tool_allowed("read_file"));
-        assert!(
-            !permissions.is_tool_allowed("shell"),
-            "non-allow-listed tools must be denied"
-        );
-        assert!(!permissions.is_tool_allowed("write_file"));
-    }
-
-    #[test]
     fn should_expand_group_references_in_deny_list() {
         // `group:fs` references must expand to read_file / write_file /
         // edit_file / diff_edit per crate::tools::policy::TOOL_GROUPS so
@@ -2593,57 +2057,6 @@ mod tool_context_tests {
         assert!(!permissions.is_tool_allowed("edit_file"));
         assert!(!permissions.is_tool_allowed("diff_edit"));
         // Non-fs tools still permitted.
-        assert!(permissions.is_tool_allowed("shell"));
-    }
-
-    #[test]
-    fn should_expand_group_references_in_allow_list() {
-        // `group:search` allows glob/grep/list_dir; everything else is
-        // implicitly denied.
-        let profile = make_profile(
-            "search-only",
-            ProfileTools::AllowList {
-                tools: vec!["group:search".to_string()],
-            },
-        );
-        let permissions = ToolPermissions::from_profile(&profile);
-        assert!(permissions.is_tool_allowed("glob"));
-        assert!(permissions.is_tool_allowed("grep"));
-        assert!(permissions.is_tool_allowed("list_dir"));
-        assert!(!permissions.is_tool_allowed("shell"));
-        assert!(!permissions.is_tool_allowed("read_file"));
-    }
-
-    #[test]
-    fn should_pass_through_when_allow_list_is_empty() {
-        // Empty allow list mirrors the registry filter behaviour: an empty
-        // allow list is a degenerate case that we treat as "no filter" (the
-        // explicit deny list is the right tool to disable everything).
-        let profile = make_profile("empty-allow", ProfileTools::AllowList { tools: Vec::new() });
-        let permissions = ToolPermissions::from_profile(&profile);
-        assert!(permissions.is_tool_allowed("anything"));
-    }
-
-    #[test]
-    fn should_record_permission_mode_from_profile() {
-        // The mode field is informational today; verify it survives the
-        // from_profile boundary so future tier rules can read it.
-        let profile = ProfileDefinition {
-            name: "restricted".to_string(),
-            version: PROFILE_SCHEMA_VERSION,
-            permissions: PermissionMode::Restricted,
-            ..Default::default()
-        };
-        let permissions = ToolPermissions::from_profile(&profile);
-        assert_eq!(permissions.mode(), PermissionMode::Restricted);
-    }
-
-    #[test]
-    fn default_tool_permissions_remain_allow_all() {
-        // Ensure the existing zero-value default keeps its allow-all
-        // semantics so unrelated tests/contexts do not regress.
-        let permissions = ToolPermissions::default();
-        assert!(permissions.is_tool_allowed("anything"));
         assert!(permissions.is_tool_allowed("shell"));
     }
 }

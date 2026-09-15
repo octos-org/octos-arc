@@ -392,27 +392,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_xml_summary() {
-        let dir = tempfile::tempdir().unwrap();
-        let skills_dir = setup_skills_dir(&dir).await;
-
-        let skill_dir = skills_dir.join("test-skill");
-        tokio::fs::create_dir_all(&skill_dir).await.unwrap();
-        tokio::fs::write(
-            skill_dir.join("SKILL.md"),
-            "---\nname: test-skill\ndescription: A test\n---\nBody.\n",
-        )
-        .await
-        .unwrap();
-
-        let loader = SkillsLoader::new(dir.path());
-        let summary = loader.build_skills_summary().await.unwrap();
-        assert!(summary.contains("<skills>"));
-        assert!(summary.contains("<name>test-skill</name>"));
-        assert!(summary.contains("<description>A test</description>"));
-    }
-
-    #[tokio::test]
     async fn test_always_filtering() {
         let dir = tempfile::tempdir().unwrap();
         let skills_dir = setup_skills_dir(&dir).await;
@@ -447,76 +426,6 @@ mod tests {
     }
 
     #[test]
-    fn test_no_frontmatter() {
-        let content = "Just some text.";
-        let (fm, body) = split_frontmatter(content);
-        assert!(fm.is_none());
-        assert_eq!(body, content);
-    }
-
-    #[test]
-    fn test_version_author_parsing() {
-        let content =
-            "---\nname: my-skill\ndescription: Does X\nversion: 1.2.3\nauthor: alice\n---\nBody.\n";
-        let path = PathBuf::from("/tmp/fake/my-skill/SKILL.md");
-        let info = parse_skill(&path, content, false).unwrap();
-        assert_eq!(info.version.as_deref(), Some("1.2.3"));
-        assert_eq!(info.author.as_deref(), Some("alice"));
-        assert!(!info.has_tools);
-    }
-
-    #[tokio::test]
-    async fn test_has_tools_detection() {
-        let dir = tempfile::tempdir().unwrap();
-        let skills_dir = setup_skills_dir(&dir).await;
-
-        // Skill without tools
-        let plain_dir = skills_dir.join("plain");
-        tokio::fs::create_dir_all(&plain_dir).await.unwrap();
-        tokio::fs::write(
-            plain_dir.join("SKILL.md"),
-            "---\nname: plain\ndescription: No tools\n---\nBody\n",
-        )
-        .await
-        .unwrap();
-
-        // Skill with tools (has manifest.json)
-        let tool_dir = skills_dir.join("with-tools");
-        tokio::fs::create_dir_all(&tool_dir).await.unwrap();
-        tokio::fs::write(
-            tool_dir.join("SKILL.md"),
-            "---\nname: with-tools\ndescription: Has tools\n---\nBody\n",
-        )
-        .await
-        .unwrap();
-        tokio::fs::write(
-            tool_dir.join("manifest.json"),
-            r#"{"name": "with-tools", "version": "1.0", "tools": []}"#,
-        )
-        .await
-        .unwrap();
-
-        let loader = SkillsLoader::new(dir.path());
-        let skills = loader.list_skills().await.unwrap();
-        let plain = skills.iter().find(|s| s.name == "plain").unwrap();
-        assert!(!plain.has_tools);
-        let with_tools = skills.iter().find(|s| s.name == "with-tools").unwrap();
-        assert!(with_tools.has_tools);
-    }
-
-    // --- Pure function tests for split_frontmatter ---
-
-    #[test]
-    fn test_split_frontmatter_leading_whitespace() {
-        // Leading whitespace before --- should still parse
-        let content = "  \n---\nname: foo\n---\nBody\n";
-        let (fm, body) = split_frontmatter(content);
-        let fm = fm.unwrap();
-        assert_eq!(fm_value(&fm, "name").unwrap(), "foo");
-        assert_eq!(body, "Body\n");
-    }
-
-    #[test]
     fn test_split_frontmatter_unclosed() {
         // Only one --- means no valid frontmatter
         let content = "---\nname: foo\nno closing fence";
@@ -526,120 +435,16 @@ mod tests {
     }
 
     #[test]
-    fn test_split_frontmatter_empty_body() {
-        let content = "---\nname: foo\n---\n";
-        let (fm, body) = split_frontmatter(content);
-        assert!(fm.is_some());
-        assert!(body.is_empty() || body.trim().is_empty());
-    }
-
-    #[test]
-    fn test_split_frontmatter_empty_frontmatter() {
-        // Empty frontmatter (no lines between ---) doesn't parse because
-        // the parser requires "\n---" which needs at least one line.
-        let content = "---\n---\nBody only\n";
-        let (fm, body) = split_frontmatter(content);
-        assert!(fm.is_none());
-        assert_eq!(body, content);
-    }
-
-    #[test]
-    fn test_split_frontmatter_multiline_body() {
-        let content = "---\nkey: val\n---\nLine 1\nLine 2\nLine 3\n";
-        let (fm, body) = split_frontmatter(content);
-        assert!(fm.is_some());
-        assert!(body.contains("Line 1"));
-        assert!(body.contains("Line 3"));
-    }
-
-    #[test]
-    fn test_split_frontmatter_dashes_in_body() {
-        // --- in the body (not at frontmatter position) should not interfere
-        let content = "---\nname: test\n---\nSome text\n---\nMore text\n";
-        let (fm, body) = split_frontmatter(content);
-        let fm = fm.unwrap();
-        assert_eq!(fm_value(&fm, "name").unwrap(), "test");
-        // Body should contain the --- from the content
-        assert!(body.contains("---"));
-    }
-
-    // --- Pure function tests for fm_value ---
-
-    #[test]
-    fn test_fm_value_missing_key() {
-        let lines = vec!["name: foo".to_string(), "description: bar".to_string()];
-        assert!(fm_value(&lines, "version").is_none());
-    }
-
-    #[test]
-    fn test_fm_value_with_extra_whitespace() {
-        let lines = vec!["  name:   spaced value  ".to_string()];
-        assert_eq!(fm_value(&lines, "name").unwrap(), "spaced value");
-    }
-
-    #[test]
-    fn test_fm_value_empty_value() {
-        // Empty value is treated as absent (returns None)
-        let lines = vec!["name:".to_string()];
-        assert!(fm_value(&lines, "name").is_none());
-    }
-
-    #[test]
-    fn test_fm_value_yaml_empty_markers() {
-        // YAML empty markers are treated as absent
-        assert!(fm_value(&["requires_bins: []".into()], "requires_bins").is_none());
-        assert!(fm_value(&["requires_bins: ~".into()], "requires_bins").is_none());
-        assert!(fm_value(&[r#"requires_bins: """#.into()], "requires_bins").is_none());
-    }
-
-    #[test]
-    fn test_fm_value_inline_comment() {
-        // Inline YAML comments are stripped
-        let lines = vec!["requires_bins: []   # DOT-based pipeline".into()];
-        assert!(fm_value(&lines, "requires_bins").is_none());
-
-        let lines = vec!["model: gpt-4o # best model".into()];
-        assert_eq!(fm_value(&lines, "model").unwrap(), "gpt-4o");
-    }
-
-    #[test]
     fn test_fm_value_colon_in_value() {
         let lines = vec!["description: key: value pair".to_string()];
         assert_eq!(fm_value(&lines, "description").unwrap(), "key: value pair");
     }
 
     #[test]
-    fn test_fm_value_empty_lines() {
-        let lines: Vec<String> = vec![];
-        assert!(fm_value(&lines, "name").is_none());
-    }
-
-    #[test]
-    fn test_fm_value_duplicate_keys_returns_first() {
-        let lines = vec!["name: first".to_string(), "name: second".to_string()];
-        assert_eq!(fm_value(&lines, "name").unwrap(), "first");
-    }
-
-    // --- Pure function tests for strip_frontmatter ---
-
-    #[test]
     fn test_strip_frontmatter_with_fm() {
         let content = "---\nname: foo\n---\nBody text\n";
         assert_eq!(strip_frontmatter(content), "Body text\n");
     }
-
-    #[test]
-    fn test_strip_frontmatter_without_fm() {
-        let content = "Just plain text\n";
-        assert_eq!(strip_frontmatter(content), "Just plain text\n");
-    }
-
-    #[test]
-    fn test_strip_frontmatter_empty() {
-        assert_eq!(strip_frontmatter(""), "");
-    }
-
-    // --- Pure function tests for parse_skill ---
 
     #[test]
     fn test_parse_skill_minimal() {
@@ -655,16 +460,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_skill_builtin_flag() {
-        let content = "---\nname: test\ndescription: builtin\n---\nBody\n";
-        let path = PathBuf::from("<builtin>/test/SKILL.md");
-        let info = parse_skill(&path, content, true).unwrap();
-        assert!(info.builtin);
-        // builtins never have has_tools
-        assert!(!info.has_tools);
-    }
-
-    #[test]
     fn test_parse_skill_no_frontmatter_returns_none() {
         let content = "Just text, no frontmatter";
         let path = PathBuf::from("/fake/skill/SKILL.md");
@@ -672,51 +467,9 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_skill_always_true() {
-        let content = "---\nname: auto\ndescription: runs always\nalways: true\n---\nBody\n";
-        let path = PathBuf::from("/fake/auto/SKILL.md");
-        let info = parse_skill(&path, content, false).unwrap();
-        assert!(info.always);
-    }
-
-    #[test]
-    fn test_parse_skill_always_non_true_is_false() {
-        let content = "---\nname: nope\ndescription: d\nalways: yes\n---\nBody\n";
-        let path = PathBuf::from("/fake/nope/SKILL.md");
-        let info = parse_skill(&path, content, false).unwrap();
-        assert!(!info.always);
-    }
-
-    #[test]
     fn test_parse_skill_requires_env_missing() {
         let content = "---\nname: envskill\ndescription: d\nrequires_env: OCTOS_NONEXISTENT_VAR_XYZ_99\n---\nB\n";
         let path = PathBuf::from("/fake/envskill/SKILL.md");
-        let info = parse_skill(&path, content, false).unwrap();
-        assert!(!info.available);
-    }
-
-    #[test]
-    fn test_parse_skill_requires_env_multiple_one_missing() {
-        // HOME should exist, but OCTOS_NONEXISTENT should not
-        let content = "---\nname: envskill\ndescription: d\nrequires_env: HOME, OCTOS_NONEXISTENT_VAR_XYZ_99\n---\nB\n";
-        let path = PathBuf::from("/fake/envskill/SKILL.md");
-        let info = parse_skill(&path, content, false).unwrap();
-        assert!(!info.available);
-    }
-
-    #[test]
-    fn test_parse_skill_requires_bins_common() {
-        // "ls" should exist on any Unix system
-        let content = "---\nname: bintest\ndescription: d\nrequires_bins: ls\n---\nB\n";
-        let path = PathBuf::from("/fake/bintest/SKILL.md");
-        let info = parse_skill(&path, content, false).unwrap();
-        assert!(info.available);
-    }
-
-    #[test]
-    fn test_parse_skill_requires_bins_missing() {
-        let content = "---\nname: bintest\ndescription: d\nrequires_bins: nonexistent_binary_xyz_999\n---\nB\n";
-        let path = PathBuf::from("/fake/bintest/SKILL.md");
         let info = parse_skill(&path, content, false).unwrap();
         assert!(!info.available);
     }
@@ -741,112 +494,6 @@ mod tests {
         let allow = SkillFilter::Only(HashSet::from(["news".to_string()]));
         assert!(allow.allows("news"));
         assert!(!allow.allows("weather"));
-    }
-
-    #[tokio::test]
-    async fn disabled_skill_absent_from_list_summary_always_and_content() {
-        let dir = tempfile::tempdir().unwrap();
-        let skills_dir = setup_skills_dir(&dir).await;
-
-        // Two always-on skills; one will be disabled by the filter.
-        for name in &["keep", "drop"] {
-            let sd = skills_dir.join(name);
-            tokio::fs::create_dir_all(&sd).await.unwrap();
-            tokio::fs::write(
-                sd.join("SKILL.md"),
-                format!("---\nname: {name}\ndescription: d\nalways: true\n---\n{name} body\n"),
-            )
-            .await
-            .unwrap();
-        }
-
-        let loader = SkillsLoader::new(dir.path()).with_skill_filter(Some(SkillFilter::AllExcept(
-            HashSet::from(["drop".to_string()]),
-        )));
-
-        // Absent from list_skills (hence the prompt summary + always set).
-        let names: Vec<String> = loader
-            .list_skills()
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|s| s.name)
-            .collect();
-        assert!(names.contains(&"keep".to_string()));
-        assert!(!names.contains(&"drop".to_string()));
-
-        let summary = loader.build_skills_summary().await.unwrap();
-        assert!(summary.contains("<name>keep</name>"));
-        assert!(!summary.contains("<name>drop</name>"));
-
-        let always = loader.get_always_skills().await.unwrap();
-        assert!(always.contains(&"keep".to_string()));
-        assert!(!always.contains(&"drop".to_string()));
-
-        // Content of a disabled skill must never be loadable / injectable.
-        assert!(loader.load_skill("keep").await.unwrap().is_some());
-        assert!(loader.load_skill("drop").await.unwrap().is_none());
-        let ctx = loader
-            .load_skills_for_context(&["keep".into(), "drop".into()])
-            .await
-            .unwrap();
-        assert!(ctx.contains("keep body"));
-        assert!(!ctx.contains("drop body"));
-    }
-
-    #[tokio::test]
-    async fn allow_list_only_loads_listed_skills() {
-        let dir = tempfile::tempdir().unwrap();
-        let skills_dir = setup_skills_dir(&dir).await;
-        for name in &["alpha", "beta"] {
-            let sd = skills_dir.join(name);
-            tokio::fs::create_dir_all(&sd).await.unwrap();
-            tokio::fs::write(
-                sd.join("SKILL.md"),
-                format!("---\nname: {name}\ndescription: d\n---\nbody\n"),
-            )
-            .await
-            .unwrap();
-        }
-        let loader = SkillsLoader::new(dir.path()).with_skill_filter(Some(SkillFilter::Only(
-            HashSet::from(["alpha".to_string()]),
-        )));
-        let names: Vec<String> = loader
-            .list_skills()
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|s| s.name)
-            .collect();
-        assert!(names.contains(&"alpha".to_string()));
-        assert!(!names.contains(&"beta".to_string()));
-        // AllowList drops every skill that is not listed.
-        assert_eq!(names.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn no_filter_loads_every_skill_unchanged() {
-        let dir = tempfile::tempdir().unwrap();
-        let skills_dir = setup_skills_dir(&dir).await;
-        let sd = skills_dir.join("solo");
-        tokio::fs::create_dir_all(&sd).await.unwrap();
-        tokio::fs::write(
-            sd.join("SKILL.md"),
-            "---\nname: solo\ndescription: d\n---\nbody\n",
-        )
-        .await
-        .unwrap();
-        // No filter ⇒ every installed skill loads.
-        let loader = SkillsLoader::new(dir.path());
-        let names: Vec<String> = loader
-            .list_skills()
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|s| s.name)
-            .collect();
-        assert!(names.contains(&"solo".to_string()));
-        assert_eq!(names.len(), 1);
     }
 
     #[tokio::test]

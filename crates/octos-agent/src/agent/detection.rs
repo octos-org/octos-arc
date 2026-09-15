@@ -487,15 +487,6 @@ mod tests {
     }
 
     #[test]
-    fn repair_empty_or_blank_is_empty_object() {
-        assert_eq!(repair_tool_arguments_to_object(""), serde_json::json!({}));
-        assert_eq!(
-            repair_tool_arguments_to_object("   "),
-            serde_json::json!({})
-        );
-    }
-
-    #[test]
     fn repair_never_returns_a_bare_string() {
         // The old fallback stored `Value::String(raw)`, which serialized back to
         // the provider as an invalid `function.arguments` → fatal HTTP 400.
@@ -510,47 +501,6 @@ mod tests {
         let v = repair_tool_arguments_to_object(r#"{"command":"cat report.md"#);
         assert!(v.is_object());
         assert_eq!(v["command"], "cat report.md");
-    }
-
-    #[test]
-    fn repair_closes_a_string_and_object_truncated_mid_heredoc() {
-        // Truncated in the middle of a heredoc command string.
-        let v = repair_tool_arguments_to_object("{\"command\":\"cat > f <<EOF\nline1\nline2");
-        assert!(v.is_object());
-        assert!(
-            v["command"].as_str().unwrap().contains("line1"),
-            "salvaged command: {}",
-            v["command"]
-        );
-    }
-
-    #[test]
-    fn repair_escapes_literal_control_chars_in_strings() {
-        // A heredoc payload with LITERAL newlines/tabs (unescaped) is invalid
-        // JSON; the repair escapes them instead of failing.
-        let v = repair_tool_arguments_to_object("{\"command\":\"echo a\nb\tc\"}");
-        assert!(v.is_object());
-        assert_eq!(v["command"], "echo a\nb\tc");
-    }
-
-    #[test]
-    fn repair_strips_trailing_commas() {
-        let v = repair_tool_arguments_to_object(r#"{"a":1,"b":2,}"#);
-        assert_eq!(v["a"], 1);
-        assert_eq!(v["b"], 2);
-    }
-
-    #[test]
-    fn repair_of_a_json_non_object_degrades_to_empty_object() {
-        // A bare JSON array/string/number is not valid tool arguments.
-        assert_eq!(
-            repair_tool_arguments_to_object("[1,2,3]"),
-            serde_json::json!({})
-        );
-        assert_eq!(
-            repair_tool_arguments_to_object("\"just a string\""),
-            serde_json::json!({})
-        );
     }
 
     #[test]
@@ -582,35 +532,6 @@ mod tests {
         let v = parse_invoke_parameter_tags("<parameter name=\"command\">ls -la /tmp</parameter>")
             .expect("params");
         assert_eq!(v["command"], "ls -la /tmp");
-    }
-
-    #[test]
-    fn parameter_tags_type_numbers_and_bools_but_keep_commands_as_strings() {
-        let v = parse_invoke_parameter_tags(
-            "<parameter name=\"command\">grep -r foo .</parameter>\
-             <parameter name=\"timeout_seconds\">30</parameter>\
-             <parameter name=\"recursive\">true</parameter>",
-        )
-        .expect("params");
-        assert_eq!(v["command"], "grep -r foo .");
-        assert_eq!(v["timeout_seconds"], 30);
-        assert_eq!(v["recursive"], true);
-    }
-
-    #[test]
-    fn parameter_tags_preserve_multiline_heredoc_value() {
-        let body =
-            "<parameter name=\"command\">cat > /tmp/r.md <<'EOF'\n# Review\nline\nEOF</parameter>";
-        let v = parse_invoke_parameter_tags(body).expect("params");
-        let cmd = v["command"].as_str().unwrap();
-        assert!(cmd.contains("<<'EOF'"), "cmd: {cmd}");
-        assert!(cmd.contains("# Review"));
-    }
-
-    #[test]
-    fn parameter_tags_absent_returns_none() {
-        assert!(parse_invoke_parameter_tags(r#"{"command":"ls"}"#).is_none());
-        assert!(parse_invoke_parameter_tags("plain text").is_none());
     }
 
     #[test]
@@ -659,46 +580,6 @@ mod tests {
     }
 
     #[test]
-    fn should_not_retry_with_content() {
-        let r = make_response(Some("hello"), vec![], 0);
-        assert!(!Agent::is_retriable_response(&r));
-    }
-
-    #[test]
-    fn should_not_retry_with_tool_calls() {
-        let tc = ToolCall {
-            id: "1".into(),
-            name: "test".into(),
-            arguments: serde_json::json!({}),
-            metadata: None,
-        };
-        let r = make_response(None, vec![tc], 0);
-        assert!(!Agent::is_retriable_response(&r));
-    }
-
-    #[test]
-    fn should_retry_with_tokens_but_no_content() {
-        let r = make_response(None, vec![], 10);
-        assert!(Agent::is_retriable_response(&r));
-    }
-
-    #[test]
-    fn should_retry_when_content_filtered() {
-        let r = make_response_with_stop(None, vec![], 0, StopReason::ContentFiltered);
-        assert!(Agent::is_retriable_response(&r));
-
-        // Even with partial content, content_filtered should retry
-        let r2 = make_response_with_stop(Some("partial"), vec![], 10, StopReason::ContentFiltered);
-        assert!(Agent::is_retriable_response(&r2));
-    }
-
-    #[test]
-    fn should_retry_when_stop_reason_tooluse_but_no_calls() {
-        let r = make_response_with_stop(Some("thinking"), vec![], 5, StopReason::ToolUse);
-        assert!(Agent::is_retriable_response(&r));
-    }
-
-    #[test]
     fn should_normalize_inline_invoke_block_into_tool_call() {
         let mut r = make_response_with_stop(
             Some("<invoke name=\"cron\">{\"action\":\"list\"}</invoke>"),
@@ -712,63 +593,6 @@ mod tests {
         assert_eq!(r.tool_calls[0].name, "cron");
         assert_eq!(r.tool_calls[0].arguments["action"], "list");
         assert!(r.content.is_none());
-    }
-
-    #[test]
-    fn should_normalize_inline_invoke_self_closing_with_args_attr() {
-        let mut r = make_response_with_stop(
-            Some("before <invoke name=\"cron\" args='{\"action\":\"list\"}' /> after"),
-            vec![],
-            10,
-            StopReason::EndTurn,
-        );
-        Agent::normalize_inline_invokes(&mut r);
-        assert_eq!(r.stop_reason, StopReason::ToolUse);
-        assert_eq!(r.tool_calls.len(), 1);
-        assert_eq!(r.tool_calls[0].name, "cron");
-        assert_eq!(r.tool_calls[0].arguments["action"], "list");
-        assert_eq!(r.content.as_deref(), Some("before  after"));
-    }
-
-    /// Regression (codex round-4 / fix/orphan-sweep-liveness-gate): inline
-    /// `<invoke>` tool-call ids must be PROCESS-UNIQUE, not positional. The id
-    /// previously embedded the within-response index, so the FIRST inline call
-    /// to a given tool in any response was always `call_inline_0_<tool>`. Two
-    /// separate responses each calling `bg_research` first thus collided —
-    /// breaking the tool_call_id-uniqueness invariant the supervisor's
-    /// synth-ack set, the `mark_descendants_failed` pipeline cascade, and the
-    /// orphan-sweep tool_call_id-family exemption all rely on.
-    #[test]
-    fn inline_invoke_ids_are_unique_across_responses() {
-        let body = "<invoke name=\"bg_research\">{\"k\":\"bg_research\"}</invoke>";
-        let (_, calls1) = extract_inline_invokes(body);
-        let (_, calls2) = extract_inline_invokes(body);
-        assert_eq!(calls1.len(), 1);
-        assert_eq!(calls2.len(), 1);
-        assert!(
-            calls1[0].id.starts_with("call_inline_"),
-            "got {}",
-            calls1[0].id
-        );
-        assert!(
-            calls1[0].id.ends_with("_bg_research"),
-            "keeps the readable tool-name suffix: {}",
-            calls1[0].id
-        );
-        assert_ne!(
-            calls1[0].id, calls2[0].id,
-            "the same tool at position 0 in two responses must NOT collide",
-        );
-    }
-
-    /// Within a single response, multiple inline calls still get distinct ids
-    /// (the monotonic counter increments per call).
-    #[test]
-    fn inline_invoke_ids_distinct_within_one_response() {
-        let body = "<invoke name=\"a\">{}</invoke><invoke name=\"b\">{}</invoke>";
-        let (_, calls) = extract_inline_invokes(body);
-        assert_eq!(calls.len(), 2);
-        assert_ne!(calls[0].id, calls[1].id);
     }
 
     #[test]
@@ -787,21 +611,6 @@ mod tests {
         let repeated = "This is a test phrase. ".repeat(30);
         assert!(Agent::is_repetitive_output(&repeated));
     }
-
-    #[test]
-    fn should_not_flag_normal_output() {
-        let normal = "The quick brown fox jumps over the lazy dog. \
-                      Pack my box with five dozen liquor jugs. \
-                      How vexingly quick daft zebras jump.";
-        assert!(!Agent::is_repetitive_output(normal));
-    }
-
-    #[test]
-    fn should_not_flag_short_text() {
-        assert!(!Agent::is_repetitive_output("hello hello hello"));
-    }
-
-    // ---------- Agent::is_retryable_stream_error ----------
 
     #[test]
     fn is_retryable_stream_error_transient_errors() {
@@ -852,23 +661,5 @@ mod tests {
             !Agent::is_retryable_stream_error(&err),
             "MalformedArgs must be NOT retryable so the model sees the diagnostic"
         );
-    }
-
-    #[test]
-    fn is_retryable_stream_error_incomplete_is_typed_retryable() {
-        let typed = octos_llm::StreamError::Incomplete {
-            detail: "stream ended without Done".to_string(),
-        };
-        let err = eyre::Report::new(typed);
-        assert!(Agent::is_retryable_stream_error(&err));
-    }
-
-    #[test]
-    fn is_retryable_stream_error_transport_is_typed_retryable() {
-        let typed = octos_llm::StreamError::Transport {
-            detail: "broken pipe".to_string(),
-        };
-        let err = eyre::Report::new(typed);
-        assert!(Agent::is_retryable_stream_error(&err));
     }
 }

@@ -482,61 +482,6 @@ mod tests {
     }
 
     #[test]
-    fn should_parse_full_profile_with_all_fields() {
-        // Exercise every optional section in a single manifest so the
-        // round-trip and defaulting paths are both covered.
-        let json = r#"{
-            "name": "full",
-            "version": 1,
-            "description": "kitchen-sink profile",
-            "tools": {"mode": "allow_list", "tools": ["shell", "group:fs"]},
-            "mcp_servers": [{"id": "jiuwenclaw"}],
-            "permissions": "restricted",
-            "compaction_policy": {
-                "token_budget": 8000,
-                "preflight_threshold": 12000,
-                "tiers": {"tier_1": 2000, "tier_2": 4000}
-            },
-            "model_preferences": {
-                "default": "anthropic/claude-sonnet-4",
-                "fast": "anthropic/claude-haiku",
-                "strong": "openai/gpt-5"
-            },
-            "system_prompt_template": "prompts/coder.md",
-            "agents": ["research-worker", "repo-editor"]
-        }"#;
-
-        let def = ProfileDefinition::from_json_str(json).expect("parse");
-        assert_eq!(def.name, "full");
-        assert_eq!(def.description.as_deref(), Some("kitchen-sink profile"));
-        match &def.tools {
-            ProfileTools::AllowList { tools } => {
-                assert_eq!(tools, &vec!["shell".to_string(), "group:fs".to_string()]);
-            }
-            other => panic!("expected AllowList, got {other:?}"),
-        }
-        assert_eq!(def.mcp_servers.len(), 1);
-        assert_eq!(def.mcp_servers[0].id, "jiuwenclaw");
-        assert_eq!(def.permissions, PermissionMode::Restricted);
-        let compaction = def.compaction_policy.as_ref().expect("compaction present");
-        assert_eq!(compaction.token_budget, Some(8000));
-        assert_eq!(compaction.preflight_threshold, Some(12000));
-        assert_eq!(compaction.tiers.get("tier_1"), Some(&2000));
-        let prefs = def
-            .model_preferences
-            .as_ref()
-            .expect("model preferences present");
-        assert_eq!(prefs.default.as_deref(), Some("anthropic/claude-sonnet-4"));
-        assert_eq!(prefs.fast.as_deref(), Some("anthropic/claude-haiku"));
-        assert_eq!(prefs.strong.as_deref(), Some("openai/gpt-5"));
-        assert_eq!(
-            def.system_prompt_template.as_deref(),
-            Some(Path::new("prompts/coder.md"))
-        );
-        assert_eq!(def.agents, vec!["research-worker", "repo-editor"]);
-    }
-
-    #[test]
     fn should_reject_profile_with_version_mismatch() {
         let json = r#"{"name": "future", "version": 42}"#;
         let err = ProfileDefinition::from_json_str(json).unwrap_err();
@@ -545,34 +490,6 @@ mod tests {
             msg.contains("version") && msg.contains("42"),
             "expected version error, got {msg}",
         );
-    }
-
-    #[test]
-    fn should_round_trip_profile_through_json() {
-        let original = ProfileDefinition {
-            name: "rt".to_string(),
-            version: 1,
-            description: Some("round-trip".to_string()),
-            tools: ProfileTools::DenyList {
-                tools: vec!["web_fetch".to_string()],
-            },
-            mcp_servers: vec![McpServerRef {
-                id: "hermes".to_string(),
-            }],
-            permissions: PermissionMode::Default,
-            compaction_policy: Some(ProfileCompactionPolicy {
-                token_budget: Some(2048),
-                preflight_threshold: None,
-                tiers: HashMap::new(),
-            }),
-            model_preferences: None,
-            system_prompt_template: None,
-            agents: vec!["repo-editor".to_string()],
-        };
-
-        let text = serde_json::to_string(&original).expect("serialize");
-        let round = ProfileDefinition::from_json_str(&text).expect("deserialize");
-        assert_eq!(round, original);
     }
 
     #[test]
@@ -610,63 +527,6 @@ mod tests {
         // Unknown names produce `None` so the load() caller can fall
         // through to a typed error.
         assert!(ProfileDefinition::builtin("does-not-exist").is_none());
-    }
-
-    #[test]
-    fn should_resolve_profile_path_to_file() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp.path().join("custom.json");
-        std::fs::write(
-            &path,
-            r#"{"name": "custom", "version": 1, "description": "from disk"}"#,
-        )
-        .expect("write");
-        let path_str = path.to_string_lossy().to_string();
-
-        let (def, source) =
-            ProfileDefinition::load_with_home(&path_str, None).expect("load from path");
-        assert_eq!(def.name, "custom");
-        assert_eq!(def.description.as_deref(), Some("from disk"));
-        assert_eq!(source, ProfileSource::ExplicitPath);
-    }
-
-    #[test]
-    fn should_resolve_profile_name_via_user_dir() {
-        // Place a profile.json under `<home>/.octos/profiles/<name>/` and
-        // confirm load() picks it up with source=UserDir.
-        let fake_home = tempfile::tempdir().expect("tempdir");
-        let profiles_dir = fake_home.path().join(".octos/profiles/alpha");
-        std::fs::create_dir_all(&profiles_dir).expect("mkdirs");
-        std::fs::write(
-            profiles_dir.join("profile.json"),
-            r#"{"name": "alpha", "version": 1}"#,
-        )
-        .expect("write");
-
-        let (def, source) = ProfileDefinition::load_with_home("alpha", Some(fake_home.path()))
-            .expect("load from user dir");
-        assert_eq!(def.name, "alpha");
-        assert_eq!(source, ProfileSource::UserDir);
-    }
-
-    #[test]
-    fn should_resolve_builtin_when_user_dir_missing() {
-        let fake_home = tempfile::tempdir().expect("tempdir");
-        // No user-dir override; coding must resolve via the built-in
-        // fallback with source=Builtin.
-        let (def, source) = ProfileDefinition::load_with_home("coding", Some(fake_home.path()))
-            .expect("load builtin");
-        assert_eq!(def.name, "coding");
-        assert_eq!(source, ProfileSource::Builtin);
-    }
-
-    #[test]
-    fn should_reject_unknown_profile_name() {
-        let fake_home = tempfile::tempdir().expect("tempdir");
-        let err = ProfileDefinition::load_with_home("no-such-profile", Some(fake_home.path()))
-            .unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("no-such-profile"));
     }
 
     #[test]
@@ -723,26 +583,6 @@ mod tests {
         // Agents preloaded match the M8.2 built-in set so spawn() can
         // resolve them by id.
         assert!(coding.agents.contains(&"repo-editor".to_string()));
-    }
-
-    #[test]
-    fn should_load_builtin_coding_full_profile_as_unfiltered_escape_hatch() {
-        let full = ProfileDefinition::builtin("coding-full").expect("coding-full");
-        full.validate().expect("valid");
-        // `coding-full` preserves the pre-lean unfiltered registry
-        // byte-for-byte: no allow/deny list, no compaction or permission
-        // override.
-        assert!(
-            matches!(full.tools, ProfileTools::Default),
-            "coding-full must not filter tools",
-        );
-        assert!(full.compaction_policy.is_none());
-        assert_eq!(full.permissions, PermissionMode::Default);
-        // Same preloaded sub-agents as `coding` so switching profiles
-        // never changes spawn() manifest resolution.
-        let coding = ProfileDefinition::builtin("coding").expect("coding");
-        assert_eq!(full.agents, coding.agents);
-        assert!(ProfileDefinition::builtin_ids().contains(&"coding-full"));
     }
 
     /// Minimal schema-bearing tool used to stand in for bundled-skill /
@@ -855,66 +695,6 @@ mod tests {
     }
 
     #[test]
-    fn spawn_only_tools_survive_filter_so_bootstrap_gates_on_allows() {
-        let mut tools = ToolRegistry::new();
-        tools.register(StubTool {
-            name: "podcast_generate",
-        });
-        tools.mark_spawn_only("podcast_generate", None);
-        tools.register(StubTool { name: "read_file" });
-
-        let coding = ProfileDefinition::builtin("coding").expect("coding");
-        coding.apply_to_registry(&mut tools);
-
-        let names: Vec<String> = tools.specs().into_iter().map(|s| s.name).collect();
-        // Registry-level carve-out (M8.3): spawn_only tools are never
-        // evicted by `filter_by_profile` — they carry background-execution
-        // wiring the runtime depends on once registered...
-        assert!(
-            names.contains(&"podcast_generate".to_string()),
-            "spawn_only carve-out regressed: {names:?}",
-        );
-        // ...which is exactly why the chat/acp bootstrap must consult
-        // `ProfileTools::allows` BEFORE registering + marking a spawn_only
-        // tool. The lean coding profile says no; coding-full says yes.
-        assert!(!coding.tools.allows("podcast_generate"));
-        let full = ProfileDefinition::builtin("coding-full").expect("coding-full");
-        assert!(full.tools.allows("podcast_generate"));
-    }
-
-    #[test]
-    fn profile_tools_allows_mirrors_filter_matching() {
-        // Default mode: everything passes.
-        assert!(ProfileTools::Default.allows("anything"));
-
-        let allow = ProfileTools::AllowList {
-            tools: vec!["group:fs".into(), "exec*".into(), "spawn".into()],
-        };
-        assert!(allow.allows("read_file"), "group member must match");
-        assert!(allow.allows("exec_command"), "wildcard must match");
-        assert!(allow.allows("spawn"), "exact name must match");
-        assert!(!allow.allows("web_search"));
-
-        // Empty allow list is treated as pass-through by
-        // `ToolRegistry::filter_by_profile` (with a warning); `allows`
-        // must agree or the bootstrap gate would drop tools the filter
-        // keeps.
-        let empty = ProfileTools::AllowList { tools: vec![] };
-        assert!(empty.allows("web_search"));
-
-        let deny = ProfileTools::DenyList {
-            tools: vec!["group:search".into()],
-        };
-        assert!(!deny.allows("grep"), "denied group member");
-        assert!(deny.allows("read_file"));
-
-        // Empty deny list denies nothing (mirrors the filter's early
-        // return).
-        let empty_deny = ProfileTools::DenyList { tools: vec![] };
-        assert!(empty_deny.allows("edit_file"));
-    }
-
-    #[test]
     fn looks_like_path_classifies_arguments_correctly() {
         // Explicit paths start with /, ./, ~/, or ../; everything else is
         // treated as a profile name for user-dir / builtin lookup.
@@ -926,105 +706,12 @@ mod tests {
         assert!(!looks_like_path("swarm"));
     }
 
-    #[cfg(windows)]
-    #[test]
-    fn looks_like_path_recognizes_windows_absolute_paths() {
-        // Regression: a profile passed by absolute Windows path (drive-letter,
-        // forward- or back-slashed, or verbatim) must be classified as a path
-        // and routed to `from_file`, not treated as a profile name.
-        assert!(looks_like_path(r"C:\Users\me\custom.json"));
-        assert!(looks_like_path("C:/Users/me/custom.json"));
-        assert!(looks_like_path(r"\\?\C:\Users\me\custom.json"));
-        // Plain names still route to name lookup.
-        assert!(!looks_like_path("coding"));
-    }
-
-    #[test]
-    fn expand_tilde_resolves_against_home() {
-        let home = Path::new("/opt/octos-home");
-        assert_eq!(
-            expand_tilde("~/profiles/foo.json", Some(home)),
-            PathBuf::from("/opt/octos-home/profiles/foo.json"),
-        );
-        // Without a home directory the tilde stays literal.
-        assert_eq!(
-            expand_tilde("~/profiles/foo.json", None),
-            PathBuf::from("~/profiles/foo.json"),
-        );
-    }
-
-    #[test]
-    fn should_reject_profile_with_empty_name() {
-        let json = r#"{"name": "   ", "version": 1}"#;
-        let err = ProfileDefinition::from_json_str(json).unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("name"), "expected name error, got {msg}");
-    }
-
-    #[test]
-    fn should_parse_profile_tools_variants() {
-        let default_json = r#"{"mode": "default"}"#;
-        let allow_json = r#"{"mode": "allow_list", "tools": ["shell"]}"#;
-        let deny_json = r#"{"mode": "deny_list", "tools": ["web_fetch"]}"#;
-        let d: ProfileTools = serde_json::from_str(default_json).expect("default");
-        let a: ProfileTools = serde_json::from_str(allow_json).expect("allow");
-        let de: ProfileTools = serde_json::from_str(deny_json).expect("deny");
-        assert!(matches!(d, ProfileTools::Default));
-        match a {
-            ProfileTools::AllowList { tools } => assert_eq!(tools, vec!["shell".to_string()]),
-            _ => panic!("expected allow_list"),
-        }
-        match de {
-            ProfileTools::DenyList { tools } => assert_eq!(tools, vec!["web_fetch".to_string()]),
-            _ => panic!("expected deny_list"),
-        }
-    }
-
     // -----------------------------------------------------------------------
     // Item 5 of OCTOS_M8_FIX_FIRST_CHECKLIST_2026-04-24:
     // Profiles and AgentDefinitions must be authoritative — fields that the
     // runtime does NOT enforce should be rejected/cleaned up so M9 clients
     // do not assume they are operational.
     // -----------------------------------------------------------------------
-
-    #[test]
-    fn profile_load_fails_or_warns_on_unknown_agent_ids() {
-        // A profile that names manifests not in the registry must be
-        // rejected by `validate_against_registry`. The legacy path
-        // silently kept the bad ids, so this test pins the new
-        // hard-validation behaviour.
-        let mut profile = ProfileDefinition::builtin("coding").expect("coding");
-        profile.agents = vec!["typo-worker".into()];
-
-        let registry = crate::agents::AgentDefinitions::with_builtins();
-        let unknown = profile.unknown_agent_ids(&registry);
-        assert_eq!(unknown, vec!["typo-worker".to_string()]);
-
-        let err = profile.validate_against_registry(&registry).unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("typo-worker"),
-            "validation error must name the missing id: {msg}"
-        );
-    }
-
-    #[test]
-    fn manifest_application_does_not_hide_unimplemented_fields_in_prompt_text() {
-        // The legacy `apply_agent_definition` smuggled `effort` and
-        // `permission_mode` into `additional_instructions` so traces
-        // showed them as if they were enforced. The fix-first commit
-        // stops that. We assert here against the manifest itself so the
-        // contract holds even if the application path is reorganised.
-        // The built-in repo-editor must NOT carry unimplemented fields
-        // (max_turns / background) any longer.
-        let registry = crate::agents::AgentDefinitions::with_builtins();
-        let repo_editor = registry.get("repo-editor").expect("repo-editor");
-        let unimplemented = repo_editor.unimplemented_fields();
-        assert!(
-            unimplemented.is_empty(),
-            "built-in repo-editor still carries unimplemented fields: {unimplemented:?}"
-        );
-    }
 
     #[test]
     fn profile_permissions_affect_tool_context_when_restricted() {

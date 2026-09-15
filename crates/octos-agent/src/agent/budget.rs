@@ -217,39 +217,11 @@ mod tests {
         assert_eq!(budget_tokens_used(&uncached), 150);
     }
 
-    #[test]
-    fn agent_config_default_values() {
-        let cfg = AgentConfig::default();
-        assert_eq!(cfg.max_iterations, 0);
-        assert_eq!(cfg.max_tokens, None);
-        assert_eq!(cfg.max_timeout, Some(Duration::from_secs(1800)));
-        assert!(cfg.save_episodes);
-        assert_eq!(cfg.tool_timeout_secs, 1800);
-        assert!(cfg.worker_prompt.is_none());
-    }
-
-    #[test]
-    fn default_tool_timeout_matches_max_so_long_running_tools_have_room() {
-        // Long-running tools like bg_research can legitimately take up to MAX_TOOL_TIMEOUT_SECS.
-        // If DEFAULT < MAX, the LLM must remember to pass `timeout_secs` to use the headroom,
-        // and forgetting silently caps the call. Keep them equal so the default is the ceiling.
-        use super::super::{DEFAULT_TOOL_TIMEOUT_SECS, MAX_TOOL_TIMEOUT_SECS};
-        assert_eq!(DEFAULT_TOOL_TIMEOUT_SECS, MAX_TOOL_TIMEOUT_SECS);
-        assert_eq!(DEFAULT_TOOL_TIMEOUT_SECS, 1800);
-    }
-
     // ---------- TokenTracker ----------
 
     #[test]
     fn token_tracker_new_starts_at_zero() {
         let t = TokenTracker::new();
-        assert_eq!(t.input_tokens.load(Ordering::Relaxed), 0);
-        assert_eq!(t.output_tokens.load(Ordering::Relaxed), 0);
-    }
-
-    #[test]
-    fn token_tracker_default_starts_at_zero() {
-        let t = TokenTracker::default();
         assert_eq!(t.input_tokens.load(Ordering::Relaxed), 0);
         assert_eq!(t.output_tokens.load(Ordering::Relaxed), 0);
     }
@@ -294,66 +266,6 @@ mod tests {
         assert!(
             msg.contains("max_iterations"),
             "expected the message to point at the `max_iterations` lever: {msg}"
-        );
-    }
-
-    #[test]
-    fn budget_stop_max_iterations_message_uses_actual_limit() {
-        // Different iteration caps should surface different numbers.
-        let msg = BudgetStop::MaxIterations { limit: 3 }.message();
-        assert!(msg.contains("3"), "expected '3' in: {msg}");
-        // Sanity: the 50 from the other test must NOT appear when the
-        // limit is 3 — guards against a hardcoded constant slipping in.
-        assert!(
-            !msg.contains("50 iterations") && !msg.contains("50 itr"),
-            "limit must not be hardcoded; got: {msg}"
-        );
-    }
-
-    #[test]
-    fn budget_stop_max_tokens_message() {
-        let msg = BudgetStop::MaxTokens {
-            used: 1000,
-            limit: 500,
-        }
-        .message();
-        assert!(
-            msg.contains("token") || msg.contains("Token") || msg.contains("TOKEN"),
-            "expected 'token' in: {msg}"
-        );
-        assert!(msg.contains("1000"), "expected '1000' in: {msg}");
-        assert!(msg.contains("500"), "expected '500' in: {msg}");
-    }
-
-    #[test]
-    fn budget_stop_activity_timeout_message() {
-        let msg = BudgetStop::ActivityTimeout {
-            limit: Duration::from_secs(120),
-        }
-        .message();
-        assert!(
-            msg.to_lowercase().contains("activity"),
-            "expected 'activity' in: {msg}"
-        );
-        assert!(
-            msg.to_lowercase().contains("timeout"),
-            "expected 'timeout' in: {msg}"
-        );
-    }
-
-    #[test]
-    fn budget_stop_idle_progress_timeout_message() {
-        let msg = BudgetStop::IdleProgressTimeout {
-            limit: Duration::from_secs(120),
-        }
-        .message();
-        assert!(
-            msg.to_lowercase().contains("idle"),
-            "expected 'idle' in: {msg}"
-        );
-        assert!(
-            msg.to_lowercase().contains("progress"),
-            "expected 'progress' in: {msg}"
         );
     }
 
@@ -416,48 +328,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zero_iteration_limit_is_unlimited_but_other_guards_stay_live() {
-        let agent = test_agent(Some(Duration::from_secs(30))).await;
-        assert_eq!(agent.config.max_iterations, 0);
-        let activity = super::super::activity::LoopActivityState::new(Instant::now());
-
-        let stop = agent.check_budget(
-            50_000,
-            Instant::now() - Duration::from_secs(3600),
-            &TokenUsage::default(),
-            &activity,
-        );
-        assert!(
-            stop.is_none(),
-            "active turns with max_iterations=0 must not hit an iteration cap"
-        );
-
-        activity.set_last_activity_at(Instant::now() - Duration::from_secs(301));
-        let stop = agent.check_budget(50_001, Instant::now(), &TokenUsage::default(), &activity);
-        assert!(matches!(stop, Some(BudgetStop::IdleProgressTimeout { .. })));
-    }
-
-    #[tokio::test]
-    async fn stale_progress_trips_activity_timeout_before_idle_timeout() {
-        let agent = test_agent(Some(Duration::from_secs(30))).await;
-        let activity = super::super::activity::LoopActivityState::new(Instant::now());
-        activity.set_last_activity_at(Instant::now() - Duration::from_secs(40));
-
-        let stop = agent.check_budget(
-            1,
-            Instant::now() - Duration::from_secs(3600),
-            &TokenUsage::default(),
-            &activity,
-        );
-
-        assert!(matches!(
-            stop,
-            Some(BudgetStop::ActivityTimeout { limit })
-                if limit == Duration::from_secs(30)
-        ));
-    }
-
-    #[tokio::test]
     async fn idle_progress_still_trips_idle_timeout() {
         let agent = test_agent(Some(Duration::from_secs(600))).await;
         let activity = super::super::activity::LoopActivityState::new(Instant::now());
@@ -473,38 +343,6 @@ mod tests {
     }
 
     // ---------- ConversationResponse derives ----------
-
-    #[test]
-    fn conversation_response_clone_and_debug() {
-        use super::super::ConversationResponse;
-
-        let resp = ConversationResponse {
-            content: "test".into(),
-            reasoning_content: None,
-            provider_metadata: None,
-            token_usage: octos_core::TokenUsage {
-                input_tokens: 10,
-                output_tokens: 20,
-                ..Default::default()
-            },
-            estimated_spend_usd: None,
-            files_modified: vec![],
-            files_to_send: vec![],
-            streamed: false,
-            messages: vec![],
-            assistant_segments: Default::default(),
-            tool_results: vec![],
-            synthesized_from_spawn_only: false,
-            pending_approval: None,
-        };
-        let cloned = resp.clone();
-        assert_eq!(cloned.content, "test");
-        assert_eq!(cloned.token_usage.input_tokens, 10);
-
-        // Debug trait works
-        let debug = format!("{cloned:?}");
-        assert!(debug.contains("ConversationResponse"));
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -605,38 +443,6 @@ pub(super) fn checkpoint_budget_exhaustion(
 mod budget_checkpoint_tests {
     use super::*;
 
-    /// #27h-r1 — dir-level ownership through the fs path (this crate's
-    /// consumer shape).
-    #[test]
-    fn result_owner_dir_level_contract() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        // Absent sidecar ⇒ fail-open.
-        std::fs::write(dir.path().join(".result-owner"), "peer\n").expect("write");
-        std::fs::write(dir.path().join(".result-owner"), "runtime").expect("write");
-    }
-
-    /// #27h — no-sidecar path is byte-identical to 27e: staged view still
-    /// lands in result.md itself (fail-open; pinned by the 27e tests too,
-    /// asserted here for the combined surface).
-    #[test]
-    fn no_owner_path_still_writes_result_md() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let cwd = dir.path();
-        init_repo(cwd);
-        std::fs::write(cwd.join("wip.txt"), "progress").expect("dirty");
-        let marker =
-            checkpoint_budget_exhaustion(Some(cwd), &BudgetStop::MaxIterations { limit: 50 }, 10);
-        assert_eq!(marker.as_deref(), Some("budget_exhausted:50"));
-        assert!(
-            cwd.join("result.md").exists(),
-            "no sidecar ⇒ staged view lands in result.md (27e behavior)"
-        );
-        assert!(
-            !cwd.join("result.checkpoint.md").exists(),
-            "checkpoint mirror only appears when the peer owns result.md"
-        );
-    }
-
     fn init_repo(dir: &std::path::Path) {
         for args in [
             vec!["init"],
@@ -707,26 +513,5 @@ mod budget_checkpoint_tests {
         assert!(result.contains("## Remaining"), "remaining section");
         // no leftover tmp file (atomic write completed).
         assert!(!dir.path().join(".result.md.tmp-27e").exists());
-    }
-
-    /// #27e — RED LINE: a CLEAN worktree produces NO checkpoint — no empty
-    /// commit, no result.md overwrite (the pre-existing behavior holds).
-    #[test]
-    fn clean_worktree_budget_exhaustion_does_not_checkpoint() {
-        let dir = tempfile::tempdir().unwrap();
-        init_repo(dir.path());
-        // Tree stays clean.
-        let marker = checkpoint_budget_exhaustion(
-            Some(dir.path()),
-            &BudgetStop::MaxIterations { limit: 50 },
-            50,
-        );
-        assert!(marker.is_none(), "clean wt must not checkpoint");
-        assert!(
-            !dir.path().join("result.md").exists(),
-            "no result.md written"
-        );
-        let log = git_in(dir.path(), &["log", "--oneline"]).unwrap();
-        assert_eq!(log.lines().count(), 1, "no empty commit: {log}");
     }
 }

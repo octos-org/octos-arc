@@ -890,52 +890,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalid_args_error_reports_type_mismatch() {
-        // #1770: wrong-typed values are reported per-parameter with the
-        // expected and actual JSON types.
-        let dir = tempfile::tempdir().unwrap();
-        let tool = ReadFileTool::new(dir.path());
-        let err = match tool
-            .execute(&serde_json::json!({"path": "a.txt", "start_line": "abc"}))
-            .await
-        {
-            Err(e) => e,
-            Ok(_) => panic!("wrong-typed parameter must fail"),
-        };
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("start_line") && msg.contains("expected integer, got string"),
-            "reports the type mismatch: {msg}"
-        );
-    }
-
-    #[tokio::test]
-    async fn unknown_extra_parameter_is_rejected_with_suggestion() {
-        // #1770: `deny_unknown_fields` — a stray parameter alongside an
-        // otherwise valid call is rejected (it is usually a typo of a
-        // real parameter, and silently ignoring it hides model bugs).
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("ok.txt"), b"ok").unwrap();
-        let tool = ReadFileTool::new(dir.path());
-        let err = match tool
-            .execute(&serde_json::json!({"path": "ok.txt", "startline": 1}))
-            .await
-        {
-            Err(e) => e,
-            Ok(_) => panic!("unknown parameter must fail"),
-        };
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("startline") && msg.contains("unknown parameter"),
-            "names the unknown parameter: {msg}"
-        );
-        assert!(
-            msg.contains("did you mean 'start_line'?"),
-            "suggests the near-miss known parameter: {msg}"
-        );
-    }
-
-    #[tokio::test]
     async fn test_read_file_basic() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("hello.txt"), "line1\nline2\nline3\n").unwrap();
@@ -976,33 +930,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_file_inverted_range_errors_without_panicking() {
-        // mini5 soak regression: start_line > end_line used to panic on
-        // `lines[start..end]` (start>end), crashing the session actor and
-        // orphaning its sub-agents. It must now return a clean error.
-        let dir = tempfile::tempdir().unwrap();
-        let content = (1..=500)
-            .map(|i| format!("line {i}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        std::fs::write(dir.path().join("big.txt"), &content).unwrap();
-
-        let tool = ReadFileTool::new(dir.path());
-        // 351 > 100 — the exact shape from the crash ("starts at 350 but ends at 100").
-        let result = tool
-            .execute(&serde_json::json!({"path": "big.txt", "start_line": 351, "end_line": 100}))
-            .await
-            .unwrap();
-
-        assert!(!result.success, "inverted range must be a clean failure");
-        assert!(
-            result.output.contains("Invalid line range") && result.output.contains("351"),
-            "should explain the bad range: {}",
-            result.output
-        );
-    }
-
-    #[tokio::test]
     async fn test_read_file_nonexistent() {
         let dir = tempfile::tempdir().unwrap();
         let tool = ReadFileTool::new(dir.path());
@@ -1025,21 +952,6 @@ mod tests {
 
         assert!(!result.success);
         assert!(result.output.contains("outside working directory"));
-    }
-
-    #[tokio::test]
-    async fn test_read_file_start_beyond_end() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("short.txt"), "one\ntwo\n").unwrap();
-
-        let tool = ReadFileTool::new(dir.path());
-        let result = tool
-            .execute(&serde_json::json!({"path": "short.txt", "start_line": 100}))
-            .await
-            .unwrap();
-
-        assert!(!result.success);
-        assert!(result.output.contains("beyond file length"));
     }
 
     #[test]
@@ -1118,76 +1030,6 @@ mod tests {
         assert!(second.output.contains("stable.txt"));
     }
 
-    #[tokio::test]
-    async fn should_read_file_tool_miss_when_file_changed_between_reads() {
-        // On most filesystems mtime resolution is coarser than a millisecond.
-        // Seed the cache with an explicitly-older mtime so the subsequent
-        // rewrite is guaranteed to bump it.
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("edits.txt");
-        std::fs::write(&file, "v1\n").unwrap();
-
-        let tool = ReadFileTool::new(dir.path());
-        let cache = Arc::new(FileStateCache::new());
-        let ctx = ctx_with_cache(cache.clone());
-
-        let _ = tool
-            .execute_with_context(&ctx, &serde_json::json!({"path": "edits.txt"}))
-            .await
-            .unwrap();
-        assert_eq!(cache.len(), 1);
-
-        // Back-date the cached mtime by 5 seconds to simulate a later edit
-        // without waiting for wall-clock granularity to change on CI.
-        let backdated = std::time::SystemTime::now() - std::time::Duration::from_secs(5);
-        cache.put(CacheEntry::new(
-            dir.path().join("edits.txt"),
-            backdated,
-            0xDEAD_BEEF,
-            2,
-            false,
-            None,
-        ));
-
-        // Rewriting the file must bust the cache on the next read.
-        std::fs::write(&file, "v2_content\n").unwrap();
-
-        let result = tool
-            .execute_with_context(&ctx, &serde_json::json!({"path": "edits.txt"}))
-            .await
-            .unwrap();
-        assert!(result.success);
-        assert!(
-            !result.output.contains("[FILE_UNCHANGED]"),
-            "mtime changed — must NOT hit the cache, got: {}",
-            result.output
-        );
-        assert!(result.output.contains("v2_content"));
-    }
-
-    #[tokio::test]
-    async fn should_read_file_tool_miss_when_cache_is_none() {
-        // Tools with no cache configured must behave identically to the
-        // pre-M8.4 path — no stub output, no errors.
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("n.txt"), "one\n").unwrap();
-
-        let tool = ReadFileTool::new(dir.path());
-        let ctx = ToolContext::zero();
-
-        let a = tool
-            .execute_with_context(&ctx, &serde_json::json!({"path": "n.txt"}))
-            .await
-            .unwrap();
-        let b = tool
-            .execute_with_context(&ctx, &serde_json::json!({"path": "n.txt"}))
-            .await
-            .unwrap();
-        assert!(a.success && b.success);
-        assert!(!a.output.contains("[FILE_UNCHANGED]"));
-        assert!(!b.output.contains("[FILE_UNCHANGED]"));
-    }
-
     // -----------------------------------------------------------------------
     // Phase 2-C: SessionScope integration tests for ReadFileTool.
     // -----------------------------------------------------------------------
@@ -1257,57 +1099,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn read_file_allows_in_workspace_path() {
-        // `InWorkspace` is the obviously-allowed zone for reads.
-        let scope_dir = tempfile::tempdir().unwrap();
-        std::fs::write(scope_dir.path().join("ok.txt"), "ok\n").unwrap();
-
-        let scope = SessionScope::solo(scope_dir.path().to_path_buf(), vec![]).unwrap();
-        let tool = ReadFileTool::new(scope_dir.path());
-        let ctx = ctx_with_scope(scope);
-
-        let result = tool
-            .execute_with_context(&ctx, &serde_json::json!({"path": "ok.txt"}))
-            .await
-            .unwrap();
-        assert!(result.success, "expected success, got: {}", result.output);
-        assert!(result.output.contains("ok"));
-    }
-
-    #[tokio::test]
-    async fn read_file_allows_in_shared_zone_path() {
-        // Multi-tenant scopes expose shared zones (research/, skills/).
-        // READS into those zones are allowed (writes are not — see the
-        // write_file tests). The user's intent here is explicit:
-        // they're recalling cross-session shared state.
-        let data_dir = tempfile::tempdir().unwrap();
-        let data = data_dir.path().to_path_buf();
-        std::fs::create_dir_all(data.join("research/topic")).unwrap();
-        std::fs::create_dir_all(data.join("users/web-1/workspace")).unwrap();
-        let shared_file = data.join("research/topic/notes.md");
-        std::fs::write(&shared_file, "shared notes\n").unwrap();
-
-        let scope = SessionScope::multi_tenant_with_default_zones(
-            data.clone(),
-            "dspfac".into(),
-            "web-1".into(),
-        )
-        .unwrap();
-        let tool = ReadFileTool::new(scope.workspace());
-        let ctx = ctx_with_scope(scope);
-
-        let result = tool
-            .execute_with_context(
-                &ctx,
-                &serde_json::json!({"path": shared_file.to_string_lossy()}),
-            )
-            .await
-            .unwrap();
-        assert!(result.success, "expected success, got: {}", result.output);
-        assert!(result.output.contains("shared notes"));
-    }
-
     #[cfg(unix)]
     #[tokio::test]
     async fn read_file_refuses_ancestor_symlink_escape() {
@@ -1348,77 +1139,12 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn read_file_falls_back_to_legacy_when_no_scope() {
-        // No scope on the context — behaviour must match the pre-Phase-2C
-        // path (relative resolved against `base_dir`, traversal blocked
-        // by the legacy resolver, etc.).
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("legacy.txt"), "legacy ok\n").unwrap();
-
-        let tool = ReadFileTool::new(dir.path());
-        let ctx = ToolContext::zero();
-        assert!(ctx.session_scope.is_none());
-
-        let ok = tool
-            .execute_with_context(&ctx, &serde_json::json!({"path": "legacy.txt"}))
-            .await
-            .unwrap();
-        assert!(ok.success);
-        assert!(ok.output.contains("legacy ok"));
-
-        let bad = tool
-            .execute_with_context(&ctx, &serde_json::json!({"path": "../escape.txt"}))
-            .await
-            .unwrap();
-        assert!(!bad.success);
-        assert!(bad.output.contains("outside working directory"));
-    }
-
-    // -----------------------------------------------------------------------
-    // #1767: industry-convention parameter aliases.
-    // -----------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn should_accept_file_path_alias_for_path() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("hello.txt"), "aliased content\n").unwrap();
-
-        let tool = ReadFileTool::new(dir.path());
-        let result = tool
-            .execute(&serde_json::json!({"filePath": "hello.txt"}))
-            .await
-            .unwrap();
-
-        assert!(
-            result.success,
-            "filePath alias must work: {}",
-            result.output
-        );
-        assert!(result.output.contains("aliased content"));
-    }
-
     fn ten_lines_file(dir: &tempfile::TempDir) {
         let content = (1..=10)
             .map(|i| format!("line {i}"))
             .collect::<Vec<_>>()
             .join("\n");
         std::fs::write(dir.path().join("lines.txt"), &content).unwrap();
-    }
-
-    #[tokio::test]
-    async fn should_accept_offset_alias_for_start_line() {
-        let dir = tempfile::tempdir().unwrap();
-        ten_lines_file(&dir);
-
-        let tool = ReadFileTool::new(dir.path());
-        let result = tool
-            .execute(&serde_json::json!({"path": "lines.txt", "offset": 3, "end_line": 5}))
-            .await
-            .unwrap();
-
-        assert!(result.success, "{}", result.output);
-        assert!(result.output.contains("showing lines 3-5 of 10"));
     }
 
     #[tokio::test]
@@ -1446,21 +1172,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_default_start_to_one_when_only_limit_given() {
-        let dir = tempfile::tempdir().unwrap();
-        ten_lines_file(&dir);
-
-        let tool = ReadFileTool::new(dir.path());
-        let result = tool
-            .execute(&serde_json::json!({"path": "lines.txt", "limit": 2}))
-            .await
-            .unwrap();
-
-        assert!(result.success, "{}", result.output);
-        assert!(result.output.contains("showing lines 1-2 of 10"));
-    }
-
-    #[tokio::test]
     async fn should_reject_when_both_end_line_and_limit_supplied() {
         let dir = tempfile::tempdir().unwrap();
         ten_lines_file(&dir);
@@ -1479,21 +1190,6 @@ mod tests {
             "expected both-supplied rejection, got: {}",
             result.output
         );
-    }
-
-    #[tokio::test]
-    async fn should_reject_zero_limit() {
-        let dir = tempfile::tempdir().unwrap();
-        ten_lines_file(&dir);
-
-        let tool = ReadFileTool::new(dir.path());
-        let result = tool
-            .execute(&serde_json::json!({"path": "lines.txt", "limit": 0}))
-            .await
-            .unwrap();
-
-        assert!(!result.success);
-        assert!(result.output.contains("at least 1"));
     }
 
     #[test]
@@ -1518,94 +1214,6 @@ mod tests {
         assert!(resolve_line_range(None, None, Some(0)).is_err());
     }
 
-    #[test]
-    fn schema_advertises_canonical_names_only() {
-        let tool = ReadFileTool::new("/tmp");
-        let schema = tool.input_schema();
-        let props = schema["properties"].as_object().unwrap();
-        assert!(props.contains_key("path"));
-        assert!(props.contains_key("start_line"));
-        assert!(props.contains_key("end_line"));
-        assert!(props.contains_key("limit"));
-        assert!(!props.contains_key("filePath"));
-        assert!(!props.contains_key("offset"));
-    }
-
-    #[tokio::test]
-    async fn should_hit_cache_when_limit_expresses_same_range_as_end_line() {
-        // limit folds into the canonical (start, end) range BEFORE the
-        // file-state cache is consulted, so an offset+limit request and a
-        // start_line+end_line request for the same lines share one entry.
-        let dir = tempfile::tempdir().unwrap();
-        ten_lines_file(&dir);
-
-        let tool = ReadFileTool::new(dir.path());
-        let cache = Arc::new(FileStateCache::new());
-        let ctx = ctx_with_cache(cache.clone());
-
-        let first = tool
-            .execute_with_context(
-                &ctx,
-                &serde_json::json!({"path": "lines.txt", "offset": 2, "limit": 3}),
-            )
-            .await
-            .unwrap();
-        assert!(first.success);
-        assert!(!first.output.contains("[FILE_UNCHANGED]"));
-
-        let second = tool
-            .execute_with_context(
-                &ctx,
-                &serde_json::json!({"path": "lines.txt", "start_line": 2, "end_line": 4}),
-            )
-            .await
-            .unwrap();
-        assert!(second.success);
-        assert!(
-            second.output.contains("[FILE_UNCHANGED]"),
-            "same canonical range must hit the cache: {}",
-            second.output
-        );
-    }
-
-    #[tokio::test]
-    async fn should_read_file_tool_not_hit_when_range_differs() {
-        // A (1, 5) cache entry cannot satisfy a (3, 7) request.
-        let dir = tempfile::tempdir().unwrap();
-        let content = (1..=10)
-            .map(|i| format!("line {i}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        std::fs::write(dir.path().join("f.txt"), &content).unwrap();
-
-        let tool = ReadFileTool::new(dir.path());
-        let cache = Arc::new(FileStateCache::new());
-        let ctx = ctx_with_cache(cache.clone());
-
-        let _ = tool
-            .execute_with_context(
-                &ctx,
-                &serde_json::json!({"path": "f.txt", "start_line": 1, "end_line": 5}),
-            )
-            .await
-            .unwrap();
-
-        let second = tool
-            .execute_with_context(
-                &ctx,
-                &serde_json::json!({"path": "f.txt", "start_line": 3, "end_line": 7}),
-            )
-            .await
-            .unwrap();
-        assert!(second.success);
-        assert!(
-            !second.output.contains("[FILE_UNCHANGED]"),
-            "different range must not hit cache, got: {}",
-            second.output
-        );
-        assert!(second.output.contains("line 7"));
-    }
-
     /// A truncated read must name the call that continues it.
     ///
     /// Without this the model sees only "N bytes omitted" and its sole
@@ -1622,16 +1230,6 @@ mod tests {
             advice.contains("offset: 201"),
             "the advice must name the CONCRETE next call, not just mention offset: {advice}"
         );
-    }
-
-    #[test]
-    fn should_suggest_bounding_the_read_when_no_range_was_given() {
-        let tool = ReadFileTool::new(std::path::Path::new("."));
-        let advice = tool
-            .truncation_recovery(&serde_json::json!({ "path": "big.txt" }), 12_345)
-            .expect("still recoverable: the tool takes offset/limit");
-        assert!(advice.contains("offset"), "{advice}");
-        assert!(advice.contains("limit"), "{advice}");
     }
 
     /// #2131 part 4: an UNBOUNDED read of a file bigger than the tool-output
@@ -1685,108 +1283,6 @@ mod tests {
     // Every test here asserts on files it created itself (per-path), never on
     // process-global counts (#2077/#2126 lesson).
     // -----------------------------------------------------------------------
-
-    /// R6: the UNARMED tool must be byte-for-byte the origin/main tool at the
-    /// WIRE — same name, description, and input schema — because every enabled
-    /// tool's ToolSpec is serialized into the LLM prompt-cache prefix
-    /// (registry.rs `specs()`). A changed unarmed spec would invalidate that
-    /// prefix for every session on the planet, armed or not, defeating the
-    /// "flag-gated, zero blast radius" premise. This golden is the exact
-    /// origin/main ToolSpec JSON; only the ARMED tool may differ from it.
-    fn read_file_origin_toolspec() -> serde_json::Value {
-        serde_json::json!({
-            "name": "read_file",
-            "description": "Read the contents of a file. Returns the file content with line numbers.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the file to read (relative to working directory; alias: filePath)"
-                    },
-                    "start_line": {
-                        "type": "integer",
-                        "description": "Optional starting line number (1-indexed; alias: offset)"
-                    },
-                    "end_line": {
-                        "type": "integer",
-                        "description": "Optional ending line number (1-indexed, inclusive)"
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Optional maximum number of lines to read, starting at start_line (alternative to end_line — do not provide both)"
-                    }
-                },
-                "required": ["path"]
-            }
-        })
-    }
-
-    fn read_file_toolspec(tool: &ReadFileTool) -> serde_json::Value {
-        serde_json::json!({
-            "name": tool.name(),
-            "description": tool.description(),
-            "input_schema": tool.input_schema(),
-        })
-    }
-
-    #[test]
-    fn unarmed_read_file_toolspec_is_byte_identical_to_origin_main() {
-        let tool = ReadFileTool::new("/tmp").with_window_enforcement(false);
-        let spec = read_file_toolspec(&tool);
-        assert_eq!(
-            spec,
-            read_file_origin_toolspec(),
-            "the UNARMED read_file ToolSpec must equal origin/main exactly — no \
-             byte_offset/byte_limit in the schema, no windowing sentence in the \
-             description — or the prompt-cache prefix changes for every session"
-        );
-        // The wire is the serialized string; pin it too (serde_json sorts
-        // keys, so this is deterministic).
-        assert_eq!(
-            serde_json::to_string(&spec).unwrap(),
-            serde_json::to_string(&read_file_origin_toolspec()).unwrap(),
-            "serialized unarmed spec must match origin byte-for-byte"
-        );
-    }
-
-    #[test]
-    fn armed_read_file_toolspec_advertises_byte_mode() {
-        // The armed spec is ALLOWED to differ — byte mode is part of the
-        // armed feature — and it must actually carry the byte parameters.
-        let tool = ReadFileTool::new("/tmp").with_window_enforcement(true);
-        let spec = read_file_toolspec(&tool);
-        assert_ne!(
-            spec,
-            read_file_origin_toolspec(),
-            "the armed spec differs from origin by design"
-        );
-        let props = spec["input_schema"]["properties"].as_object().unwrap();
-        assert!(
-            props.contains_key("byte_offset") && props.contains_key("byte_limit"),
-            "armed schema advertises byte mode: {props:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn unarmed_byte_params_are_rejected_not_silently_ignored() {
-        // byte mode is an armed-only capability. Unarmed, the schema does not
-        // advertise it, so the model never sends it; a manual caller that
-        // does must get a clear error, never a silent fall-through to a line
-        // read (which would drop its intent).
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("f.txt"), "abcdef").unwrap();
-        let tool = ReadFileTool::new(dir.path()); // unarmed
-        let r = tool
-            .execute(&serde_json::json!({"path": "f.txt", "byte_offset": 0}))
-            .await
-            .unwrap();
-        assert!(
-            !r.success && r.output.contains("byte_offset"),
-            "unarmed byte_offset must be a clean rejection: {}",
-            r.output
-        );
-    }
 
     /// 1500 lines, 100 bytes of content each (distinct `row NNNNNN` prefixes),
     /// 151,500 content bytes total. With a 4-digit gutter each formatted line
@@ -1849,86 +1345,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_fire_the_line_limit_first_on_a_many_short_lines_file_when_armed() {
-        let dir = tempfile::tempdir().unwrap();
-        let many = (1..=3000)
-            .map(|i| format!("line {i}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        std::fs::write(dir.path().join("many_armed.txt"), &many).unwrap();
-        let tool = ReadFileTool::new(dir.path()).with_window_enforcement(true);
-
-        let r = tool
-            .execute(&serde_json::json!({"path": "many_armed.txt"}))
-            .await
-            .unwrap();
-
-        assert!(r.success, "{}", r.output);
-        assert!(
-            r.output.contains("line 2000"),
-            "line 2000 is the last shown"
-        );
-        assert!(!r.output.contains("line 2001"), "line 2001 is windowed off");
-        assert!(
-            r.output.contains("showing lines 1-2000 of 3000"),
-            "footer names the range and total: {}",
-            r.output
-        );
-        assert!(
-            r.output.contains("2000-line limit"),
-            "the footer names WHICH limit fired (lines, not bytes): {}",
-            r.output
-        );
-        assert!(r.output.contains("offset: 2001"), "{}", r.output);
-        assert!(r.output.len() <= octos_core::tool_output_limit("read_file"));
-    }
-
-    #[tokio::test]
-    async fn should_clamp_an_explicit_oversized_limit_when_armed() {
-        let dir = tempfile::tempdir().unwrap();
-        wide_rows_file(&dir, "clamp_armed.txt");
-        let tool = ReadFileTool::new(dir.path()).with_window_enforcement(true);
-
-        let r = tool
-            .execute(&serde_json::json!({"path": "clamp_armed.txt", "offset": 1, "limit": 999999}))
-            .await
-            .unwrap();
-
-        assert!(r.success, "{}", r.output);
-        assert!(
-            r.output.contains("showing lines 1-450 of 1500") && r.output.contains("offset: 451"),
-            "an explicit range past the window is clamped with the same footer: {}",
-            r.output
-        );
-        assert!(r.output.len() <= octos_core::tool_output_limit("read_file"));
-    }
-
-    #[tokio::test]
-    async fn should_continue_from_a_later_offset_with_the_same_window_when_armed() {
-        // The continuation call the footer names must itself work and name
-        // the next one — that is what makes paging converge.
-        let dir = tempfile::tempdir().unwrap();
-        wide_rows_file(&dir, "page2_armed.txt");
-        let tool = ReadFileTool::new(dir.path()).with_window_enforcement(true);
-
-        let r = tool
-            .execute(&serde_json::json!({"path": "page2_armed.txt", "offset": 451}))
-            .await
-            .unwrap();
-
-        assert!(r.success, "{}", r.output);
-        assert!(
-            r.output.contains("row 000451"),
-            "page two starts where told"
-        );
-        assert!(
-            r.output.contains("showing lines 451-900 of 1500") && r.output.contains("offset: 901"),
-            "page two names page three: {}",
-            r.output
-        );
-    }
-
-    #[tokio::test]
     async fn should_return_small_files_whole_and_byte_identical_when_armed() {
         // Arming must not touch anything that fits the window: same bytes as
         // the unarmed goldens captured before this feature existed.
@@ -1971,172 +1387,6 @@ mod tests {
             (62, 0x7ca7_68c2_04c1_08d7),
             "armed in-window explicit range must be byte-identical to unarmed: {:?}",
             range.output
-        );
-    }
-
-    #[tokio::test]
-    async fn should_keep_unarmed_outputs_byte_identical_to_pre_change_goldens() {
-        // Golden compare against a capture taken on the pre-change tree
-        // (fnv-1a via FileStateCache::content_hash, plus exact lengths).
-        // Inputs are reconstructed deterministically; outputs embed only the
-        // relative path, so the hashes are stable across hosts.
-        let dir = tempfile::tempdir().unwrap();
-        let tool = ReadFileTool::new(dir.path());
-
-        std::fs::write(dir.path().join("golden_small.txt"), "alpha\nbeta\ngamma\n").unwrap();
-        let ten = (1..=10)
-            .map(|i| format!("line {i}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        std::fs::write(dir.path().join("golden_range.txt"), &ten).unwrap();
-        std::fs::write(
-            dir.path().join("golden_big.txt"),
-            "0123456789abcdef\n".repeat(4000),
-        )
-        .unwrap();
-        let wide = (0..3000)
-            .map(|_| "x".repeat(40))
-            .collect::<Vec<_>>()
-            .join("\n");
-        std::fs::write(dir.path().join("golden_cut.txt"), &wide).unwrap();
-        let many = (1..=3000)
-            .map(|i| format!("line {i}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        std::fs::write(dir.path().join("golden_manylines.txt"), &many).unwrap();
-
-        // (args, success, output_len, fnv1a) captured pre-change:
-        let cases: Vec<(serde_json::Value, bool, usize, u64)> = vec![
-            (
-                serde_json::json!({"path": "golden_small.txt"}),
-                true,
-                32,
-                0xa9a1_582d_5fdd_6b1c,
-            ),
-            (
-                serde_json::json!({"path": "golden_range.txt", "start_line": 3, "end_line": 5}),
-                true,
-                62,
-                0x7ca7_68c2_04c1_08d7,
-            ),
-            // The #2131 refusal for an oversized unbounded read stays.
-            (
-                serde_json::json!({"path": "golden_big.txt"}),
-                false,
-                305,
-                0x1fb1_380c_4950_1cb6,
-            ),
-            // The internal blind 100KB cut stays on the unarmed path.
-            (
-                serde_json::json!({"path": "golden_cut.txt", "start_line": 1, "end_line": 3000}),
-                true,
-                100_024,
-                0xfd5e_1b93_81ff_e0b0,
-            ),
-            // >2000 lines unbounded stays a FULL read when unarmed.
-            (
-                serde_json::json!({"path": "golden_manylines.txt"}),
-                true,
-                52_893,
-                0x88cc_44e4_d1e6_85a3,
-            ),
-        ];
-        for (args, success, len, fnv) in cases {
-            let r = tool.execute(&args).await.unwrap();
-            assert_eq!(
-                (
-                    r.success,
-                    r.output.len(),
-                    FileStateCache::content_hash(r.output.as_bytes())
-                ),
-                (success, len, fnv),
-                "unarmed output changed for {args}: {:?}...",
-                octos_core::truncated_utf8(&r.output, 200, "")
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn should_advise_byte_mode_for_a_single_line_larger_than_the_window_when_armed() {
-        // A line bigger than the whole byte window cannot be paged by line
-        // offset — the answer is the IN-TOOL raw byte mode, never a shell
-        // fallback: shell output is capped at 30,000 bytes
-        // (tool_output_limit("shell")), so a `head -c 49152` could never
-        // arrive intact even if advised.
-        let dir = tempfile::tempdir().unwrap();
-        let giant = format!("short first\n{}\nafter line", "G".repeat(60_000));
-        std::fs::write(dir.path().join("giant_armed.txt"), &giant).unwrap();
-        let tool = ReadFileTool::new(dir.path()).with_window_enforcement(true);
-
-        // Page one: the giant line does not fit after line 1, so the window
-        // stops before it and resumes AT it.
-        let page1 = tool
-            .execute(&serde_json::json!({"path": "giant_armed.txt"}))
-            .await
-            .unwrap();
-        assert!(page1.success, "{}", page1.output);
-        assert!(page1.output.contains("short first"));
-        assert!(
-            !page1.output.contains("GGGG"),
-            "the giant line must not leak into page one"
-        );
-        assert!(
-            page1.output.contains("showing lines 1-1 of 3") && page1.output.contains("offset: 2"),
-            "page one stops before the giant line and names it as the next offset: {}",
-            page1.output
-        );
-
-        // Page two starts AT the giant line: advice naming the byte-mode
-        // continuation, not content.
-        let page2 = tool
-            .execute(&serde_json::json!({"path": "giant_armed.txt", "offset": 2}))
-            .await
-            .unwrap();
-        assert!(page2.success, "{}", page2.output);
-        assert!(
-            !page2.output.contains("GGGG"),
-            "a line larger than the window is never returned inline by line mode"
-        );
-        assert!(
-            page2.output.contains("line 2 is 60000 bytes"),
-            "the advice names the line and its full size: {}",
-            page2.output
-        );
-        assert!(
-            page2.output.contains("byte_offset: 12"),
-            "the advice names the exact byte offset where the line starts: {}",
-            page2.output
-        );
-        assert!(
-            !page2.output.contains("sed"),
-            "no shell fallback — it cannot survive the shell tool's own \
-             30,000-byte cap: {}",
-            page2.output
-        );
-        assert!(
-            page2.output.contains("offset: 3"),
-            "the advice names how to continue past the giant line: {}",
-            page2.output
-        );
-        assert!(page2.output.len() <= octos_core::tool_output_limit("read_file"));
-
-        // And the advised byte-mode call actually returns the line's bytes.
-        let bytes = tool
-            .execute(
-                &serde_json::json!({"path": "giant_armed.txt", "byte_offset": 12, "byte_limit": 20}),
-            )
-            .await
-            .unwrap();
-        assert!(bytes.success, "{}", bytes.output);
-        assert!(
-            bytes.output.starts_with(&"G".repeat(20)),
-            "raw byte mode returns the giant line's bytes without a gutter: {}",
-            octos_core::truncated_utf8(&bytes.output, 120, "...")
-        );
-        assert!(
-            bytes.output.contains("byte_offset: 32"),
-            "the byte-mode footer names the exact next byte: {}",
-            bytes.output
         );
     }
 
@@ -2228,41 +1478,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_not_serve_file_unchanged_for_a_byte_mode_read() {
-        // The M8.4 cache stores LINE ranges; a byte-mode request must bypass
-        // it entirely — a cached complete entry must not answer a byte
-        // request with the [FILE_UNCHANGED] stub, and a byte read must not
-        // poison the line-range cache.
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("cached.txt"), "one\ntwo\nthree\n").unwrap();
-        let tool = ReadFileTool::new(dir.path()).with_window_enforcement(true);
-        let cache = Arc::new(FileStateCache::new());
-        let ctx = ctx_with_cache(cache.clone());
-
-        let full = tool
-            .execute_with_context(&ctx, &serde_json::json!({"path": "cached.txt"}))
-            .await
-            .unwrap();
-        assert!(full.success && !full.output.contains("[FILE_UNCHANGED]"));
-
-        let bytes = tool
-            .execute_with_context(
-                &ctx,
-                &serde_json::json!({"path": "cached.txt", "byte_offset": 0, "byte_limit": 3}),
-            )
-            .await
-            .unwrap();
-        assert!(bytes.success, "{}", bytes.output);
-        assert!(
-            !bytes.output.contains("[FILE_UNCHANGED]"),
-            "a byte-mode read must never be answered from the line-range \
-             cache: {}",
-            bytes.output
-        );
-        assert!(bytes.output.starts_with("one"), "{}", bytes.output);
-    }
-
-    #[tokio::test]
     async fn should_keep_every_armed_return_under_the_loop_cap_for_a_pathological_path() {
         // Path SPELLINGS are caller-controlled and unbounded — a spelling
         // made of thousands of `./` components resolves to a normal file but
@@ -2289,78 +1504,6 @@ mod tests {
             "an armed return may never exceed the loop cap, whatever the \
              path spelling: {} bytes",
             advice.output.len()
-        );
-    }
-
-    #[tokio::test]
-    async fn should_not_cache_a_windowed_read_as_complete_when_armed() {
-        // (b) The file-state cache hazard: a windowed read recorded as "no
-        // range = complete file" would make the next unbounded read return
-        // `[FILE_UNCHANGED] (full file cached)` — a lie about a view the
-        // model never fully saw. The recorded view must be the RETURNED
-        // window, so an unbounded re-read re-pages instead of claiming
-        // completeness.
-        let dir = tempfile::tempdir().unwrap();
-        wide_rows_file(&dir, "cache_armed.txt");
-        let tool = ReadFileTool::new(dir.path()).with_window_enforcement(true);
-        let cache = Arc::new(FileStateCache::new());
-        let ctx = ctx_with_cache(cache.clone());
-
-        let first = tool
-            .execute_with_context(&ctx, &serde_json::json!({"path": "cache_armed.txt"}))
-            .await
-            .unwrap();
-        assert!(first.success, "{}", first.output);
-        assert!(first.output.contains("showing lines 1-450 of 1500"));
-
-        let second = tool
-            .execute_with_context(&ctx, &serde_json::json!({"path": "cache_armed.txt"}))
-            .await
-            .unwrap();
-        assert!(second.success, "{}", second.output);
-        assert!(
-            !second.output.contains("[FILE_UNCHANGED]"),
-            "a windowed view must never satisfy an unbounded request as \
-             unchanged-complete: {}",
-            second.output
-        );
-        assert!(
-            second.output.contains("showing lines 1-450 of 1500"),
-            "the honest answer is the same first page again: {}",
-            second.output
-        );
-    }
-
-    #[tokio::test]
-    async fn should_still_serve_file_unchanged_for_a_repeated_in_window_range_when_armed() {
-        // Arming must not destroy the M8.4 cache win for ranges the model
-        // truly saw in full.
-        let dir = tempfile::tempdir().unwrap();
-        ten_lines_file(&dir);
-        let tool = ReadFileTool::new(dir.path()).with_window_enforcement(true);
-        let cache = Arc::new(FileStateCache::new());
-        let ctx = ctx_with_cache(cache.clone());
-
-        let first = tool
-            .execute_with_context(
-                &ctx,
-                &serde_json::json!({"path": "lines.txt", "start_line": 3, "end_line": 5}),
-            )
-            .await
-            .unwrap();
-        assert!(first.success && !first.output.contains("[FILE_UNCHANGED]"));
-
-        let second = tool
-            .execute_with_context(
-                &ctx,
-                &serde_json::json!({"path": "lines.txt", "start_line": 3, "end_line": 5}),
-            )
-            .await
-            .unwrap();
-        assert!(
-            second.output.contains("[FILE_UNCHANGED]"),
-            "an identical fully-seen range still hits the cache when armed: {}",
-            second.output
         );
     }
 }

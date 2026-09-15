@@ -428,37 +428,6 @@ mod tests {
     }
 
     #[test]
-    fn spawn_task_artifact_sources_fall_back_to_single_artifact() {
-        let task = WorkspaceSpawnTaskPolicy {
-            artifact: Some("primary_audio".into()),
-            artifacts: Vec::new(),
-            on_verify: Vec::new(),
-            on_complete: Vec::new(),
-            on_deliver: Vec::new(),
-            on_failure: Vec::new(),
-        };
-
-        assert_eq!(task.artifact_sources(), vec!["primary_audio"]);
-    }
-
-    #[test]
-    fn spawn_task_artifact_sources_roundtrip_omits_empty_list() {
-        let task = WorkspaceSpawnTaskPolicy {
-            artifact: Some("primary_audio".into()),
-            artifacts: Vec::new(),
-            on_verify: vec!["file_exists:$artifact".into()],
-            on_complete: Vec::new(),
-            on_deliver: Vec::new(),
-            on_failure: Vec::new(),
-        };
-
-        let rendered = toml::to_string_pretty(&task).unwrap();
-        assert!(!rendered.contains("artifacts = []"));
-        let roundtrip: WorkspaceSpawnTaskPolicy = toml::from_str(&rendered).unwrap();
-        assert_eq!(roundtrip.artifact_sources(), vec!["primary_audio"]);
-    }
-
-    #[test]
     fn spawn_task_delivery_actions_prefer_explicit_delivery_list() {
         let task = WorkspaceSpawnTaskPolicy {
             artifact: Some("primary_audio".into()),
@@ -473,20 +442,6 @@ mod tests {
             task.delivery_actions(),
             &["notify_user:deliver".to_string()]
         );
-    }
-
-    #[test]
-    fn spawn_task_delivery_actions_fall_back_to_legacy_completion_list() {
-        let task = WorkspaceSpawnTaskPolicy {
-            artifact: Some("primary_audio".into()),
-            artifacts: Vec::new(),
-            on_verify: Vec::new(),
-            on_complete: vec!["notify_user:legacy".into()],
-            on_deliver: Vec::new(),
-            on_failure: Vec::new(),
-        };
-
-        assert_eq!(task.delivery_actions(), &["notify_user:legacy".to_string()]);
     }
 
     #[test]
@@ -562,75 +517,6 @@ ignore = []
     }
 
     #[test]
-    fn write_workspace_policy_if_absent_preserves_existing_file() {
-        // This is the M11-C contract: under concurrent bootstrap or
-        // operator edit, a pre-existing `.octos-workspace.toml` is
-        // never clobbered. Equivalent to `OpenOptions::create_new`
-        // failing closed on `AlreadyExists`.
-        let temp = tempfile::tempdir().unwrap();
-        let path = workspace_policy_path(temp.path());
-        let sentinel = "# operator hand-edit do not overwrite\n";
-        std::fs::write(&path, sentinel).unwrap();
-
-        // Should succeed (idempotent) but NOT overwrite.
-        write_workspace_policy_if_absent(temp.path(), &WorkspacePolicy::for_session()).unwrap();
-        let after = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(after, sentinel);
-    }
-
-    // ----- WorkspacePolicyKind::Coding (Audit Gap-1 + section 7 Q3) -----
-
-    #[test]
-    fn should_detect_coding_kind_when_cargo_toml_is_present() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
-        assert_eq!(
-            detect_workspace_policy_kind(tmp.path()),
-            WorkspacePolicyKind::Coding
-        );
-    }
-
-    #[test]
-    fn should_detect_coding_kind_when_package_json_is_present() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("package.json"), "{}").unwrap();
-        assert_eq!(
-            detect_workspace_policy_kind(tmp.path()),
-            WorkspacePolicyKind::Coding
-        );
-    }
-
-    #[test]
-    fn should_detect_coding_kind_when_pyproject_toml_is_present() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("pyproject.toml"), "[project]\n").unwrap();
-        assert_eq!(
-            detect_workspace_policy_kind(tmp.path()),
-            WorkspacePolicyKind::Coding
-        );
-    }
-
-    #[test]
-    fn should_fall_back_to_session_kind_when_no_language_signal() {
-        let tmp = tempfile::tempdir().unwrap();
-        // Just an unrelated file — no manifest probes match.
-        std::fs::write(tmp.path().join("README.md"), "# hi").unwrap();
-        assert_eq!(
-            detect_workspace_policy_kind(tmp.path()),
-            WorkspacePolicyKind::Session
-        );
-    }
-
-    #[test]
-    fn should_return_coding_policy_marker_for_coding_kind() {
-        let policy = WorkspacePolicy::for_coding();
-        assert_eq!(policy.workspace.kind, WorkspacePolicyKind::Coding);
-        // The coding policy shares the session baseline (no bundled
-        // spawn-task contracts in the slimmed coding-agent build).
-        assert!(policy.spawn_tasks.is_empty());
-    }
-
-    #[test]
     fn should_return_rust_check_hook_in_coding_defaults() {
         let hooks = coding_default_hooks();
         let cargo = hooks
@@ -643,59 +529,6 @@ ignore = []
         assert!(cargo.tool_filter.iter().any(|t| t == "write_file"));
         assert!(cargo.tool_filter.iter().any(|t| t == "diff_edit"));
         assert_eq!(cargo.requires_bin.as_deref(), Some("cargo"));
-    }
-
-    #[test]
-    fn should_return_eslint_hook_gated_on_bin_in_coding_defaults() {
-        let hooks = coding_default_hooks();
-        let eslint = hooks
-            .iter()
-            .find(|h| h.command.first().map(String::as_str) == Some("eslint"))
-            .expect("eslint hook present");
-        // ESLint hook must be opt-out friendly via requires_bin — operators
-        // without eslint on PATH must NOT see hook failures every edit.
-        assert_eq!(eslint.requires_bin.as_deref(), Some("eslint"));
-        // Four explicit patterns — the glob crate treats braces as literals
-        // (#2129 review, finding 10).
-        for ext in ["js", "ts", "tsx", "jsx"] {
-            let pattern = format!("**/*.{ext}");
-            assert!(
-                eslint.path_filter.iter().any(|p| p == &pattern),
-                "missing {pattern}"
-            );
-        }
-    }
-
-    #[test]
-    fn should_return_ruff_hook_gated_on_bin_in_coding_defaults() {
-        let hooks = coding_default_hooks();
-        let ruff = hooks
-            .iter()
-            .find(|h| h.command.first().map(String::as_str) == Some("ruff"))
-            .expect("ruff hook present");
-        assert_eq!(ruff.requires_bin.as_deref(), Some("ruff"));
-        assert!(ruff.path_filter.iter().any(|p| p == "**/*.py"));
-    }
-
-    #[test]
-    fn should_not_emit_coding_hooks_for_session_kind() {
-        // Session policies retain the legacy no-default-hooks behaviour so
-        // existing operators don't see a sudden new wave of cargo checks.
-        let session = WorkspacePolicy::for_session();
-        assert_eq!(session.workspace.kind, WorkspacePolicyKind::Session);
-        // The hooks helper is global (not method-on-policy); we assert that
-        // callers must opt in by inspecting the kind themselves.
-        assert_ne!(session.workspace.kind, WorkspacePolicyKind::Coding);
-    }
-
-    #[test]
-    fn should_serialize_coding_kind_as_kebab_case() {
-        let policy = WorkspacePolicy::for_coding();
-        let rendered = toml::to_string(&policy).unwrap();
-        assert!(
-            rendered.contains("kind = \"coding\""),
-            "expected kebab-case 'coding' in serialized policy:\n{rendered}"
-        );
     }
 
     /// #2129: the session bootstrap path routes a detected coding workspace

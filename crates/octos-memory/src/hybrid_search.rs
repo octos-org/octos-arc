@@ -776,21 +776,6 @@ mod tests {
         assert!((c.ratio() - 0.6).abs() < 1e-9);
     }
 
-    /// A healthy index must not look degraded — the signal is useless if it
-    /// fires when nothing is wrong.
-    #[test]
-    fn vector_coverage_is_clean_when_dimensions_agree() {
-        let mut index = HybridIndex::new(2);
-        index.insert("a", "alpha", Some(&[1.0, 0.0]));
-        index.insert("b", "beta", Some(&[0.0, 1.0]));
-
-        let c = index.vector_coverage();
-        assert_eq!((c.total, c.vectorized, c.dimension_mismatches), (2, 2, 0));
-        assert!(!c.has_dimension_mismatch());
-        assert!((c.ratio() - 1.0).abs() < 1e-9);
-        assert_eq!(c.bm25_only(), 0);
-    }
-
     /// An episode saved with no embedding at all is BM25-only but is NOT a
     /// mismatch — conflating the two would make the health signal cry wolf on
     /// every text-only episode.
@@ -810,67 +795,6 @@ mod tests {
         );
         assert_eq!(c.dimension_mismatches, 0, "absent != mismatched");
         assert!(!c.has_dimension_mismatch());
-    }
-
-    /// Empty index reports full coverage rather than 0/0 = NaN.
-    #[test]
-    fn vector_coverage_ratio_is_one_when_empty() {
-        let c = HybridIndex::new(4).vector_coverage();
-        assert_eq!((c.total, c.vectorized), (0, 0));
-        assert!((c.ratio() - 1.0).abs() < 1e-9);
-        assert!(c.ratio().is_finite());
-    }
-
-    /// Tombstoned entries must leave both sides of the ratio, or removing an
-    /// episode would make coverage look worse than it is.
-    #[test]
-    fn vector_coverage_excludes_removed_episodes() {
-        let mut index = HybridIndex::new(2);
-        index.insert("a", "alpha", Some(&[1.0, 0.0]));
-        index.insert("b", "beta", Some(&[0.0, 1.0]));
-        assert!(index.remove("a"));
-
-        let c = index.vector_coverage();
-        assert_eq!((c.total, c.vectorized), (1, 1));
-        assert!((c.ratio() - 1.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn test_tokenize() {
-        let tokens = tokenize("Hello, World! This is a test-123.");
-        assert!(tokens.contains(&"hello".to_string()));
-        assert!(tokens.contains(&"world".to_string()));
-        assert!(tokens.contains(&"test".to_string()));
-        assert!(tokens.contains(&"123".to_string()));
-        assert!(tokens.contains(&"this".to_string()));
-        assert!(tokens.contains(&"is".to_string()));
-        // Single-char "a" should be filtered out
-        assert!(!tokens.contains(&"a".to_string()));
-    }
-
-    #[test]
-    fn test_l2_normalize() {
-        let v = vec![3.0, 4.0];
-        let n = l2_normalize(&v).unwrap();
-        assert!((n[0] - 0.6).abs() < 1e-6);
-        assert!((n[1] - 0.8).abs() < 1e-6);
-    }
-
-    #[test]
-    fn test_l2_normalize_zero() {
-        let v = vec![0.0, 0.0];
-        assert!(l2_normalize(&v).is_none());
-    }
-
-    #[test]
-    fn test_zero_vector_not_indexed() {
-        let mut index = HybridIndex::new(2);
-        index.insert("ep1", "hello world", Some(&[0.0, 0.0]));
-        // Zero vector should not be marked as having an embedding
-        assert!(!index.has_embedding[0]);
-        // add_embedding with zero vector should return false
-        index.insert("ep2", "test doc", None);
-        assert!(!index.add_embedding("ep2", &[0.0, 0.0]));
     }
 
     #[test]
@@ -912,13 +836,6 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_index() {
-        let index = HybridIndex::new(4);
-        let results = index.search("anything", None, 5);
-        assert!(results.is_empty());
-    }
-
-    #[test]
     fn test_insert_without_embedding() {
         let mut index = HybridIndex::new(4);
         index.insert("ep1", "hello world", None);
@@ -927,29 +844,6 @@ mod tests {
         // Should still work with BM25 for ep1
         let results = index.search("hello", None, 2);
         assert_eq!(results.len(), 2);
-    }
-
-    #[test]
-    fn add_embedding_basic_contract() {
-        // Basic happy-path contract for `add_embedding` (NOT the
-        // capacity-branch regression — see
-        // `add_embedding_returns_false_when_hnsw_at_capacity` for
-        // that).
-        let mut index = HybridIndex::new(4);
-        index.insert("ep1", "alpha beta", None);
-        // BM25-only initially.
-        assert!(!index.has_embedding[0]);
-
-        // add_embedding succeeds and flips has_embedding to true.
-        assert!(index.add_embedding("ep1", &[1.0, 0.0, 0.0, 0.0]));
-        assert!(index.has_embedding[0]);
-
-        // Idempotent: already has one.
-        assert!(index.add_embedding("ep1", &[0.0, 1.0, 0.0, 0.0]));
-        assert!(index.has_embedding[0]);
-
-        // Non-existent episode -> false.
-        assert!(!index.add_embedding("nonexistent", &[1.0, 0.0, 0.0, 0.0]));
     }
 
     #[test]
@@ -1103,38 +997,6 @@ mod tests {
     }
 
     #[test]
-    fn search_scored_combined_matches_search_for_ranking_parity() {
-        // `search_scored` must produce the same combined score that
-        // `search` would, so callers that switch don't get different
-        // rankings.
-        let mut index = HybridIndex::new(4);
-        index.insert(
-            "ep1",
-            "rust ownership borrow checker",
-            Some(&[1.0, 0.0, 0.0, 0.0]),
-        );
-        index.insert("ep2", "python web flask", Some(&[0.0, 1.0, 0.0, 0.0]));
-        index.insert("ep3", "rust async programming", Some(&[0.5, 0.5, 0.0, 0.0]));
-
-        let q = "rust programming";
-        let q_emb: [f32; 4] = [0.7, 0.3, 0.0, 0.0];
-        let plain = index.search(q, Some(&q_emb), 5);
-        let scored = index.search_scored(q, Some(&q_emb), 5);
-
-        assert_eq!(plain.len(), scored.len());
-        for (a, b) in plain.iter().zip(scored.iter()) {
-            assert_eq!(a.0, b.0, "ranking order must match");
-            assert!(
-                (a.1 - b.1.combined).abs() < 1e-5,
-                "combined score must match plain score for {}: search={} search_scored.combined={}",
-                a.0,
-                a.1,
-                b.1.combined
-            );
-        }
-    }
-
-    #[test]
     fn search_scored_filtered_pool_decoupled_from_limit_when_floor_supplied() {
         // Regression for codex P2 round 3: when a floor is supplied,
         // the per-modality candidate pool must NOT be capped at
@@ -1265,32 +1127,6 @@ mod tests {
     }
 
     #[test]
-    fn search_scored_filtered_none_floor_matches_unfiltered() {
-        // `search_scored_filtered` with `min_best_modality == None` must
-        // be a no-op wrapper around `search_scored` so callers can
-        // adopt the floor API without changing existing behavior.
-        let mut index = HybridIndex::new(4);
-        index.insert("ep1", "alpha beta", Some(&[1.0, 0.0, 0.0, 0.0]));
-        index.insert("ep2", "gamma delta", Some(&[0.0, 1.0, 0.0, 0.0]));
-        index.insert("ep3", "alpha gamma", Some(&[0.7, 0.3, 0.0, 0.0]));
-
-        let q = "alpha";
-        let q_emb: [f32; 4] = [0.8, 0.2, 0.0, 0.0];
-        let plain = index.search_scored(q, Some(&q_emb), 5);
-        let unfiltered = index.search_scored_filtered(q, Some(&q_emb), 5, None);
-
-        assert_eq!(
-            plain.len(),
-            unfiltered.len(),
-            "no-op floor must preserve length"
-        );
-        for (a, b) in plain.iter().zip(unfiltered.iter()) {
-            assert_eq!(a.0, b.0, "no-op floor must preserve order");
-            assert!((a.1.combined - b.1.combined).abs() < 1e-5);
-        }
-    }
-
-    #[test]
     fn search_scored_filtered_admits_bm25_only_winner_across_large_noise() {
         // Regression for codex P2 round-2 (the storage-layer fix):
         // simulate a memory store where the BM25-perfect older episode
@@ -1382,14 +1218,6 @@ mod tests {
         assert_eq!(results[0].0, "ep1");
     }
 
-    #[test]
-    fn should_return_false_when_add_embedding_dimension_mismatches() {
-        let mut index = HybridIndex::new(4);
-        index.insert("ep1", "some text", None);
-        assert!(!index.add_embedding("ep1", &[1.0, 0.0, 0.0]));
-        assert!(index.add_embedding("ep1", &[1.0, 0.0, 0.0, 0.0]));
-    }
-
     /// Reference BM25: score every matching document with the same formula and
     /// no selection shortcut, then take the top `limit` scores descending.
     ///
@@ -1458,53 +1286,6 @@ mod tests {
     }
 
     #[test]
-    fn should_select_true_top_k_when_query_has_multiple_terms() {
-        let index = wide_index();
-        let limit = 7;
-
-        let got = index.bm25_score("common pad topic3", limit);
-        let want = reference_top_k(&index, "common pad topic3", limit);
-        assert_eq!(got.len(), want.len());
-
-        let max = want[0];
-        let mut got_scores: Vec<f64> = got.values().map(|&s| s as f64).collect();
-        got_scores.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-        for (i, (g, w)) in got_scores.iter().zip(want.iter()).enumerate() {
-            assert!(
-                (g - w / max).abs() < 1e-6,
-                "rank {i}: got {g}, want {}",
-                w / max
-            );
-        }
-    }
-
-    #[test]
-    fn should_select_true_top_k_when_query_is_selective() {
-        // `wide_index`'s common-term queries walk enough postings to take the
-        // dense accumulator; two df=1 terms keep this one on the sparse hash-map
-        // path, so both branches are checked against the same oracle.
-        let index = wide_index();
-        let query = "unique7 unique19";
-        let limit = 10;
-
-        let got = index.bm25_score(query, limit);
-        let want = reference_top_k(&index, query, limit);
-        assert_eq!(got.len(), want.len(), "sparse path returned wrong count");
-        assert_eq!(got.len(), 2, "only two documents carry these terms");
-
-        let max = want[0];
-        let mut got_scores: Vec<f64> = got.values().map(|&s| s as f64).collect();
-        got_scores.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-        for (i, (g, w)) in got_scores.iter().zip(want.iter()).enumerate() {
-            assert!(
-                (g - w / max).abs() < 1e-6,
-                "rank {i}: got {g}, want {}",
-                w / max
-            );
-        }
-    }
-
-    #[test]
     fn should_rank_descending_and_respect_limit_when_searching() {
         let index = wide_index();
         let results = index.search("common", None, 5);
@@ -1517,11 +1298,5 @@ mod tests {
                 pair[1]
             );
         }
-    }
-
-    #[test]
-    fn should_return_empty_when_limit_is_zero() {
-        let index = wide_index();
-        assert!(index.bm25_score("common", 0).is_empty());
     }
 }

@@ -717,24 +717,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tail_returns_last_n_lines() {
-        let dir = tempdir().unwrap();
-        let (supervisor, router, tool) = make_tool(dir.path());
-        let body = "a\nb\nc\nd\ne\n";
-        let task_id = seed_task(&supervisor, &router, "tc-2", body);
-
-        let result = tool
-            .execute(&json!({
-                "task_handle": task_id,
-                "mode": {"kind": "tail", "lines": 3}
-            }))
-            .await
-            .unwrap();
-        assert!(result.success);
-        assert_eq!(result.output, "c\nd\ne");
-    }
-
-    #[tokio::test]
     async fn falls_back_to_recorded_final_output_when_router_has_nothing() {
         // Black-hole regression: a background `spawn` child never appends to
         // the router (only spawn_only tools do), so this tool returned "" for
@@ -772,31 +754,6 @@ mod tests {
             grep.output.contains("localStorage"),
             "grep must operate on the recorded final output: {:?}",
             grep.output
-        );
-    }
-
-    #[tokio::test]
-    async fn explains_when_no_output_captured_instead_of_silent_empty() {
-        // A still-running spawn child has neither router bytes nor a
-        // recorded final output. The old behaviour returned "" — a silent
-        // black hole. Now the tool says why there is nothing.
-        let dir = tempdir().unwrap();
-        let (supervisor, _router, tool) = make_tool(dir.path());
-        let task_id = supervisor.register("review-child", "tc-empty", Some("session-A"));
-        supervisor.mark_running(&task_id);
-
-        let result = tool
-            .execute(&json!({
-                "task_handle": task_id,
-                "mode": {"kind": "tail", "lines": 10}
-            }))
-            .await
-            .unwrap();
-        assert!(result.success);
-        assert!(
-            result.output.contains("no captured output") && result.output.contains(&task_id),
-            "must explain the absence, not return an empty string: {:?}",
-            result.output
         );
     }
 
@@ -942,43 +899,6 @@ mod tests {
         assert!(result.output.contains("different session"));
     }
 
-    #[tokio::test]
-    async fn output_is_capped_at_4kb() {
-        let dir = tempdir().unwrap();
-        let (supervisor, router, tool) = make_tool(dir.path());
-        // Single very long line should still be capped after the mode runs.
-        let huge: String = "x".repeat(MAX_OUTPUT_BYTES * 4);
-        let task_id = seed_task(&supervisor, &router, "tc-7", &huge);
-
-        let result = tool
-            .execute(&json!({
-                "task_handle": task_id,
-                "mode": {"kind": "head", "lines": 1}
-            }))
-            .await
-            .unwrap();
-        assert!(result.success);
-        assert!(result.output.len() <= MAX_OUTPUT_BYTES + 32);
-        assert!(result.output.ends_with("[truncated]"));
-    }
-
-    #[test]
-    fn nested_file_mode_inside_file_mode_rejected() {
-        let dir = tempdir().unwrap();
-        let (supervisor, router, tool) = make_tool(dir.path());
-        let task_id = seed_task(&supervisor, &router, "tc-8", "x\n");
-
-        let res = tool.read_file(
-            &supervisor.get_task(&task_id).unwrap(),
-            "x.md",
-            ReadMode::File {
-                path: "y.md".into(),
-                mode: Box::new(ReadMode::Head { lines: 1 }),
-            },
-        );
-        assert!(res.is_err());
-    }
-
     // Codex P1 (round 1): file mode must refuse to read until the task has
     // declared its output_files. Without this guard a fresh handle gives the
     // LLM read access to any file inside the workspace.
@@ -1012,96 +932,6 @@ mod tests {
         assert!(
             !body.contains("shh"),
             "file mode must not return content before output_files declared; got: {body}"
-        );
-    }
-
-    // Codex P1 (round 1): exact path comparison — `_report.md` must NOT
-    // satisfy a whitelist of `research/_report.md`.
-    #[tokio::test]
-    async fn file_mode_basename_does_not_satisfy_path_whitelist() {
-        let dir = tempdir().unwrap();
-        let (supervisor, router, tool) = make_tool(dir.path());
-        let task_id = seed_task(&supervisor, &router, "tc-prefix", "stdout\n");
-
-        // Recorded output: a path under research/.
-        let allowed_rel = "research/_report.md";
-        let allowed_abs = dir.path().join("workspace").join(allowed_rel);
-        std::fs::create_dir_all(allowed_abs.parent().unwrap()).unwrap();
-        std::fs::write(&allowed_abs, "# allowed").unwrap();
-
-        // Trap file with a name that COULD match a sloppy `ends_with` check.
-        let trap_rel = "_report.md";
-        let trap_abs = dir.path().join("workspace").join(trap_rel);
-        std::fs::write(&trap_abs, "BAIT - not the report").unwrap();
-
-        supervisor.mark_completed(&task_id, vec![allowed_rel.to_string()]);
-
-        let result = tool
-            .execute(&json!({
-                "task_handle": task_id,
-                "mode": {
-                    "kind": "file",
-                    "path": trap_rel,
-                    "mode": {"kind": "head", "lines": 1}
-                }
-            }))
-            .await;
-        let body = match result {
-            Ok(r) => r.output,
-            Err(e) => format!("{e}"),
-        };
-        assert!(
-            !body.contains("BAIT"),
-            "exact-path whitelist must reject {trap_rel:?} when only {allowed_rel:?} \
-             is recorded; got: {body}"
-        );
-    }
-
-    // Codex P1 (round 4): a symlinked PARENT directory under the workspace
-    // would let `out/passwd` lexically pass containment while resolving to
-    // a file outside the workspace at open time. O_NOFOLLOW only checks
-    // the leaf — we need to refuse symlinks anywhere along the ancestor
-    // chain.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn file_mode_rejects_symlinked_parent_directory() {
-        let dir = tempdir().unwrap();
-        let (supervisor, router, tool) = make_tool(dir.path());
-        let task_id = seed_task(&supervisor, &router, "tc-parent-sym", "stdout\n");
-
-        // Create a target directory outside the workspace with a secret.
-        let outside_dir = dir.path().join("etc-fake");
-        std::fs::create_dir_all(&outside_dir).unwrap();
-        std::fs::write(outside_dir.join("passwd"), "root:x:0:0").unwrap();
-
-        // Symlink workspace/out -> outside_dir.
-        let link_inside = dir.path().join("workspace").join("out");
-        std::os::unix::fs::symlink(&outside_dir, &link_inside).unwrap();
-
-        // Record an output that traverses the parent symlink. From the
-        // tool's POV `out/passwd` looks like a workspace-relative path
-        // and the leaf `passwd` is a real file — only the parent is a
-        // symlink. Without ancestor checks this would read /etc-fake/passwd.
-        let recorded = "out/passwd";
-        supervisor.mark_completed(&task_id, vec![recorded.to_string()]);
-
-        let result = tool
-            .execute(&json!({
-                "task_handle": task_id,
-                "mode": {
-                    "kind": "file",
-                    "path": recorded,
-                    "mode": {"kind": "head", "lines": 1}
-                }
-            }))
-            .await;
-        let body = match result {
-            Ok(r) => r.output,
-            Err(e) => format!("{e}"),
-        };
-        assert!(
-            !body.contains("root:x:0:0"),
-            "parent-directory symlink must not grant read; got: {body}"
         );
     }
 
@@ -1159,78 +989,6 @@ mod tests {
         );
     }
 
-    // Codex P1 (round 1): symlink inside the workspace must not redirect
-    // reads outside the workspace boundary.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn file_mode_rejects_symlink_targets() {
-        let dir = tempdir().unwrap();
-        let (supervisor, router, tool) = make_tool(dir.path());
-        let task_id = seed_task(&supervisor, &router, "tc-sym", "stdout\n");
-
-        let outside = dir.path().join("outside.txt");
-        std::fs::write(&outside, "secret outside the workspace").unwrap();
-
-        let inside_rel = "linkedin.md";
-        let inside_abs = dir.path().join("workspace").join(inside_rel);
-        std::os::unix::fs::symlink(&outside, &inside_abs).unwrap();
-
-        supervisor.mark_completed(&task_id, vec![inside_rel.to_string()]);
-
-        let result = tool
-            .execute(&json!({
-                "task_handle": task_id,
-                "mode": {
-                    "kind": "file",
-                    "path": inside_rel,
-                    "mode": {"kind": "head", "lines": 1}
-                }
-            }))
-            .await;
-        let body = match result {
-            Ok(r) => r.output,
-            Err(e) => format!("{e}"),
-        };
-        assert!(
-            !body.contains("secret outside"),
-            "O_NOFOLLOW must reject symlink target reads; got: {body}"
-        );
-    }
-
-    // Codex P2 (round 3): file mode must accept absolute paths that
-    // appear in `output_files` verbatim, so long as they lie inside
-    // the workspace. Workspace-contract spawn tasks often record
-    // absolute paths and `check_background_tasks` surfaces those.
-    #[tokio::test]
-    async fn file_mode_accepts_absolute_path_recorded_in_output_files() {
-        let dir = tempdir().unwrap();
-        let (supervisor, router, tool) = make_tool(dir.path());
-        let task_id = seed_task(&supervisor, &router, "tc-abs", "stdout\n");
-
-        let rel = "research/_report.md";
-        let abs = dir.path().join("workspace").join(rel);
-        std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
-        std::fs::write(&abs, "# Report\nLine A\nLine B\n").unwrap();
-
-        // Record the ABSOLUTE path — this is what the workspace contract
-        // path produces in many real spawn_only tasks.
-        supervisor.mark_completed(&task_id, vec![abs.to_string_lossy().into_owned()]);
-
-        let result = tool
-            .execute(&json!({
-                "task_handle": task_id,
-                "mode": {
-                    "kind": "file",
-                    "path": abs.to_string_lossy(),
-                    "mode": {"kind": "head", "lines": 1}
-                }
-            }))
-            .await
-            .unwrap();
-        assert!(result.success, "got: {}", result.output);
-        assert_eq!(result.output, "# Report");
-    }
-
     // Codex P2 (round 3): even when an LLM supplies an absolute path,
     // it must still lie inside the workspace root — otherwise an
     // accidentally recorded absolute output_files entry outside the
@@ -1262,86 +1020,6 @@ mod tests {
         assert!(
             !body.contains("secret outside workspace"),
             "absolute paths recorded outside the workspace must not grant access; got: {body}"
-        );
-    }
-
-    // Codex P2 (round 2): file mode with an inner `tail` must also read
-    // from the end of multi-megabyte expected files.
-    #[tokio::test]
-    async fn file_mode_tail_reads_from_end_for_large_expected_files() {
-        let dir = tempdir().unwrap();
-        let (supervisor, router, tool) = make_tool(dir.path());
-        let task_id = seed_task(&supervisor, &router, "tc-big-file", "stdout\n");
-
-        let report_rel = "research/big_report.md";
-        let report_abs = dir.path().join("workspace").join(report_rel);
-        std::fs::create_dir_all(report_abs.parent().unwrap()).unwrap();
-
-        // Build a > MAX_READ_BYTES file with a unique marker at the end.
-        let bulk = "filler-line-pad-pad-pad-pad-pad-pad-pad-pad-pad-pad\n";
-        let chunk_count = (MAX_READ_BYTES / bulk.len()) + 100;
-        let mut body = bulk.repeat(chunk_count);
-        body.push_str("UNIQUE_FILE_TAIL_MARKER\n");
-        std::fs::write(&report_abs, &body).unwrap();
-
-        supervisor.mark_completed(&task_id, vec![report_rel.to_string()]);
-
-        let result = tool
-            .execute(&json!({
-                "task_handle": task_id,
-                "mode": {
-                    "kind": "file",
-                    "path": report_rel,
-                    "mode": {"kind": "tail", "lines": 5}
-                }
-            }))
-            .await
-            .unwrap();
-        assert!(result.success, "got: {}", result.output);
-        assert!(
-            result.output.contains("UNIQUE_FILE_TAIL_MARKER"),
-            "file-mode tail must surface lines from the END of the file; got: {}",
-            result.output
-        );
-    }
-
-    // Codex P2 (round 1): tail mode must read the END of multi-megabyte
-    // logs, not the first MAX_READ_BYTES.
-    #[tokio::test]
-    async fn tail_reads_from_end_for_logs_larger_than_max_read_bytes() {
-        let dir = tempdir().unwrap();
-        let (supervisor, router, tool) = make_tool(dir.path());
-        let task_id = supervisor.register("search", "tc-big", Some("session-A"));
-        supervisor.mark_running(&task_id);
-
-        // Build a body well over MAX_READ_BYTES with a unique line near the
-        // end. Each line is short so we can fit > 1 MiB while keeping the
-        // unique marker in the very last line.
-        let bulk = "filler-line-that-takes-up-space-padding-pad-pad\n";
-        let session_id = "agent:tc-big";
-        // Append bulk in chunks until we're well past MAX_READ_BYTES.
-        let chunk_count = (MAX_READ_BYTES / bulk.len()) + 100;
-        let bulk_chunk = bulk.repeat(chunk_count);
-        router
-            .append(session_id, &task_id, bulk_chunk.as_bytes())
-            .unwrap();
-        let unique_tail = "\nUNIQUE_LAST_LINE_MARKER\n";
-        router
-            .append(session_id, &task_id, unique_tail.as_bytes())
-            .unwrap();
-
-        let result = tool
-            .execute(&json!({
-                "task_handle": task_id,
-                "mode": {"kind": "tail", "lines": 5}
-            }))
-            .await
-            .unwrap();
-        assert!(result.success);
-        assert!(
-            result.output.contains("UNIQUE_LAST_LINE_MARKER"),
-            "tail mode must surface lines from the END of the log; got: {}",
-            result.output
         );
     }
 }

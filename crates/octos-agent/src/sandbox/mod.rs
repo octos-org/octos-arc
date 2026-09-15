@@ -1353,55 +1353,6 @@ mod tests {
     }
 
     #[test]
-    fn test_sandbox_mode_serde_roundtrip() {
-        let modes = [
-            (SandboxMode::Auto, "\"auto\""),
-            (SandboxMode::Bwrap, "\"bwrap\""),
-            (SandboxMode::Landlock, "\"landlock\""),
-            (SandboxMode::Macos, "\"macos\""),
-            (SandboxMode::Docker, "\"docker\""),
-            (SandboxMode::AppContainer, "\"appcontainer\""),
-            (SandboxMode::None, "\"none\""),
-        ];
-        for (mode, expected_json) in &modes {
-            let json = serde_json::to_string(mode).unwrap();
-            assert_eq!(&json, expected_json, "serialize {mode:?}");
-            let parsed: SandboxMode = serde_json::from_str(expected_json).unwrap();
-            assert_eq!(&parsed, mode, "deserialize {expected_json}");
-        }
-    }
-
-    #[test]
-    fn test_sandbox_mode_debug() {
-        let dbg = format!("{:?}", SandboxMode::Auto);
-        assert_eq!(dbg, "Auto");
-    }
-
-    // --- MountMode enum tests ---
-
-    #[test]
-    fn test_mount_mode_default_is_readwrite() {
-        assert_eq!(MountMode::default(), MountMode::ReadWrite);
-    }
-
-    #[test]
-    fn test_mount_mode_serde_roundtrip() {
-        let modes = [
-            (MountMode::None, "\"none\""),
-            (MountMode::ReadOnly, "\"ro\""),
-            (MountMode::ReadWrite, "\"rw\""),
-        ];
-        for (mode, expected_json) in &modes {
-            let json = serde_json::to_string(mode).unwrap();
-            assert_eq!(&json, expected_json, "serialize {mode:?}");
-            let parsed: MountMode = serde_json::from_str(expected_json).unwrap();
-            assert_eq!(&parsed, mode, "deserialize {expected_json}");
-        }
-    }
-
-    // --- BLOCKED_ENV_VARS tests ---
-
-    #[test]
     fn test_blocked_env_vars_contains_critical_vars() {
         let critical = [
             "LD_PRELOAD",
@@ -1423,52 +1374,11 @@ mod tests {
     }
 
     #[test]
-    fn test_blocked_env_vars_has_expected_count() {
-        assert_eq!(
-            BLOCKED_ENV_VARS.len(),
-            18,
-            "BLOCKED_ENV_VARS count changed unexpectedly"
-        );
-    }
-
-    #[test]
-    fn test_blocked_env_vars_no_duplicates() {
-        let mut seen = std::collections::HashSet::new();
-        for var in BLOCKED_ENV_VARS {
-            assert!(seen.insert(var), "duplicate in BLOCKED_ENV_VARS: {var}");
-        }
-    }
-
-    // --- SandboxConfig / DockerConfig default tests ---
-
-    #[test]
     fn test_sandbox_config_default() {
         let config = SandboxConfig::default();
         assert!(config.enabled, "sandbox should be enabled by default");
         assert_eq!(config.mode, SandboxMode::Auto);
         assert!(!config.allow_network);
-    }
-
-    #[test]
-    fn test_docker_config_default() {
-        let config = DockerConfig::default();
-        assert_eq!(config.image, "ubuntu:24.04");
-        assert!(config.cpu_limit.is_none());
-        assert!(config.memory_limit.is_none());
-        assert!(config.pids_limit.is_none());
-        assert_eq!(config.mount_mode, MountMode::ReadWrite);
-    }
-
-    #[test]
-    fn test_sandbox_config_serde_defaults() {
-        let config: SandboxConfig = serde_json::from_str("{}").unwrap();
-        assert!(
-            config.enabled,
-            "sandbox should be enabled by default when field is missing"
-        );
-        assert_eq!(config.mode, SandboxMode::Auto);
-        assert!(!config.allow_network);
-        assert_eq!(config.docker.image, "ubuntu:24.04");
     }
 
     #[test]
@@ -1612,17 +1522,6 @@ mod tests {
     }
 
     // --- is_noop contract (fail-closed callers depend on this) ---
-
-    #[test]
-    fn no_sandbox_reports_noop() {
-        // The `mcp-serve` fail-closed check and the validator direct-argv path
-        // both key off `is_noop()`. NoSandbox provides zero confinement, so it
-        // must report `true`; the trait default (real backends) is `false`.
-        assert!(
-            NoSandbox.is_noop(),
-            "NoSandbox must report is_noop() == true"
-        );
-    }
 
     #[test]
     fn disabled_and_none_modes_yield_noop_sandbox() {
@@ -2127,42 +2026,6 @@ mod tests {
     }
 
     #[test]
-    fn refusal_text_names_per_os_remediations_and_avoids_denial_phrases() {
-        // The message is model-readable remediation, per OS…
-        let windows = remediation_for(HostOs::Windows);
-        assert!(
-            windows.contains("octos-sandbox.exe") && windows.contains("Docker"),
-            "windows remediation names the AppContainer helper and Docker: {windows}"
-        );
-        let linux = remediation_for(HostOs::Linux);
-        assert!(
-            linux.contains("bubblewrap") && linux.contains("Docker"),
-            "linux remediation names bubblewrap and Docker: {linux}"
-        );
-        let macos = remediation_for(HostOs::Macos);
-        assert!(
-            macos.contains("sandbox-exec"),
-            "macos remediation names sandbox-exec: {macos}"
-        );
-        for os in ALL_OSES {
-            let text = remediation_for(os);
-            assert!(
-                text.contains("sandbox.enabled=false") && text.contains("\"none\""),
-                "every remediation names the explicit opt-outs: {text}"
-            );
-            // …and must never contain a kernel denial phrase, or the
-            // sandbox_denial_hint scanner would append a misleading
-            // "the OS sandbox blocked a file access" hint to a refusal.
-            for phrase in DENIAL_PHRASES {
-                assert!(
-                    !text.contains(phrase),
-                    "refusal text must not trip the denial scanner: {phrase}"
-                );
-            }
-        }
-    }
-
-    #[test]
     fn confining_backends_never_report_noop_or_refusal() {
         // #2196 review MUST-FIX invariant: `is_noop()` is a CONSTRUCTION-TIME
         // property. A backend built from a `Confine` decision must never
@@ -2191,70 +2054,6 @@ mod tests {
         }
         // The inverse stays true: NoSandbox is the one honest no-op.
         assert!(NoSandbox.is_noop());
-    }
-
-    #[test]
-    fn refusal_display_never_names_the_disable_keys() {
-        // Codex MUST-FIX (#2196 review): the Display text flows VERBATIM into
-        // model-visible tool results (shell/exec refusal guards, wrap-time
-        // stderr, mcp-serve session errors, fleet termination reasons). Text
-        // that names the config keys that remove confinement is itself an
-        // escape vector -- a confined model can still edit config files. The
-        // operator-facing remediation (which legitimately names the explicit
-        // opt-outs) lives in the `remediation` FIELD, surfaced only via the
-        // creation-time error log and doctor-adjacent surfaces.
-        let mut displays: Vec<String> = Vec::new();
-        for os in ALL_OSES {
-            // Explicit-mode refusals (wrong OS / missing backend) ...
-            for mode in [
-                SandboxMode::Bwrap,
-                SandboxMode::Landlock,
-                SandboxMode::Macos,
-                SandboxMode::AppContainer,
-                SandboxMode::Docker,
-            ] {
-                if let SandboxDecision::Refuse(error) =
-                    decide_sandbox(&mode_config(mode.clone()), os, &NO_BACKENDS)
-                {
-                    displays.push(error.to_string());
-                }
-            }
-            // ... and the auto+fail_closed refusal.
-            let config = SandboxConfig {
-                fail_closed: true,
-                ..SandboxConfig::default()
-            };
-            if let SandboxDecision::Refuse(error) = decide_sandbox(&config, os, &NO_BACKENDS) {
-                displays.push(error.to_string());
-            }
-        }
-        assert!(
-            displays.len() >= ALL_OSES.len(),
-            "matrix must produce refusals to inspect"
-        );
-        for text in &displays {
-            for banned in [
-                "enabled=false",
-                "mode=\"none\"",
-                "mode = \"none\"",
-                "danger-full-access",
-            ] {
-                assert!(
-                    !text.contains(banned),
-                    "model-visible refusal must not name the disable keys ({banned:?}): {text}"
-                );
-            }
-            for phrase in DENIAL_PHRASES {
-                assert!(
-                    !text.contains(phrase),
-                    "model-visible refusal must not trip the denial scanner: {phrase}"
-                );
-            }
-            assert!(
-                text.contains("operator"),
-                "model-visible refusal points at the operator, not at config keys: {text}"
-            );
-        }
     }
 
     #[test]

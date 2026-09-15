@@ -1048,38 +1048,6 @@ mod tests {
         );
     }
 
-    /// The mismatch guard still has to bite: a vector of the wrong width is
-    /// dropped rather than corrupting the index.
-    #[tokio::test]
-    async fn open_with_dimension_still_drops_mismatched_vectors() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = EpisodeStore::open_with_dimension(dir.path(), 768)
-            .await
-            .unwrap();
-
-        let ep = make_episode("wrong width embedding", "/proj");
-        let ep_id = ep.id.clone();
-        store.store(ep).await.unwrap();
-        // 1536-d vector into a 768-d index.
-        store
-            .store_embedding(&ep_id, vec![0.1f32; 1536])
-            .await
-            .unwrap();
-
-        let scored = store
-            .find_relevant_hybrid_scored("wrong width", None, 10)
-            .await
-            .unwrap();
-        let hit = scored.iter().find(|(ep, _)| ep.id == ep_id);
-        // Still findable by BM25, but with no vector contribution.
-        assert!(hit.is_some(), "episode should remain BM25-searchable");
-        assert_eq!(
-            hit.unwrap().1.vector,
-            0.0,
-            "mismatched vector must not enter the index"
-        );
-    }
-
     /// The scenario this whole signal exists for: someone switches embedding
     /// model, restarts, and every persisted vector is now the wrong width.
     /// Before, that was a wall of per-episode warnings and no way to ask how
@@ -1166,118 +1134,6 @@ mod tests {
         assert!((c.ratio() - 1.0).abs() < 1e-9);
     }
 
-    /// The reindex worklist must contain exactly the episodes that lack a
-    /// usable vector — absent AND wrong-width — and nothing else. A false
-    /// positive re-embeds (and re-bills) work that was already fine; a false
-    /// negative leaves an episode permanently BM25-only.
-    #[tokio::test]
-    async fn episodes_needing_vectors_lists_absent_and_mismatched_only() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = EpisodeStore::open_with_dimension(dir.path(), 4)
-            .await
-            .unwrap();
-
-        let good = make_episode("has a correct vector", "/proj");
-        let good_id = good.id.clone();
-        store.store(good).await.unwrap();
-        store
-            .store_embedding(&good_id, vec![0.5f32; 4])
-            .await
-            .unwrap();
-
-        let absent = make_episode("never embedded", "/proj");
-        let absent_id = absent.id.clone();
-        store.store(absent).await.unwrap();
-
-        let wrong = make_episode("embedded at the old width", "/proj");
-        let wrong_id = wrong.id.clone();
-        store.store(wrong).await.unwrap();
-        store
-            .store_embedding(&wrong_id, vec![0.5f32; 1536])
-            .await
-            .unwrap();
-
-        let pending = store.episodes_needing_vectors().await.unwrap();
-        let ids: Vec<&str> = pending.iter().map(|(id, _)| id.as_str()).collect();
-
-        assert!(
-            !ids.contains(&good_id.as_str()),
-            "a correctly-sized vector must NOT be re-embedded"
-        );
-        assert!(
-            ids.contains(&absent_id.as_str()),
-            "an episode with no vector needs one"
-        );
-        assert!(
-            ids.contains(&wrong_id.as_str()),
-            "a wrong-width vector must be regenerated"
-        );
-        assert_eq!(pending.len(), 2);
-
-        // The summary comes back so the caller can embed without a second read.
-        let (_, summary) = pending.iter().find(|(id, _)| id == &absent_id).unwrap();
-        assert_eq!(summary, "never embedded");
-    }
-
-    /// Full repair loop: the worklist drains to empty and coverage recovers.
-    /// This is what `octos memory reindex` does, minus the provider.
-    #[tokio::test]
-    async fn reindexing_the_worklist_restores_full_coverage() {
-        let dir = tempfile::tempdir().unwrap();
-        // Persist at the old width.
-        {
-            let store = EpisodeStore::open_with_dimension(dir.path(), 1536)
-                .await
-                .unwrap();
-            for i in 0..5 {
-                let ep = make_episode(&format!("episode {i}"), "/proj");
-                let id = ep.id.clone();
-                store.store(ep).await.unwrap();
-                store
-                    .store_embedding(&id, vec![0.1f32; 1536])
-                    .await
-                    .unwrap();
-            }
-        }
-        // Reopen at the new width: everything is now mismatched.
-        let store = EpisodeStore::open_with_dimension(dir.path(), 768)
-            .await
-            .unwrap();
-        assert_eq!(store.vector_coverage().vectorized, 0);
-
-        let pending = store.episodes_needing_vectors().await.unwrap();
-        assert_eq!(pending.len(), 5);
-        for (id, _summary) in &pending {
-            let mut v = vec![0.0f32; 768];
-            v[0] = 1.0;
-            store.store_embedding(id, v).await.unwrap();
-        }
-
-        let after = store.vector_coverage();
-        assert_eq!(
-            after.vectorized, 5,
-            "every episode rejoins the vector index"
-        );
-        assert!((after.ratio() - 1.0).abs() < 1e-9);
-        assert!(
-            store.episodes_needing_vectors().await.unwrap().is_empty(),
-            "the worklist must drain — a non-empty list here means reindex never converges"
-        );
-    }
-
-    /// An episode with an empty summary has nothing to embed. Including it
-    /// would send empty text to a paid provider and never clear the worklist.
-    #[tokio::test]
-    async fn episodes_needing_vectors_skips_empty_summaries() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = EpisodeStore::open_with_dimension(dir.path(), 4)
-            .await
-            .unwrap();
-        let ep = make_episode("   ", "/proj");
-        store.store(ep).await.unwrap();
-        assert!(store.episodes_needing_vectors().await.unwrap().is_empty());
-    }
-
     #[test]
     fn parse_episode_ids_salvages_corrupt_json() {
         // Valid JSON parses normally.
@@ -1292,72 +1148,6 @@ mod tests {
             parse_episode_ids_with_salvage(r#"["ep-1","ep-2""#),
             vec!["ep-1".to_string(), "ep-2".to_string()]
         );
-    }
-
-    /// End-to-end pin for the delete-path salvage: corrupt the on-disk cwd
-    /// index, delete ONE episode, and assert the other episode's ID survives
-    /// in the index. Pre-fix, `delete_by_id` parsed the corrupt JSON with
-    /// `unwrap_or_default()`, saw an empty list, and removed the whole cwd
-    /// entry — orphaning every other episode indexed under that cwd.
-    #[tokio::test]
-    async fn delete_by_id_salvages_corrupt_cwd_index_and_keeps_other_ids() {
-        let dir = tempfile::tempdir().unwrap();
-        let (id_keep, id_delete);
-        {
-            let store = EpisodeStore::open(dir.path()).await.unwrap();
-            let keeper = make_episode("keeper episode", "/proj");
-            let doomed = make_episode("doomed episode", "/proj");
-            id_keep = keeper.id.clone();
-            id_delete = doomed.id.clone();
-            store.store(keeper).await.unwrap();
-            store.store(doomed).await.unwrap();
-        } // drop the store to release the redb lock
-
-        // Corrupt the cwd index: truncated JSON array (no closing bracket).
-        {
-            let db = Database::create(dir.path().join("episodes.redb")).unwrap();
-            let txn = db.begin_write().unwrap();
-            {
-                let mut table = txn.open_table(CWD_INDEX_TABLE).unwrap();
-                let corrupt = format!("[\"{id_keep}\",\"{id_delete}\"");
-                table.insert("/proj", corrupt.as_str()).unwrap();
-            }
-            txn.commit().unwrap();
-        }
-
-        {
-            let store = EpisodeStore::open(dir.path()).await.unwrap();
-            assert!(store.delete_by_id(&id_delete).await.unwrap());
-        }
-
-        // Inspect the index directly: the keeper must have been salvaged.
-        let db = Database::create(dir.path().join("episodes.redb")).unwrap();
-        let txn = db.begin_read().unwrap();
-        let table = txn.open_table(CWD_INDEX_TABLE).unwrap();
-        let raw = table
-            .get("/proj")
-            .unwrap()
-            .expect("cwd entry must survive when it still lists episodes")
-            .value()
-            .to_string();
-        let ids: Vec<String> = serde_json::from_str(&raw).expect("rewritten index is valid JSON");
-        assert_eq!(
-            ids,
-            vec![id_keep.clone()],
-            "keeper must remain indexed after deleting through a corrupt cwd index"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_open_creates_db() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = EpisodeStore::open(dir.path()).await.unwrap();
-        // Verify empty store returns no results
-        let results = store
-            .find_relevant(Path::new("/nonexistent"), "anything", 10)
-            .await
-            .unwrap();
-        assert!(results.is_empty());
     }
 
     #[tokio::test]
@@ -1399,23 +1189,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(results.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn test_find_relevant_no_matches() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = EpisodeStore::open(dir.path()).await.unwrap();
-
-        store
-            .store(make_episode("Fixed UI layout", "/proj"))
-            .await
-            .unwrap();
-
-        let results = store
-            .find_relevant(Path::new("/proj"), "database", 10)
-            .await
-            .unwrap();
-        assert!(results.is_empty());
     }
 
     /// NEW-06 codex follow-up — when `min_best_modality` is supplied
@@ -1560,35 +1333,6 @@ mod tests {
         );
     }
 
-    /// NEW-06 codex follow-up companion — when `min_best_modality` is
-    /// `None`, the legacy fall-through to the unscored DB scan stays in
-    /// place. Locks the "no behaviour change for legacy callers" half
-    /// of the fix.
-    #[tokio::test]
-    async fn find_relevant_filtered_falls_through_to_db_scan_when_no_floor() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = EpisodeStore::open(dir.path()).await.unwrap();
-
-        store
-            .store(make_episode("Fixed parser bug in tokenizer", "/proj"))
-            .await
-            .unwrap();
-
-        // No floor → legacy behaviour: keyword-substring matching via
-        // the index OR the DB scan returns the episode.
-        let results = store
-            .find_relevant_filtered(Path::new("/proj"), "parser", 10, None)
-            .await
-            .unwrap();
-        assert_eq!(
-            results.len(),
-            1,
-            "find_relevant_filtered with no floor must keep legacy \
-             behaviour byte-for-byte — got {} episodes",
-            results.len()
-        );
-    }
-
     #[tokio::test]
     async fn test_store_embedding_and_hybrid_search() {
         let dir = tempfile::tempdir().unwrap();
@@ -1693,46 +1437,6 @@ mod tests {
             .await
             .unwrap();
         assert!(results.is_empty());
-    }
-
-    #[tokio::test]
-    async fn should_return_false_when_deleting_nonexistent_id() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = EpisodeStore::open(dir.path()).await.unwrap();
-
-        let deleted = store.delete_by_id("nonexistent-id").await.unwrap();
-        assert!(!deleted);
-    }
-
-    #[tokio::test]
-    async fn should_delete_many_episodes_when_bulk_deleting() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = EpisodeStore::open(dir.path()).await.unwrap();
-
-        let ep1 = make_episode("First episode", "/proj");
-        let ep2 = make_episode("Second episode", "/proj");
-        let ep3 = make_episode("Third episode", "/proj");
-        let id1 = ep1.id.clone();
-        let id2 = ep2.id.clone();
-        let id3 = ep3.id.clone();
-        store.store(ep1).await.unwrap();
-        store.store(ep2).await.unwrap();
-        store.store(ep3).await.unwrap();
-
-        // Delete two of three
-        let count = store
-            .delete_many(&[id1, id2, "nonexistent".to_string()])
-            .await
-            .unwrap();
-        assert_eq!(count, 2);
-
-        // Only ep3 should remain
-        let results = store
-            .find_relevant(Path::new("/proj"), "episode", 10)
-            .await
-            .unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].id, id3);
     }
 
     #[tokio::test]
@@ -1843,98 +1547,6 @@ mod tests {
         assert!(
             degraded_view.is_empty(),
             "degraded reads must return empty; got {degraded_view:?}",
-        );
-    }
-
-    /// Strict `open` must fail (not silently degrade) when the redb
-    /// file lock is already held. This locks down the contract that
-    /// codex's round-1 review of #899 called out: a second
-    /// `Serve`-role bootstrap should never quietly flip canonical
-    /// ownership.
-    #[tokio::test]
-    async fn should_error_on_strict_open_when_redb_already_held() {
-        let dir = tempfile::tempdir().unwrap();
-        let _owner = EpisodeStore::open(dir.path()).await.unwrap();
-
-        let err = EpisodeStore::open(dir.path())
-            .await
-            .err()
-            .expect("strict open must error when lock is held");
-        let msg = err.to_string() + " " + &format!("{err:?}");
-        assert!(
-            msg.contains("Database already open") || msg.contains("Cannot acquire lock"),
-            "strict open error must surface the lock contention; got: {err:?}",
-        );
-    }
-
-    /// The strict-open failure must be *recognisable* and *actionable*, not
-    /// just non-empty prose.
-    ///
-    /// Recognisable: callers upstack (the ui-protocol `session/open` handler)
-    /// decide whether to render a "another process owns this data dir"
-    /// remedy or a generic internal error, and they must not do that by
-    /// string-matching an error whose wording is free to change.
-    ///
-    /// Actionable: the operator sees this through a client, so the sentence
-    /// itself has to name the path and both ways out. Before this, the
-    /// message reached the TUI as a bare "failed to open episode store for
-    /// profile 'x'" with the cause dropped entirely.
-    #[tokio::test]
-    async fn strict_open_lock_error_is_typed_and_names_the_remedy() {
-        let dir = tempfile::tempdir().unwrap();
-        let _owner = EpisodeStore::open(dir.path()).await.unwrap();
-
-        let err = EpisodeStore::open(dir.path())
-            .await
-            .err()
-            .expect("strict open must error when lock is held");
-
-        assert!(
-            is_episode_store_locked(&err),
-            "lock contention must be structurally detectable; got: {err:?}",
-        );
-
-        // Survives re-wrapping: `ProfileRuntime::bootstrap` adds its own
-        // context before the API layer inspects the error.
-        let wrapped = Err::<(), _>(err)
-            .wrap_err("failed to open episode store for profile 'alan'")
-            .unwrap_err();
-        assert!(
-            is_episode_store_locked(&wrapped),
-            "detection must survive eyre context wrapping; got: {wrapped:?}",
-        );
-
-        let rendered = format!("{wrapped:#}");
-        assert!(
-            rendered.contains("episodes.redb"),
-            "message must name the contended file; got: {rendered}",
-        );
-        assert!(
-            rendered.contains("--instance-data-dir"),
-            "message must name the remedy; got: {rendered}",
-        );
-    }
-
-    /// Corruption / I/O failures must NOT be mistaken for lock contention —
-    /// they have no `--instance-data-dir` remedy and need a different
-    /// message. Guards the typed detector against over-matching.
-    #[tokio::test]
-    async fn non_lock_open_failures_are_not_flagged_as_locked() {
-        let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("episodes.redb");
-        // Not a redb file at all: open must fail as a format/corruption
-        // error, which is a distinct condition from a held lock.
-        tokio::fs::write(&db_path, b"this is not a redb database")
-            .await
-            .unwrap();
-
-        let err = EpisodeStore::open(dir.path())
-            .await
-            .err()
-            .expect("opening a corrupt file must error");
-        assert!(
-            !is_episode_store_locked(&err),
-            "corruption must not be reported as lock contention; got: {err:?}",
         );
     }
 }

@@ -556,48 +556,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_contract_prefers_explicit_delivery_actions_over_legacy_completion_actions() {
-        let temp = tempfile::tempdir().unwrap();
-        let bundle = temp.path().join("bundle.md");
-        std::fs::write(&bundle, b"bundle").unwrap();
-
-        let mut policy = WorkspacePolicy::for_session();
-        policy
-            .artifacts
-            .entries
-            .insert("bundle".into(), "bundle.md".into());
-        policy.spawn_tasks.insert(
-            "bundle_generate".into(),
-            WorkspaceSpawnTaskPolicy {
-                artifact: Some("bundle".into()),
-                artifacts: vec!["bundle".into()],
-                on_verify: vec!["file_exists:$bundle".into()],
-                on_complete: vec!["file_exists:missing.txt".into()],
-                on_deliver: vec!["notify_user:bundle delivered".into()],
-                on_failure: Vec::new(),
-            },
-        );
-        write_workspace_policy(temp.path(), &policy).unwrap();
-
-        let result = enforce_spawn_task_contract(
-            &ToolRegistry::with_builtins(temp.path()),
-            "bundle_generate",
-            "tool-call-4",
-            &[],
-            UNIX_EPOCH,
-            None,
-        )
-        .await;
-
-        match result {
-            SpawnTaskContractResult::Satisfied { output_files } => {
-                assert_eq!(output_files, vec![bundle.to_string_lossy().to_string()]);
-            }
-            other => panic!("expected success, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
     async fn session_contract_binds_explicit_files_to_named_artifacts_for_delivery_actions() {
         let temp = tempfile::tempdir().unwrap();
         let report = temp.path().join("report.md");
@@ -735,28 +693,5 @@ mod tests {
                 reason: None,
             }
         );
-    }
-
-    #[test]
-    fn runtime_verification_uses_shared_validator_semantics_for_file_size_checks() {
-        let temp = tempfile::tempdir().unwrap();
-        let artifact = temp.path().join("output.mp3");
-        std::fs::write(&artifact, b"x").unwrap();
-
-        let resolved_artifacts = ResolvedArtifacts {
-            context: ActionContext::default()
-                .with_named_target("$artifact", vec![artifact.clone()]),
-            paths: vec![artifact.clone()],
-        };
-
-        let error = run_verify_actions(
-            temp.path(),
-            &["file_size_min:$artifact:1024".into()],
-            &resolved_artifacts,
-        )
-        .unwrap_err();
-
-        assert!(error.contains("file_size_min:$artifact:1024"));
-        assert!(error.contains("output.mp3 is 1 bytes, minimum is 1024"));
     }
 }

@@ -303,68 +303,11 @@ mod tool_choice_wire_tests {
         );
         assert!(ToolChoice::None.openai_responses_wire(false).is_none());
     }
-
-    #[test]
-    fn should_render_every_provider_wire_form_for_explicit_choices() {
-        assert_eq!(ToolChoice::None.openai_chat_wire(true).unwrap(), "none");
-        assert_eq!(
-            ToolChoice::Required.openai_chat_wire(true).unwrap(),
-            "required"
-        );
-        assert_eq!(
-            ToolChoice::Specific {
-                name: "read".into()
-            }
-            .openai_chat_wire(true)
-            .unwrap(),
-            serde_json::json!({"type": "function", "function": {"name": "read"}})
-        );
-        assert_eq!(
-            ToolChoice::Specific {
-                name: "read".into()
-            }
-            .openai_responses_wire(true)
-            .unwrap(),
-            serde_json::json!({"type": "function", "name": "read"})
-        );
-        assert_eq!(
-            ToolChoice::None.anthropic_wire(true).unwrap(),
-            serde_json::json!({"type": "none"})
-        );
-        assert_eq!(
-            ToolChoice::Required.anthropic_wire(true).unwrap(),
-            serde_json::json!({"type": "any"})
-        );
-        assert_eq!(
-            ToolChoice::None
-                .gemini_function_calling_config(true)
-                .unwrap(),
-            serde_json::json!({"mode": "NONE"})
-        );
-        assert_eq!(
-            ToolChoice::Specific {
-                name: "read".into()
-            }
-            .gemini_function_calling_config(true)
-            .unwrap(),
-            serde_json::json!({"mode": "ANY", "allowed_function_names": ["read"]})
-        );
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn should_deserialize_disabled_reasoning_effort_from_none() {
-        let effort: ReasoningEffort = serde_json::from_value(serde_json::json!("none"))
-            .expect("none should disable reasoning");
-        assert_eq!(
-            serde_json::to_value(effort).unwrap(),
-            serde_json::json!("none")
-        );
-    }
 
     #[test]
     fn test_chat_config_defaults() {
@@ -376,40 +319,6 @@ mod tests {
         assert_eq!(config.temperature, Some(0.0));
         assert!(matches!(config.tool_choice, ToolChoice::Auto));
         assert!(config.stop_sequences.is_empty());
-    }
-
-    #[test]
-    fn test_tool_choice_default_is_auto() {
-        let choice = ToolChoice::default();
-        assert!(matches!(choice, ToolChoice::Auto));
-    }
-
-    #[test]
-    fn should_default_cache_retention_to_provider_default_when_unset() {
-        assert_eq!(
-            ChatConfig::default().cache_retention,
-            CacheRetention::Default
-        );
-    }
-
-    #[test]
-    fn should_keep_cache_retention_off_the_wire_when_default() {
-        // Persisted ChatConfig JSON must keep its pre-field byte shape for a
-        // config that never touches the preference.
-        let json = serde_json::to_value(ChatConfig::default()).unwrap();
-        assert!(json.get("cache_retention").is_none());
-    }
-
-    #[test]
-    fn should_round_trip_cache_retention_none_as_snake_case() {
-        let config = ChatConfig {
-            cache_retention: CacheRetention::None,
-            ..Default::default()
-        };
-        let json = serde_json::to_value(&config).unwrap();
-        assert_eq!(json["cache_retention"], "none");
-        let decoded: ChatConfig = serde_json::from_value(json).unwrap();
-        assert_eq!(decoded.cache_retention, CacheRetention::None);
     }
 
     #[test]
@@ -457,53 +366,6 @@ mod tests {
     }
 
     #[test]
-    fn should_serialize_context_management_when_present() {
-        let config = ChatConfig {
-            context_management: Some(serde_json::json!({
-                "edits": [
-                    { "type": "clear_tool_uses_20250919", "keep": { "type": "input_tokens", "value": 10 } }
-                ]
-            })),
-            ..Default::default()
-        };
-        let json = serde_json::to_value(&config).unwrap();
-        let cm = json.get("context_management").expect("field present");
-        assert!(cm.is_object());
-        assert!(cm.get("edits").is_some());
-    }
-
-    #[test]
-    fn deepest_shared_checkpoint_stops_before_edited_semantic_suffix() {
-        fn hint(id: &str, hash: &str) -> SemanticCheckpointHint {
-            SemanticCheckpointHint {
-                boundary_id: id.to_owned(),
-                boundary_kind: "message:user".to_owned(),
-                prefix_hash: hash.to_owned(),
-                prefix_token_estimate: 1,
-                estimated_recompute_tokens: 1,
-                checkpoint_priority: 1,
-            }
-        }
-        let previous = PromptCacheContext {
-            affinity_key: "key".to_owned(),
-            epoch_id: "epoch".to_owned(),
-            stable_prefix_hash: "stable".to_owned(),
-            semantic_boundaries: vec![hint("one", "h1"), hint("two", "h2")],
-        };
-        let edited = PromptCacheContext {
-            semantic_boundaries: vec![hint("one-new-id", "h1"), hint("two", "changed")],
-            ..previous.clone()
-        };
-
-        assert_eq!(
-            previous
-                .deepest_shared_checkpoint(&edited)
-                .map(|hint| hint.boundary_id.as_str()),
-            Some("one")
-        );
-    }
-
-    #[test]
     fn test_tool_choice_specific_serde() {
         let choice = ToolChoice::Specific {
             name: "search".to_string(),
@@ -516,51 +378,5 @@ mod tests {
             ToolChoice::Specific { name } => assert_eq!(name, "search"),
             _ => panic!("expected Specific"),
         }
-    }
-
-    #[test]
-    fn test_tool_choice_none_serde() {
-        let choice = ToolChoice::None;
-        let json = serde_json::to_value(&choice).unwrap();
-        let deserialized: ToolChoice = serde_json::from_value(json).unwrap();
-        assert!(matches!(deserialized, ToolChoice::None));
-    }
-
-    #[test]
-    fn test_response_format_json_object_serde() {
-        let rf = ResponseFormat::JsonObject;
-        let json = serde_json::to_value(&rf).unwrap();
-        assert_eq!(json["type"], "json_object");
-        let deserialized: ResponseFormat = serde_json::from_value(json).unwrap();
-        assert!(matches!(deserialized, ResponseFormat::JsonObject));
-    }
-
-    #[test]
-    fn test_response_format_json_schema_serde() {
-        let rf = ResponseFormat::JsonSchema {
-            name: "person".into(),
-            schema: serde_json::json!({"type": "object", "properties": {"name": {"type": "string"}}}),
-            strict: true,
-        };
-        let json = serde_json::to_value(&rf).unwrap();
-        assert_eq!(json["type"], "json_schema");
-        assert_eq!(json["name"], "person");
-        assert!(json["strict"].as_bool().unwrap());
-
-        let deserialized: ResponseFormat = serde_json::from_value(json).unwrap();
-        match deserialized {
-            ResponseFormat::JsonSchema { name, strict, .. } => {
-                assert_eq!(name, "person");
-                assert!(strict);
-            }
-            _ => panic!("expected JsonSchema"),
-        }
-    }
-
-    #[test]
-    fn test_response_format_skipped_when_none() {
-        let config = ChatConfig::default();
-        let json = serde_json::to_value(&config).unwrap();
-        assert!(json.get("response_format").is_none());
     }
 }

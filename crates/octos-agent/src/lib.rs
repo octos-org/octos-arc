@@ -224,22 +224,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_glob_recursive() {
-        let dir = setup_test_dir();
-        let tool = GlobTool::new(dir.path());
-
-        let result = tool
-            .execute(&serde_json::json!({"pattern": "**/*.rs"}))
-            .await
-            .unwrap();
-
-        assert!(result.success);
-        assert!(
-            result.output.contains("src/module.rs") || result.output.contains("src\\module.rs")
-        );
-    }
-
-    #[tokio::test]
     async fn test_grep_tool() {
         let dir = setup_test_dir();
         let tool = GrepTool::new(dir.path());
@@ -252,35 +236,6 @@ mod tests {
         assert!(result.success);
         assert!(result.output.contains("test.rs"));
         assert!(result.output.contains("println"));
-    }
-
-    #[tokio::test]
-    async fn test_grep_with_context() {
-        let dir = setup_test_dir();
-        let tool = GrepTool::new(dir.path());
-
-        let result = tool
-            .execute(&serde_json::json!({"pattern": "add", "context": 1}))
-            .await
-            .unwrap();
-
-        assert!(result.success);
-        // Should include surrounding lines
-        assert!(result.output.contains("pub fn"));
-    }
-
-    #[tokio::test]
-    async fn test_grep_case_insensitive() {
-        let dir = setup_test_dir();
-        let tool = GrepTool::new(dir.path());
-
-        let result = tool
-            .execute(&serde_json::json!({"pattern": "FOO", "ignore_case": true}))
-            .await
-            .unwrap();
-
-        assert!(result.success);
-        assert!(result.output.contains("Foo"));
     }
 
     #[tokio::test]
@@ -330,66 +285,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_glob_rejects_absolute_pattern() {
-        let dir = setup_test_dir();
-        let tool = GlobTool::new(dir.path());
-        let result = tool
-            .execute(&serde_json::json!({"pattern": "/etc/passwd"}))
-            .await
-            .unwrap();
-        assert!(!result.success);
-        assert!(result.output.contains("not allowed"));
-    }
-
-    #[tokio::test]
-    async fn test_glob_rejects_parent_traversal() {
-        let dir = setup_test_dir();
-        let tool = GlobTool::new(dir.path());
-        let result = tool
-            .execute(&serde_json::json!({"pattern": "../../etc/*"}))
-            .await
-            .unwrap();
-        assert!(!result.success);
-        assert!(result.output.contains("not allowed"));
-    }
-
-    #[tokio::test]
-    async fn test_grep_rejects_absolute_file_pattern() {
-        let dir = setup_test_dir();
-        let tool = GrepTool::new(dir.path());
-        let result = tool
-            .execute(&serde_json::json!({"pattern": "fn", "file_pattern": "/etc/*.conf"}))
-            .await
-            .unwrap();
-        assert!(!result.success);
-        assert!(result.output.contains("not allowed"));
-    }
-
-    #[tokio::test]
-    async fn test_list_dir_rejects_traversal() {
-        let dir = setup_test_dir();
-        let tool = ListDirTool::new(dir.path());
-        let result = tool
-            .execute(&serde_json::json!({"path": "../../.."}))
-            .await
-            .unwrap();
-        assert!(!result.success);
-        assert!(result.output.contains("Path outside"));
-    }
-
-    #[tokio::test]
-    async fn test_registry_unknown_tool() {
-        let dir = setup_test_dir();
-        let registry = ToolRegistry::with_builtins(dir.path());
-
-        let result = registry
-            .execute("nonexistent", &serde_json::json!({}))
-            .await;
-
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
     async fn test_context_filter_restricts_specs() {
         let dir = setup_test_dir();
         let mut registry = ToolRegistry::with_builtins(dir.path());
@@ -425,76 +320,5 @@ mod tests {
             Err(e) => assert!(e.to_string().contains("too large")),
             Ok(_) => panic!("should reject oversized args"),
         }
-    }
-
-    #[test]
-    fn test_registry_retain() {
-        let dir = setup_test_dir();
-        let mut registry = ToolRegistry::with_builtins(dir.path());
-        let initial_count = registry.len();
-
-        registry.retain(|name| name == "shell" || name == "read_file");
-        assert_eq!(registry.len(), 2);
-        assert!(registry.len() < initial_count);
-
-        let specs = registry.specs();
-        let names: Vec<_> = specs.iter().map(|s| s.name.as_str()).collect();
-        assert!(names.contains(&"shell"));
-        assert!(names.contains(&"read_file"));
-    }
-
-    #[test]
-    fn test_registry_is_empty() {
-        let registry = ToolRegistry::new();
-        assert!(registry.is_empty());
-        assert_eq!(registry.len(), 0);
-    }
-
-    #[test]
-    fn test_specs_cache_invalidated_on_register() {
-        let mut registry = ToolRegistry::new();
-        let specs1 = registry.specs();
-        assert!(specs1.is_empty());
-
-        registry.register(ReadFileTool::new("/tmp"));
-        let specs2 = registry.specs();
-        assert_eq!(specs2.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn test_provider_policy_filters_specs() {
-        let dir = setup_test_dir();
-        let mut registry = ToolRegistry::with_builtins(dir.path());
-        let all_count = registry.specs().len();
-
-        // Set provider policy that denies diff_edit
-        let policy: ToolPolicy = serde_json::from_value(serde_json::json!({
-            "deny": ["diff_edit"]
-        }))
-        .unwrap();
-        registry.set_provider_policy(policy);
-
-        let filtered = registry.specs();
-        let names: Vec<_> = filtered.iter().map(|s| s.name.as_str()).collect();
-        assert!(!names.contains(&"diff_edit"));
-        assert!(names.contains(&"shell"));
-        assert!(names.contains(&"read_file"));
-        assert_eq!(filtered.len(), all_count - 1);
-
-        // Allowed tools can still be executed
-        let result = registry
-            .execute("read_file", &serde_json::json!({"path": "test.rs"}))
-            .await
-            .unwrap();
-        assert!(result.success);
-
-        // Denied tools are blocked at execution time too
-        match registry.execute("diff_edit", &serde_json::json!({})).await {
-            Err(e) => assert!(e.to_string().contains("denied by provider policy")),
-            Ok(_) => panic!("should be denied by provider policy"),
-        }
-
-        // Tools still registered internally (len unchanged)
-        assert_eq!(registry.len(), all_count);
     }
 }

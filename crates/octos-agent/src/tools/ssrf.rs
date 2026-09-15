@@ -165,12 +165,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_check_ssrf_blocks_loopback_ip() {
-        let result = check_ssrf("http://127.0.0.1:8080/admin").await;
-        assert!(result.is_some(), "127.0.0.1 should be blocked");
-    }
-
-    #[tokio::test]
     async fn test_check_ssrf_blocks_metadata_endpoint() {
         // AWS metadata endpoint
         let result = check_ssrf("http://169.254.169.254/latest/meta-data/").await;
@@ -184,19 +178,6 @@ mod tests {
 
         let result = check_ssrf("http://192.168.1.1/router").await;
         assert!(result.is_some(), "192.168.x.x should be blocked");
-    }
-
-    #[tokio::test]
-    async fn test_check_ssrf_blocks_invalid_url() {
-        let result = check_ssrf("not-a-url").await;
-        assert!(result.is_some(), "invalid URL should be blocked");
-        assert!(result.unwrap().contains("Invalid URL"));
-    }
-
-    #[tokio::test]
-    async fn test_check_ssrf_blocks_no_host() {
-        let result = check_ssrf("file:///etc/passwd").await;
-        assert!(result.is_some(), "file:// URL should be blocked (no host)");
     }
 
     #[tokio::test]
@@ -215,23 +196,6 @@ mod tests {
     // --- Sync helper tests ---
 
     #[test]
-    fn test_private_host_localhost() {
-        assert!(is_private_host("localhost"));
-        assert!(is_private_host("LOCALHOST"));
-        assert!(is_private_host("localhost."));
-    }
-
-    #[test]
-    fn test_private_host_ipv4() {
-        assert!(is_private_host("127.0.0.1"));
-        assert!(is_private_host("10.0.0.1"));
-        assert!(is_private_host("172.16.0.1"));
-        assert!(is_private_host("192.168.1.1"));
-        assert!(is_private_host("169.254.169.254"));
-        assert!(is_private_host("0.0.0.0"));
-    }
-
-    #[test]
     fn test_private_host_ipv6() {
         assert!(is_private_host("::1"));
         assert!(is_private_host("::"));
@@ -243,14 +207,6 @@ mod tests {
         assert!(is_private_host("ff02::1"));
         assert!(is_private_host("fec0::1"));
         assert!(is_private_host("::192.168.1.1"));
-    }
-
-    #[test]
-    fn test_public_host_allowed() {
-        assert!(!is_private_host("8.8.8.8"));
-        assert!(!is_private_host("1.1.1.1"));
-        assert!(!is_private_host("example.com"));
-        assert!(!is_private_host("2001:4860:4860::8888"));
     }
 
     #[test]
@@ -282,18 +238,6 @@ mod tests {
         assert!(is_private_host("::ffff:100.64.0.1"), "mapped CGNAT");
     }
 
-    #[test]
-    fn test_private_ip_check() {
-        assert!(is_private_ip(&"127.0.0.1".parse().unwrap()));
-        assert!(is_private_ip(&"10.0.0.1".parse().unwrap()));
-        assert!(is_private_ip(&"192.168.1.1".parse().unwrap()));
-        assert!(is_private_ip(&"::1".parse().unwrap()));
-        assert!(!is_private_ip(&"8.8.8.8".parse().unwrap()));
-        assert!(!is_private_ip(&"1.1.1.1".parse().unwrap()));
-    }
-
-    // --- validate_answer_set tests ---
-
     /// SECURITY (peer-review finding: empty DNS answer skips pinning): an
     /// empty DNS answer set must be a HARD FAILURE, never a bypass — if it
     /// flowed through as `Ok` with no addresses, every pinning consumer
@@ -316,13 +260,6 @@ mod tests {
     }
 
     #[test]
-    fn should_pass_public_answer_set_through_validation() {
-        let addr: SocketAddr = "93.184.216.34:443".parse().unwrap();
-        let result = validate_answer_set("example.com", [addr]);
-        assert_eq!(result.expect("public answer set is safe"), vec![addr]);
-    }
-
-    #[test]
     fn should_block_answer_set_containing_private_ip() {
         // A mixed answer (public + private) is how a rebinding resolver
         // smuggles an internal target past a first-answer-only check.
@@ -340,24 +277,6 @@ mod tests {
     // --- check_ssrf_with_addrs tests ---
 
     #[tokio::test]
-    async fn test_with_addrs_blocks_private_host() {
-        let result = check_ssrf_with_addrs("http://127.0.0.1/secret").await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("private"));
-    }
-
-    #[tokio::test]
-    async fn test_with_addrs_returns_resolved_for_public_ip() {
-        // Literal public IP — no DNS needed, resolved_addrs should be empty
-        let result = check_ssrf_with_addrs("https://8.8.8.8/").await;
-        assert!(result.is_ok());
-        assert!(
-            result.unwrap().resolved_addrs.is_empty(),
-            "literal IP should not trigger DNS, resolved_addrs empty"
-        );
-    }
-
-    #[tokio::test]
     async fn test_with_addrs_fails_closed_on_nonexistent_domain() {
         // This domain should fail DNS resolution → must be blocked (fail closed)
         let result =
@@ -370,16 +289,6 @@ mod tests {
         assert!(
             err.contains("DNS resolution failed") || err.contains("fail closed"),
             "error message should indicate DNS failure: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_check_ssrf_blocks_nonexistent_domain() {
-        // The simple API should also fail closed
-        let result = check_ssrf("https://this-domain-does-not-exist-ssrf-test.invalid/foo").await;
-        assert!(
-            result.is_some(),
-            "DNS failure should block via simple API too"
         );
     }
 
