@@ -97,9 +97,7 @@ fn stdio_solo_lean_defaults_enabled() -> bool {
 ///
 /// Built once per profile on first use via [`Self::bootstrap`]. Held
 /// behind an `Arc` so every [`super::SessionRuntime`] for the profile
-/// can cheaply share it. Hot-reloaded (rebuilt) when the profile
-/// config on disk changes; the [`crate::config_watcher`] decides what
-/// constitutes a reload-worthy change.
+/// can cheaply share it.
 pub struct ProfileRuntime {
     /// Stable identifier for the profile (matches
     /// `UserProfile::id`). Used as part of the cache key in
@@ -529,57 +527,6 @@ impl ProfileRuntime {
             tools.register(octos_agent::MemoryNoteTool::new(memory_store.clone()));
         }
 
-        // REG-7 follow-up: register `bg_research` at profile scope so
-        // the serve path (`/api/sessions/*`, UI Protocol WS) exposes
-        // it just like the gateway path does at
-        // `crates/octos-cli/src/session_actor.rs:2283-2305`. The serve
-        // path is the one `octos serve` mounts for web clients; prior
-        // to this, only the gateway (octos chat / bus channels)
-        // registered `bg_research`, so the LLM in serve mode received
-        // `"No tools matched"` when it tried `activate_tools(["bg_research"])`
-        // for `深度研究X` queries (per PR #930's ACT-DIRECTLY rule).
-        //
-        // The original M11-D split-out at `e01a07e4` (PR #764) called
-        // this gap out as a follow-up but never landed; PR #903
-        // restored 6 of 10 regressions and explicitly deferred this
-        // one. PR #930's prompt rewrite — which makes the LLM call
-        // `bg_research` directly rather than wrapping it in `spawn`
-        // — turned the latent gap into an observable production
-        // failure on the dspfac profile (May 13 2026).
-        //
-        // Profile scope is sufficient: the pipeline tool only captures
-        // `llm` / `memory` / `data_dir` / `plugin_dirs` /
-        // `provider_policy`, all of which are profile-level.
-        // Per-session workspace context is threaded separately via
-        // `PipelineHostContext` at execute time (see
-        // `crates/octos-pipeline/src/tool.rs::execute`).
-        //
-        // `mark_spawn_only` keeps the tool out of LRU eviction and
-        // tells the execution loop to background the call so the chat
-        // bubble doesn't block on the long-running pipeline. The
-        // message text mirrors session_actor.rs:2287-2291 verbatim.
-        // The `default_provider` we hand in (`llm`) is already wrapped
-        // by `RetryProvider` → `ProviderChain`, so per-node calls
-        // fail over through the static chain.
-        //
-        // The profile's embedding provider was resolved ONCE back in Step 4
-        // (the episodic index has to be sized from it). The same handle feeds
-        // the pipeline factory below AND rides on the returned ProfileRuntime
-        // so the serve spawn/delegate wiring hands every worker the exact same
-        // embed-on-save + hybrid-recall behaviour.
-
-        // NEW-07: hoist the per-instance the pipeline tool builder
-        // into a [`crate::session_actor::PipelineToolFactory`] impl
-        // so the WS / UI Protocol spawn-wiring site can hand a fresh
-        // `bg_research` instance to every spawned child registry
-        // (mirroring the gateway path at `session_actor.rs:2744-2748`).
-        // Without this, an LLM emitting
-        // `spawn(allowed_tools=["bg_research"])` on the WS path
-        // failed the spawn preflight
-        // (`spawn.rs::ensure_subagent_tools_available`) with
-        // `"required tool(s) not available on this host: bg_research"`
-        // — reproduced by mini1 `bg_research` round-7 soak (binary
-        // `5cfd85f3`).
         // Step 17: re-apply tool policy AFTER plugin / memory-bank
         // registration so deny entries can target plugin-declared
         // tool names too (PR #688 follow-up — MEDIUM #4).
@@ -617,10 +564,7 @@ impl ProfileRuntime {
         //
         // We assemble once per profile and stash it on the runtime so
         // every `SessionRuntime` bootstrapped from this profile inherits
-        // the same prompt onto its per-session `Agent`. The gateway path
-        // is unaffected — `profile_factory::build` continues to call
-        // `build_system_prompt` itself for child-bot sub-agents, and
-        // `plugin_prompt_fragments` is still populated for that path.
+        // the same prompt onto its per-session `Agent`.
         //
         // `project_dir` is `data_dir` in serve mode. The bootstrap-files
         // assembly (`load_bootstrap_files`) reads AGENTS.md / SOUL.md /

@@ -233,8 +233,8 @@ impl WorkspacePolicy {
     /// the agent, while `WorkspacePolicy` is a serialized declaration shared
     /// with the LLM. Stuffing process-launch hooks into the workspace policy
     /// would (a) leak operator-side state into a contract the LLM can read
-    /// and (b) force every embedder of the policy struct (config_watcher,
-    /// session bootstrap, REST inspectors) to know how to run shells.
+    /// and (b) force every embedder of the policy struct (session
+    /// bootstrap, inspectors) to know how to run shells.
     pub fn for_coding() -> Self {
         let mut policy = Self::for_session();
         policy.workspace.kind = WorkspacePolicyKind::Coding;

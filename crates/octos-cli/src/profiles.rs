@@ -941,53 +941,6 @@ impl ProfileStore {
         Ok(())
     }
 
-    /// List sub-accounts for a given parent profile.
-    ///
-    /// NOTE(#148): This performs an O(N) scan over all profiles and filters by parent_id.
-    /// For small deployments (<100 profiles) this is fine. If profile counts grow large,
-    /// consider adding a secondary index (e.g. a parent_id -> Vec<sub_id> mapping) or
-    /// storing sub-accounts in a subdirectory per parent.
-    pub fn list_sub_accounts(&self, parent_id: &str) -> Result<Vec<UserProfile>> {
-        let all = self.list()?;
-        Ok(all
-            .into_iter()
-            .filter(|p| p.parent_id.as_deref() == Some(parent_id))
-            .collect())
-    }
-
-    /// Resolve a public host slug to an internal profile ID.
-    ///
-    /// Host routing is authoritative on `public_subdomain`. For top-level
-    /// profiles only, we allow falling back to the immutable internal ID when
-    /// no explicit public slug has been configured.
-    pub fn resolve_routable_profile_id(&self, candidate: &str) -> Result<Option<String>> {
-        if let Some(profile) = self.get_by_public_subdomain(candidate)? {
-            return Ok(Some(profile.id));
-        }
-
-        let Some(profile) = self.get(candidate)? else {
-            return Ok(None);
-        };
-
-        if profile.parent_id.is_none() && profile.public_subdomain.is_none() {
-            return Ok(Some(profile.id));
-        }
-
-        Ok(None)
-    }
-
-    pub fn get_by_public_subdomain(&self, slug: &str) -> Result<Option<UserProfile>> {
-        let normalized = slug.trim();
-        if normalized.is_empty() {
-            return Ok(None);
-        }
-
-        Ok(self
-            .list()?
-            .into_iter()
-            .find(|profile| profile.public_subdomain.as_deref() == Some(normalized)))
-    }
-
     pub fn ensure_public_subdomain_available(
         &self,
         slug: &str,

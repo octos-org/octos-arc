@@ -158,22 +158,6 @@ impl OupSession {
         })
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) async fn hydrate(&self) -> Result<SessionHydrateResult> {
-        serde_json::from_value(
-            self.client
-                .request(
-                    methods::SESSION_HYDRATE,
-                    json!({
-                        "session_id": self.session_id,
-                        "include": ["messages", "threads", "context"],
-                    }),
-                )
-                .await?,
-        )
-        .wrap_err("decode OUP session hydration")
-    }
-
     pub(crate) async fn turn(
         &self,
         input: &str,
@@ -493,12 +477,6 @@ mod tests {
             .downcast_ref::<OupTurnFailure>()
             .expect("typed terminal failure");
         assert_eq!(failure.partial.text, final_content.unwrap_or_default());
-        let history = session.hydrate().await.unwrap().messages.unwrap();
-        assert!(
-            history
-                .iter()
-                .any(|row| row.content == "OLD-FINAL-DO-NOT-REUSE")
-        );
         session.close().await.unwrap();
     }
 
@@ -595,26 +573,17 @@ mod tests {
             "closing A must not cancel B"
         );
         model.release.notify_waiters();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let history = sessions[1]
-                    .hydrate()
-                    .await
-                    .unwrap()
-                    .messages
-                    .unwrap_or_default();
-                if history
-                    .iter()
-                    .any(|m| m.content == "Other connection completed")
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::timeout(Duration::from_secs(5), sessions[1].close())
+            .await
+            .expect("closing B after release must not wedge")
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while model.dropped.load(Ordering::SeqCst) < 2 {
+                tokio::task::yield_now().await;
             }
         })
         .await
         .unwrap();
-        sessions[1].close().await.unwrap();
         assert_eq!(model.dropped.load(Ordering::SeqCst), 2);
     }
 

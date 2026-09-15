@@ -27,12 +27,6 @@ pub fn write_line(w: &mut impl io::Write, msg: &str) -> io::Result<()> {
     }
 }
 
-/// Thin wrapper: write a line to stdout via [`write_line`].
-pub fn print_stdout(msg: &str) -> io::Result<()> {
-    let mut out = io::stdout().lock();
-    write_line(&mut out, msg)
-}
-
 /// Thin wrapper: write a line to stderr via [`write_line`].
 pub fn print_stderr(msg: &str) -> io::Result<()> {
     let mut out = io::stderr().lock();
@@ -85,13 +79,5 @@ mod tests {
         let result = write_line(&mut buf, "hello");
         assert!(result.is_ok());
         assert_eq!(buf, b"hello\n");
-    }
-
-    #[test]
-    fn serve_console_print_stdout_delegates_to_write_line() {
-        // print_stdout is a thin wrapper around write_line with stdout lock.
-        // We verify it returns Ok and does not panic under normal conditions.
-        let result = print_stdout("test");
-        assert!(result.is_ok());
     }
 }

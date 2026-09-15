@@ -32,11 +32,9 @@ pub(crate) mod turn_loop;
 pub(crate) mod turn_trace;
 
 pub mod commands;
-pub mod compaction;
 pub mod config;
 pub mod config_context;
 pub mod config_layer;
-pub mod config_watcher;
 #[path = "api/context_manager.rs"]
 pub(crate) mod context_manager;
 // Interactive-contract stores (pending approvals / user questions / diff

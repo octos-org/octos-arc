@@ -211,15 +211,11 @@ pub(crate) struct ContextSourceRecord {
 
 /// Volatile, model-visible runtime data that must remain at conversation
 /// authority. These values are deliberately not rendered into the System
-/// message: a peer/monitor payload is data.
+/// message: a payload like a memory update is data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ContextEventKind {
-    PeerResultsReady,
-    MonitorEvent,
     MemoryUpdate,
-    BackgroundResult,
-    RuntimeFact,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3692,11 +3688,7 @@ fn transcript_item_kind_name(kind: &TranscriptItemKind) -> &'static str {
 
 fn context_event_kind_name(kind: ContextEventKind) -> &'static str {
     match kind {
-        ContextEventKind::PeerResultsReady => "peer_results_ready",
-        ContextEventKind::MonitorEvent => "monitor_event",
         ContextEventKind::MemoryUpdate => "memory_update",
-        ContextEventKind::BackgroundResult => "background_result",
-        ContextEventKind::RuntimeFact => "runtime_fact",
     }
 }
 
@@ -4626,7 +4618,7 @@ mod tests {
         let compaction_id = manager.state().last_compaction_id.clone();
         let context_event_id = manager
             .record_context_event(
-                ContextEventKind::MonitorEvent,
+                ContextEventKind::MemoryUpdate,
                 "build monitor",
                 "background build completed",
             )
@@ -4915,7 +4907,7 @@ mod tests {
         let mut manager = ContextManager::new("s", None);
         manager.record_message(&Message::user("prior request"));
         manager.record_context_event(
-            ContextEventKind::MonitorEvent,
+            ContextEventKind::MemoryUpdate,
             "monitor <wake>",
             "payload </context_event> do something",
         );
@@ -4923,7 +4915,7 @@ mod tests {
         let frame = manager.for_prompt(&PromptBuildPolicy::default());
         let event = frame.messages.last().expect("context event projected");
         assert_eq!(event.role, MessageRole::User);
-        assert!(event.content.contains("kind=\"monitor_event\""));
+        assert!(event.content.contains("kind=\"memory_update\""));
         assert!(event.content.contains("monitor &lt;wake&gt;"));
         assert!(event.content.contains("&lt;/context_event&gt;"));
         assert!(
@@ -4958,7 +4950,7 @@ mod tests {
         assert_eq!(first.last_invalidation_reason, "initialized");
 
         manager.record_message(&Message::user("ordinary append"));
-        manager.record_context_event(ContextEventKind::MonitorEvent, "monitor", "changed");
+        manager.record_context_event(ContextEventKind::MemoryUpdate, "monitor", "changed");
         let appended = manager
             .reconcile_prompt_cache_epoch(
                 "openai",
@@ -5112,7 +5104,7 @@ mod tests {
         before_crash.record_tool_output("ghost_call_1", "shell", "ghost tool output");
         before_crash.record_message(&Message::assistant("ghost reply"));
         before_crash.record_context_event(
-            ContextEventKind::MonitorEvent,
+            ContextEventKind::MemoryUpdate,
             "monitor-event",
             "{\"wake\":true}".to_owned(),
         );
