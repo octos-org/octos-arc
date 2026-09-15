@@ -327,14 +327,14 @@ impl Agent {
                         self.llm.report_late_failure();
 
                         // Try one final non-streaming call — this goes through
-                        // FallbackProvider.chat() which tries all fallback providers,
+                        // the failover chain (RetryProvider → ProviderChain),
                         // not just the primary.
                         warn!(
                             attempts = Self::LLM_RETRY_MAX + 1,
                             reason, "streaming retries exhausted, trying non-streaming fallback"
                         );
 
-                        // Non-streaming call triggers FallbackProvider's full fallback chain
+                        // Non-streaming call traverses the full failover chain
                         match with_prompt_cache_observation_context(
                             provider_config.prompt_cache_context.as_ref(),
                             iteration,

@@ -67,8 +67,8 @@ impl RetryProvider {
     /// Codex round-2 BLOCKER fix: prior versions only string-matched the
     /// legacy `"API error: <code>"` shape. The typed `LlmError::Display`
     /// renders as `"API error (<provider>): <summary> — HTTP <code> ..."`
-    /// which the legacy match misses, so `FallbackProvider` and
-    /// `ProviderChain` failed to failover for Quota / Auth / Rate-Limited /
+    /// which the legacy match misses, so `ProviderChain` failed to failover
+    /// for Quota / Auth / Rate-Limited /
     /// Server-Error classifications. We now downcast to `LlmError` first
     /// and switch on `LlmErrorKind` directly; the legacy string-match
     /// branch is preserved for non-typed callers and bare `eyre::eyre!`

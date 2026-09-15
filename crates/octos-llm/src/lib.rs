@@ -11,7 +11,6 @@ pub mod context;
 mod context_override;
 pub mod embedding;
 mod failover;
-mod fallback;
 pub mod pricing;
 mod provider;
 mod retry;
@@ -29,7 +28,6 @@ pub mod gemini;
 pub mod openai;
 pub mod openai_responses;
 pub mod registry;
-pub mod vertex_auth;
 
 pub use cache_manifest::{
     PromptCacheInputComparison, PromptCacheInputManifest, PromptCacheInputSegment,
@@ -48,7 +46,6 @@ pub use context_override::ContextWindowOverride;
 pub use embedding::{EmbeddingProvider, OpenAIEmbedder};
 pub use error::{LlmError, LlmErrorKind, StreamError};
 pub use failover::ProviderChain;
-pub use fallback::FallbackProvider;
 pub use provider::{
     ApiStyle, DEFAULT_EMBEDDING_CONNECT_TIMEOUT_SECS, DEFAULT_EMBEDDING_TIMEOUT_SECS,
     DEFAULT_LLM_CONNECT_TIMEOUT_SECS, DEFAULT_LLM_TIMEOUT_SECS, LaneFailure, LlmProvider,

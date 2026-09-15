@@ -387,8 +387,8 @@ pub fn build_streaming_http_client(connect_timeout_secs: u64) -> reqwest::Client
 /// composite whose slot 1 is a different lane (what `ProviderChain` reports
 /// after failover); `StubLane` is a concrete lane that either always succeeds
 /// or always fails with an HTTP 500.
-/// Flat-lane bookkeeping shared by the composites (`ProviderChain`,
-/// `FallbackProvider`): the first flat lane index owned by slot `slot`, given
+/// Flat-lane bookkeeping shared by the composites (`ProviderChain`): the first
+/// flat lane index owned by slot `slot`, given
 /// every slot's [`LlmProvider::provider_lane_count`].
 pub(crate) fn lane_offset_for_slot(lane_counts: &[usize], slot: usize) -> usize {
     lane_counts.iter().take(slot).sum()

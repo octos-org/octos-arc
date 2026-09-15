@@ -9,9 +9,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 use secrecy::{ExposeSecret, SecretString};
-use std::sync::Arc;
 
-use crate::vertex_auth::{ServiceAccount, TokenSource, VertexTokenProvider};
 use crate::vision;
 
 use crate::cache_manifest::{PromptCacheInputManifest, without_cache_markers};
@@ -62,20 +60,6 @@ const STUDIO_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta"
 /// request from failing before the model can consume the tool result.
 const SKIP_THOUGHT_SIGNATURE_VALIDATOR: &str = "skip_thought_signature_validator";
 
-/// How a [`GeminiProvider`] authenticates.
-///
-/// `ApiKey` is AI Studio (`x-goog-api-key` against
-/// `generativelanguage.googleapis.com`). `Vertex` is Vertex AI: an OAuth2
-/// `Authorization: Bearer` token (minted from a service account) against the
-/// `aiplatform.googleapis.com` `projects/.../locations/global` endpoint.
-enum GeminiAuth {
-    ApiKey(SecretString),
-    Vertex {
-        project: String,
-        token: Arc<dyn TokenSource>,
-    },
-}
-
 /// Google Gemini provider.
 pub struct GeminiProvider {
     client: Client,
@@ -83,7 +67,7 @@ pub struct GeminiProvider {
     /// timeout so a healthy long generation is never cut off mid-stream. See
     /// [`crate::provider::build_streaming_http_client`].
     stream_client: Client,
-    auth: GeminiAuth,
+    api_key: SecretString,
     model: String,
     base_url: String,
 }
@@ -99,65 +83,10 @@ impl GeminiProvider {
             stream_client: crate::provider::build_streaming_http_client(
                 crate::provider::DEFAULT_LLM_CONNECT_TIMEOUT_SECS,
             ),
-            auth: GeminiAuth::ApiKey(SecretString::from(api_key.into())),
+            api_key: SecretString::from(api_key.into()),
             model: model.into(),
             base_url: STUDIO_BASE_URL.to_string(),
         }
-    }
-
-    /// Create a Gemini provider that calls **Vertex AI** with an OAuth2 token
-    /// source. `project` is the GCP project id; the region is fixed to `global`.
-    pub fn vertex(
-        project: impl Into<String>,
-        model: impl Into<String>,
-        token: Arc<dyn TokenSource>,
-    ) -> Self {
-        Self {
-            client: crate::provider::build_http_client(
-                crate::provider::DEFAULT_LLM_TIMEOUT_SECS,
-                crate::provider::DEFAULT_LLM_CONNECT_TIMEOUT_SECS,
-            ),
-            stream_client: crate::provider::build_streaming_http_client(
-                crate::provider::DEFAULT_LLM_CONNECT_TIMEOUT_SECS,
-            ),
-            auth: GeminiAuth::Vertex {
-                project: project.into(),
-                token,
-            },
-            model: model.into(),
-            // Unused in Vertex mode (endpoint is computed), kept for metadata.
-            base_url: STUDIO_BASE_URL.to_string(),
-        }
-    }
-
-    /// Create a Vertex-mode provider from a service account. The GCP project is
-    /// taken from the service account's `project_id`.
-    pub fn vertex_from_service_account(sa: ServiceAccount, model: impl Into<String>) -> Self {
-        Self::vertex_from_service_account_with_timeout(sa, model, None)
-    }
-
-    /// Like [`vertex_from_service_account`], but threads the provider's HTTP
-    /// timeout into the OAuth token-exchange client as well. Without this the
-    /// token fetcher uses an unbounded `reqwest::Client`, so a stalled token
-    /// endpoint would block a Vertex chat past the configured LLM timeout before
-    /// `generateContent` is ever reached.
-    pub fn vertex_from_service_account_with_timeout(
-        sa: ServiceAccount,
-        model: impl Into<String>,
-        http_timeout: Option<(u64, u64)>,
-    ) -> Self {
-        let project = sa.project_id.clone();
-        let token: Arc<dyn TokenSource> =
-            if let Some((timeout_secs, connect_timeout_secs)) = http_timeout {
-                Arc::new(VertexTokenProvider::from_service_account_with_timeout(
-                    sa,
-                    timeout_secs,
-                    connect_timeout_secs,
-                ))
-            } else {
-                Arc::new(VertexTokenProvider::from_service_account(sa))
-            };
-        Self::vertex(project, model, token)
     }
 
     /// Create a provider using the GEMINI_API_KEY environment variable.
@@ -168,7 +97,7 @@ impl GeminiProvider {
         Ok(Self::new(api_key, "gemini-2.5-flash"))
     }
 
-    /// Set a custom base URL (AI Studio mode only; ignored for Vertex).
+    /// Set a custom base URL.
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
         self
@@ -197,34 +126,19 @@ impl GeminiProvider {
         )
     }
 
-    /// Build the generateContent endpoint URL for the active auth mode.
+    /// Build the generateContent endpoint URL.
     fn build_url(&self, streaming: bool) -> String {
         let action = if streaming {
             "streamGenerateContent?alt=sse"
         } else {
             "generateContent"
         };
-        match &self.auth {
-            GeminiAuth::ApiKey(_) => {
-                format!("{}/models/{}:{}", self.base_url, self.model, action)
-            }
-            GeminiAuth::Vertex { project, .. } => format!(
-                "https://aiplatform.googleapis.com/v1/projects/{project}/locations/global/publishers/google/models/{}:{}",
-                self.model, action
-            ),
-        }
+        format!("{}/models/{}:{}", self.base_url, self.model, action)
     }
 
-    /// Attach the auth header for the active mode (resolving a fresh Vertex
-    /// token when needed).
+    /// Attach the auth header.
     async fn apply_auth(&self, req: reqwest::RequestBuilder) -> Result<reqwest::RequestBuilder> {
-        Ok(match &self.auth {
-            GeminiAuth::ApiKey(key) => req.header("x-goog-api-key", key.expose_secret()),
-            GeminiAuth::Vertex { token, .. } => {
-                let t = token.token().await?;
-                req.header("Authorization", format!("Bearer {t}"))
-            }
-        })
+        Ok(req.header("x-goog-api-key", self.api_key.expose_secret()))
     }
 
     fn build_request(
@@ -425,13 +339,7 @@ impl LlmProvider for GeminiProvider {
     }
 
     fn provider_name(&self) -> &str {
-        // Vertex AI and AI Studio Gemini must be distinguishable for routing,
-        // adaptive-lane matching and metrics — they're different backends even
-        // though both use `GeminiProvider`.
-        match self.auth {
-            GeminiAuth::Vertex { .. } => "vertex",
-            GeminiAuth::ApiKey(_) => "gemini",
-        }
+        "gemini"
     }
 
     fn api_style(&self) -> Option<crate::provider::ApiStyle> {
@@ -444,8 +352,7 @@ impl LlmProvider for GeminiProvider {
         } else {
             None
         };
-        // Derive the metadata name from the auth mode (same as `provider_name`)
-        // so Vertex calls aren't mislabelled as AI Studio gemini in provenance.
+        // Derive the metadata name from `provider_name` for provenance.
         ProviderMetadata::new(self.provider_name(), self.model.clone(), endpoint)
             .with_cache_lane(crate::types::CacheLane::Gemini)
     }
@@ -1608,46 +1515,6 @@ mod tests {
     }
 
     // --- Provider metadata tests ---
-
-    // --- Vertex / Gemini auth-mode tests ---
-
-    struct StaticToken(&'static str);
-
-    #[async_trait::async_trait]
-    impl crate::vertex_auth::TokenSource for StaticToken {
-        async fn token(&self) -> Result<String> {
-            Ok(self.0.to_string())
-        }
-    }
-
-    #[test]
-    fn should_build_global_vertex_endpoint_when_vertex_mode() {
-        let provider =
-            GeminiProvider::vertex("my-proj", "gemini-2.5-flash", Arc::new(StaticToken("tok")));
-        assert_eq!(
-            provider.build_url(false),
-            "https://aiplatform.googleapis.com/v1/projects/my-proj/locations/global/publishers/google/models/gemini-2.5-flash:generateContent"
-        );
-        assert_eq!(
-            provider.build_url(true),
-            "https://aiplatform.googleapis.com/v1/projects/my-proj/locations/global/publishers/google/models/gemini-2.5-flash:streamGenerateContent?alt=sse"
-        );
-    }
-
-    #[tokio::test]
-    async fn should_send_bearer_header_when_vertex_mode() {
-        let provider = GeminiProvider::vertex("p", "m", Arc::new(StaticToken("abc123")));
-        let req = provider.client.post("https://example.com");
-        let built = provider.apply_auth(req).await.unwrap().build().unwrap();
-        assert_eq!(
-            built.headers().get("Authorization").unwrap(),
-            "Bearer abc123"
-        );
-        assert!(
-            built.headers().get("x-goog-api-key").is_none(),
-            "Vertex mode must not send the AI Studio api-key header"
-        );
-    }
 
     // --- Generation config tests ---
 
