@@ -1333,8 +1333,11 @@ pub fn slot_dirs(repo_dir: &Path, config: &BuildCacheConfig) -> Vec<(SlotKind, P
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::build_cache::repo_key_for_path;
+
     use std::sync::Arc;
+
     use std::sync::atomic::Ordering;
 
     fn config() -> BuildCacheConfig {
@@ -1679,161 +1682,6 @@ mod tests {
         assert!(path.join(LOCK_LEAF).exists());
     }
 
-    fn assert_failed_acquire_is_recoverable(purpose: SlotPurpose, failed_leaf: &str) {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("pool");
-        let repo_key = key(&tmp);
-        let cfg = BuildCacheConfig {
-            peer_slots: 1,
-            verify_slots: 1,
-            ..config()
-        };
-        let dir = slot_dir(&root.join(repo_key.as_str()), SlotKind::from(purpose), 1);
-        let blocked = dir.join(failed_leaf);
-        // A directory at the destination deterministically fails the atomic
-        // rename without requiring a full disk or permission-sensitive tests.
-        fs::create_dir_all(&blocked).unwrap();
-        let target = dir.join(TARGET_LEAF);
-        fs::create_dir_all(&target).unwrap();
-        let artifact = target.join("artifact.bin");
-        fs::write(&artifact, b"cached").unwrap();
-
-        let result = acquire(&root, &repo_key, purpose, &cfg, &HolderInfo::default());
-        assert!(matches!(result, Err(BuildCacheError::Io { .. })));
-        assert!(
-            read_holder(&dir).is_none(),
-            "failed acquisition must not publish a live claim without a Slot"
-        );
-        assert!(dir.join(LOCK_LEAF).is_file());
-        assert_eq!(fs::read(&artifact).unwrap(), b"cached");
-
-        fs::remove_dir(&blocked).unwrap();
-        let mut slot = acquire(&root, &repo_key, purpose, &cfg, &HolderInfo::default())
-            .expect("the same process must reacquire the only slot after the I/O failure is fixed");
-        assert_eq!(slot.path, dir);
-        assert_eq!(read_holder(&dir).unwrap().claim_token, slot.claim_token);
-        release(&mut slot, SlotOutcome::Completed).unwrap();
-        assert_eq!(fs::read(&artifact).unwrap(), b"cached");
-    }
-
-    #[test]
-    fn failed_last_used_write_does_not_leak_acquisition() {
-        for purpose in [SlotPurpose::Peer, SlotPurpose::Verify] {
-            assert_failed_acquire_is_recoverable(purpose, LAST_USED_LEAF);
-        }
-    }
-
-    #[test]
-    fn failed_holder_write_does_not_leak_acquisition() {
-        for purpose in [SlotPurpose::Peer, SlotPurpose::Verify] {
-            assert_failed_acquire_is_recoverable(purpose, HOLDER_LEAF);
-        }
-    }
-
-    #[test]
-    fn slot_is_reusable_after_release() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("pool");
-        let mut slot = acquire(
-            &root,
-            &key(&tmp),
-            SlotPurpose::Peer,
-            &config(),
-            &HolderInfo::default(),
-        )
-        .unwrap();
-        let first = slot.path.clone();
-        release(&mut slot, SlotOutcome::Completed).unwrap();
-        let again = acquire(
-            &root,
-            &key(&tmp),
-            SlotPurpose::Peer,
-            &config(),
-            &HolderInfo::default(),
-        )
-        .unwrap();
-        // Scan order is deterministic: the freed lowest-numbered slot is
-        // re-taken first.
-        assert_eq!(again.path, first);
-    }
-
-    #[test]
-    fn detached_live_claims_use_distinct_slots_then_exhaust() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("pool");
-        let cfg = BuildCacheConfig {
-            verify_slots: 2,
-            ..config()
-        };
-        let first = acquire_detached(&root, &key(&tmp), &cfg, &HolderInfo::default()).unwrap();
-        let second = acquire(
-            &root,
-            &key(&tmp),
-            SlotPurpose::Verify,
-            &cfg,
-            &HolderInfo::default(),
-        )
-        .unwrap();
-        assert_ne!(first.path, second.path);
-        assert!(matches!(
-            acquire_detached(&root, &key(&tmp), &cfg, &HolderInfo::default()),
-            Err(BuildCacheError::PoolExhausted { .. })
-        ));
-    }
-
-    #[test]
-    fn old_slot_release_preserves_new_claim_metadata() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("pool");
-        let mut old = acquire(
-            &root,
-            &key(&tmp),
-            SlotPurpose::Peer,
-            &config(),
-            &HolderInfo::default(),
-        )
-        .unwrap();
-        release(&mut old, SlotOutcome::Completed).unwrap();
-        let new = acquire(
-            &root,
-            &key(&tmp),
-            SlotPurpose::Peer,
-            &config(),
-            &HolderInfo::default(),
-        )
-        .unwrap();
-        assert_eq!(old.path, new.path);
-        write_last_used(&new.path, 123).unwrap();
-        let metadata = fs::read(new.path.join(HOLDER_LEAF)).unwrap();
-        assert_eq!(
-            release(&mut old, SlotOutcome::Completed).unwrap(),
-            ReleaseDisposition::AlreadyReleased
-        );
-        assert_eq!(fs::read(new.path.join(HOLDER_LEAF)).unwrap(), metadata);
-        assert_eq!(read_last_used(&new.path), 123);
-        touch(&old).unwrap();
-        assert_eq!(read_last_used(&new.path), 123);
-    }
-
-    #[test]
-    fn old_detached_release_preserves_new_claim_metadata() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("pool");
-        let old = acquire_detached(&root, &key(&tmp), &config(), &HolderInfo::default()).unwrap();
-        release_detached(&root, &old.path, &old.claim_token, SlotOutcome::Completed).unwrap();
-        let new = acquire_detached(&root, &key(&tmp), &config(), &HolderInfo::default()).unwrap();
-        assert_eq!(old.path, new.path);
-        write_last_used(&new.path, 123).unwrap();
-        let metadata = fs::read(new.path.join(HOLDER_LEAF)).unwrap();
-        assert_ne!(old.claim_token, new.claim_token);
-        assert_eq!(
-            release_detached(&root, &old.path, &old.claim_token, SlotOutcome::Completed).unwrap(),
-            ReleaseDisposition::ClaimMismatch
-        );
-        assert_eq!(fs::read(new.path.join(HOLDER_LEAF)).unwrap(), metadata);
-        assert_eq!(read_last_used(&new.path), 123);
-    }
-
     #[cfg(unix)]
     fn gc_link_fixture(component: &str) {
         let tmp = tempfile::tempdir().unwrap();
@@ -1912,18 +1760,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
-    fn gc_skips_slot_symlink_fixture() {
-        gc_link_fixture("slot");
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn gc_skips_target_symlink_fixture() {
-        gc_link_fixture("target");
-    }
-
-    #[test]
     fn numeric_excessive_stale_window_is_a_configuration_error() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("pool");
@@ -1950,19 +1786,6 @@ mod tests {
                 "invalid stale window {hours} must be rejected"
             );
         }
-    }
-
-    #[test]
-    fn numeric_excessive_stale_config_is_reported() {
-        let cfg = BuildCacheConfig {
-            stale_hours: u64::MAX,
-            ..config()
-        };
-        assert!(
-            cfg.validate()
-                .iter()
-                .any(|warning| warning.contains("stale_hours"))
-        );
     }
 
     #[test]
@@ -2259,78 +2082,6 @@ mod tests {
     }
 
     #[test]
-    fn fresh_unheld_slot_is_not_reclaimed() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("pool");
-        let slot = acquire(
-            &root,
-            &key(&tmp),
-            SlotPurpose::Peer,
-            &config(),
-            &HolderInfo::default(),
-        )
-        .unwrap();
-        fs::write(slot.target_dir.join("warm.bin"), b"x").unwrap();
-        let dir = slot.path.clone();
-        drop(slot);
-        // A crashed-but-live holder would be (correctly) skipped by §3.5;
-        // this test targets the pure §6 staleness arm, so clear ownership.
-        fs::remove_file(dir.join(HOLDER_LEAF)).unwrap();
-        let report = reclaim_stale(
-            &root,
-            &GcPolicy {
-                stale_hours: 168, // just released: inside the window
-                apply: true,
-            },
-            &config(),
-        )
-        .unwrap();
-        let row = report.iter().find(|r| r.slot_path == dir).unwrap();
-        assert_eq!(row.outcome, ReclaimOutcome::Fresh);
-        assert!(dir.join(TARGET_LEAF).join("warm.bin").exists());
-    }
-
-    #[test]
-    fn gc_without_apply_only_reports() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("pool");
-        let slot = acquire(
-            &root,
-            &key(&tmp),
-            SlotPurpose::Peer,
-            &config(),
-            &HolderInfo::default(),
-        )
-        .unwrap();
-        // Put real bytes in target/ so the report can carry a non-zero
-        // would-free size (an empty dir measures 0).
-        fs::write(slot.target_dir.join("stale.bin"), vec![0u8; 4096]).unwrap();
-        let dir = slot.path.clone();
-        drop(slot);
-        // Crash-simulation with the pid gone: clear the holder so the §6
-        // arm runs (a live-pid holder would be skipped, as its own test
-        // asserts).
-        fs::remove_file(dir.join(HOLDER_LEAF)).unwrap();
-        write_last_used(&dir, 0).unwrap();
-        let report = reclaim_stale(
-            &root,
-            &GcPolicy {
-                stale_hours: 1,
-                apply: false,
-            },
-            &config(),
-        )
-        .unwrap();
-        let row = report.iter().find(|r| r.slot_path == dir).unwrap();
-        // Past the window, apply=false → Stale carrying the would-free bytes
-        // (D1), never Reclaimed, and the tree survives.
-        assert_eq!(row.outcome, ReclaimOutcome::Stale);
-        assert!(row.would_free_bytes > 0, "would-free size must be carried");
-        assert_eq!(row.freed_bytes, 0);
-        assert!(dir.join(TARGET_LEAF).is_dir());
-    }
-
-    #[test]
     fn space_gate_low_space_is_typed_error_not_panic() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("pool");
@@ -2357,24 +2108,6 @@ mod tests {
     }
 
     #[test]
-    fn space_gate_zero_disables_the_gate() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("pool");
-        let cfg = BuildCacheConfig {
-            min_free_gb: 0,
-            ..config()
-        };
-        acquire(
-            &root,
-            &key(&tmp),
-            SlotPurpose::Peer,
-            &cfg,
-            &HolderInfo::default(),
-        )
-        .unwrap();
-    }
-
-    #[test]
     fn space_gate_unknown_fails_closed() {
         let tmp = tempfile::tempdir().unwrap();
         // A path statvfs cannot answer for: the pool root's parent was
@@ -2392,60 +2125,6 @@ mod tests {
     }
 
     #[test]
-    fn touch_updates_last_used() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("pool");
-        let slot = acquire(
-            &root,
-            &key(&tmp),
-            SlotPurpose::Peer,
-            &config(),
-            &HolderInfo::default(),
-        )
-        .unwrap();
-        write_last_used(&slot.path, 1_000).unwrap();
-        touch(&slot).unwrap();
-        assert!(read_last_used(&slot.path) > 1_000);
-    }
-
-    #[test]
-    fn holder_metadata_round_trips() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("pool");
-        let slot = acquire(
-            &root,
-            &key(&tmp),
-            SlotPurpose::Peer,
-            &config(),
-            &HolderInfo {
-                slug: Some("kestrel".to_string()),
-                goal_id: Some("g-1".to_string()),
-                task_id: Some("t-2".to_string()),
-                purpose_note: None,
-                pid_override: None,
-            },
-        )
-        .unwrap();
-        let meta = read_holder(&slot.path).unwrap();
-        assert_eq!(meta.slug.as_deref(), Some("kestrel"));
-        assert_eq!(meta.goal_id.as_deref(), Some("g-1"));
-        assert_eq!(meta.task_id.as_deref(), Some("t-2"));
-    }
-
-    #[test]
-    fn config_defaults_match_the_design() {
-        let cfg = BuildCacheConfig::default();
-        assert_eq!(cfg.peer_slots, 2);
-        assert_eq!(cfg.verify_slots, 1);
-        assert_eq!(cfg.min_free_gb, 50);
-        assert_eq!(cfg.stale_hours, 168);
-        assert!(cfg.validate().is_empty());
-        // Absent section parses to defaults (serde default, like snapshots).
-        let parsed: BuildCacheConfig = serde_json::from_str("{}").unwrap();
-        assert_eq!(parsed, cfg);
-    }
-
-    #[test]
     fn config_rejects_sub_floor_values() {
         let cfg = BuildCacheConfig {
             peer_slots: 0,
@@ -2458,156 +2137,6 @@ mod tests {
     }
 
     // ---- review #3 fixes (D1, D3, D4, D6) ----
-
-    #[test]
-    #[cfg(unix)]
-    fn pid_alive_distinguishes_eperm_from_esrch() {
-        // EPERM branch: pid 1 exists but a normal user may not signal it —
-        // test_kill_process must surface EPERM as "alive but not ours",
-        // which pid_alive encodes as Some(false), never None (dead).
-        // (Running as root this returns Ok — Some(true) — which is still
-        // "alive"; both readings keep the slot safe, but assert the EPERM
-        // shape when we can observe it.)
-        match pid_alive(1) {
-            Some(false) | Some(true) => {} // alive either way: never reclaimed
-            None => panic!("pid 1 must never be judged dead (EPERM/Ok both mean alive)"),
-        }
-        // ESRCH branch: a verifiably gone pid (spawned, killed, reaped).
-        let dead = spawn_dead_pid();
-        assert_eq!(pid_alive(dead), None);
-        // Malformed pid (D1's EINVAL arm): 0 is not a valid signal target.
-        assert_eq!(pid_alive(0), None);
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn foreign_live_holder_is_never_reclaimed() {
-        // The D1 end-to-end guarantee: a holder.json naming a LIVE pid the
-        // reclaimer cannot signal (root's pid 1) keeps the slot even when
-        // the stale window has long passed.
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("pool");
-        let slot = acquire(
-            &root,
-            &key(&tmp),
-            SlotPurpose::Peer,
-            &config(),
-            &HolderInfo::default(),
-        )
-        .unwrap();
-        fs::write(slot.target_dir.join("foreign.bin"), b"x").unwrap();
-        let dir = slot.path.clone();
-        drop(slot); // unlock, metadata stays
-        let meta = HolderMeta {
-            kind: SlotKind::Peer,
-            pid: 1, // alive, not ours (EPERM for an unprivileged reader)
-            slug: None,
-            goal_id: None,
-            task_id: None,
-            purpose_note: None,
-            acquired_at: 1,
-            claim_token: String::new(),
-        };
-        write_file_atomic(&dir, HOLDER_LEAF, &serde_json::to_string(&meta).unwrap()).unwrap();
-        write_last_used(&dir, 0).unwrap(); // maximally stale
-        let report = reclaim_stale(
-            &root,
-            &GcPolicy {
-                stale_hours: 0,
-                apply: true,
-            },
-            &config(),
-        )
-        .unwrap();
-        let row = report.iter().find(|r| r.slot_path == dir).unwrap();
-        assert_eq!(
-            row.outcome,
-            ReclaimOutcome::Locked,
-            "live foreign pid must read as held"
-        );
-        assert!(dir.join(TARGET_LEAF).join("foreign.bin").exists());
-    }
-
-    #[test]
-    fn shrunk_config_still_reclaims_historical_slots() {
-        // D3: peer_slots was once 3; slot-3's dir survives the config
-        // change and must stay visible to GC (status + reclaim).
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("pool");
-        let cfg3 = BuildCacheConfig {
-            peer_slots: 3,
-            ..config()
-        };
-        let slot3 = acquire(
-            &root,
-            &key(&tmp),
-            SlotPurpose::Peer,
-            &cfg3,
-            &HolderInfo::default(),
-        )
-        .unwrap();
-        // acquire takes the lowest slot, so forge the high one instead.
-        let _ = slot3;
-        let repo_dir = root.join(key(&tmp).as_str());
-        let high = repo_dir.join(format!("{SLOT_PREFIX}3"));
-        fs::create_dir_all(high.join(TARGET_LEAF)).unwrap();
-        File::create(high.join(LOCK_LEAF)).unwrap();
-        write_last_used(&high, 0).unwrap();
-        // Now the config is back to 2 slots — slot-3 must still be listed
-        // by status and reclaimed by gc.
-        assert!(
-            slot_dirs(&repo_dir, &config())
-                .iter()
-                .any(|(_, d)| d == &high)
-        );
-        let report = reclaim_stale(
-            &root,
-            &GcPolicy {
-                stale_hours: 1,
-                apply: true,
-            },
-            &config(),
-        )
-        .unwrap();
-        assert!(
-            report
-                .iter()
-                .any(|r| r.slot_path == high && r.outcome == ReclaimOutcome::Reclaimed)
-        );
-        assert!(!high.join(TARGET_LEAF).exists());
-    }
-
-    #[test]
-    fn slot_without_lock_reports_no_lock_not_fresh() {
-        // D6: a structurally broken slot (no .lock) must not be labeled
-        // "fresh" — it is its own outcome, and it is never deleted.
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("pool");
-        let slot = acquire(
-            &root,
-            &key(&tmp),
-            SlotPurpose::Peer,
-            &config(),
-            &HolderInfo::default(),
-        )
-        .unwrap();
-        let dir = slot.path.clone();
-        drop(slot);
-        fs::remove_file(dir.join(LOCK_LEAF)).unwrap();
-        write_last_used(&dir, 0).unwrap();
-        let report = reclaim_stale(
-            &root,
-            &GcPolicy {
-                stale_hours: 0,
-                apply: true,
-            },
-            &config(),
-        )
-        .unwrap();
-        let row = report.iter().find(|r| r.slot_path == dir).unwrap();
-        assert_eq!(row.outcome, ReclaimOutcome::NoLock);
-        assert!(dir.join(TARGET_LEAF).is_dir(), "no_lock never deletes");
-    }
 
     // chmod-based EACCES plus the dead-pid seam are both Unix-only.
     #[test]

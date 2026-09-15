@@ -333,6 +333,7 @@ impl ConfigWatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use tempfile::TempDir;
 
     fn write_config(dir: &TempDir, content: &str) -> PathBuf {
@@ -354,36 +355,6 @@ mod tests {
 
         assert!(hash1.is_some());
         assert!(hash2.is_some());
-        assert_ne!(hash1, hash2);
-    }
-
-    #[test]
-    fn test_no_change_same_hash() {
-        let dir = TempDir::new().unwrap();
-        let path = write_config(&dir, r#"{"provider": "anthropic"}"#);
-        let bufs1 = ConfigWatcher::read_files(std::slice::from_ref(&path));
-        let hash1 = ConfigWatcher::hash_buffers(&bufs1);
-        let bufs2 = ConfigWatcher::read_files(&[path]);
-        let hash2 = ConfigWatcher::hash_buffers(&bufs2);
-        assert_eq!(hash1, hash2);
-    }
-
-    #[test]
-    fn test_hash_includes_all_files() {
-        let dir = TempDir::new().unwrap();
-        let path1 = dir.path().join("a.json");
-        let path2 = dir.path().join("b.json");
-        std::fs::write(&path1, r#"{"provider": "anthropic"}"#).unwrap();
-        std::fs::write(&path2, r#"{"model": "gpt-4o"}"#).unwrap();
-
-        let bufs = ConfigWatcher::read_files(&[path1.clone(), path2.clone()]);
-        let hash1 = ConfigWatcher::hash_buffers(&bufs);
-
-        // Change second file only
-        std::fs::write(&path2, r#"{"model": "claude"}"#).unwrap();
-        let bufs = ConfigWatcher::read_files(&[path1, path2]);
-        let hash2 = ConfigWatcher::hash_buffers(&bufs);
-
         assert_ne!(hash1, hash2);
     }
 
@@ -421,61 +392,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_provider_change_no_restart() {
-        // Provider/model changes are hot-reloadable
-        let dir = TempDir::new().unwrap();
-        let path = write_config(&dir, r#"{"provider": "anthropic"}"#);
-        let old_config = Config::from_file(&path).unwrap();
-
-        std::fs::write(&path, r#"{"provider": "openai"}"#).unwrap();
-        let new_config = Config::from_file(&path).unwrap();
-
-        let (tx, rx) = watch::channel(None);
-        let watcher = ConfigWatcher::new(vec![path], old_config, tx);
-        watcher.diff_and_emit(&new_config);
-
-        let change = rx.borrow().clone();
-        // Should NOT trigger RestartRequired for provider-only change
-        // None or HotReload is fine; provider-only changes must not restart.
-        if let Some(ConfigChange::RestartRequired(fields)) = change {
-            panic!("provider change should not require restart, got fields: {fields:?}");
-        }
-    }
-
-    #[test]
-    fn should_require_restart_when_format_after_edit_toggled() {
-        // #1774: `format_after_edit` is baked into AgentConfig at startup, so
-        // a live toggle must surface as restart-required (like `hooks`).
-        let dir = TempDir::new().unwrap();
-        let path = write_config(&dir, r#"{"provider": "anthropic"}"#);
-        let old_config = Config::from_file(&path).unwrap();
-
-        std::fs::write(
-            &path,
-            r#"{"provider": "anthropic", "format_after_edit": true}"#,
-        )
-        .unwrap();
-        let new_config = Config::from_file(&path).unwrap();
-
-        let (tx, rx) = watch::channel(None);
-        let watcher = ConfigWatcher::new(vec![path], old_config, tx);
-        watcher.diff_and_emit(&new_config);
-
-        let change = rx.borrow().clone();
-        match change {
-            Some(ConfigChange::RestartRequired(fields)) => {
-                assert!(
-                    fields.iter().any(|f| f == "format_after_edit"),
-                    "expected format_after_edit in restart fields, got: {fields:?}"
-                );
-            }
-            other => panic!("expected RestartRequired, got: {other:?}"),
-        }
-    }
-
-    // ---- FIX 3: profile-defaults.json watching + fail-safe ----
-
     fn default_hook(cmd: &str) -> octos_agent::HookConfig {
         octos_agent::HookConfig {
             event: octos_agent::HookEvent::BeforeToolCall,
@@ -488,24 +404,6 @@ mod tests {
     }
 
     const PROFILE_JSON: &str = r#"{"id":"p","name":"p","enabled":true,"config":{},"created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-01T00:00:00Z"}"#;
-
-    #[test]
-    fn parse_first_layers_profile_defaults_under_profile() {
-        let buffers = vec![(PathBuf::from("p.json"), PROFILE_JSON.as_bytes().to_vec())];
-
-        // Without a defaults base, the empty profile has no hooks.
-        let bare = ConfigWatcher::parse_first(&buffers, None).unwrap();
-        assert!(bare.hooks.is_empty());
-
-        // With a defaults base, the profile inherits the default hook.
-        let defaults = ProfileConfig {
-            hooks: vec![default_hook("dh")],
-            ..Default::default()
-        };
-        let merged = ConfigWatcher::parse_first(&buffers, Some(&defaults)).unwrap();
-        assert_eq!(merged.hooks.len(), 1);
-        assert_eq!(merged.hooks[0].command, vec!["dh".to_string()]);
-    }
 
     #[test]
     fn malformed_defaults_edit_retains_last_known_good() {

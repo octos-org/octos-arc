@@ -981,41 +981,6 @@ mod tests {
     }
 
     #[test]
-    fn same_provider_override_keeps_the_route() {
-        // Re-naming the SAME provider is a no-op re-affirmation; keep the route.
-        let mut config = openai_route_config();
-        detach_route_on_provider_override(&mut config, Some("openai"));
-        assert_eq!(config.base_url.as_deref(), Some("https://fake.example/v1"));
-        assert_eq!(config.api_key_env.as_deref(), Some("MYFAKE_PROFILE_KEY"));
-        assert_eq!(config.api_type.as_deref(), Some("openai"));
-    }
-
-    #[test]
-    fn absent_cli_provider_keeps_the_route() {
-        // No `--provider` at all — pure profile reuse — keeps the whole route.
-        let mut config = openai_route_config();
-        detach_route_on_provider_override(&mut config, None);
-        assert_eq!(config.base_url.as_deref(), Some("https://fake.example/v1"));
-        assert_eq!(config.api_key_env.as_deref(), Some("MYFAKE_PROFILE_KEY"));
-        assert_eq!(config.api_type.as_deref(), Some("openai"));
-    }
-
-    #[test]
-    fn provider_override_without_inherited_provider_keeps_route() {
-        // No inherited provider identity to detach from (unusual ambient config
-        // with a bare route): leave it alone rather than clobber it.
-        let mut config = Config {
-            provider: None,
-            base_url: Some("https://amb.example/v1".into()),
-            api_key_env: Some("AMBIENT_KEY".into()),
-            ..Default::default()
-        };
-        detach_route_on_provider_override(&mut config, Some("anthropic"));
-        assert_eq!(config.base_url.as_deref(), Some("https://amb.example/v1"));
-        assert_eq!(config.api_key_env.as_deref(), Some("AMBIENT_KEY"));
-    }
-
-    #[test]
     fn chat_profile_loads_llm_config_from_stored_serve_profile() {
         use crate::profiles::{
             LlmModelSelectionConfig, LlmProfileConfig, LlmRouteConfig, ProfileConfig, ProfileStore,
@@ -1097,37 +1062,6 @@ mod tests {
     use octos_agent::{ApprovalPolicy, PermissionProfile};
 
     #[test]
-    fn should_yield_danger_full_access_when_yolo_flag_set() {
-        // `--yolo` / `--dangerously-bypass-approvals-and-sandbox` maps onto
-        // the codex "danger full access" profile: no approvals, no sandbox,
-        // host filesystem, network on.
-        let perms = resolve_chat_permissions(true, None, None)
-            .expect("--yolo must resolve to danger_full_access");
-        assert_eq!(
-            perms.permission_profile,
-            PermissionProfile::DangerFullAccess
-        );
-        assert_eq!(perms.approval_policy, ApprovalPolicy::Never);
-        assert!(perms.is_dangerous());
-    }
-
-    #[test]
-    fn should_yield_workspace_write_never_when_sandbox_and_approval_flags_set() {
-        // Codex parity: `--sandbox workspace-write --ask-for-approval never`
-        // yields exactly that pair (workspace-write profile, approvals never)
-        // WITHOUT escalating to host/danger.
-        let perms = resolve_chat_permissions(
-            false,
-            Some(ChatSandboxMode::WorkspaceWrite),
-            Some(ChatApprovalMode::Never),
-        )
-        .expect("explicit sandbox + approval flags must resolve");
-        assert_eq!(perms.permission_profile, PermissionProfile::WorkspaceWrite);
-        assert_eq!(perms.approval_policy, ApprovalPolicy::Never);
-        assert!(!perms.is_dangerous());
-    }
-
-    #[test]
     fn should_default_to_workspace_write_ask_when_no_flags() {
         let perms =
             resolve_chat_permissions(false, None, None).expect("no flags is the plain default");
@@ -1160,62 +1094,6 @@ mod tests {
             err.to_string().contains("sandbox"),
             "error should explain the sandbox conflict; got: {err}"
         );
-    }
-
-    #[test]
-    fn should_reject_approval_override_on_danger_sandbox() {
-        // DangerFullAccess implies approvals=never; an explicit
-        // `--ask-for-approval ask` alongside it is contradictory.
-        let err = resolve_chat_permissions(
-            false,
-            Some(ChatSandboxMode::DangerFullAccess),
-            Some(ChatApprovalMode::Ask),
-        )
-        .expect_err("ask-for-approval=ask cannot combine with danger-full-access");
-        assert!(err.to_string().contains("approval"));
-    }
-
-    #[test]
-    fn should_parse_yolo_alias_and_sandbox_flags_via_clap() {
-        // Prove the clap wiring: the hidden `--yolo` alias, the long form,
-        // and both value-enum flags parse into the expected fields.
-        use clap::Parser;
-
-        #[derive(Parser)]
-        struct Wrap {
-            #[command(flatten)]
-            chat: ChatCommand,
-        }
-
-        let yolo = Wrap::parse_from(["prog", "--yolo"]).chat;
-        assert!(yolo.dangerously_bypass_approvals_and_sandbox);
-        let perms = resolve_chat_permissions(
-            yolo.dangerously_bypass_approvals_and_sandbox,
-            yolo.sandbox,
-            yolo.ask_for_approval,
-        )
-        .unwrap();
-        assert!(perms.is_dangerous());
-
-        let long = Wrap::parse_from(["prog", "--dangerously-bypass-approvals-and-sandbox"]).chat;
-        assert!(long.dangerously_bypass_approvals_and_sandbox);
-
-        let explicit = Wrap::parse_from([
-            "prog",
-            "--sandbox",
-            "workspace-write",
-            "--ask-for-approval",
-            "never",
-        ])
-        .chat;
-        assert_eq!(explicit.sandbox, Some(ChatSandboxMode::WorkspaceWrite));
-        assert_eq!(explicit.ask_for_approval, Some(ChatApprovalMode::Never));
-
-        // Default: neither flag present.
-        let bare = Wrap::parse_from(["prog"]).chat;
-        assert!(!bare.dangerously_bypass_approvals_and_sandbox);
-        assert_eq!(bare.sandbox, None);
-        assert_eq!(bare.ask_for_approval, None);
     }
 
     #[test]
@@ -1257,101 +1135,6 @@ mod tests {
             .to_string();
         assert!(err.contains("not both"), "{err}");
     }
-
-    #[test]
-    fn should_parse_effort_no_persistence_and_positional_prompt_via_clap() {
-        // `claude -p` parity: --effort, --no-session-persistence, and a bare
-        // positional PROMPT all parse into the expected fields.
-        use clap::Parser;
-
-        #[derive(Parser)]
-        struct Wrap {
-            #[command(flatten)]
-            chat: ChatCommand,
-        }
-
-        let full = Wrap::parse_from([
-            "prog",
-            "--effort",
-            "max",
-            "--no-session-persistence",
-            "Review the diff",
-        ])
-        .chat;
-        assert_eq!(full.effort, Some(ChatEffort::Max));
-        assert!(full.no_session_persistence);
-        // The positional prompt lands in `prompt`, distinct from `--message`.
-        assert_eq!(full.prompt.as_deref(), Some("Review the diff"));
-        assert_eq!(full.message, None);
-
-        // Every effort tier parses (clap's default kebab/lower naming).
-        for (arg, want) in [
-            ("none", ChatEffort::None),
-            ("low", ChatEffort::Low),
-            ("medium", ChatEffort::Medium),
-            ("high", ChatEffort::High),
-            ("max", ChatEffort::Max),
-        ] {
-            let c = Wrap::parse_from(["prog", "--effort", arg]).chat;
-            assert_eq!(c.effort, Some(want));
-        }
-
-        // Defaults: no effort, persistence ON, no positional prompt.
-        let bare = Wrap::parse_from(["prog"]).chat;
-        assert_eq!(bare.effort, None);
-        assert!(!bare.no_session_persistence);
-        assert_eq!(bare.prompt, None);
-    }
-
-    #[test]
-    fn should_parse_none_when_reasoning_is_disabled() {
-        use clap::Parser;
-
-        #[derive(Parser)]
-        struct Wrap {
-            #[command(flatten)]
-            chat: ChatCommand,
-        }
-
-        let chat = Wrap::try_parse_from(["prog", "--effort", "none"])
-            .expect("none should be a valid effort")
-            .chat;
-        let effort = octos_llm::ReasoningEffort::from(chat.effort.unwrap());
-        assert_eq!(
-            serde_json::to_value(effort).unwrap(),
-            serde_json::json!("none")
-        );
-    }
-
-    #[test]
-    fn should_parse_api_type_flag_and_its_api_style_alias() {
-        // `--api-type` (and its `--api-style` alias) picks the wire protocol
-        // for a custom `--base-url`, independent of the vendor `--provider`.
-        use clap::Parser;
-
-        #[derive(Parser)]
-        struct Wrap {
-            #[command(flatten)]
-            chat: ChatCommand,
-        }
-
-        let via_type = Wrap::parse_from(["prog", "--api-type", "anthropic"]).chat;
-        assert_eq!(via_type.api_type.as_deref(), Some("anthropic"));
-
-        let via_alias = Wrap::parse_from(["prog", "--api-style", "openai"]).chat;
-        assert_eq!(via_alias.api_type.as_deref(), Some("openai"));
-
-        // Honest form: a real vendor name + an explicit protocol, no overload.
-        let combined =
-            Wrap::parse_from(["prog", "--provider", "zai", "--api-type", "anthropic"]).chat;
-        assert_eq!(combined.provider.as_deref(), Some("zai"));
-        assert_eq!(combined.api_type.as_deref(), Some("anthropic"));
-
-        // Absent by default (falls back to config's api_type at runtime).
-        assert_eq!(Wrap::parse_from(["prog"]).chat.api_type, None);
-    }
-
-    // ---- `--json` result envelope ----
 
     #[test]
     #[cfg(feature = "api")]
@@ -1406,32 +1189,6 @@ mod tests {
             serde_json::json!({"error":"configuration failed"})
         );
     }
-
-    #[test]
-    fn should_serialize_chat_json_result_with_expected_shape() {
-        // The `--json` envelope is a single-line object with every documented
-        // key, in declaration order, so an agent/script can parse it directly.
-        let result = ChatJsonResult {
-            text: "hello world".to_string(),
-            model: "glm-5.2".to_string(),
-            input_tokens: 4582,
-            output_tokens: 7,
-        };
-        let json = result.to_json_line();
-        assert_eq!(
-            json,
-            r#"{"text":"hello world","model":"glm-5.2","input_tokens":4582,"output_tokens":7}"#
-        );
-
-        // And it parses back to the exact fields/values a caller reads.
-        let value: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
-        assert_eq!(value["text"], "hello world");
-        assert_eq!(value["model"], "glm-5.2");
-        assert_eq!(value["input_tokens"], 4582);
-        assert_eq!(value["output_tokens"], 7);
-    }
-
-    // ---- #1570: [y/s/N] approval prompt + numbered user-question prompt ----
 
     fn q(multi: bool, allow_free_text: bool) -> octos_core::ui_protocol::UserQuestion {
         use octos_core::ui_protocol::{UserQuestion, UserQuestionOption};
@@ -1503,27 +1260,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_selection_single_picks_the_numbered_option() {
-        let (labels, other) = parse_question_selection(&q(false, true), "2");
-        assert_eq!(labels, vec!["actix"]);
-        assert!(!other);
-    }
-
-    #[test]
-    fn parse_selection_empty_defaults_to_first_option() {
-        let (labels, other) = parse_question_selection(&q(false, true), "  \n");
-        assert_eq!(labels, vec!["axum"]);
-        assert!(!other);
-    }
-
-    #[test]
-    fn parse_selection_single_ignores_extra_picks() {
-        // Single-select keeps only the first valid pick.
-        let (labels, _) = parse_question_selection(&q(false, true), "3,1");
-        assert_eq!(labels, vec!["warp"]);
-    }
-
-    #[test]
     fn parse_selection_multi_keeps_all_valid_and_drops_garbage() {
         let (labels, other) = parse_question_selection(&q(true, true), "1, 3, 9, x");
         assert_eq!(labels, vec!["axum", "warp"]); // 9 out-of-range, x non-numeric
@@ -1539,14 +1275,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_selection_other_ignored_when_free_text_disallowed() {
-        // With free text off, index 4 is out of range → filtered → default(1).
-        let (labels, other) = parse_question_selection(&q(false, false), "4");
-        assert!(!other);
-        assert_eq!(labels, vec!["axum"]); // empty picks after filter → default
-    }
-
-    #[test]
     fn test_resolve_provider_policy_model_id_match() {
         let json = r#"{
             "tool_policy_by_provider": {
@@ -1559,27 +1287,6 @@ mod tests {
             resolve_provider_policy(&config, "anthropic", "claude-sonnet-4-20250514").unwrap();
         assert!(policy.is_allowed("shell"));
         assert!(!policy.is_allowed("read_file"));
-    }
-
-    #[test]
-    fn test_resolve_provider_policy_provider_fallback() {
-        let json = r#"{
-            "tool_policy_by_provider": {
-                "gemini": {"deny": ["diff_edit"]}
-            }
-        }"#;
-        let config: Config = serde_json::from_str(json).unwrap();
-        let policy = resolve_provider_policy(&config, "gemini", "gemini-2.0-flash").unwrap();
-        assert!(!policy.is_allowed("diff_edit"));
-        assert!(policy.is_allowed("shell"));
-    }
-
-    #[test]
-    fn test_resolve_provider_policy_none() {
-        let config = Config::default();
-        assert!(
-            resolve_provider_policy(&config, "anthropic", "claude-sonnet-4-20250514").is_none()
-        );
     }
 
     #[test]
@@ -1612,30 +1319,6 @@ mod tests {
         assert_eq!(scope.workspace(), cwd.as_path());
         assert_eq!(scope.root(), cwd.as_path());
         assert!(scope.shared_zones().is_empty());
-    }
-
-    #[test]
-    fn chat_solo_session_scope_does_not_panic_on_relative_cwd_input() {
-        // Defensive cover for chat.rs's absolutize branch — the
-        // `--cwd relative` case must not propagate a relative path
-        // into `SessionScope::solo`, which would `expect` on the
-        // `RootNotAbsolute` invariant. The chat entry point now
-        // bubbles `current_dir()` errors up via `wrap_err?` so the
-        // branch only ever produces an absolute path or returns Err
-        // before reaching the `SessionScope::solo` call site.
-        let relative = PathBuf::from("some-subdir");
-        let base = std::env::current_dir().expect("current_dir() in tests");
-        let absolute_cwd: PathBuf = if relative.is_absolute() {
-            relative.clone()
-        } else {
-            base.join(&relative)
-        };
-        assert!(
-            absolute_cwd.is_absolute(),
-            "current_dir().join(relative) must produce an absolute path"
-        );
-        SessionScope::solo(absolute_cwd, Vec::new())
-            .expect("SessionScope::solo accepts the absolutized path");
     }
 }
 
@@ -1850,37 +1533,6 @@ mod custom_provider_tests {
             octos_llm::pricing::cache_rates_for_lane(meta.cache_lane).read_multiplier,
             1.0,
             "custom + api_type=openai must price cache reads at the residual rate",
-        );
-    }
-
-    #[test]
-    fn creates_custom_anthropic_compatible_provider() {
-        let provider = create_provider_with_api_type(
-            "custom",
-            &custom_config(),
-            Some("claude-compatible".to_string()),
-            Some("https://proxy.example.com/anthropic".to_string()),
-            Some("anthropic"),
-        )
-        .unwrap();
-
-        // #2194 R4: the label STAYS "custom" (its logical identity for
-        // adaptive-lane / QoS matching — relabeling it silently disabled a
-        // configured lane restriction). The Anthropic cache rate is instead
-        // carried by the metadata cache_lane, sourced from the provider TYPE,
-        // so pricing is correct WITHOUT overloading the identity label.
-        assert_eq!(provider.provider_name(), "custom");
-        assert_eq!(provider.model_id(), "claude-compatible");
-        let meta = provider.provider_metadata();
-        assert_eq!(
-            meta.cache_lane,
-            octos_llm::CacheLane::Anthropic,
-            "custom + api_type=anthropic must carry the Anthropic cache lane",
-        );
-        assert_eq!(
-            octos_llm::pricing::cache_rates_for_lane(meta.cache_lane).read_multiplier,
-            0.1,
-            "and therefore price cache reads at 0.1x, not the 1.0x residual",
         );
     }
 

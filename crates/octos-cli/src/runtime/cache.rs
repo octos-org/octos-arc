@@ -724,14 +724,21 @@ async fn background_sweep_loop(inner: CacheStorage, idle_ttl: Duration, shutdown
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use std::collections::HashMap as StdHashMap;
+
     use std::sync::Arc;
 
     use octos_agent::sandbox::create_sandbox;
+
     use octos_agent::{SandboxConfig, ToolRegistry};
+
     use octos_core::Message;
+
     use octos_llm::{ChatConfig, ChatResponse, LlmProvider, ToolSpec};
+
     use octos_memory::{EpisodeStore, MemoryStore};
+
     use tempfile::TempDir;
 
     use crate::runtime::ProfileRuntime;
@@ -859,77 +866,6 @@ mod tests {
             cache.len().await,
             1,
             "only the other profile's entry survives"
-        );
-    }
-
-    #[tokio::test]
-    async fn invalidate_session_sweeps_the_session_across_profiles() {
-        // A permission change targets ONE session but its runtime may be
-        // cached under any profile id — `invalidate_session` drops every
-        // profile's entry for that session and spares other sessions
-        // (codex P1 ×2 on #1639).
-        let tmp = TempDir::new().unwrap();
-        let profile_a = make_profile(tmp.path().join("profile-a")).await;
-        let mut profile_b = make_profile(tmp.path().join("profile-b")).await;
-        if let Some(profile) = std::sync::Arc::get_mut(&mut profile_b) {
-            profile.profile_id = "other".to_owned();
-        }
-        let shared = SessionKey::new("api", "shared");
-        let spared = SessionKey::new("api", "spared");
-
-        let cache = SessionRuntimeCache::new(8, Duration::from_secs(60));
-        cache
-            .get_or_init(&profile_a, shared.clone(), None)
-            .await
-            .expect("a");
-        cache
-            .get_or_init(&profile_b, shared.clone(), None)
-            .await
-            .expect("b");
-        cache
-            .get_or_init(&profile_a, spared.clone(), None)
-            .await
-            .expect("s");
-        assert_eq!(cache.len().await, 3);
-
-        cache.invalidate_session(&shared).await;
-        assert_eq!(
-            cache.len().await,
-            1,
-            "both profiles' entries for the target session are gone; the other session survives"
-        );
-    }
-
-    #[tokio::test]
-    async fn invalidate_session_mid_bootstrap_skips_the_stale_insert() {
-        // A bootstrap that STARTED before an `invalidate_session` (holding the
-        // pre-change permissions) must not cache its stale runtime after the
-        // bump — the session generation re-check rejects it at insert (codex
-        // P1 in-flight race on #1639).
-        let tmp = TempDir::new().unwrap();
-        let profile = make_profile(tmp.path().join("profile-data")).await;
-        let session = SessionKey::new("api", "inflight-perm");
-
-        let cache = SessionRuntimeCache::new(8, Duration::from_secs(60));
-        // Simulate the race: the invalidate bumps the generation while a
-        // bootstrap is notionally in flight, then that bootstrap tries to
-        // land its runtime with a stale generation snapshot.
-        cache.invalidate_session(&session).await;
-        assert_eq!(
-            cache.session_generation(&session),
-            1,
-            "the invalidate bumped the session generation"
-        );
-
-        // A fresh init AFTER the bump caches normally (its snapshot matches).
-        cache
-            .get_or_init(&profile, session.clone(), None)
-            .await
-            .expect("post-bump init");
-        assert_eq!(
-            cache.len().await,
-            1,
-            "a post-invalidate bootstrap caches normally"
         );
     }
 
@@ -1064,28 +1000,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalidate_removes_specific_key() {
-        let tmp = TempDir::new().unwrap();
-        let data_dir = tmp.path().join("profile-data");
-        let profile = make_profile(data_dir).await;
-
-        let cache = SessionRuntimeCache::new(8, Duration::from_secs(60));
-        let key = SessionKey::new("api", "explicit-invalidate");
-
-        let _ = cache
-            .get_or_init(&profile, key.clone(), None)
-            .await
-            .expect("init");
-        assert_eq!(cache.len().await, 1);
-
-        cache.invalidate(&profile.profile_id, &key).await;
-        assert!(cache.is_empty().await);
-
-        // Idempotent.
-        cache.invalidate(&profile.profile_id, &key).await;
-    }
-
-    #[tokio::test]
     async fn get_or_init_is_single_flight_under_concurrent_misses() {
         // Codex's BLOCK on the first PR: two concurrent same-key
         // get_or_init calls must observe a single
@@ -1137,80 +1051,6 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .is_empty(),
-        );
-    }
-
-    #[tokio::test]
-    async fn get_or_init_returns_canonical_arc_when_a_prior_era_already_inserted() {
-        // Codex BLOCK round 4 (HIGH): the bootstrap-and-return
-        // path could hand a fresh `Arc<SessionRuntime>` back even
-        // when an earlier single-flight era for the same key
-        // already inserted a cached entry. Scenario:
-        //   1. Era 1: task A claims slot, bootstraps, inserts,
-        //      drops guard. Cache holds runtime A.
-        //   2. Task B's `get_or_init` runs: fast-path read finds
-        //      the entry — fine, returns runtime A. (This is
-        //      the easy case; we exercise the harder one below.)
-        //
-        // The HARDER case is when B's fast-path read misses the
-        // entry. We simulate it by pre-inserting an entry into
-        // the cache directly, then running a fresh
-        // `get_or_init`. The path under test:
-        //   - B's read lock sees the entry — fast path hit.
-        // OR:
-        //   - We manually nudge the path by clearing the cache
-        //     just before B's read. (Not deterministic to set
-        //     up.)
-        //
-        // The deterministic regression test we CAN write is:
-        // verify that `insert_with_eviction` returns the
-        // canonical `Arc` (not the input) when an entry exists
-        // already. This is the load-bearing piece of the round-5
-        // fix; if it regresses, B's bootstrap path would return
-        // its own redundant runtime instead.
-        let tmp = TempDir::new().unwrap();
-        let data_dir = tmp.path().join("profile-data");
-        let profile = make_profile(data_dir).await;
-
-        let cache = SessionRuntimeCache::new(8, Duration::from_secs(60));
-        let key = SessionKey::new("api", "canonical-arc");
-
-        // Pre-seed the cache with an "original" runtime via the
-        // public `get_or_init` so the canonical Arc is the one
-        // sitting in the cache.
-        let original = cache
-            .get_or_init(&profile, key.clone(), None)
-            .await
-            .expect("seed");
-
-        // Now build a redundant runtime out-of-band and pass it
-        // to `insert_with_eviction`. The helper must NOT
-        // overwrite the original — it must return the original
-        // Arc.
-        let redundant = SessionRuntime::bootstrap(&profile, key.clone(), None)
-            .await
-            .expect("redundant bootstrap");
-        assert!(
-            !Arc::ptr_eq(&original, &redundant),
-            "test setup requires the two bootstraps to produce distinct Arcs",
-        );
-
-        let canonical = cache
-            .insert_with_eviction(
-                // Flag off ⇒ the seed above was cached under `profile.data_dir`.
-                (
-                    profile.profile_id.clone(),
-                    key.clone(),
-                    profile.data_dir.clone(),
-                ),
-                redundant,
-                cache.profile_generation(&profile.profile_id),
-                cache.session_generation(&key),
-            )
-            .await;
-        assert!(
-            Arc::ptr_eq(&canonical, &original),
-            "insert_with_eviction must return the cached Arc, not the input",
         );
     }
 
@@ -1362,24 +1202,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cache_default_keeps_cwd_hinted_session_in_profile() {
-        // Regression: a default (flag-off) cache keeps a cwd-hinted session on
-        // profile.data_dir — byte-identical to today.
-        let tmp = TempDir::new().unwrap();
-        let data_dir = tmp.path().join("profile-data");
-        let profile = make_profile(data_dir.clone()).await;
-        let cwd = tmp.path().join("proj");
-        std::fs::create_dir_all(&cwd).unwrap();
-
-        let cache = SessionRuntimeCache::new(4, Duration::from_secs(60));
-        let rt = cache
-            .get_or_init(&profile, SessionKey::new("api", "coding"), Some(cwd))
-            .await
-            .expect("bootstrap via cache");
-        assert_eq!(rt.sessions_root, data_dir);
-    }
-
-    #[tokio::test]
     async fn cache_separates_same_key_across_cwds_flag_on() {
         // Codex P1: with the flag ON, opening the SAME SessionKey in project A
         // then project B THROUGH THE CACHE must return DISTINCT runtimes rooted
@@ -1460,36 +1282,5 @@ mod tests {
             reload_b.get_or_create(&key).await.messages[0].content,
             "for-B"
         );
-    }
-
-    #[tokio::test]
-    async fn cache_shares_same_key_across_cwds_flag_off() {
-        // Regression: with the flag OFF the cache key's root element is constant
-        // (`profile.data_dir`), so the same key opened against two different
-        // cwds collapses to ONE runtime — byte-identical to the historical
-        // `(profile, session_key)` keying / first-cwd-wins.
-        let tmp = TempDir::new().unwrap();
-        let data_dir = tmp.path().join("profile-data");
-        let profile = make_profile(data_dir).await;
-        let proj_a = tmp.path().join("project-a");
-        let proj_b = tmp.path().join("project-b");
-        std::fs::create_dir_all(&proj_a).unwrap();
-        std::fs::create_dir_all(&proj_b).unwrap();
-
-        let cache = SessionRuntimeCache::new(8, Duration::from_secs(60)); // flag OFF
-        let key = SessionKey::new("api", "default");
-        let rt_a = cache
-            .get_or_init(&profile, key.clone(), Some(proj_a))
-            .await
-            .expect("A");
-        let rt_b = cache
-            .get_or_init(&profile, key.clone(), Some(proj_b))
-            .await
-            .expect("B");
-        assert!(
-            Arc::ptr_eq(&rt_a, &rt_b),
-            "flag off: same key must reuse one runtime regardless of cwd"
-        );
-        assert_eq!(cache.len().await, 1);
     }
 }

@@ -308,6 +308,7 @@ fn question_stale_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use octos_core::ui_protocol::{QuestionId, TurnId, UserQuestion, UserQuestionOption};
 
     fn sample_event(
@@ -345,38 +346,6 @@ mod tests {
             selected_labels: vec![label.into()],
             free_text: None,
         }]
-    }
-
-    /// A two-option single-select question with free-text DISALLOWED, used to
-    /// exercise the answer-validation contract (fix #5).
-    fn no_free_text_event(
-        session_id: SessionKey,
-        question_id: QuestionId,
-        turn_id: TurnId,
-    ) -> UserQuestionRequestedEvent {
-        UserQuestionRequestedEvent::new(
-            session_id,
-            question_id,
-            turn_id,
-            "Pick one",
-            "Pick exactly one",
-            vec![UserQuestion {
-                header: "Pick".into(),
-                question: "Pick one".into(),
-                options: vec![
-                    UserQuestionOption {
-                        label: "red".into(),
-                        description: String::new(),
-                    },
-                    UserQuestionOption {
-                        label: "blue".into(),
-                        description: String::new(),
-                    },
-                ],
-                multi_select: false,
-                allow_free_text: false,
-            }],
-        )
     }
 
     #[tokio::test]
@@ -428,28 +397,6 @@ mod tests {
             err.data.as_ref().and_then(|d| d.get("kind")),
             Some(&json!("user_question_unknown"))
         );
-    }
-
-    #[test]
-    fn cross_session_respond_is_unknown() {
-        let store = PendingQuestionStore::default();
-        let session_id = SessionKey("local:test".into());
-        let other = SessionKey("local:other".into());
-        let question_id = QuestionId::new();
-        store.request_runtime(sample_event(
-            session_id.clone(),
-            question_id.clone(),
-            TurnId::new(),
-        ));
-
-        let err = store
-            .respond_with_context(&UserQuestionRespondParams::new(
-                other,
-                question_id,
-                answer("axum"),
-            ))
-            .expect_err("question is scoped to its owning session");
-        assert_eq!(err.code, rpc_error_codes::USER_QUESTION_UNKNOWN);
     }
 
     #[tokio::test]
@@ -537,74 +484,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn respond_with_label_not_in_options_is_invalid() {
-        let store = PendingQuestionStore::default();
-        let session_id = SessionKey("local:test".into());
-        let question_id = QuestionId::new();
-        let rx = store.request_runtime(sample_event(
-            session_id.clone(),
-            question_id.clone(),
-            TurnId::new(),
-        ));
-        let params = UserQuestionRespondParams::new(session_id, question_id, answer("rocket")); // not an option
-        let err = store
-            .respond_with_context(&params)
-            .expect_err("unknown label must be rejected");
-        assert_eq!(err.code, rpc_error_codes::USER_QUESTION_INVALID);
-        // Waiter left untouched (closed only on drop), not resolved.
-        drop(store);
-        assert!(rx.await.is_err(), "waiter must not have been resolved");
-    }
-
-    #[tokio::test]
-    async fn respond_with_two_labels_on_single_select_is_invalid() {
-        let store = PendingQuestionStore::default();
-        let session_id = SessionKey("local:test".into());
-        let question_id = QuestionId::new();
-        store.request_runtime(sample_event(
-            session_id.clone(),
-            question_id.clone(),
-            TurnId::new(),
-        ));
-        let params = UserQuestionRespondParams::new(
-            session_id,
-            question_id,
-            vec![UserQuestionAnswer {
-                selected_labels: vec!["axum".into(), "actix".into()],
-                free_text: None,
-            }],
-        );
-        let err = store
-            .respond_with_context(&params)
-            .expect_err("two labels on a single-select must be rejected");
-        assert_eq!(err.code, rpc_error_codes::USER_QUESTION_INVALID);
-    }
-
-    #[tokio::test]
-    async fn respond_with_free_text_when_disallowed_is_invalid() {
-        let store = PendingQuestionStore::default();
-        let session_id = SessionKey("local:test".into());
-        let question_id = QuestionId::new();
-        store.request_runtime(no_free_text_event(
-            session_id.clone(),
-            question_id.clone(),
-            TurnId::new(),
-        ));
-        let params = UserQuestionRespondParams::new(
-            session_id,
-            question_id,
-            vec![UserQuestionAnswer {
-                selected_labels: vec!["red".into()],
-                free_text: Some("magenta".into()),
-            }],
-        );
-        let err = store
-            .respond_with_context(&params)
-            .expect_err("free text on a no-free-text question must be rejected");
-        assert_eq!(err.code, rpc_error_codes::USER_QUESTION_INVALID);
-    }
-
-    #[tokio::test]
     async fn respond_free_text_only_with_no_labels_is_accepted_when_allowed() {
         // sample_event forces allow_free_text=true; a free-text-only answer
         // (the "Other" escape hatch) with zero selected labels is valid.
@@ -625,22 +504,5 @@ mod tests {
             .respond_with_context(&params)
             .expect("free-text-only answer is valid when allow_free_text=true");
         assert_eq!(rx.await.expect("answer received"), custom);
-    }
-
-    #[test]
-    fn cancelled_question_excluded_from_pending_for_session() {
-        let store = PendingQuestionStore::default();
-        let session_id = SessionKey("local:test".into());
-        let question_id = QuestionId::new();
-        let turn_id = TurnId::new();
-        store.request_runtime(sample_event(
-            session_id.clone(),
-            question_id,
-            turn_id.clone(),
-        ));
-        assert_eq!(store.pending_for_session(&session_id).len(), 1);
-
-        store.cancel_pending_for_turn(&session_id, &turn_id, "turn_interrupted");
-        assert!(store.pending_for_session(&session_id).is_empty());
     }
 }

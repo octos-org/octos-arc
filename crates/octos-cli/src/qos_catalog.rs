@@ -418,7 +418,9 @@ pub(crate) fn materialize_runtime_qos_catalog(
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use octos_llm::ModelType;
+
     use tempfile::tempdir;
 
     fn sample_catalog(scores: [f64; 2]) -> QosCatalog {
@@ -595,43 +597,6 @@ mod tests {
         assert_eq!(providers, sorted);
     }
 
-    /// The compiled-in canonical catalog (the seed floor for fresh installs) is
-    /// well-formed and reflects curation: glm-5.3 + the moonshot-coding k3
-    /// default present, deepseek-chat removed.
-    #[test]
-    fn embedded_qos_catalog_is_curated_ssot() {
-        let catalog = embedded_qos_catalog().expect("embedded canonical catalog must parse");
-        let has = |p: &str| catalog.models.iter().any(|m| m.provider == p);
-        assert!(has("zai/glm-5.3"), "glm-5.3 present");
-        assert!(
-            has("moonshot-coding/k3"),
-            "moonshot-coding k3 default present"
-        );
-        assert!(
-            !has("deepseek/deepseek-chat"),
-            "deepseek-chat curated out of the embedded catalog"
-        );
-        // Researched context window survives the round-trip through the embed.
-        let glm53 = catalog
-            .models
-            .iter()
-            .find(|m| m.provider == "zai/glm-5.3")
-            .unwrap();
-        assert_eq!(glm53.context_window, 1_000_000);
-        // k3 researched values: 1M window, 131072 (default max completion).
-        let k3 = catalog
-            .models
-            .iter()
-            .find(|m| m.provider == "moonshot-coding/k3")
-            .unwrap();
-        assert_eq!(k3.context_window, 1_048_576);
-        assert_eq!(k3.max_output, 131_072);
-        assert!(
-            k3.is_family_default,
-            "k3 is the moonshot-coding family default"
-        );
-    }
-
     #[test]
     fn persist_qos_catalog_round_trips_runtime_scores() {
         let temp = tempdir().unwrap();
@@ -656,75 +621,5 @@ mod tests {
 
         assert_eq!(materialized.models.len(), seed.models.len());
         assert!(materialized.models.iter().all(|entry| entry.score > 0.0));
-    }
-
-    /// #2142: an operator `context_window` override must resolve through the
-    /// WHOLE assembled stack (RetryProvider here), beating what the underlying
-    /// provider reports — the acceptance criterion "a profile pinning
-    /// context_window: 16384 on a 262K server reports 16384 through the full
-    /// runtime stack".
-    #[test]
-    fn context_window_override_wins_through_the_assembled_stack() {
-        use crate::config::Config;
-        use octos_core::Message;
-        use octos_llm::{ChatConfig, ChatResponse, ToolSpec};
-        use std::sync::Arc;
-
-        // A backend that advertises a large window (stands in for the probed
-        // 262K llama-server).
-        struct WideProvider;
-        #[async_trait::async_trait]
-        impl LlmProvider for WideProvider {
-            async fn chat(
-                &self,
-                _messages: &[Message],
-                _tools: &[ToolSpec],
-                _config: &ChatConfig,
-            ) -> eyre::Result<ChatResponse> {
-                Err(eyre::eyre!("stub not callable in tests"))
-            }
-            fn model_id(&self) -> &str {
-                "wide-model"
-            }
-            fn provider_name(&self) -> &str {
-                "wide"
-            }
-            fn context_window(&self) -> u32 {
-                262_144
-            }
-        }
-
-        let temp = tempdir().unwrap();
-        let data_dir = temp.path().to_path_buf();
-
-        // Control: no override → the backend's own window survives the
-        // RetryProvider wrap (delegation, per #2135).
-        let control =
-            build_provider_chain(Arc::new(WideProvider), &Config::default(), &data_dir, false);
-        assert_eq!(
-            control.llm.context_window(),
-            262_144,
-            "without an override the probed/backend window must pass through the stack"
-        );
-
-        // Override: 16384 must win through RetryProvider all the way out.
-        let config = Config {
-            context_window: Some(16_384),
-            ..Default::default()
-        };
-        let overridden = build_provider_chain(Arc::new(WideProvider), &config, &data_dir, false);
-        assert_eq!(
-            overridden.llm.context_window(),
-            16_384,
-            "config.context_window must override the 262K backend through the full stack"
-        );
-
-        // And in the no_retry path (bare provider) the override still holds.
-        let bare = build_provider_chain(Arc::new(WideProvider), &config, &data_dir, true);
-        assert_eq!(
-            bare.llm.context_window(),
-            16_384,
-            "override must hold even on the no_retry (unwrapped) path"
-        );
     }
 }

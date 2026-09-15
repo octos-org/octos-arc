@@ -51,8 +51,6 @@ use octos_core::ui_protocol::{
     approval_kinds, hydrate_sections, thread_status,
 };
 
-#[cfg(test)]
-use octos_core::ui_protocol::{ToolCompletedEvent, ToolProgressEvent, ToolStartedEvent};
 use octos_core::{
     AgentId, InboundMessage, MAIN_PROFILE_ID, Message, MessageRole, SessionKey, TaskId,
 };
@@ -545,11 +543,6 @@ impl WsConnection {
     #[cfg(test)]
     pub(crate) fn connection_id(&self) -> ConnectionId {
         self.connection_id
-    }
-
-    #[cfg(test)]
-    pub(crate) fn metrics(&self) -> Arc<ConnectionMetrics> {
-        self.metrics.clone()
     }
 
     fn try_enqueue(&self, frame: WsMessage) -> Result<(), SendError> {
@@ -1572,30 +1565,16 @@ fn ui_protocol_delivery_metric(event: &UiProtocolLedgerEvent) -> Option<UiProtoc
     }
 }
 
-#[cfg(test)]
-std::thread_local! {
-    static UI_PROTOCOL_DELIVERY_METRICS_FOR_TEST: std::cell::RefCell<Vec<UiProtocolDeliveryMetric>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
-
 fn record_ui_protocol_delivery_metric(metric: Option<UiProtocolDeliveryMetric>) {
     let Some(metric) = metric else {
         return;
     };
-
-    #[cfg(test)]
-    UI_PROTOCOL_DELIVERY_METRICS_FOR_TEST.with(|metrics| metrics.borrow_mut().push(metric));
 
     match metric {
         UiProtocolDeliveryMetric::V2Envelope => {
             metrics::counter!("octos_ui_protocol_v2_envelope_delivered_total").increment(1);
         }
     }
-}
-
-#[cfg(test)]
-fn take_ui_protocol_delivery_metrics_for_test() -> Vec<UiProtocolDeliveryMetric> {
-    UI_PROTOCOL_DELIVERY_METRICS_FOR_TEST.with(|metrics| std::mem::take(&mut *metrics.borrow_mut()))
 }
 
 fn apply_stdio_auth_bound_capability_policy(capabilities: &mut UiProtocolCapabilities) {
@@ -3997,11 +3976,6 @@ fn message_commit_observer(ledger: Arc<UiProtocolLedger>) -> octos_bus::MessageC
             }
         });
     observer
-}
-
-#[cfg(test)]
-fn install_message_commit_observer(ledger: Arc<UiProtocolLedger>) {
-    octos_bus::set_message_commit_observer(Some(message_commit_observer(ledger)));
 }
 
 /// Process-global pending diff-preview store. Mirrors
@@ -13988,14 +13962,6 @@ impl Drop for BtwInFlightGuard {
     }
 }
 
-/// Serializes tests that use the global provider slot — two slot users
-/// running in parallel would clear each other's stub mid-flight.
-#[cfg(test)]
-fn btw_test_slot_serial() -> &'static tokio::sync::Mutex<()> {
-    static SERIAL: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-    SERIAL.get_or_init(|| tokio::sync::Mutex::new(()))
-}
-
 /// Test-only provider override so handler tests can exercise the full
 /// `session/btw` flow without constructing a `ProfileRuntime`.
 #[cfg(test)]
@@ -20389,104 +20355,3 @@ fn flush_replay_lossy(
 mod tests;
 
 // ── Test-support helpers (callers live in `ui_protocol_tests.rs`) ──
-
-/// CONTRACT: this helper bypasses the typed `UiNotification` ledger
-/// path and the envelope dual-emit. It exists ONLY for AppUI
-/// supervisor-event methods that are NOT in the M9-γ envelope-superseded
-/// set (e.g. `agent/updated`, `agent/output_delta`,
-/// `agent/artifact_updated`, and the other `WsSupervisorEventSink`
-/// surfaces).
-///
-/// Codex #1336 round-3 BLOCKER 1 (defense in depth): the helper now
-/// REFUSES to dispatch a `method` that is envelope-superseded under the
-/// M9-γ cutover gate — even on legacy connections — to make the
-/// envelope-only contract enforceable by construction. Future callers
-/// who reach for a legacy `message/delta` / `tool/started` / `…` send
-/// via the raw helper fail closed with a debug log instead of leaking
-/// a frame past `direct_send_passes_capability_filter`. Use
-/// [`send_notification_ephemeral`] (typed `UiNotification`) +
-/// [`emit_envelope_for_legacy_notification`] for those methods.
-#[cfg_attr(not(test), allow(dead_code))]
-fn send_raw_notification_ephemeral(
-    ws: &WsConnection,
-    method: &'static str,
-    params: Value,
-) -> Result<(), SendError> {
-    use octos_core::ui_protocol::methods as ui_methods;
-    // Envelope-superseded legacy methods are off-limits to the raw
-    // helper — they MUST flow through the typed `UiNotification` path
-    // so `send_notification_ephemeral` / `send_notification_durable` /
-    // `send_notification_lifecycle` can apply the per-connection
-    // capability filter AND `emit_envelope_for_legacy_notification`
-    // can publish the canonical envelope dual-emit.
-    if matches!(
-        method,
-        ui_methods::MESSAGE_DELTA
-            | ui_methods::MESSAGE_REASONING_DELTA
-            | ui_methods::TOOL_STARTED
-            | ui_methods::TOOL_PROGRESS
-            | ui_methods::TOOL_COMPLETED
-            | ui_methods::FILE_ATTACHED
-            | ui_methods::TURN_COMPLETED
-    ) {
-        tracing::error!(
-            target: "octos::ui_protocol::ws",
-            method = %method,
-            "send_raw_notification_ephemeral refused: envelope-superseded method must use \
-             send_notification_ephemeral + emit_envelope_for_legacy_notification"
-        );
-        debug_assert!(
-            false,
-            "send_raw_notification_ephemeral called with envelope-superseded method {method}"
-        );
-        return Err(SendError::BackpressureDrop);
-    }
-    let notification = octos_core::ui_protocol::RpcNotification::new(method, params);
-    let frame = frame_for(&notification).ok_or(SendError::BackpressureDrop)?;
-    ws.send_ephemeral(frame, method)
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-fn send_notification_lifecycle_forced_backpressure_fixture(
-    ws: &WsConnection,
-    ledger: &UiProtocolLedger,
-    notification: UiNotification,
-) -> Result<(), SendError> {
-    let event = ledger.append_notification_from(notification, ws.connection_id);
-    let method = ledger_event_method(&event.event).to_string();
-    let _frame = frame_from_ledger(event.event)
-        .ok_or_else(|| SendError::LifecycleFailure(format!("serialize {method}")))?;
-    metrics::counter!("ws.send.error.lifecycle").increment(1);
-    ws.metrics.dropped_count.fetch_add(1, Ordering::Relaxed);
-    tracing::warn!(
-        target: "octos::ui_protocol::ws",
-        method = %method,
-        reason = "forced_backpressure",
-        "forced turn/completed writer channel full fixture; aborting connection"
-    );
-    eprintln!("forced turn/completed writer channel full fixture; aborting connection: {method}");
-    ws.mark_failed();
-    let reason = "writer channel full for lifecycle frame turn/completed";
-    tracing::warn!(
-        target: "octos::ui_protocol::ws",
-        method = %method,
-        reason = %reason,
-        "lifecycle notification not delivered; entry remains in ledger as delivery_failed"
-    );
-    eprintln!(
-        "lifecycle notification not delivered; entry remains in ledger as delivery_failed: {reason}"
-    );
-    Err(SendError::LifecycleFailure(reason.into()))
-}
-
-/// The legacy `turn/start` path only has nothing to process when silent audio
-/// is the request's sole input.
-#[cfg_attr(not(test), allow(dead_code))]
-fn should_short_circuit_no_speech(
-    had_audio_media: bool,
-    had_non_audio_media: bool,
-    had_audio_input: bool,
-    prompt_is_empty: bool,
-) -> bool {
-    had_audio_media && !had_non_audio_media && !had_audio_input && prompt_is_empty
-}

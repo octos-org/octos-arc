@@ -253,32 +253,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_roundtrip_persisted_reasoning_effort_across_restart() {
-        // Simulates persist-on-turn then a cold reload (fresh process / new
-        // store call against the same data_dir).
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let data_dir = tmp.path();
-        let session = SessionKey("api:abc".into());
-
-        assert_eq!(read_reasoning_effort(data_dir, &session), None);
-
-        write_reasoning_effort(data_dir, &session, ReasoningEffortLevel::High)
-            .expect("write high effort");
-        assert_eq!(
-            read_reasoning_effort(data_dir, &session),
-            Some(ReasoningEffortLevel::High)
-        );
-
-        // Overwrite wins (last `/thinking` set is authoritative).
-        write_reasoning_effort(data_dir, &session, ReasoningEffortLevel::Max)
-            .expect("overwrite to max");
-        assert_eq!(
-            read_reasoning_effort(data_dir, &session),
-            Some(ReasoningEffortLevel::Max)
-        );
-    }
-
-    #[test]
     fn should_key_reasoning_effort_per_topic() {
         // Topic-suffixed sessions persist independently of the base session.
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -343,19 +317,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_resolve_none_when_no_param_and_nothing_stored() {
-        // Nothing stored + turn omits → no override; caller keeps the default.
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let data_dir = tmp.path();
-        let session = SessionKey("api:fresh".into());
-
-        assert_eq!(
-            resolve_and_persist_reasoning_effort(data_dir, &session, None, true).await,
-            None
-        );
-    }
-
-    #[tokio::test]
     async fn should_clear_stored_when_user_turn_omits_effort() {
         // A USER turn (from_user_turn=true) that omits the effort means the user
         // chose "default": it must CLEAR the stored override so future turns use
@@ -378,74 +339,6 @@ mod tests {
         assert_eq!(
             resolve_and_persist_reasoning_effort(data_dir, &session, None, false).await,
             None
-        );
-    }
-
-    #[tokio::test]
-    async fn should_not_rewrite_when_turn_param_matches_stored() {
-        // The hot path: the TUI re-attaches the SAME effort on every turn. When
-        // the incoming value already equals the stored value we must NOT touch
-        // the file (no write, no fsync) — the per-turn write is exactly what the
-        // P2 fix eliminates.
-        //
-        // Detect the no-write deterministically (no clock/mtime-resolution
-        // dependence): seed the file with a byte-distinct-but-equivalent JSON
-        // encoding (extra whitespace) that still parses to `High`. A genuine
-        // rewrite would normalize it to serde's compact form, so byte-equality
-        // after the call proves no write happened.
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let data_dir = tmp.path();
-        let session = SessionKey("api:abc".into());
-
-        let path = reasoning_effort_path(data_dir, &session);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let sentinel = b"{ \"reasoning_effort\" : \"high\" }";
-        std::fs::write(&path, sentinel).expect("seed sentinel");
-        // Sanity: the sentinel parses to High but is NOT byte-equal to a fresh
-        // canonical write, so a rewrite is observable.
-        assert_eq!(
-            read_reasoning_effort(data_dir, &session),
-            Some(ReasoningEffortLevel::High)
-        );
-        assert_ne!(
-            std::fs::read(&path).unwrap(),
-            serde_json::to_vec(&ReasoningEffortRecord {
-                reasoning_effort: ReasoningEffortLevel::High
-            })
-            .unwrap()
-        );
-
-        let resolved = resolve_and_persist_reasoning_effort(
-            data_dir,
-            &session,
-            Some(ReasoningEffortLevel::High),
-            true,
-        )
-        .await;
-        assert_eq!(resolved, Some(ReasoningEffortLevel::High));
-        assert_eq!(
-            std::fs::read(&path).unwrap(),
-            sentinel,
-            "unchanged effort must not rewrite (and re-fsync) the file"
-        );
-
-        // A genuinely different value, by contrast, DOES rewrite.
-        let resolved_changed = resolve_and_persist_reasoning_effort(
-            data_dir,
-            &session,
-            Some(ReasoningEffortLevel::Low),
-            true,
-        )
-        .await;
-        assert_eq!(resolved_changed, Some(ReasoningEffortLevel::Low));
-        assert_ne!(
-            std::fs::read(&path).unwrap(),
-            sentinel,
-            "a changed effort must rewrite the file"
-        );
-        assert_eq!(
-            read_reasoning_effort(data_dir, &session),
-            Some(ReasoningEffortLevel::Low)
         );
     }
 

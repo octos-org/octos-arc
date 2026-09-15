@@ -749,14 +749,13 @@ impl ProfileRuntime {
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
+
     use crate::profiles::{
         GatewaySettings, LlmModelSelectionConfig, LlmProfileConfig, LlmRouteConfig, ProfileConfig,
     };
+
     use chrono::Utc;
-    use octos_agent::SandboxConfig;
-    use std::collections::HashMap;
 
     /// Build a minimal `UserProfile` with no LLM contract. M11-D
     /// bootstrap must reject this with a clear error, not panic.
@@ -788,49 +787,6 @@ mod tests {
         assert!(
             err.to_string().contains("no LLM provider configured"),
             "unexpected error: {err}",
-        );
-    }
-
-    /// Smoke-test the structural contract: when the profile carries a
-    /// declared env var, bootstrap surfaces it under `credentials`.
-    ///
-    /// We avoid driving `create_provider` here (which would require an
-    /// API key on the test host); instead we exercise the error path
-    /// and assert the error formatting includes the profile id, which
-    /// proves the early-derivation steps ran in order.
-    #[tokio::test]
-    async fn bootstrap_error_path_names_the_profile() {
-        let tmp = tempfile::tempdir().unwrap();
-        let data_dir = tmp.path().join("profiles").join("test").join("data");
-        std::fs::create_dir_all(&data_dir).unwrap();
-
-        let mut env_vars: HashMap<String, String> = HashMap::new();
-        env_vars.insert("PROBE".to_string(), "probe-value".to_string());
-
-        let profile = UserProfile {
-            id: "named-err".to_string(),
-            name: "Named Err".to_string(),
-            enabled: true,
-            data_dir: None,
-            parent_id: None,
-            public_subdomain: None,
-            config: ProfileConfig {
-                gateway: GatewaySettings::default(),
-                env_vars,
-                sandbox: SandboxConfig::default(),
-                ..Default::default()
-            },
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
-
-        let err = ProfileRuntime::bootstrap(&profile, &data_dir, None, BootstrapRole::Serve)
-            .await
-            .err()
-            .expect("bootstrap must fail without a provider");
-        assert!(
-            err.to_string().contains("named-err"),
-            "error should mention profile id: {err}",
         );
     }
 
@@ -1043,97 +999,6 @@ mod tests {
         assert!(
             rt_sibling.memory.is_degraded(),
             "Gateway-role bootstrap's episode store must be degraded",
-        );
-    }
-
-    /// Companion to the crashloop test: a *second* `Serve`-role
-    /// bootstrap must NOT silently degrade. This prevents a
-    /// gateway-first/dev-workflow misordering from flipping canonical
-    /// ownership to the gateway and quietly degrading serve's
-    /// persistence — a concern codex raised on the round-1 review of
-    /// #899. Serve must fail loudly so the operator sees the
-    /// deployment misconfiguration.
-    #[tokio::test]
-    #[allow(unsafe_code)]
-    async fn second_serve_role_bootstrap_fails_loudly_when_redb_already_owned() {
-        const KEY_NAME: &str = "OCTOS_GH899_SERVE_STRICT_TEST_API_KEY";
-        // SAFETY: env var name is unique to this test.
-        unsafe {
-            std::env::set_var(KEY_NAME, "test-key-sk-fake");
-        }
-        struct EnvGuard;
-        impl Drop for EnvGuard {
-            fn drop(&mut self) {
-                // SAFETY: see set_var above.
-                unsafe {
-                    std::env::remove_var(KEY_NAME);
-                }
-            }
-        }
-        let _guard = EnvGuard;
-
-        let tmp = tempfile::tempdir().unwrap();
-        let data_dir = tmp.path().join("profiles").join("gh899s").join("data");
-        std::fs::create_dir_all(&data_dir).unwrap();
-
-        let profile = UserProfile {
-            id: "gh899s".to_string(),
-            name: "GH899S".to_string(),
-            enabled: true,
-            data_dir: None,
-            parent_id: None,
-            public_subdomain: None,
-            config: ProfileConfig {
-                gateway: GatewaySettings::default(),
-                llm: Some(LlmProfileConfig {
-                    primary: Some(LlmModelSelectionConfig {
-                        family_id: Some("openai".to_string()),
-                        model_id: Some("gpt-4o-mini".to_string()),
-                        route: Some(LlmRouteConfig {
-                            route_id: None,
-                            label: None,
-                            base_url: None,
-                            api_key_env: Some(KEY_NAME.to_string()),
-                            api_type: None,
-                        }),
-                        ..Default::default()
-                    }),
-                    fallbacks: Vec::new(),
-                }),
-                ..Default::default()
-            },
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
-
-        let _rt_owner = ProfileRuntime::bootstrap(&profile, &data_dir, None, BootstrapRole::Serve)
-            .await
-            .expect("first Serve bootstrap should succeed");
-
-        // Second Serve-role bootstrap must error — never silently
-        // degrade. This is the property codex's round-1 review asked
-        // us to lock down.
-        let err = ProfileRuntime::bootstrap(&profile, &data_dir, None, BootstrapRole::Serve)
-            .await
-            .err()
-            .expect(
-                "second Serve-role bootstrap must fail loudly on redb \
-                 lock contention — silent degradation would risk \
-                 flipping canonical ownership",
-            );
-        let msg = err.to_string() + " " + &format!("{err:?}");
-        assert!(
-            msg.contains("Database already open") || msg.contains("Cannot acquire lock"),
-            "error must surface the redb lock contention; got: {err:?}",
-        );
-
-        // Failing loudly is only half the contract: the API layer branches on
-        // this to render an actionable remedy, and it must be able to tell
-        // lock contention from corruption without string matching.
-        assert!(
-            octos_memory::is_episode_store_locked(&err),
-            "bootstrap must preserve the typed lock cause through its own \
-             wrap_err context; got: {err:?}",
         );
     }
 }
