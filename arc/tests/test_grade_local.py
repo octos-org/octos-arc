@@ -32,6 +32,22 @@ class PortGuardTests(unittest.TestCase):
         self.assertEqual(code, 5)
 
 
+class AppTreeTests(unittest.TestCase):
+    def test_should_not_write_a_lock_file_into_the_graded_app(self):
+        """Grading npm-installs inside the app it is about to score. Those runs
+        wrote backend/package-lock.json and frontend/package-lock.json, the
+        pre-test `git add -A` snapshot staged them, and the cleanup could no
+        longer remove them -- so scoring a bookstack run added two files to the
+        deliverable it claims never to change."""
+        for cwd, command in grade_local.app_install_steps(Path("/app")):
+            self.assertIn("--no-package-lock", command, f"{cwd} install writes a lock file")
+
+    def test_should_still_build_the_frontend_and_install_the_backend(self):
+        steps = dict((cwd.name, command) for cwd, command in grade_local.app_install_steps(Path("/app")))
+        self.assertIn("npm run build", steps["frontend"])
+        self.assertIn("npm install", steps["backend"])
+
+
 class TeardownTests(unittest.TestCase):
     def test_should_stop_a_server_whose_process_group_cannot_be_signalled(self):
         """`killpg` raised PermissionError on macOS and killed the grader

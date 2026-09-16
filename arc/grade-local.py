@@ -7,6 +7,19 @@ import json, os, shutil, signal, socket, subprocess, sys, time
 from pathlib import Path
 
 
+# `--no-package-lock`: these installs run inside the app that is about to be
+# scored, and the lock files they wrote were captured by the pre-test `git add
+# -A` snapshot, which put them beyond the reach of the cleanup -- grading a
+# bookstack run added two files to the deliverable it promises not to touch.
+APP_INSTALL = "npm install --no-audit --no-fund --no-package-lock"
+
+
+def app_install_steps(out) -> list[tuple]:
+    """(working directory, shell command) for preparing the app to be graded."""
+    return [(out / "frontend", f"{APP_INSTALL} && npm run build"),
+            (out / "backend", APP_INSTALL)]
+
+
 def port_is_free(port: int) -> bool:
     """True when nothing is listening on the loopback port."""
     with socket.socket() as probe:
@@ -47,7 +60,7 @@ def main(argv: list[str]) -> int:
     def sh(cmd, cwd, **kw):
         r = subprocess.run(cmd, cwd=cwd, env=env, shell=True, capture_output=True, text=True, **kw)
         return r.returncode, (r.stdout + r.stderr)[-1500:]
-    for step, cwd in (("npm install --no-audit --no-fund && npm run build", out/"frontend"), ("npm install --no-audit --no-fund", out/"backend")):
+    for cwd, step in app_install_steps(out):
         rc, log = sh(step, cwd)
         print(f"[grade] {cwd.name}: {step!r} -> {rc}")
         if rc: print(log); return 2
