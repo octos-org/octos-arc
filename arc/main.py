@@ -956,20 +956,14 @@ UI behavior follows the requirement and the current application:
 
 CODEGEN_SYSTEM = "You write complete, minimal web apps. Reply only with file blocks in the requested format."
 
-# Ordered for prompt-prefix caching. The file layout, the persistence rule and
-# the coding rules are identical for every node in a run; `Requirement
-# {node_id}:` used to be line one, so consecutive prompts diverged at character
-# one and a bookstack run cached 8% of 421k codegen prompt tokens. Only the
-# order changed, and the node's own requirement now sits last, next to the answer.
 CODEGEN_PROMPT = """\
-Files: frontend/src/index.html (+ one html per further route); backend/server.js = CommonJS (require) Node http server on process.env.PORT||{port} serving ../frontend/dist files (index.html for /, <name>.html for /<name>) plus any API routes and persistence the requirement needs, 404 for anything else, handling request errors without hiding unexpected process failures.{ports} Initial package.json files already exist (build copies src/* to dist; start runs server.js). Preserve existing architecture; update manifests when required by dependencies or build changes.
-For persistent data, initialize required records only for a new store or an explicit migration. Later startups must preserve user edits, deletions and archive state; a missing record does not mean the store is new. Reset data only when the requirements explicitly demand it.
-Rules: implement the requirement for general valid inputs and preserve existing behavior. Use required labels and accessible controls, with unique IDs and correct label associations. Derive storage, rendering, styling and validation from the task; do not hardcode test outputs. Return only requested file blocks. {size_rule}
+Requirement {node_id}: {description}
 
 Public acceptance example (implement the full requirement):
 {spec}
-
-Requirement {node_id}: {description}
+Files: frontend/src/index.html (+ one html per further route); backend/server.js = CommonJS (require) Node http server on process.env.PORT||{port} serving ../frontend/dist files (index.html for /, <name>.html for /<name>) plus any API routes and persistence the requirement needs, 404 for anything else, handling request errors without hiding unexpected process failures.{ports} Initial package.json files already exist (build copies src/* to dist; start runs server.js). Preserve existing architecture; update manifests when required by dependencies or build changes.
+For persistent data, initialize required records only for a new store or an explicit migration. Later startups must preserve user edits, deletions and archive state; a missing record does not mean the store is new. Reset data only when the requirements explicitly demand it.
+Rules: implement the requirement for general valid inputs and preserve existing behavior. Use required labels and accessible controls, with unique IDs and correct label associations. Derive storage, rendering, styling and validation from the task; do not hardcode test outputs. Return only requested file blocks. {size_rule}
 """
 
 CODEGEN_SIZE_SMALL = 'Prefer a small implementation, but do not omit required behavior, accessibility, styling or validation to meet an arbitrary line count.'
@@ -1106,21 +1100,14 @@ Read the acceptance spec files for this node in full and the existing code they 
 Copy every accessible name verbatim from the specs. This is a reading turn: use only file reading, listing and grep — no builds, servers, curl or other shell commands — and do not create or modify any other file.\
 """
 
-# Ordered for prompt-prefix caching: everything fixed for the whole run comes
-# first (the UI/performance contracts, the verification rules, the port rules),
-# then the node-specific text. The reverse order made consecutive prompts
-# diverge on their first line, so a bookstack run cached 8% of 421k codegen
-# prompt tokens. Content is unchanged; only the order moved, and the node's own
-# ask now sits last, closest to the answer.
 NODE_PROMPT = """\
-{ui}{performance}
-{verify}
-""" + PORT_RULES + """
 {preamble}
 {node_spec}
 {design}{ancestors}
 {tests}
-"""
+{ui}{performance}
+{verify}
+""" + PORT_RULES
 
 NODE_PREAMBLE_EXTEND = """\
 Implement requirement node {node_id} in the existing application (frontend/ built by `npm run build` into frontend/dist/; zero-dependency Node backend in backend/, `npm start`, PORT env var). Extend the app; do not rewrite or break existing features.
@@ -1733,13 +1720,9 @@ class Flow:
         """Just the spec file contents for a node (codegen prompts)."""
         if not self.tests_dir:
             return "(none)"
-        own = list(self.spec_map.get(node_id) or [])
-        # Shared helpers first: they are byte-identical in every node prompt, so
-        # leading with them keeps them inside the cacheable prefix instead of
-        # sliding to a new offset behind each node's own spec.
-        files = sorted(str(p.relative_to(self.tests_dir)) for p in self.tests_dir.rglob("*.ts")
-                       if not p.name.endswith(".spec.ts") and str(p.relative_to(self.tests_dir)) not in own)
-        files += own
+        files = list(self.spec_map.get(node_id) or [])
+        files += sorted(str(p.relative_to(self.tests_dir)) for p in self.tests_dir.rglob("*.ts")
+                        if not p.name.endswith(".spec.ts") and str(p.relative_to(self.tests_dir)) not in files)
         parts = []
         for rel in files:
             try:
