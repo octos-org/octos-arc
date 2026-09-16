@@ -15,6 +15,20 @@ class InjectTests(unittest.TestCase):
         self.assertEqual(out["thinking"], {"type": "disabled"})
         self.assertNotIn("reasoning_effort", out)
 
+    def test_should_control_reasoning_on_glm_not_only_deepseek(self):
+        """GLM accepts the same two fields, measured on z.ai's coding endpoint
+        for one identical prompt: no field 787 reasoning tokens / 17s,
+        `thinking: disabled` 6 / 8s, `reasoning_effort: low` 0 / 6s. Gating the
+        injection on the DeepSeek name alone let a GLM turn spend its whole
+        32768-token output budget on reasoning (32607 of it) and return 161
+        tokens of content after 433s."""
+        out = json.loads(inject_reasoning(json.dumps({"model": "glm-5.3", "messages": []}).encode(), "low"))
+        self.assertEqual(out["reasoning_effort"], "low")
+        self.assertEqual(out["thinking"], {"type": "enabled"})
+        off = json.loads(inject_reasoning(json.dumps({"model": "glm-5.3", "messages": []}).encode(), "none"))
+        self.assertEqual(off["thinking"], {"type": "disabled"})
+        self.assertNotIn("reasoning_effort", off)
+
     def test_should_leave_other_models_and_non_chat_bodies_alone(self):
         body = json.dumps({"model": "gpt-5", "messages": []}).encode()
         self.assertEqual(inject_reasoning(body, "low"), body)

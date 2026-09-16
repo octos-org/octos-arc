@@ -109,6 +109,14 @@ def route_request(body: bytes, rules: list[dict], phase: str) -> bytes:
     return body
 
 
+# Families measured to honour `reasoning_effort` / `thinking` on the
+# chat/completions path. Anything else is passed through untouched rather than
+# risking a 400 from an endpoint that rejects the fields. GLM was measured on
+# z.ai's coding endpoint (identical prompt): no field 787 reasoning tokens in
+# 17s, `thinking: disabled` 6 in 8s, `reasoning_effort: low` 0 in 6s.
+REASONING_CONTROL_FAMILIES = ("deepseek", "glm")
+
+
 def inject_reasoning(body: bytes, mode: str) -> bytes:
     """mode: "low"|"medium"|"high" -> reasoning_effort (+ thinking enabled);
     "none"/"off" -> thinking disabled; anything else -> unchanged. Fields the
@@ -122,7 +130,7 @@ def inject_reasoning(body: bytes, mode: str) -> bytes:
     if not isinstance(data, dict) or "messages" not in data:
         return body
     model = str(data.get("model") or "").lower()
-    if "deepseek" not in model:
+    if not any(family in model for family in REASONING_CONTROL_FAMILIES):
         return body
     if mode in ("none", "off", "disabled"):
         data.setdefault("thinking", {"type": "disabled"})
