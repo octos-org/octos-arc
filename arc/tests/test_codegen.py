@@ -432,3 +432,41 @@ class TailCheckpointTests(unittest.TestCase):
         import main
         self.assertFalse(main.regression_checkpoint_due(32, 32, 4))
         self.assertFalse(main.regression_checkpoint_due(4, 20, 0))
+
+
+class RepairFallbackReasonTests(unittest.TestCase):
+    """Falling back from a one-request repair to tool mode is the expensive
+    branch, and three unrelated conditions take it. The run log said only
+    "complete repair evidence unavailable within codegen budget", which does
+    not say which one, so the cost cliff was invisible on the repair path the
+    way it had been on the implement path."""
+
+    def _flow(self, tmp):
+        import main
+        flow = main.Flow.__new__(main.Flow)
+        flow.output_dir = Path(tmp)
+        flow.spec_bodies = lambda _: 'a spec body'
+        flow.sources_text = lambda: ''
+        return flow
+
+    def test_should_say_when_the_node_has_no_spec_to_quote(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            flow = self._flow(tmp)
+            flow.spec_bodies = lambda _: '(none)'
+            self.assertIsNone(flow.codegen_repair_prompt('node', 'failure'))
+            self.assertIn('no spec', flow.codegen_repair_block)
+
+    def test_should_say_when_the_prompt_is_over_the_budget_and_by_how_much(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            flow = self._flow(tmp)
+            flow.codegen_context_chars = lambda: 500
+            self.assertIsNone(flow.codegen_repair_prompt('node', 'x' * 4000))
+            self.assertIn('500', flow.codegen_repair_block)
+            self.assertRegex(flow.codegen_repair_block, r'\d{4}')
+
+    def test_should_clear_the_reason_when_a_prompt_is_produced(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            flow = self._flow(tmp)
+            flow.codegen_context_chars = lambda: 200000
+            self.assertIsNotNone(flow.codegen_repair_prompt('node', 'failure evidence'))
+            self.assertEqual(flow.codegen_repair_block, '')
