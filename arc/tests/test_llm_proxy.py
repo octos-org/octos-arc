@@ -165,3 +165,44 @@ class SystemOverrideTests(unittest.TestCase):
         out = json.loads(replace_system_prompt(body, "short"))
         self.assertEqual([m["role"] for m in out["messages"]], ["system", "user"])
         self.assertEqual(out["messages"][0]["content"], "short")
+
+
+class ToolTrimTests(unittest.TestCase):
+    """Two stubborn bookstack nodes escalated to tool mode and spent 201 of the
+    run's 232 requests and 7.39M of its 7.83M prompt tokens. Every one of those
+    requests carried 67 tool schemas, 73005 characters, of which the repair
+    could use ten."""
+
+    ALL = ["read_file", "write_file", "edit_file", "diff_edit", "apply_patch", "list_dir", "glob",
+           "grep", "view_image", "check_background_tasks", "smart_home_control_device", "get_weather",
+           "send_email", "voice_synthesize", "news_fetch", "cron", "spawn_agent", "peer_handoff",
+           "goal_plan", "run_pipeline", "search", "web_search", "browser", "workspace_diff",
+           "write_stdin", "request_user_input", "image_generation", "download_model"]
+
+    def _trim(self, names):
+        body = json.dumps({"messages": [], "tools": [{"function": {"name": n}} for n in names]}).encode()
+        out = json.loads(trim_request(body))
+        return [(t.get("function") or {}).get("name") for t in out["tools"]]
+
+    def test_should_keep_the_tools_a_repair_actually_uses(self):
+        kept = self._trim(self.ALL)
+        for name in ("read_file", "write_file", "edit_file", "diff_edit", "apply_patch",
+                     "list_dir", "glob", "grep", "view_image", "check_background_tasks"):
+            self.assertIn(name, kept)
+
+    def test_should_drop_schemas_a_web_app_repair_cannot_use(self):
+        """Smart home, weather, email, voice, news, cron, multi-agent, the goal
+        system, the research pipelines, the browser and the slides/sites
+        workspace tools are all reachable from a repair turn and all useless to
+        one; `write_stdin` only drives `exec_command`, which is already dropped."""
+        kept = self._trim(self.ALL)
+        for name in ("smart_home_control_device", "get_weather", "send_email", "voice_synthesize",
+                     "news_fetch", "cron", "spawn_agent", "peer_handoff", "goal_plan", "run_pipeline",
+                     "search", "web_search", "browser", "workspace_diff", "write_stdin",
+                     "request_user_input", "image_generation", "download_model"):
+            self.assertNotIn(name, kept)
+
+    def test_should_pass_through_a_tool_it_has_never_heard_of(self):
+        """A deny list, not an allow list: an octos release that adds a tool the
+        repair needs must not have it silently removed."""
+        self.assertIn("some_future_tool", self._trim(["read_file", "some_future_tool"]))

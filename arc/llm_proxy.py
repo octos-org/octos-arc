@@ -204,7 +204,39 @@ DROP_SECTIONS: list[tuple[str, str | None]] = [
     ("## Active Skills", "## Tool use discipline"),  # cron / skill-store skill docs (H1s inside)
 ]
 # Tools the coding turns never need; the model cannot call what it cannot see.
-DROP_TOOLS = {"spawn", "ask_user_question", "check", "tool_search", "update_plan", "exec_command"}
+# Schemas the kernel offers that a web-app repair turn cannot use. Measured on
+# one captured tool-mode request: 67 tools, 73005 characters (~18k tokens) sent
+# on every request, of which ten were reachable work. Two bookstack nodes that
+# escalated to tool mode spent 201 of the run's 232 requests and 7.39M of its
+# 7.83M prompt tokens carrying this payload; dropping the names below removes
+# 66547 of the 73005 characters.
+#
+# A deny list, deliberately: an octos release that adds a tool the repair needs
+# must reach the model rather than be silently removed.
+DROP_TOOLS = {
+    "spawn", "ask_user_question", "check", "tool_search", "update_plan", "exec_command",
+    # research and network: the app is local and the prompt forbids the network
+    "run_pipeline", "search", "web_search", "web_fetch", "deep_crawl", "browser", "news_fetch",
+    # other people's devices, inboxes and calendars
+    "send_email", "send_file", "smart_home_control_device", "smart_home_list_devices",
+    "get_weather", "get_forecast", "get_time", "cron", "monitor_create", "monitor_delete",
+    "monitor_list",
+    # multi-agent orchestration: this turn is the only worker
+    "spawn_agent", "delegate", "wait_agent", "close_agent", "resume_agent", "send_input",
+    "peer_handoff", "peer_respond", "peer_send_input", "peer_gather", "peer_close", "peer_list",
+    # the goal system, account and model management
+    "goal_plan", "goal_create", "goal_update", "goal_get", "goal_grant", "goal_deny",
+    "goal_dispatch", "manage_account", "download_model", "load_model", "unload_model",
+    "list_models", "configure_tool", "tool_suggest",
+    # media generation and speech
+    "image_generation", "voice_synthesize", "voice_transcribe",
+    # cross-conversation memory, disabled in the harness config anyway
+    "save_memory", "recall_memory", "record_memory_use",
+    # the slides/sites "workspace project" tools, which are not the app tree
+    "check_workspace_contract", "workspace_diff", "workspace_log", "workspace_show",
+    # a non-interactive run has nobody to ask, and these only drive exec_command
+    "request_user_input", "write_stdin", "read_task_output",
+}
 
 
 def trim_system_prompt(text: str, drops: list[tuple[str, str | None]] = DROP_SECTIONS) -> str:
