@@ -1984,3 +1984,31 @@ class FailureConsoleTests(unittest.TestCase):
     def test_should_still_show_a_single_line_observation(self):
         shown = "\n".join(m.failure_console_lines("  Observation: locator not found\n  Steps: click"))
         self.assertIn("locator not found", shown)
+
+
+class CodegenOverflowMessageTests(unittest.TestCase):
+    """Crossing the codegen context budget is the most expensive event in a
+    run: every node after it repairs through tool mode, which on bookstack cost
+    about 19 requests per node instead of one. The log has to name the side
+    that actually overflowed."""
+
+    def test_should_report_the_source_total_that_caused_the_overflow(self):
+        """The old line quoted the spec size -- `exceeds one-request allowance
+        (10112 spec chars)` -- while the limit is 90000 and the spec was well
+        under it. The app's own sources were what had grown past the budget, so
+        the number printed sent the reader after the wrong thing."""
+        import tempfile
+        from pathlib import Path as P
+        with tempfile.TemporaryDirectory() as tmp:
+            out = P(tmp)
+            (out / "backend").mkdir()
+            (out / "backend" / "server.js").write_text("x" * 5000, encoding="utf-8")
+            (out / "frontend" / "src").mkdir(parents=True)
+            (out / "frontend" / "src" / "index.html").write_text("y" * 3000, encoding="utf-8")
+            self.assertEqual(m.app_source_chars(out), 8000)
+
+    def test_should_be_zero_before_the_app_exists(self):
+        import tempfile
+        from pathlib import Path as P
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(m.app_source_chars(P(tmp)), 0)

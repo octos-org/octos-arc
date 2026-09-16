@@ -378,6 +378,23 @@ def inline_sources(output_dir: Path, max_chars: int = 90000, exts: tuple = (".js
 SOURCE_EXTS = (".html", ".js", ".mjs", ".cjs", ".css", ".json")  # visibility and layout failures may originate in CSS
 
 
+def app_source_chars(output_dir: Path, exts: tuple = SOURCE_EXTS) -> int:
+    """Total size of the generated app's own sources.
+
+    This is what the codegen context budget is really spent on, and crossing it
+    is the most expensive event in a run: from that node on, every node repairs
+    through tool mode instead of one request. On bookstack that was about 19
+    requests per node instead of one, for the last seven nodes.
+    """
+    total = 0
+    for path in app_source_files(output_dir, exts):
+        try:
+            total += len(path.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+    return total
+
+
 def app_source_files(output_dir: Path, exts: tuple = SOURCE_EXTS) -> list[Path]:
     files: list[Path] = []
     for part in ("frontend", "backend"):
@@ -2264,7 +2281,9 @@ class Flow:
             ok, text = self.codegen_turn(compact, implement_timeout, f"{node_id} implement", spec_chars=self.current_spec_chars)
         else:
             if self.codegen_mode():
-                log(f"[flow] {node_id}: spec or existing source exceeds one-request allowance ({len(self.spec_bodies(node_id))} spec chars); tool mode")
+                log(f"[flow] {node_id}: codegen context exceeded ({len(self.spec_bodies(node_id))} spec chars "
+                    f"+ {app_source_chars(self.output_dir)} source chars vs {self.codegen_context_chars()} allowed); "
+                    f"tool mode from here")
             ok, text = self.turn(prompt, implement_timeout, f"{node_id} implement")
         if not ok and "truncated" in text.lower():
             # Cloud 76fb32a69d81: output cut by max_tokens, nothing written. Retry
