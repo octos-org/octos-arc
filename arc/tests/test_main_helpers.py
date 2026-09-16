@@ -1948,3 +1948,39 @@ class UnfinishedRepairNoteTests(unittest.TestCase):
         # The escalation is queued as a correction; corrections_text() renders it.
         self.assertTrue(any("Recheck the assumptions" in c for c in flow.pending_corrections))
 
+
+
+class FailureConsoleTests(unittest.TestCase):
+    """What the run log shows about a failure is the only record left once the
+    run ends, so it has to carry the evidence, not just the headline."""
+
+    def test_should_keep_the_error_body_under_an_observation(self):
+        """`Observation:` is followed by the build/start log tail on its own
+        lines. The console filter matched line prefixes only, so a bookstack
+        node that died with `npm start exited early (rc=1):` logged exactly
+        that and dropped every line of the Node traceback that said why."""
+        failures = (
+            "- Feature: app startup\n"
+            "  Failed at: build/start\n"
+            "  Observation: backend `npm start` exited early (rc=1):\n"
+            "SyntaxError: Unexpected token '}'\n"
+            "    at wrapSafe (node:internal/modules/cjs/loader:1281:20)\n"
+            "  Steps: npm run build -> npm start")
+        shown = "\n".join(m.failure_console_lines(failures))
+        self.assertIn("Failed at: build/start", shown)
+        self.assertIn("exited early (rc=1)", shown)
+        self.assertIn("SyntaxError: Unexpected token", shown)
+        self.assertNotIn("Steps: npm run build", shown)
+
+    def test_should_collapse_and_bound_a_long_observation(self):
+        failures = "  Observation: boom\n" + "\n".join(f"frame {i}" for i in range(400))
+        shown = m.failure_console_lines(failures)
+        self.assertEqual(len(shown), 1)
+        # clip_ends keeps max_chars of text and adds its own elision marker.
+        self.assertLessEqual(len(shown[0]), 800 + 60)
+        self.assertIn("characters elided", shown[0])
+        self.assertIn("boom", shown[0])
+
+    def test_should_still_show_a_single_line_observation(self):
+        shown = "\n".join(m.failure_console_lines("  Observation: locator not found\n  Steps: click"))
+        self.assertIn("locator not found", shown)

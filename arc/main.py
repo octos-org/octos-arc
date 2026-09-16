@@ -1234,6 +1234,37 @@ def spec_base_ports(tests_dir: Path | None) -> list[int]:
     return sorted(ports)
 
 
+FAILURE_FIELD_PREFIXES = ("- Feature:", "Feature:", "Failed at:", "Observation:", "Steps:")
+
+
+def failure_console_lines(failures: str, max_chars: int = 800) -> list[str]:
+    """Console lines for one acceptance failure block.
+
+    `Observation:` carries the build/start log tail on the lines that follow it,
+    and a prefix-only filter dropped all of them -- a node that died with
+    `npm start exited early (rc=1):` logged that and nothing about why. The
+    continuation is folded into the observation and clipped at both ends, so
+    the first line (which names the error) survives a long traceback.
+    """
+    lines = (failures or "").splitlines()
+    out: list[str] = []
+    index = 0
+    while index < len(lines):
+        stripped = lines[index].strip()
+        if stripped.startswith("Failed at:"):
+            out.append(" ".join(stripped.split())[:max_chars])
+        elif stripped.startswith("Observation:"):
+            body = [stripped]
+            index += 1
+            while index < len(lines) and not lines[index].strip().startswith(FAILURE_FIELD_PREFIXES):
+                body.append(lines[index].strip())
+                index += 1
+            out.append(clip_ends(" ".join(" ".join(body).split()), max_chars))
+            continue
+        index += 1
+    return out
+
+
 def acceptance_tests_prompt(tests_dir: Path | None, web_port: int, smoke_port: int,
                             files: list[str] | None = None, inline: bool = False) -> str:
     if not tests_dir:
@@ -2047,9 +2078,8 @@ class Flow:
                 # One cheap codegen repair (failure digest + quoted sources) is allowed; then tools.
                 self.codegen_blocked = True
                 log(f"[flow] {node_id}: codegen attempt {attempt} still failing; repairs use tool mode")
-            for line in (failures or "").splitlines():
-                if line.strip().startswith(("Failed at:", "Observation:")):
-                    log(f"[acceptance]   {' '.join(line.strip().split())[:360]}")
+            for line in failure_console_lines(failures):
+                log(f"[acceptance]   {line}")
             if summary.total and passed == summary.total:
                 self.commit(f"{node_id} (accepted): {passed}/{summary.total} acceptance tests pass")
                 return True
