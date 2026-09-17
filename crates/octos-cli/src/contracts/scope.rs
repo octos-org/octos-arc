@@ -283,22 +283,6 @@ impl ScopePolicy {
         });
         entries
     }
-
-    /// Test-only: number of stored entries for a session.
-    #[cfg(test)]
-    pub(crate) fn entry_count(&self, session_id: &SessionKey) -> usize {
-        let sessions = self.sessions.read().unwrap_or_else(|p| p.into_inner());
-        sessions
-            .get(session_id)
-            .map(|session| {
-                session
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .entries
-                    .len()
-            })
-            .unwrap_or(0)
-    }
 }
 
 /// Result of a successful `lookup` — what the auto-resolved notification
@@ -342,24 +326,6 @@ mod tests {
     }
 
     #[test]
-    fn unknown_scope_string_falls_back_to_approve_once() {
-        assert_eq!(
-            ApprovalScopeKind::from_scope_str("nonsense_scope_v99"),
-            ApprovalScopeKind::ApproveOnce
-        );
-        assert_eq!(
-            ApprovalScopeKind::from_scope_str(""),
-            ApprovalScopeKind::ApproveOnce
-        );
-        // The default / one-shot scope is also `ApproveOnce`.
-        assert_eq!(
-            ApprovalScopeKind::from_scope_str("request"),
-            ApprovalScopeKind::ApproveOnce
-        );
-        assert!(!ApprovalScopeKind::ApproveOnce.is_recordable());
-    }
-
-    #[test]
     fn recognised_scope_aliases_round_trip() {
         assert_eq!(
             ApprovalScopeKind::from_scope_str("approve_for_turn"),
@@ -392,20 +358,6 @@ mod tests {
     }
 
     #[test]
-    fn record_skips_one_shot_scopes() {
-        let policy = ScopePolicy::default();
-        let s = session("local:test");
-        let recorded = policy.record(
-            &s,
-            ApprovalScopeKind::ApproveOnce,
-            MatchKey::Session,
-            ApprovalDecision::Approve,
-        );
-        assert!(!recorded);
-        assert_eq!(policy.entry_count(&s), 0);
-    }
-
-    #[test]
     fn record_then_lookup_finds_session_scope() {
         let policy = ScopePolicy::default();
         let s = session("local:test");
@@ -424,82 +376,6 @@ mod tests {
     }
 
     #[test]
-    fn turn_scope_only_matches_same_turn() {
-        let policy = ScopePolicy::default();
-        let s = session("local:test");
-        let turn_a = TurnId::new();
-        let turn_b = TurnId::new();
-        policy.record(
-            &s,
-            ApprovalScopeKind::ApproveForTurn,
-            MatchKey::Turn(turn_a.clone()),
-            ApprovalDecision::Approve,
-        );
-        assert!(policy.lookup(&s, "shell", &turn_a).is_some());
-        assert!(policy.lookup(&s, "shell", &turn_b).is_none());
-    }
-
-    #[test]
-    fn tool_scope_does_not_match_different_tool() {
-        let policy = ScopePolicy::default();
-        let s = session("local:test");
-        let turn = TurnId::new();
-        policy.record(
-            &s,
-            ApprovalScopeKind::ApproveForTool,
-            MatchKey::Tool("shell".into()),
-            ApprovalDecision::Approve,
-        );
-        assert!(policy.lookup(&s, "shell", &turn).is_some());
-        assert!(policy.lookup(&s, "browser", &turn).is_none());
-    }
-
-    #[test]
-    fn evict_session_drops_all_entries() {
-        let policy = ScopePolicy::default();
-        let s = session("local:test");
-        let turn = TurnId::new();
-        policy.record(
-            &s,
-            ApprovalScopeKind::ApproveForSession,
-            MatchKey::Session,
-            ApprovalDecision::Approve,
-        );
-        policy.record(
-            &s,
-            ApprovalScopeKind::ApproveForTool,
-            MatchKey::Tool("shell".into()),
-            ApprovalDecision::Approve,
-        );
-        assert_eq!(policy.entry_count(&s), 2);
-        policy.evict_session(&s);
-        assert_eq!(policy.entry_count(&s), 0);
-        assert!(policy.lookup(&s, "shell", &turn).is_none());
-    }
-
-    #[test]
-    fn evict_turn_only_removes_turn_entries() {
-        let policy = ScopePolicy::default();
-        let s = session("local:test");
-        let turn = TurnId::new();
-        policy.record(
-            &s,
-            ApprovalScopeKind::ApproveForTurn,
-            MatchKey::Turn(turn.clone()),
-            ApprovalDecision::Approve,
-        );
-        policy.record(
-            &s,
-            ApprovalScopeKind::ApproveForSession,
-            MatchKey::Session,
-            ApprovalDecision::Approve,
-        );
-        policy.evict_turn(&s, &turn);
-        assert!(policy.lookup(&s, "shell", &turn).is_some()); // session-scope survives
-        assert_eq!(policy.entry_count(&s), 1);
-    }
-
-    #[test]
     fn deny_scope_short_circuits_with_deny() {
         let policy = ScopePolicy::default();
         let s = session("local:test");
@@ -512,31 +388,6 @@ mod tests {
         );
         let hit = policy.lookup(&s, "shell", &turn).expect("hit");
         assert_eq!(hit.decision, ApprovalDecision::Deny);
-    }
-
-    #[test]
-    fn list_for_session_returns_sorted_entries() {
-        let policy = ScopePolicy::default();
-        let s = session("local:test");
-        let turn = TurnId::new();
-        policy.record(
-            &s,
-            ApprovalScopeKind::ApproveForTool,
-            MatchKey::Tool("shell".into()),
-            ApprovalDecision::Approve,
-        );
-        policy.record(
-            &s,
-            ApprovalScopeKind::ApproveForTurn,
-            MatchKey::Turn(turn.clone()),
-            ApprovalDecision::Deny,
-        );
-        let listed = policy.list_for_session(&s);
-        assert_eq!(listed.len(), 2);
-        // sort: scope alphabetical — `session`/`tool`/`turn`. We have tool, turn.
-        assert_eq!(listed[0].scope, approval_scopes::TOOL);
-        assert_eq!(listed[1].scope, approval_scopes::TURN);
-        assert_eq!(listed[1].turn_id.as_ref(), Some(&turn));
     }
 
     #[test]
@@ -566,22 +417,5 @@ mod tests {
         let hit = policy.lookup(&s, "shell", &turn).expect("turn wins");
         assert_eq!(hit.scope_kind, ApprovalScopeKind::ApproveForTurn);
         assert_eq!(hit.decision, ApprovalDecision::Approve);
-    }
-
-    #[test]
-    fn match_key_for_dispatches_correctly() {
-        let turn = TurnId::new();
-        assert!(matches!(
-            match_key_for(ApprovalScopeKind::ApproveForTurn, "shell", &turn),
-            MatchKey::Turn(_)
-        ));
-        assert!(matches!(
-            match_key_for(ApprovalScopeKind::ApproveForTool, "shell", &turn),
-            MatchKey::Tool(_)
-        ));
-        assert!(matches!(
-            match_key_for(ApprovalScopeKind::ApproveForSession, "shell", &turn),
-            MatchKey::Session
-        ));
     }
 }

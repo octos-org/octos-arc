@@ -362,11 +362,9 @@ impl McpClient {
         "message",
         "send_file",
         "spawn",
-        "voice_synthesize",
         "save_memory",
         "recall_memory",
         "record_memory_use",
-        "configure_tool",
     ];
 
     /// Start all configured MCP servers and discover their tools. Fail-soft: a

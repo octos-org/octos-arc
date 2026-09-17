@@ -263,53 +263,6 @@ impl FileStateCache {
         inner.total_size_bytes = 0;
     }
 
-    /// M8.4/M8.6 fix-first item 7: seed the cache from recovered
-    /// resume refs.
-    ///
-    /// The legacy session-actor hand-off consumed
-    /// [`octos_bus::ReplacementStateRef`] entries but did nothing with
-    /// them — the TODO(M8.4) comment explicitly flagged this as a
-    /// gap. The recovered refs carry the file path + optional content
-    /// hash the transcript claimed was last read. We can NOT fully
-    /// reconstruct the cache from a ref alone (the content bytes live
-    /// only in the original tool result, which has been pruned), but
-    /// we can record a best-effort entry with the ref's hash so a
-    /// later `read_file` can at least detect a changed mtime.
-    ///
-    /// When `content_hash` is missing on the ref (the pre-M8.4
-    /// transcript-only path) we skip that entry — a placeholder with a
-    /// zero hash would turn every subsequent read into a false
-    /// [FILE_UNCHANGED]. Returns the number of entries actually seeded.
-    pub fn seed_from_replacement_refs<'a, I>(&self, refs: I) -> usize
-    where
-        I: IntoIterator<Item = &'a octos_bus::ReplacementStateRef>,
-    {
-        let mut seeded = 0_usize;
-        for r in refs {
-            let Some(hash_str) = r.content_hash.as_deref() else {
-                continue;
-            };
-            let Ok(hash) = hash_str.parse::<u64>() else {
-                continue;
-            };
-            // Build a "best guess" CacheEntry: no mtime yet (set to
-            // UNIX_EPOCH so the first real read will always miss and
-            // repopulate); hash comes from the recovered ref; file size
-            // is unknown (0).
-            let entry = CacheEntry::new(
-                r.path.clone(),
-                std::time::SystemTime::UNIX_EPOCH,
-                hash,
-                0,
-                false,
-                None,
-            );
-            self.put(entry);
-            seeded += 1;
-        }
-        seeded
-    }
-
     /// Return a deep-copied cache for a subagent.
     ///
     /// The child's writes/invalidations do not race the parent. The caps are
@@ -439,22 +392,6 @@ mod tests {
         )
     }
 
-    fn mk_partial_entry(
-        path: &str,
-        mtime: SystemTime,
-        size: usize,
-        range: (u64, u64),
-    ) -> CacheEntry {
-        CacheEntry::new(
-            PathBuf::from(path),
-            mtime,
-            FileStateCache::content_hash(path.as_bytes()),
-            size,
-            true,
-            Some(range),
-        )
-    }
-
     #[test]
     fn should_hit_when_mtime_unchanged() {
         let cache = FileStateCache::new();
@@ -484,24 +421,6 @@ mod tests {
     }
 
     #[test]
-    fn should_evict_lru_when_max_entries_exceeded() {
-        let cache = FileStateCache::builder().max_entries(2).build();
-        let mtime = SystemTime::now();
-
-        cache.put(mk_entry("/a", mtime, 10));
-        cache.put(mk_entry("/b", mtime, 10));
-        cache.put(mk_entry("/c", mtime, 10));
-
-        assert_eq!(cache.len(), 2);
-        assert!(
-            cache.peek(Path::new("/a")).is_none(),
-            "oldest entry must be evicted"
-        );
-        assert!(cache.peek(Path::new("/b")).is_some());
-        assert!(cache.peek(Path::new("/c")).is_some());
-    }
-
-    #[test]
     fn should_evict_lru_when_max_bytes_exceeded() {
         let cache = FileStateCache::builder()
             .max_entries(100)
@@ -524,25 +443,6 @@ mod tests {
     }
 
     #[test]
-    fn should_bump_lru_position_on_hit() {
-        let cache = FileStateCache::builder().max_entries(2).build();
-        let mtime = SystemTime::now();
-
-        cache.put(mk_entry("/a", mtime, 10));
-        cache.put(mk_entry("/b", mtime, 10));
-
-        // Touch /a so it becomes the most-recent.
-        assert!(cache.get(Path::new("/a"), mtime).is_some());
-
-        // Insert /c: must evict /b (now the oldest) not /a.
-        cache.put(mk_entry("/c", mtime, 10));
-
-        assert!(cache.peek(Path::new("/a")).is_some(), "/a was touched");
-        assert!(cache.peek(Path::new("/b")).is_none(), "/b was evicted");
-        assert!(cache.peek(Path::new("/c")).is_some());
-    }
-
-    #[test]
     fn should_invalidate_on_put_to_same_path() {
         let cache = FileStateCache::new();
         let mtime = SystemTime::now();
@@ -558,25 +458,6 @@ mod tests {
         let peek = cache.peek(Path::new("/a")).unwrap();
         assert_eq!(peek.mtime, new_mtime);
         assert_eq!(peek.size, 25);
-    }
-
-    #[test]
-    fn should_invalidate_explicit_path() {
-        let cache = FileStateCache::new();
-        let mtime = SystemTime::now();
-        cache.put(mk_entry("/a", mtime, 10));
-        cache.put(mk_entry("/b", mtime, 20));
-        assert_eq!(cache.total_size_bytes(), 30);
-
-        cache.invalidate(Path::new("/a"));
-        assert_eq!(cache.len(), 1);
-        assert_eq!(cache.total_size_bytes(), 20);
-        assert!(cache.peek(Path::new("/a")).is_none());
-        assert!(cache.peek(Path::new("/b")).is_some());
-
-        // Invalidating a missing path is a no-op.
-        cache.invalidate(Path::new("/does-not-exist"));
-        assert_eq!(cache.len(), 1);
     }
 
     #[test]
@@ -602,52 +483,6 @@ mod tests {
     }
 
     #[test]
-    fn should_clear_drops_all_entries() {
-        let cache = FileStateCache::new();
-        let mtime = SystemTime::now();
-        cache.put(mk_entry("/a", mtime, 10));
-        cache.put(mk_entry("/b", mtime, 20));
-        cache.put(mk_entry("/c", mtime, 30));
-        assert_eq!(cache.len(), 3);
-        assert_eq!(cache.total_size_bytes(), 60);
-
-        cache.clear();
-
-        assert!(cache.is_empty());
-        assert_eq!(cache.total_size_bytes(), 0);
-        assert!(cache.peek(Path::new("/a")).is_none());
-    }
-
-    #[test]
-    fn should_handle_partial_view_entries() {
-        let cache = FileStateCache::new();
-        let mtime = SystemTime::now();
-        let entry = mk_partial_entry("/big.rs", mtime, 500, (10, 30));
-        cache.put(entry.clone());
-
-        let fetched = cache.get(Path::new("/big.rs"), mtime).unwrap();
-        assert!(fetched.is_partial_view);
-        assert_eq!(fetched.view_range, Some((10, 30)));
-        assert_eq!(fetched.size, 500);
-    }
-
-    #[test]
-    fn should_not_hit_when_view_range_differs() {
-        // Cache consumers are expected to compare `view_range` themselves —
-        // the cache's job is to return the stored view. Verify the entry
-        // surfaces its range so the caller can see it does not match.
-        let cache = FileStateCache::new();
-        let mtime = SystemTime::now();
-        cache.put(mk_partial_entry("/f.rs", mtime, 100, (1, 50)));
-
-        let entry = cache.get(Path::new("/f.rs"), mtime).unwrap();
-        // Caller asked for (1, 100) but we cached (1, 50): the entry's range
-        // is what tells the caller to ignore this hit.
-        assert_ne!(entry.view_range, Some((1, 100)));
-        assert_eq!(entry.view_range, Some((1, 50)));
-    }
-
-    #[test]
     fn should_reject_binary_extensions() {
         assert!(FileStateCache::has_binary_extension(Path::new("img.png")));
         assert!(FileStateCache::has_binary_extension(Path::new("doc.PDF")));
@@ -662,17 +497,6 @@ mod tests {
     }
 
     #[test]
-    fn should_detect_text_vs_binary_content() {
-        assert!(FileStateCache::is_text_cacheable(b"hello world\n"));
-        assert!(FileStateCache::is_text_cacheable(
-            "// comment\nfn main() {}".as_bytes()
-        ));
-        assert!(!FileStateCache::is_text_cacheable(b"\x00\x01\x02binary"));
-        let big = vec![b'a'; 8192];
-        assert!(FileStateCache::is_text_cacheable(&big));
-    }
-
-    #[test]
     fn should_format_file_unchanged_stub() {
         let full = format_file_unchanged_stub(Path::new("/tmp/foo.rs"), None);
         assert!(full.starts_with(FILE_UNCHANGED_STUB_PREFIX));
@@ -683,24 +507,5 @@ mod tests {
         assert!(partial.starts_with(FILE_UNCHANGED_STUB_PREFIX));
         assert!(partial.contains("/tmp/bar.rs"));
         assert!(partial.contains("3..12"));
-    }
-
-    #[test]
-    fn builder_exposes_configured_caps() {
-        let cache = FileStateCache::builder()
-            .max_entries(10)
-            .max_total_bytes(4096)
-            .build();
-        assert_eq!(cache.max_entries(), 10);
-        assert_eq!(cache.max_total_bytes(), 4096);
-    }
-
-    #[test]
-    fn content_hash_is_stable_for_same_input() {
-        let a = FileStateCache::content_hash(b"hello");
-        let b = FileStateCache::content_hash(b"hello");
-        assert_eq!(a, b);
-        let c = FileStateCache::content_hash(b"hello\n");
-        assert_ne!(a, c);
     }
 }

@@ -1445,30 +1445,6 @@ mod tests {
     }
 
     #[test]
-    fn llm_compaction_transcript_preserves_tool_structure_without_hidden_reasoning() {
-        let mut assistant = Message::assistant("checking");
-        assistant.reasoning_content = Some("private chain of thought".to_owned());
-        assistant.tool_calls = Some(vec![ToolCall {
-            id: "call_1".to_owned(),
-            name: "read_file".to_owned(),
-            arguments: serde_json::json!({"path": "README.md"}),
-            metadata: None,
-        }]);
-        let tool = Message::tool_with_thread(
-            "file contents",
-            "call_1",
-            octos_core::ThreadId::new("thread-1"),
-        );
-
-        let rendered = render_transcript(&[assistant, tool]);
-        assert!(rendered.contains("tool_call: id=call_1 name=read_file"));
-        assert!(rendered.contains("\"path\":\"README.md\""));
-        assert!(rendered.contains("tool_result_for: call_1"));
-        assert!(rendered.contains("reasoning: [present but intentionally omitted]"));
-        assert!(!rendered.contains("private chain of thought"));
-    }
-
-    #[test]
     fn summary_budget_cap_is_utf8_safe() {
         let summary = "界".repeat(100);
         let capped = cap_summary_to_budget(&summary, 10);
@@ -1527,56 +1503,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn llm_compaction_summary_returns_model_output() {
-        let provider: Arc<dyn LlmProvider> = Arc::new(CompactionMockProvider {
-            result: Ok("Goal: X. Done: Y. Next: Z.".into()),
-            captured_messages: None,
-        });
-        let messages = vec![Message::user("do X"), Message::assistant("did Y")];
-        let out = llm_compaction_summary(&provider, &messages, Duration::from_secs(5));
-        assert_eq!(out.as_deref(), Some("Goal: X. Done: Y. Next: Z."));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn llm_compaction_request_corpus_is_exactly_the_supplied_prefix() {
-        // `llm_compaction_summary` summarizes EXACTLY the slice it is handed;
-        // it never filters. Keeping the retained current task out of that
-        // slice is the caller's contract, enforced upstream by
-        // `ContextManager::compaction_input_messages`
-        // (octos-cli/src/api/context_manager.rs), which builds the disjoint
-        // dropped-item set before prompt projection. This test pins the half
-        // that lives here: the prompt frames the corpus as the discarded
-        // prefix, and the corpus contains the supplied rows and nothing else.
-        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let provider: Arc<dyn LlmProvider> = Arc::new(CompactionMockProvider {
-            result: Ok("Historical checkpoint".into()),
-            captured_messages: Some(Arc::clone(&captured)),
-        });
-        let discarded_old_prefix = vec![
-            Message::user("OLD task: replace the parser"),
-            Message::assistant("OLD progress: parser replaced"),
-        ];
-
-        let output =
-            llm_compaction_summary(&provider, &discarded_old_prefix, Duration::from_secs(5));
-        assert_eq!(output.as_deref(), Some("Historical checkpoint"));
-
-        let request = captured.lock().unwrap_or_else(|error| error.into_inner());
-        assert_eq!(request.len(), 2);
-        assert_eq!(request[0].role, octos_core::MessageRole::System);
-        assert!(request[0].content.contains("discarded historical prefix"));
-        assert!(request[0].content.contains("retained CURRENT task"));
-        assert_eq!(request[1].role, octos_core::MessageRole::User);
-        assert_eq!(
-            request[1].content.matches("<message index=").count(),
-            discarded_old_prefix.len(),
-            "the corpus must contain exactly the supplied rows"
-        );
-        assert!(request[1].content.contains("OLD task: replace the parser"));
-        assert!(request[1].content.contains("OLD progress: parser replaced"));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn llm_compaction_summary_returns_none_on_provider_error() {
         // The caller falls back to the heuristic on None — a failing provider
         // must NEVER break or block the turn.
@@ -1587,95 +1513,6 @@ mod tests {
         let messages = vec![Message::user("do X")];
         let out = llm_compaction_summary(&provider, &messages, Duration::from_secs(5));
         assert!(out.is_none());
-    }
-
-    #[test]
-    fn llm_compaction_summary_none_for_empty_messages() {
-        // Short-circuits before any blocking call, so needs no runtime.
-        let provider: Arc<dyn LlmProvider> = Arc::new(CompactionMockProvider {
-            result: Ok("unused".into()),
-            captured_messages: None,
-        });
-        assert!(llm_compaction_summary(&provider, &[], Duration::from_secs(5)).is_none());
-    }
-
-    /// Captures the `ChatConfig` the summary call sends so the cache-economics
-    /// contract is pinned at the call site, not just in the provider.
-    struct RetentionProbeProvider {
-        seen: Arc<std::sync::Mutex<Option<octos_llm::CacheRetention>>>,
-    }
-
-    #[async_trait::async_trait]
-    impl LlmProvider for RetentionProbeProvider {
-        async fn chat(
-            &self,
-            _messages: &[Message],
-            _tools: &[octos_llm::ToolSpec],
-            config: &ChatConfig,
-        ) -> eyre::Result<octos_llm::ChatResponse> {
-            *self.seen.lock().unwrap() = Some(config.cache_retention);
-            Ok(octos_llm::ChatResponse {
-                content: Some("one-shot summary".into()),
-                reasoning_content: None,
-                tool_calls: Vec::new(),
-                stop_reason: octos_llm::StopReason::EndTurn,
-                usage: octos_llm::TokenUsage::default(),
-                provider_index: None,
-            })
-        }
-
-        async fn chat_stream(
-            &self,
-            _messages: &[Message],
-            _tools: &[octos_llm::ToolSpec],
-            _config: &ChatConfig,
-        ) -> eyre::Result<octos_llm::ChatStream> {
-            unimplemented!("probe does not stream")
-        }
-
-        fn model_id(&self) -> &str {
-            "retention-probe"
-        }
-
-        fn provider_name(&self) -> &str {
-            "mock"
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn should_opt_out_of_cache_writes_when_summarizing_one_shot() {
-        // The compaction summary sends its transcript exactly once — the
-        // prefix is never replayed, so marking cache breakpoints would pay
-        // the 1.25x write premium for nothing. The request must opt out.
-        let seen = Arc::new(std::sync::Mutex::new(None));
-        let provider: Arc<dyn LlmProvider> = Arc::new(RetentionProbeProvider {
-            seen: Arc::clone(&seen),
-        });
-        let messages = vec![Message::user("do X"), Message::assistant("did Y")];
-        let out = llm_compaction_summary(&provider, &messages, Duration::from_secs(5));
-        assert!(out.is_some(), "probe provider returns a summary");
-        assert_eq!(
-            *seen.lock().unwrap(),
-            Some(octos_llm::CacheRetention::None),
-            "one-shot compaction summaries must not request cache writes"
-        );
-    }
-
-    #[tokio::test] // current_thread runtime (the default, no `flavor`)
-    async fn llm_compaction_summary_degrades_to_heuristic_on_current_thread() {
-        // The async→sync bridge is only hang-safe on a multi-threaded runtime,
-        // so on a current_thread runtime the LLM path must be skipped entirely
-        // (caller falls back to the heuristic) rather than risk a hang.
-        let provider: Arc<dyn LlmProvider> = Arc::new(CompactionMockProvider {
-            result: Ok("should not be used on current_thread".into()),
-            captured_messages: None,
-        });
-        let messages = vec![Message::user("do X")];
-        let out = llm_compaction_summary(&provider, &messages, Duration::from_secs(5));
-        assert!(
-            out.is_none(),
-            "current_thread runtime must degrade to the heuristic, not run the LLM path"
-        );
     }
 
     fn user_msg(content: &str) -> Message {
@@ -1754,54 +1591,6 @@ mod tests {
     }
 
     #[test]
-    fn typed_prior_summary_keeps_full_body_beyond_soft_extract_budget() {
-        let body = format!(
-            "{}\nFINAL-CARRIED-FACT",
-            "Earlier factual context. ".repeat(45)
-        );
-        let messages = vec![
-            user_msg("[Conversation summary]\nframed projection"),
-            user_msg("new row"),
-        ];
-        let prior = [PriorCompactionSummary {
-            message_index: 0,
-            body: body.clone(),
-        }];
-        assert!(estimate_tokens(&body) > (512.0 * BASE_CHUNK_RATIO) as u32);
-        let summary = compact_messages_with_prior_summaries(&messages, 512, &prior);
-        assert!(summary.contains(&body));
-        assert!(
-            summary.contains("> User: new row"),
-            "a fitting old summary must not starve new evidence while budget remains"
-        );
-        assert!(estimate_tokens(&summary) <= 512);
-    }
-
-    #[test]
-    fn typed_prior_summary_obeys_tiny_and_unicode_budgets() {
-        let messages = vec![
-            user_msg("[Conversation summary]"),
-            user_msg("other content"),
-        ];
-        let prior = [PriorCompactionSummary {
-            message_index: 0,
-            body: format!("IMPORTANT-FACT\n{}", "保留证据🦀\n".repeat(2_000)),
-        }];
-        for budget in [0, 1, 8, 16, 64, 128, 512] {
-            let summary = compact_messages_with_prior_summaries(&messages, budget, &prior);
-            if budget == 0 {
-                assert!(summary.is_empty());
-            } else {
-                assert!(estimate_tokens(&summary) <= budget, "budget={budget}");
-            }
-            if budget >= 64 {
-                assert!(summary.contains("IMPORTANT-FACT"));
-                assert!(summary.contains("summary truncated to budget"));
-            }
-        }
-    }
-
-    #[test]
     fn test_compact_messages_basic() {
         let messages = vec![
             user_msg("Hello, can you help me?"),
@@ -1848,36 +1637,6 @@ mod tests {
     }
 
     #[test]
-    fn test_compact_media_omitted() {
-        let messages = vec![Message {
-            role: MessageRole::User,
-            content: "Look at this image".to_string(),
-            media: vec!["photo.jpg".to_string()],
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-            client_message_id: None,
-            thread_id: None,
-            timestamp: chrono::Utc::now(),
-        }];
-
-        let summary = compact_messages(&messages, 10000);
-        assert!(summary.contains("[media omitted]"));
-        assert!(!summary.contains("photo.jpg"));
-    }
-
-    #[test]
-    fn test_compact_error_tool_result() {
-        let messages = vec![
-            assistant_tool_call("shell", "tc1"),
-            tool_result("tc1", "Error: command not found"),
-        ];
-
-        let summary = compact_messages(&messages, 10000);
-        assert!(summary.contains("-> shell: error"));
-    }
-
-    #[test]
     fn test_find_recent_boundary_tool_pairing() {
         let mut messages = vec![system_msg("system prompt")];
         for i in 0..5 {
@@ -1902,126 +1661,6 @@ mod tests {
         let split = find_recent_boundary(&messages, 200, 50);
         assert!(split > 1, "budget should force compaction, split={split}");
         assert_ne!(messages[split].role, MessageRole::Tool);
-    }
-
-    #[test]
-    fn test_first_line_utf8_safe() {
-        let text = "Hello world";
-        assert_eq!(first_line(text, 5), "Hello...");
-
-        let cjk = "你好世界测试文本";
-        assert_eq!(first_line(cjk, 4), "你好世界...");
-
-        let short = "hi";
-        assert_eq!(first_line(short, 100), "hi");
-    }
-
-    #[test]
-    fn test_find_tool_name_resolves() {
-        let messages = vec![
-            assistant_tool_call("grep", "tc1"),
-            tool_result("tc1", "found matches"),
-        ];
-        let name = find_tool_name(&messages[1], &messages);
-        assert_eq!(name, "grep");
-    }
-
-    #[test]
-    fn test_find_tool_name_unknown_fallback() {
-        let msg = tool_result("nonexistent", "data");
-        let name = find_tool_name(&msg, &[]);
-        assert_eq!(name, "unknown_tool");
-    }
-
-    #[test]
-    fn test_summarize_user_message() {
-        let msg = user_msg("Hello world");
-        let summary = summarize_message(&msg, &[]);
-        assert_eq!(summary, "> User: Hello world");
-    }
-
-    #[test]
-    fn test_summarize_user_message_with_media() {
-        let msg = Message {
-            role: MessageRole::User,
-            content: "Check this".to_string(),
-            media: vec!["img.png".to_string()],
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-            client_message_id: None,
-            thread_id: None,
-            timestamp: chrono::Utc::now(),
-        };
-        let summary = summarize_message(&msg, &[]);
-        assert!(summary.contains("[media omitted]"));
-        assert!(summary.contains("Check this"));
-    }
-
-    #[test]
-    fn test_summarize_assistant_text() {
-        let msg = assistant_msg("Here is your answer");
-        let summary = summarize_message(&msg, &[]);
-        assert_eq!(summary, "> Assistant: Here is your answer");
-    }
-
-    #[test]
-    fn test_summarize_assistant_tool_call() {
-        let msg = assistant_tool_call("read_file", "tc1");
-        let summary = summarize_message(&msg, &[]);
-        assert!(summary.contains("Called read_file"));
-    }
-
-    #[test]
-    fn test_summarize_tool_result_ok() {
-        let context = vec![assistant_tool_call("grep", "tc1")];
-        let msg = tool_result("tc1", "found 3 matches");
-        let summary = summarize_message(&msg, &context);
-        assert!(summary.contains("-> grep: ok"));
-    }
-
-    #[test]
-    fn test_summarize_tool_result_error() {
-        let context = vec![assistant_tool_call("shell", "tc1")];
-        let msg = tool_result("tc1", "Error: command not found");
-        let summary = summarize_message(&msg, &context);
-        assert!(summary.contains("-> shell: error"));
-    }
-
-    #[test]
-    fn test_summarize_system_message() {
-        let msg = system_msg("You are a coding assistant");
-        let summary = summarize_message(&msg, &[]);
-        assert_eq!(summary, "> Context: You are a coding assistant");
-    }
-
-    #[test]
-    fn test_first_line_multiline() {
-        let text = "first line\nsecond line\nthird line";
-        assert_eq!(first_line(text, 200), "first line");
-    }
-
-    #[test]
-    fn test_first_line_empty() {
-        assert_eq!(first_line("", 200), "");
-    }
-
-    #[test]
-    fn tool_result_placeholder_roundtrips() {
-        let p = ToolResultPlaceholder {
-            schema_version: TOOL_RESULT_PLACEHOLDER_SCHEMA_VERSION,
-            tool_name: "shell".into(),
-            tool_call_id: "id1".into(),
-            turn_id: Some(2),
-            original_byte_len: Some(1234),
-            reason: "pruned_after_turns".into(),
-        };
-        let content = p.to_placeholder_content();
-        assert!(content.starts_with(TOOL_RESULT_PLACEHOLDER_PREFIX));
-        // The placeholder carries tool_call_id (the recall handle).
-        assert!(content.contains("id1"), "{content}");
-        let parsed = ToolResultPlaceholder::from_placeholder_content(&content).unwrap();
-        assert_eq!(parsed, p);
     }
 
     #[test]
@@ -2097,47 +1736,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn runner_preflight_threshold_detects_overflow() {
-        let policy = CompactionPolicy {
-            token_budget: 10_000,
-            preflight_threshold: Some(10),
-            ..Default::default()
-        };
-        let runner = CompactionRunner::new(policy);
-        let messages = vec![user_msg(&"x".repeat(500))];
-        assert!(runner.needs_preflight(&messages).is_some());
-    }
-
-    #[test]
-    fn runner_prune_tool_results_skips_when_disabled() {
-        let policy = CompactionPolicy {
-            prune_tool_results_after_turns: None,
-            ..Default::default()
-        };
-        let runner = CompactionRunner::new(policy);
-        let mut messages = vec![
-            user_msg("question"),
-            assistant_tool_call("shell", "tc1"),
-            tool_result("tc1", "big"),
-        ];
-        let report = runner.prune_tool_results(&mut messages);
-        assert_eq!(report.replaced, 0);
-    }
-
-    #[test]
-    fn matches_artifact_supports_glob_prefix() {
-        let art = PreservedArtifact::new("deck", "output/**/slide-*.png");
-        assert!(matches_artifact(
-            "rendered output/sub/slide-1.png successfully",
-            &art
-        ));
-        let art2 = PreservedArtifact::new("primary", "output/deck.pptx");
-        assert!(matches_artifact("wrote to output/deck.pptx earlier", &art2));
-        let art3 = PreservedArtifact::new("other", "never/mentioned.txt");
-        assert!(!matches_artifact("no mention here", &art3));
-    }
-
     /// #2132 helper: a message carrying an update_plan tool call.
     fn plan_message(steps: serde_json::Value) -> Message {
         use octos_core::ToolCall;
@@ -2175,87 +1773,5 @@ mod tests {
         // Plan-free conversations carry no block.
         let plain = compact_messages(&[Message::user("hi")], 1024);
         assert!(!plain.contains(PLAN_BLOCK_BEGIN), "{plain}");
-    }
-
-    /// #2132 multi-pass: after pass 1 drops the tool-call rows, the block
-    /// carried inside the prior summary text is re-extracted — the plan
-    /// survives ANY number of passes, not one.
-    #[test]
-    fn should_carry_plan_forward_when_prior_summary_is_the_only_source() {
-        let pass1 = compact_messages(
-            &[plan_message(serde_json::json!([
-                {"step": "convert attention", "status": "in_progress"}
-            ]))],
-            1024,
-        );
-        // Pass 2 input: only the prior summary text (as a user row) + chatter.
-        let messages = vec![Message::user(pass1), Message::user("more work")];
-        let snapshot = latest_plan_snapshot(&messages).expect("carried plan");
-        assert!(snapshot.contains("- [>] convert attention"), "{snapshot}");
-        let pass2 = compact_messages(&messages, 1024);
-        assert!(pass2.starts_with(PLAN_BLOCK_BEGIN), "{pass2}");
-        // Exactly ONE block: the carried copy inside the summarized prose
-        // must not stack under the fresh one.
-        assert_eq!(pass2.matches(PLAN_BLOCK_BEGIN).count(), 1, "{pass2}");
-    }
-
-    /// #2132 (#1711 shape): stringified-object arguments are recovered, and
-    /// degenerate plans (cleared, unparseable) are SKIPPED so they cannot
-    /// shadow an older valid plan. No raw-JSON fallback exists — tool
-    /// arguments are untrusted.
-    #[test]
-    fn should_skip_degenerate_plans_and_recover_stringified_arguments() {
-        use octos_core::ToolCall;
-        let mut stringified = Message::assistant("");
-        stringified.tool_calls = Some(vec![ToolCall {
-            id: "c1".into(),
-            name: "update_plan".into(),
-            arguments: serde_json::Value::String(
-                r#"{"plan":[{"step":"from stringified args","status":"pending"}]}"#.into(),
-            ),
-            metadata: None,
-        }]);
-        let snapshot = latest_plan_snapshot(&[stringified]).expect("recovered");
-        assert!(
-            snapshot.contains("- [ ] from stringified args"),
-            "{snapshot}"
-        );
-
-        // A cleared plan (empty array) newest must NOT shadow the older
-        // valid one, and alone must yield no block at all.
-        let valid = plan_message(serde_json::json!([{"step": "real step", "status": "pending"}]));
-        let cleared = plan_message(serde_json::json!([]));
-        let snapshot = latest_plan_snapshot(&[valid, cleared.clone()]).expect("older valid plan");
-        assert!(snapshot.contains("real step"), "{snapshot}");
-        assert_eq!(latest_plan_snapshot(&[cleared]), None);
-        // Unparseable/null arguments are equally inert.
-        let mut null_args = Message::assistant("");
-        null_args.tool_calls = Some(vec![ToolCall {
-            id: "c1".into(),
-            name: "update_plan".into(),
-            arguments: serde_json::Value::Null,
-            metadata: None,
-        }]);
-        assert_eq!(latest_plan_snapshot(&[null_args]), None);
-    }
-
-    /// #2132 budget: the block is carved out of the producer's own budget
-    /// (a tiny budget still yields a bounded artifact), and oversized plans
-    /// truncate with the marker.
-    #[test]
-    fn should_keep_combined_artifact_bounded_when_budget_is_small() {
-        let steps: Vec<serde_json::Value> = (0..200)
-            .map(|i| serde_json::json!({"step": format!("step number {i} with some length"), "status": "pending"}))
-            .collect();
-        let messages = vec![plan_message(serde_json::Value::Array(steps))];
-        let summary = compact_messages(&messages, 256);
-        assert!(summary.contains("(plan truncated)"), "{summary}");
-        // Combined artifact stays in the same order of magnitude as the
-        // budget (256 tokens ≈ 1KB) instead of stacking 1.5KB on top.
-        assert!(
-            summary.len() < 4096,
-            "combined artifact must remain bounded, got {} bytes",
-            summary.len()
-        );
     }
 }

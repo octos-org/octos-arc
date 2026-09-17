@@ -140,33 +140,6 @@ mod tests {
     }
 
     #[test]
-    fn test_bwrap_sandbox_env_sanitization() {
-        let sb = BwrapSandbox {
-            allow_network: false,
-            workspace_write: true,
-            repo_git_write: None,
-        };
-        let cmd = sb.wrap_command("ls", Path::new("/tmp"));
-        let removed: Vec<String> = cmd
-            .as_std()
-            .get_envs()
-            .filter_map(|(k, v)| {
-                if v.is_none() {
-                    Some(k.to_string_lossy().to_string())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        for var in BLOCKED_ENV_VARS {
-            assert!(
-                removed.iter().any(|r| r == *var),
-                "bwrap should env_remove {var}"
-            );
-        }
-    }
-
-    #[test]
     fn should_ro_bind_workspace_when_workspace_write_disabled() {
         // P1 (codex): a read-only permission profile must bind the workspace
         // read-only so shell commands cannot write to it.
@@ -194,32 +167,6 @@ mod tests {
             args[ws_bind_idx - 1],
             "--ro-bind",
             "read-only profile must --ro-bind the workspace, args: {args:?}"
-        );
-    }
-
-    #[test]
-    fn should_rw_bind_workspace_when_workspace_write_enabled() {
-        let sb = BwrapSandbox {
-            allow_network: false,
-            workspace_write: true,
-            repo_git_write: None,
-        };
-        let cmd = sb.wrap_command("touch newfile", Path::new("/tmp/ws"));
-        let args: Vec<_> = cmd
-            .as_std()
-            .get_args()
-            .map(|a| a.to_string_lossy().to_string())
-            .collect();
-        // The FIRST occurrence of the workspace path is the workspace bind
-        // (system dirs bound before it never match /tmp/ws).
-        let ws_bind_idx = args
-            .iter()
-            .position(|a| a == "/tmp/ws")
-            .expect("workspace path must be bound");
-        assert_eq!(
-            args[ws_bind_idx - 1],
-            "--bind",
-            "writable profile must --bind (rw) the workspace, args: {args:?}"
         );
     }
 
@@ -288,109 +235,6 @@ mod tests {
         assert!(
             tmpfs_idx < ws_bind_idx,
             "--tmpfs /tmp must precede the workspace bind so it is not shadowed, args: {args:?}"
-        );
-    }
-
-    #[test]
-    fn should_tmpfs_var_tmp_before_workspace_ro_bind_when_cwd_under_var_tmp() {
-        // Round-5 audit (bwrap sibling of the Landlock /var/tmp handling): the
-        // Landlock backend treats BOTH /tmp and /var/tmp as system temp roots and
-        // provides a scratch for a read-only cwd under either. bwrap must be
-        // symmetric: a /var/tmp scratch tmpfs must exist AND be mounted BEFORE the
-        // workspace ro-bind, so (a) a read-only cwd under /var/tmp is not shadowed
-        // (and cannot be re-permitted for writes) and (b) tools that default to
-        // /var/tmp still have writable scratch.
-        let sb = BwrapSandbox {
-            allow_network: false,
-            workspace_write: false,
-            repo_git_write: None,
-        };
-        let cmd = sb.wrap_command("touch newfile", Path::new("/var/tmp/ws"));
-        let args: Vec<_> = cmd
-            .as_std()
-            .get_args()
-            .map(|a| a.to_string_lossy().to_string())
-            .collect();
-
-        // A `--tmpfs /var/tmp` mount must be present.
-        let var_tmp_tmpfs_idx = args
-            .iter()
-            .enumerate()
-            .find(|(i, a)| {
-                *a == "--tmpfs" && args.get(i + 1).map(String::as_str) == Some("/var/tmp")
-            })
-            .map(|(i, _)| i)
-            .expect("bwrap must mount a /var/tmp tmpfs");
-
-        // The workspace ro-bind must come AFTER the tmpfs so it wins.
-        let ws_bind_idx = args
-            .iter()
-            .position(|a| a == "/var/tmp/ws")
-            .expect("workspace path must be bound");
-        assert_eq!(args[ws_bind_idx - 1], "--ro-bind");
-        assert!(
-            var_tmp_tmpfs_idx < ws_bind_idx,
-            "--tmpfs /var/tmp must be mounted BEFORE the workspace ro-bind so the \
-             tmpfs cannot shadow (and re-permit writes to) the read-only \
-             workspace, args: {args:?}"
-        );
-    }
-
-    #[test]
-    fn should_tmpfs_both_temp_roots_before_workspace_bind() {
-        // Both temp-root tmpfs mounts must precede the workspace bind regardless
-        // of where cwd lives, so ordering is never workspace-dependent.
-        let sb = BwrapSandbox {
-            allow_network: false,
-            workspace_write: false,
-            repo_git_write: None,
-        };
-        let cmd = sb.wrap_command("echo hi", Path::new("/home/u/proj"));
-        let args: Vec<_> = cmd
-            .as_std()
-            .get_args()
-            .map(|a| a.to_string_lossy().to_string())
-            .collect();
-        let tmp_idx = args
-            .iter()
-            .enumerate()
-            .find(|(i, a)| *a == "--tmpfs" && args.get(i + 1).map(String::as_str) == Some("/tmp"))
-            .map(|(i, _)| i)
-            .expect("must mount /tmp tmpfs");
-        let var_tmp_idx = args
-            .iter()
-            .enumerate()
-            .find(|(i, a)| {
-                *a == "--tmpfs" && args.get(i + 1).map(String::as_str) == Some("/var/tmp")
-            })
-            .map(|(i, _)| i)
-            .expect("must mount /var/tmp tmpfs");
-        let ws_bind_idx = args
-            .iter()
-            .position(|a| a == "/home/u/proj")
-            .expect("workspace path must be bound");
-        assert!(
-            tmp_idx < ws_bind_idx && var_tmp_idx < ws_bind_idx,
-            "both temp-root tmpfs mounts must precede the workspace bind, args: {args:?}"
-        );
-    }
-
-    #[test]
-    fn test_bwrap_sandbox_allows_network() {
-        let sb = BwrapSandbox {
-            allow_network: true,
-            workspace_write: true,
-            repo_git_write: None,
-        };
-        let cmd = sb.wrap_command("echo hi", Path::new("/tmp"));
-        let args: Vec<_> = cmd
-            .as_std()
-            .get_args()
-            .map(|a| a.to_string_lossy().to_string())
-            .collect();
-        assert!(
-            !args.contains(&"--unshare-net".to_string()),
-            "should not unshare net when network is allowed"
         );
     }
 

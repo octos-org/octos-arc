@@ -177,8 +177,8 @@ fn init_tracing(
 
         Ok(Some(guard))
     } else {
-        // `octos acp` reserves stdout for the JSON-RPC protocol → its logs go to
-        // stderr. Every other no-log-dir command keeps the historical stdout.
+        // Commands that reserve stdout for structured output keep their logs
+        // on stderr. Every other no-log-dir command keeps the historical stdout.
         let writer: BoxMakeWriter = if reserve_stdout {
             BoxMakeWriter::new(std::io::stderr)
         } else {

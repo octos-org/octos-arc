@@ -659,7 +659,7 @@ fn materialize_one(
     // ABSOLUTE path so the encoder can read it (a bare `up/` handle isn't a real
     // file path). A non-tmpdir image (workspace/external) already returned
     // Passthrough above via `resolve_upload_reference` == None.
-    if matches!(image_mode, ImageMaterializeMode::VisionPath) && crate::media::is_image(entry) {
+    if matches!(image_mode, ImageMaterializeMode::VisionPath) && looks_like_image(entry) {
         return match src.to_str() {
             Some(abs) => MaterializeOutcome::Rewritten(abs.to_string()),
             None => MaterializeOutcome::Passthrough,
@@ -715,6 +715,16 @@ fn materialize_one(
         Some(name) => MaterializeOutcome::Rewritten(format!("uploads/{name}")),
         None => MaterializeOutcome::Passthrough,
     }
+}
+
+/// True when `entry` has a vision-path image extension (jpg/png/gif/webp).
+fn looks_like_image(entry: &str) -> bool {
+    let lower = entry.to_lowercase();
+    lower.ends_with(".jpg")
+        || lower.ends_with(".jpeg")
+        || lower.ends_with(".png")
+        || lower.ends_with(".gif")
+        || lower.ends_with(".webp")
 }
 
 #[cfg(test)]

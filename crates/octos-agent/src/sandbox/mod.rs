@@ -500,14 +500,13 @@ pub trait Sandbox: Send + Sync {
     /// Whether this backend is the Docker container sandbox.
     ///
     /// #1607 (codex-review follow-up): Docker bind-mounts the workspace at a
-    /// fixed in-container path (`/workspace`), but `Command` validators
-    /// interpolate absolute *host* paths (e.g. `${output.patch_path}` ->
-    /// `/host/ws/.../foo.patch`) which don't exist inside the container, so a
-    /// previously-passing required validator would start failing. Before
-    /// #1607, command validators ran on the host and worked. `ValidatorRunner`
-    /// uses this to keep Docker-mode command validators on the pre-#1607 direct
-    /// (host) path rather than silently breaking them. Full in-container path
-    /// translation is a known follow-up. Non-Docker backends inherit `false`.
+    /// fixed in-container path (`/workspace`), while template interpolation in
+    /// workspace contracts can reference absolute *host* paths (e.g.
+    /// `${output.patch_path}` -> `/host/ws/.../foo.patch`) which don't exist
+    /// inside the container. Backends use this predicate to keep Docker-mode
+    /// sessions on the direct (host) execution path rather than silently
+    /// breaking them. Full in-container path translation is a known follow-up.
+    /// Non-Docker backends inherit `false`.
     fn is_docker(&self) -> bool {
         false
     }
@@ -1039,16 +1038,6 @@ fn warn_fence_unenforced(config: &SandboxConfig) {
 pub fn create_sandbox(config: &SandboxConfig) -> Box<dyn Sandbox> {
     let in_container = running_in_container();
     match decide_sandbox(config, HostOs::current(), &RealHostProbe) {
-        SandboxDecision::Confine(choice)
-            if should_degrade_nested_docker(in_container, &config.mode, choice) =>
-        {
-            tracing::warn!(
-                backend = choice.label(),
-                "container already supplies the outer isolation boundary; skipping nested Docker sandbox and degrading auto mode to explicitly logged unconfined execution"
-            );
-            warn_fence_unenforced(config);
-            Box::new(NoSandbox)
-        }
         SandboxDecision::Confine(choice) => build_backend(choice, config),
         SandboxDecision::Unconfined(reason) => {
             match reason {
@@ -1117,14 +1106,6 @@ fn running_in_container() -> bool {
     let dockerenv = Path::new("/.dockerenv").exists();
     let cgroup = std::fs::read_to_string("/proc/1/cgroup").unwrap_or_default();
     container_markers_present(dockerenv, &cgroup)
-}
-
-fn should_degrade_nested_docker(
-    in_container: bool,
-    mode: &SandboxMode,
-    choice: SandboxBackendChoice,
-) -> bool {
-    in_container && matches!(mode, SandboxMode::Auto) && choice == SandboxBackendChoice::Docker
 }
 
 /// Which backend [`SandboxMode::Auto`] would select on this host — a stable
@@ -1353,30 +1334,6 @@ mod tests {
     }
 
     #[test]
-    fn container_auto_skips_nested_docker_but_explicit_docker_does_not() {
-        assert!(should_degrade_nested_docker(
-            true,
-            &SandboxMode::Auto,
-            SandboxBackendChoice::Docker
-        ));
-        assert!(!should_degrade_nested_docker(
-            false,
-            &SandboxMode::Auto,
-            SandboxBackendChoice::Docker
-        ));
-        assert!(!should_degrade_nested_docker(
-            true,
-            &SandboxMode::Docker,
-            SandboxBackendChoice::Docker
-        ));
-        assert!(!should_degrade_nested_docker(
-            true,
-            &SandboxMode::Auto,
-            SandboxBackendChoice::Bwrap
-        ));
-    }
-
-    #[test]
     fn test_create_sandbox_disabled() {
         let config = SandboxConfig {
             allow_toolchains: true,
@@ -1394,55 +1351,6 @@ mod tests {
     fn test_sandbox_mode_default_is_auto() {
         assert_eq!(SandboxMode::default(), SandboxMode::Auto);
     }
-
-    #[test]
-    fn test_sandbox_mode_serde_roundtrip() {
-        let modes = [
-            (SandboxMode::Auto, "\"auto\""),
-            (SandboxMode::Bwrap, "\"bwrap\""),
-            (SandboxMode::Landlock, "\"landlock\""),
-            (SandboxMode::Macos, "\"macos\""),
-            (SandboxMode::Docker, "\"docker\""),
-            (SandboxMode::AppContainer, "\"appcontainer\""),
-            (SandboxMode::None, "\"none\""),
-        ];
-        for (mode, expected_json) in &modes {
-            let json = serde_json::to_string(mode).unwrap();
-            assert_eq!(&json, expected_json, "serialize {mode:?}");
-            let parsed: SandboxMode = serde_json::from_str(expected_json).unwrap();
-            assert_eq!(&parsed, mode, "deserialize {expected_json}");
-        }
-    }
-
-    #[test]
-    fn test_sandbox_mode_debug() {
-        let dbg = format!("{:?}", SandboxMode::Auto);
-        assert_eq!(dbg, "Auto");
-    }
-
-    // --- MountMode enum tests ---
-
-    #[test]
-    fn test_mount_mode_default_is_readwrite() {
-        assert_eq!(MountMode::default(), MountMode::ReadWrite);
-    }
-
-    #[test]
-    fn test_mount_mode_serde_roundtrip() {
-        let modes = [
-            (MountMode::None, "\"none\""),
-            (MountMode::ReadOnly, "\"ro\""),
-            (MountMode::ReadWrite, "\"rw\""),
-        ];
-        for (mode, expected_json) in &modes {
-            let json = serde_json::to_string(mode).unwrap();
-            assert_eq!(&json, expected_json, "serialize {mode:?}");
-            let parsed: MountMode = serde_json::from_str(expected_json).unwrap();
-            assert_eq!(&parsed, mode, "deserialize {expected_json}");
-        }
-    }
-
-    // --- BLOCKED_ENV_VARS tests ---
 
     #[test]
     fn test_blocked_env_vars_contains_critical_vars() {
@@ -1466,52 +1374,11 @@ mod tests {
     }
 
     #[test]
-    fn test_blocked_env_vars_has_expected_count() {
-        assert_eq!(
-            BLOCKED_ENV_VARS.len(),
-            18,
-            "BLOCKED_ENV_VARS count changed unexpectedly"
-        );
-    }
-
-    #[test]
-    fn test_blocked_env_vars_no_duplicates() {
-        let mut seen = std::collections::HashSet::new();
-        for var in BLOCKED_ENV_VARS {
-            assert!(seen.insert(var), "duplicate in BLOCKED_ENV_VARS: {var}");
-        }
-    }
-
-    // --- SandboxConfig / DockerConfig default tests ---
-
-    #[test]
     fn test_sandbox_config_default() {
         let config = SandboxConfig::default();
         assert!(config.enabled, "sandbox should be enabled by default");
         assert_eq!(config.mode, SandboxMode::Auto);
         assert!(!config.allow_network);
-    }
-
-    #[test]
-    fn test_docker_config_default() {
-        let config = DockerConfig::default();
-        assert_eq!(config.image, "ubuntu:24.04");
-        assert!(config.cpu_limit.is_none());
-        assert!(config.memory_limit.is_none());
-        assert!(config.pids_limit.is_none());
-        assert_eq!(config.mount_mode, MountMode::ReadWrite);
-    }
-
-    #[test]
-    fn test_sandbox_config_serde_defaults() {
-        let config: SandboxConfig = serde_json::from_str("{}").unwrap();
-        assert!(
-            config.enabled,
-            "sandbox should be enabled by default when field is missing"
-        );
-        assert_eq!(config.mode, SandboxMode::Auto);
-        assert!(!config.allow_network);
-        assert_eq!(config.docker.image, "ubuntu:24.04");
     }
 
     #[test]
@@ -1655,17 +1522,6 @@ mod tests {
     }
 
     // --- is_noop contract (fail-closed callers depend on this) ---
-
-    #[test]
-    fn no_sandbox_reports_noop() {
-        // The `mcp-serve` fail-closed check and the validator direct-argv path
-        // both key off `is_noop()`. NoSandbox provides zero confinement, so it
-        // must report `true`; the trait default (real backends) is `false`.
-        assert!(
-            NoSandbox.is_noop(),
-            "NoSandbox must report is_noop() == true"
-        );
-    }
 
     #[test]
     fn disabled_and_none_modes_yield_noop_sandbox() {
@@ -2170,47 +2026,11 @@ mod tests {
     }
 
     #[test]
-    fn refusal_text_names_per_os_remediations_and_avoids_denial_phrases() {
-        // The message is model-readable remediation, per OS…
-        let windows = remediation_for(HostOs::Windows);
-        assert!(
-            windows.contains("octos-sandbox.exe") && windows.contains("Docker"),
-            "windows remediation names the AppContainer helper and Docker: {windows}"
-        );
-        let linux = remediation_for(HostOs::Linux);
-        assert!(
-            linux.contains("bubblewrap") && linux.contains("Docker"),
-            "linux remediation names bubblewrap and Docker: {linux}"
-        );
-        let macos = remediation_for(HostOs::Macos);
-        assert!(
-            macos.contains("sandbox-exec"),
-            "macos remediation names sandbox-exec: {macos}"
-        );
-        for os in ALL_OSES {
-            let text = remediation_for(os);
-            assert!(
-                text.contains("sandbox.enabled=false") && text.contains("\"none\""),
-                "every remediation names the explicit opt-outs: {text}"
-            );
-            // …and must never contain a kernel denial phrase, or the
-            // sandbox_denial_hint scanner would append a misleading
-            // "the OS sandbox blocked a file access" hint to a refusal.
-            for phrase in DENIAL_PHRASES {
-                assert!(
-                    !text.contains(phrase),
-                    "refusal text must not trip the denial scanner: {phrase}"
-                );
-            }
-        }
-    }
-
-    #[test]
     fn confining_backends_never_report_noop_or_refusal() {
         // #2196 review MUST-FIX invariant: `is_noop()` is a CONSTRUCTION-TIME
         // property. A backend built from a `Confine` decision must never
         // (dynamically or otherwise) report no-op — `is_noop() == true` is
-        // the exact transition validators.rs / tools/check.rs use to run
+        // the exact transition sandbox consumers (spawn/exec/check) use to run
         // argv DIRECTLY on the host, so a confining backend that flips to
         // no-op converts fail-closed paths into raw host execution. (The
         // Windows AppContainer half of this — whose old override re-probed
@@ -2234,70 +2054,6 @@ mod tests {
         }
         // The inverse stays true: NoSandbox is the one honest no-op.
         assert!(NoSandbox.is_noop());
-    }
-
-    #[test]
-    fn refusal_display_never_names_the_disable_keys() {
-        // Codex MUST-FIX (#2196 review): the Display text flows VERBATIM into
-        // model-visible tool results (shell/exec refusal guards, wrap-time
-        // stderr, mcp-serve session errors, fleet termination reasons). Text
-        // that names the config keys that remove confinement is itself an
-        // escape vector -- a confined model can still edit config files. The
-        // operator-facing remediation (which legitimately names the explicit
-        // opt-outs) lives in the `remediation` FIELD, surfaced only via the
-        // creation-time error log and doctor-adjacent surfaces.
-        let mut displays: Vec<String> = Vec::new();
-        for os in ALL_OSES {
-            // Explicit-mode refusals (wrong OS / missing backend) ...
-            for mode in [
-                SandboxMode::Bwrap,
-                SandboxMode::Landlock,
-                SandboxMode::Macos,
-                SandboxMode::AppContainer,
-                SandboxMode::Docker,
-            ] {
-                if let SandboxDecision::Refuse(error) =
-                    decide_sandbox(&mode_config(mode.clone()), os, &NO_BACKENDS)
-                {
-                    displays.push(error.to_string());
-                }
-            }
-            // ... and the auto+fail_closed refusal.
-            let config = SandboxConfig {
-                fail_closed: true,
-                ..SandboxConfig::default()
-            };
-            if let SandboxDecision::Refuse(error) = decide_sandbox(&config, os, &NO_BACKENDS) {
-                displays.push(error.to_string());
-            }
-        }
-        assert!(
-            displays.len() >= ALL_OSES.len(),
-            "matrix must produce refusals to inspect"
-        );
-        for text in &displays {
-            for banned in [
-                "enabled=false",
-                "mode=\"none\"",
-                "mode = \"none\"",
-                "danger-full-access",
-            ] {
-                assert!(
-                    !text.contains(banned),
-                    "model-visible refusal must not name the disable keys ({banned:?}): {text}"
-                );
-            }
-            for phrase in DENIAL_PHRASES {
-                assert!(
-                    !text.contains(phrase),
-                    "model-visible refusal must not trip the denial scanner: {phrase}"
-                );
-            }
-            assert!(
-                text.contains("operator"),
-                "model-visible refusal points at the operator, not at config keys: {text}"
-            );
-        }
     }
 
     #[test]

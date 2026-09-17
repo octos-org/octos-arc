@@ -3,15 +3,14 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use async_trait::async_trait;
 use eyre::{Result, WrapErr};
 use metrics::counter;
 use octos_core::{AgentId, InboundMessage, SessionScope, Task, TaskContext, TaskKind, TaskResult};
-use octos_llm::{ContextWindowOverride, LlmProvider, ProviderRouter};
+use octos_llm::{ContextWindowOverride, LlmProvider};
 use octos_memory::EpisodeStore;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
@@ -29,10 +28,7 @@ use crate::sandbox::{SandboxConfig, create_sandbox};
 use crate::subagent_output::SubAgentOutputRouter;
 use crate::subagent_summary::AgentSummaryGenerator;
 use crate::task_supervisor::{TaskSupervisor, TaskTerminalGuard};
-use crate::workspace_git::{
-    WorkspaceContractStatus, WorkspaceProjectKind,
-    resolve_preferred_workspace_contract_artifact_path, resolve_workspace_contract_artifact_paths,
-};
+use crate::workspace_contract::resolve_workspace_contract_artifact_paths;
 use crate::{Agent, AgentConfig, HookContext, HookExecutor, HookPayload, HookResult};
 
 /// Default MCP tool name dispatched on the remote agent. Chosen to match
@@ -497,8 +493,9 @@ fn scoped_child_session_scope(
         .transpose()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BackgroundResultKind {
+    #[default]
     Notification,
     Report,
 }
@@ -579,6 +576,23 @@ pub struct BackgroundResultPayload {
     pub terminal_status: Option<crate::task_supervisor::TaskStatus>,
 }
 
+impl Default for BackgroundResultPayload {
+    fn default() -> Self {
+        Self {
+            task_label: String::new(),
+            content: String::new(),
+            kind: BackgroundResultKind::default(),
+            media: Vec::new(),
+            envelope_media: Vec::new(),
+            originating_thread_id: None,
+            task_id: None,
+            tool_call_id: None,
+            originating_client_message_id: None,
+            terminal_status: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChildSessionLifecycleKind {
     Spawned,
@@ -626,7 +640,7 @@ struct WorkflowMetadata {
     /// Coarse progress fraction in [0.0, 1.0] for this phase. Populated
     /// on every workflow_runtime-driven `mark_runtime_state` so the
     /// dashboard `runtime_detail.progress` field is non-null even for
-    /// workflows whose internal tools (e.g. `run_pipeline`) do not emit
+    /// workflows whose internal tools (e.g. `bg_research`) do not emit
     /// per-event `HarnessEvent::progress`. Increments roughly with phase
     /// transitions: 0.05 at workflow start (`research`/initial phase),
     /// 0.95 when the runtime advances to `deliver_result`. The
@@ -810,47 +824,10 @@ fn role_task_capability_warning(effective_tools: &[String], task: &str) -> Optio
 /// `agent:{task.tool_call_id}` where the spawn registers with
 /// `tool_call_id = "spawn-{worker_id}"`.
 ///
-/// When an `on_stream_chunk` callback is set, live `StreamChunk` events are
-/// forwarded there so the caller (the WS/serve layer) can emit
-/// `agent/output/delta` directly — bypassing the heavy `on_change` path
-/// (which persists a snapshot on every fire). This gives the TUI agent dock
-/// live streaming output for running background children without per-token
-/// persistence overhead (codex plan review: "the proposed per-token
-/// persistence/on_change fan-out is too heavy"). The WS layer emits via
-/// `send_notification_ephemeral(UiNotification::AgentOutputDelta(...))`.
-/// Live child-stream callback: `(agent_id, start_offset, text_delta)` —
-/// `start_offset` is the cumulative streamed-bytes offset BEFORE the delta
-/// (the window's first byte), `u64` end to end to match
-/// `OutputCursor::offset` on the wire.
-type ChildStreamCallback = Arc<dyn Fn(&str, u64, &str) + Send + Sync>;
-
 struct SpawnChildTranscriptReporter {
     router: Arc<SubAgentOutputRouter>,
     router_session_id: String,
     task_id: String,
-    /// Cumulative byte count of streamed text so far. Incremented per
-    /// `StreamChunk`; the callback receives the value from BEFORE the
-    /// increment, i.e. the START offset of the delta's window — the same
-    /// convention every other `cursor` producer uses
-    /// (`TaskOutputDeltaTracker`, the agent_orchestrator read RPCs all
-    /// report `cursor` = window start). Monotonic, so clients can detect
-    /// gaps / reorder if chunks ever arrive out of order (e.g. across
-    /// reconnects). Atomic because `report(&self)` is `&self` and the
-    /// reporter is shared across the child's tokio task(s). `u64` end to
-    /// end so no lossy narrowing hides between here and
-    /// `OutputCursor::offset` (`u64`) on the wire.
-    stream_offset: AtomicU64,
-    /// Optional callback for live `StreamChunk` forwarding. Called directly
-    /// from the reporter thread with `(agent_id, cursor_offset, text_delta)`
-    /// — the caller owns the emit path (e.g. emitting
-    /// `agent/output/delta` via `send_notification_ephemeral` with a
-    /// properly-formed `AgentOutputDeltaEvent` keyed on the child's
-    /// `agent_id`). The `agent_id` is the spawn's `task_id` (the same id
-    /// surfaced via `TurnSpawnCompleteEvent` / the agent dock).
-    /// `cursor_offset` is the cumulative byte offset BEFORE this chunk
-    /// (i.e. the start-offset of this delta's window) — matches the
-    /// start-offset convention of every sibling `OutputCursor` producer.
-    on_stream_chunk: Option<ChildStreamCallback>,
 }
 
 impl crate::progress::ProgressReporter for SpawnChildTranscriptReporter {
@@ -876,51 +853,16 @@ impl crate::progress::ProgressReporter for SpawnChildTranscriptReporter {
                 format!("[tool {status}] {name} — {first}\n")
             }
             ProgressEvent::FileModified { path } => format!("[file modified] {path}\n"),
-            // StreamChunk: live text goes ONLY to the direct
-            // on_stream_chunk callback (if set) so the WS layer can emit
-            // agent/output/delta WITHOUT going through on_change (which
-            // persists a snapshot on every fire — too heavy per-token per
-            // codex review). Deliberately NO router append here: the
+            // StreamChunk deltas are intentionally NOT appended here: the
             // Response arm below already appends each iteration's full
             // text, so writing the same bytes per-chunk would land every
             // child message TWICE in `<task_id>.out` (this exact
             // duplication is what the original drop-comment on this arm
             // warned about). The router file stays the Response-based
-            // durable record; `task/output/delta` is produced from
-            // supervisor progress events, not router appends, so no live
-            // consumer loses anything.
-            //
-            // Delivery note (codex review): a fast LLM child can fire
-            // this 100+ times/sec. There is no per-token coalescing here,
-            // and the ephemeral WS send is LOSSY: `try_enqueue` onto the
-            // bounded channel drops the frame on full (BackpressureDrop)
-            // rather than blocking the producer. Dropped deltas are
-            // acceptable for a live tail (the durable record is the
-            // Response append); if loss under N parallel children proves
-            // user-visible, add a ~16ms coalescing debounce at the
-            // callback site.
-            ProgressEvent::StreamChunk { text, .. } => {
-                if !text.is_empty() {
-                    // `fetch_add` returns the PREVIOUS value: the
-                    // cumulative streamed-bytes offset BEFORE this chunk,
-                    // i.e. the START offset of the delta's window —
-                    // matching every sibling `cursor` producer
-                    // (TaskOutputDeltaTracker, the agent_orchestrator
-                    // read RPCs). Monotonic, so clients can detect gaps /
-                    // reorder on reconnect.
-                    let start_offset = self
-                        .stream_offset
-                        .fetch_add(text.len() as u64, Ordering::Relaxed);
-                    if let Some(ref cb) = self.on_stream_chunk {
-                        // Pass `(task_id, cursor_offset, text)` so the WS
-                        // layer can construct a properly-keyed
-                        // `AgentOutputDeltaEvent` (the dock correlates live
-                        // output with the spawned agent by `task_id`).
-                        cb(self.task_id.as_str(), start_offset, text.as_str());
-                    }
-                }
-                return;
-            }
+            // durable record. (The live `agent/output/delta` wire push
+            // that used to consume StreamChunk here was removed with the
+            // agent panel notification face in slim5-batch4.)
+            ProgressEvent::StreamChunk { .. } => return,
             // Thinking/LlmStatus/etc. are cadence noise for a transcript.
             _ => return,
         };
@@ -1059,8 +1001,6 @@ pub struct SpawnTool {
     worker_count: AtomicU32,
     /// Inherited provider policy applied to subagent registries.
     provider_policy: Option<ToolPolicy>,
-    /// Optional router for resolving prefixed model IDs to sub-providers.
-    provider_router: Option<Arc<ProviderRouter>>,
     /// Default worker prompt for sub-agents (overrides compiled-in worker.txt).
     worker_prompt: Option<String>,
     /// Direct delivery channel to session actor (bypasses InboundMessage relay).
@@ -1071,15 +1011,6 @@ pub struct SpawnTool {
     hooks: Option<Arc<HookExecutor>>,
     /// Template used to stamp parent/child session hook context.
     hook_context_template: Option<HookContext>,
-    /// Plugin directories to load into subagent registries.
-    /// Subagents can use plugin tools (fm_tts, etc.) when listed in allowed_tools.
-    plugin_dirs: Vec<PathBuf>,
-    /// Extra environment variables for plugin processes.
-    plugin_extra_env: Vec<(String, String)>,
-    /// Section B (codex review P1.1): inherit the parent's strict-signing
-    /// policy so subagents enforce the same integrity gate when loading
-    /// plugin tools. Defaults to `false` (legacy permissive path).
-    plugin_require_signed: bool,
     /// Additional per-child tools that cannot live in octos-agent builtins.
     child_tool_factories: Vec<ChildToolFactory>,
     /// Shared task supervisor so background subagents show up in task tracking.
@@ -1096,7 +1027,7 @@ pub struct SpawnTool {
     /// both saves episodes (`AgentConfig::default().save_episodes`) and
     /// lacked an embedder — workers stored episodes UNEMBEDDED and their
     /// `build_initial_messages` recall silently skipped (the same NEW-06
-    /// class of gap `RunPipelineTool::with_embedder` closed for
+    /// class of gap `pipeline-era embedder wiring` closed for
     /// pipeline workers).
     embedder: Option<Arc<dyn octos_llm::EmbeddingProvider>>,
     /// Optional MCP-backed sub-agent used when callers pick
@@ -1107,12 +1038,6 @@ pub struct SpawnTool {
     /// MCP `tools/call` name dispatched on the backend. Defaults to
     /// [`DEFAULT_MCP_AGENT_TOOL_NAME`].
     mcp_agent_tool_name: Option<String>,
-    /// Cost / provenance accountant (M7.4). When present, every
-    /// successful MCP sub-agent dispatch writes a
-    /// [`crate::cost_ledger::CostAttributionEvent`] to the ledger.
-    /// When combined with a budget policy, the dispatcher rejects
-    /// spawns whose projected spend breaches the ceiling.
-    cost_accountant: Option<Arc<crate::cost_ledger::CostAccountant>>,
     /// M8 Runtime Parity W2.B1: parent session's `FileStateCache` so
     /// spawned child Agents short-circuit re-reads of unchanged files
     /// the same way the parent does. `None` keeps pre-W2 behaviour.
@@ -1121,11 +1046,6 @@ pub struct SpawnTool {
     /// the child Agent's spawn_only background tools route output
     /// through the same on-disk log the dashboard tails.
     parent_subagent_output_router: Option<Arc<SubAgentOutputRouter>>,
-    /// Optional callback for live stream-chunk forwarding. When set, the
-    /// spawn child's `ProgressEvent::StreamChunk` text is forwarded here so
-    /// the WS/serve layer can emit `agent/output/delta` directly (bypassing
-    /// the heavy `on_change` + per-token persistence path — per codex review).
-    child_stream_callback: Option<ChildStreamCallback>,
     /// M8 Runtime Parity W2.B1: parent session's M8.7 summary generator
     /// so the child can spawn periodic-summary watchers under the same
     /// LLM/budget contract.
@@ -1143,22 +1063,15 @@ pub struct SpawnTool {
     /// (e.g. legacy tests not exercising the gate).
     dispatch_policy: Option<crate::dispatch_policy::DispatchPolicy>,
     /// #1607 (codex-review follow-up): the session's sandbox config, carried
-    /// so the spawn/agent_mcp child completion path can confine `Command`
-    /// validators declared by an untrusted workspace `workspace_policy.toml`
-    /// to the same backend as the parent's shell/exec tools. Before this
-    /// field, the two validator registries in `execute_with_context`'s
-    /// `agent_mcp` branch were built with `ToolRegistry::with_builtins`
-    /// (hardcoded `NoSandbox`), so `run_project_root_validators` /
-    /// `run_declared_validators` executed a workspace-authored `Command`
-    /// validator directly on the host even when the session was sandboxed —
-    /// a second construction site for the exact escape #1607 closed on the
-    /// `build_validator_runner` chokepoint. Defaults to
+    /// so child registries are built with the same backend the parent
+    /// `ToolRegistry` uses, keeping child command execution confined to the
+    /// session's sandbox instead of the hardcoded `NoSandbox` that
+    /// `ToolRegistry::with_builtins` stores. Defaults to
     /// `SandboxConfig::default()`; the real session wiring threads the same
     /// config the parent `ToolRegistry` was built with via
     /// [`Self::with_sandbox`]. A no-op backend (`NoSandbox`, or a helper that
-    /// is unavailable) has nothing to escape, so `ValidatorRunner` runs the
-    /// argv directly there — behaviour is unchanged on hosts without a real
-    /// backend.
+    /// is unavailable) runs argv directly — behaviour is unchanged on hosts
+    /// without a real backend.
     sandbox: SandboxConfig,
     /// Optional host-owned root for spawned-worker deliverables. When absent,
     /// retain the legacy `<working_dir>/.octos/spawn-deliverables` location.
@@ -1185,15 +1098,11 @@ impl SpawnTool {
             origin: std::sync::Mutex::new(("cli".into(), "default".into())),
             worker_count: AtomicU32::new(0),
             provider_policy: None,
-            provider_router: None,
             worker_prompt: None,
             background_result_sender: None,
             child_session_sender: None,
             hooks: None,
             hook_context_template: None,
-            plugin_dirs: Vec::new(),
-            plugin_extra_env: Vec::new(),
-            plugin_require_signed: false,
             child_tool_factories: Vec::new(),
             task_supervisor: None,
             session_key: None,
@@ -1202,10 +1111,8 @@ impl SpawnTool {
             embedder: None,
             mcp_agent_backend: None,
             mcp_agent_tool_name: None,
-            cost_accountant: None,
             parent_file_state_cache: None,
             parent_subagent_output_router: None,
-            child_stream_callback: None,
             parent_subagent_summary_generator: None,
             child_prompt_context_manager_factory: None,
             dispatch_policy: None,
@@ -1232,15 +1139,11 @@ impl SpawnTool {
             origin: std::sync::Mutex::new((channel.into(), chat_id.into())),
             worker_count: AtomicU32::new(0),
             provider_policy: None,
-            provider_router: None,
             worker_prompt: None,
             background_result_sender: None,
             child_session_sender: None,
             hooks: None,
             hook_context_template: None,
-            plugin_dirs: Vec::new(),
-            plugin_extra_env: Vec::new(),
-            plugin_require_signed: false,
             child_tool_factories: Vec::new(),
             task_supervisor: None,
             session_key: None,
@@ -1249,10 +1152,8 @@ impl SpawnTool {
             embedder: None,
             mcp_agent_backend: None,
             mcp_agent_tool_name: None,
-            cost_accountant: None,
             parent_file_state_cache: None,
             parent_subagent_output_router: None,
-            child_stream_callback: None,
             parent_subagent_summary_generator: None,
             child_prompt_context_manager_factory: None,
             dispatch_policy: None,
@@ -1293,15 +1194,11 @@ impl SpawnTool {
             ),
             worker_count: AtomicU32::new(0),
             provider_policy: self.provider_policy.clone(),
-            provider_router: self.provider_router.clone(),
             worker_prompt: self.worker_prompt.clone(),
             background_result_sender: self.background_result_sender.clone(),
             child_session_sender: self.child_session_sender.clone(),
             hooks: self.hooks.clone(),
             hook_context_template: self.hook_context_template.clone(),
-            plugin_dirs: self.plugin_dirs.clone(),
-            plugin_extra_env: self.plugin_extra_env.clone(),
-            plugin_require_signed: self.plugin_require_signed,
             child_tool_factories: self.child_tool_factories.clone(),
             task_supervisor: self.task_supervisor.clone(),
             session_key: self.session_key.clone(),
@@ -1310,10 +1207,8 @@ impl SpawnTool {
             embedder: self.embedder.clone(),
             mcp_agent_backend: self.mcp_agent_backend.clone(),
             mcp_agent_tool_name: self.mcp_agent_tool_name.clone(),
-            cost_accountant: self.cost_accountant.clone(),
             parent_file_state_cache: self.parent_file_state_cache.clone(),
             parent_subagent_output_router: self.parent_subagent_output_router.clone(),
-            child_stream_callback: self.child_stream_callback.clone(),
             parent_subagent_summary_generator: self.parent_subagent_summary_generator.clone(),
             // Depth-1-only wiring, deliberately DROPPED for grandchildren: the
             // AppUI context-fork factory captures the ORIGINAL parent session's
@@ -1375,12 +1270,11 @@ impl SpawnTool {
     }
 
     /// #1607 (codex-review follow-up): inherit the session's sandbox config so
-    /// the spawn/agent_mcp child completion path confines workspace-declared
-    /// `Command` validators to the same backend as the parent's shell/exec
-    /// tools. Real session wiring passes the exact `SandboxConfig` the parent
-    /// `ToolRegistry` was built with; callers that don't set it keep the
-    /// host-independent `SandboxConfig::default()` (which resolves to a no-op
-    /// backend when no helper is present, so validators run the argv directly).
+    /// child registries run command execution on the same backend as the
+    /// parent's shell/exec tools. Real session wiring passes the exact
+    /// `SandboxConfig` the parent `ToolRegistry` was built with; callers that
+    /// don't set it keep the host-independent `SandboxConfig::default()`
+    /// (which resolves to a no-op backend when no helper is present).
     pub fn with_sandbox(mut self, sandbox: SandboxConfig) -> Self {
         self.sandbox = sandbox;
         self
@@ -1421,34 +1315,9 @@ impl SpawnTool {
             .join(worker_id.to_string()))
     }
 
-    /// Set a provider router for multi-model sub-agent support.
-    pub fn with_provider_router(mut self, router: Arc<ProviderRouter>) -> Self {
-        self.provider_router = Some(router);
-        self
-    }
-
     /// Set a default worker prompt for sub-agents (overrides compiled-in worker.txt).
     pub fn with_worker_prompt(mut self, prompt: String) -> Self {
         self.worker_prompt = Some(prompt);
-        self
-    }
-
-    /// Set plugin directories and env vars so subagents can use plugin tools.
-    pub fn with_plugin_dirs(
-        mut self,
-        dirs: Vec<PathBuf>,
-        extra_env: Vec<(String, String)>,
-    ) -> Self {
-        self.plugin_dirs = dirs;
-        self.plugin_extra_env = extra_env;
-        self
-    }
-
-    /// Section B (codex review P1.1): inherit the parent's strict-signing
-    /// policy. When `true`, subagent plugin loads honour the same
-    /// `plugins.require_signed` gate as the parent.
-    pub fn with_plugin_require_signed(mut self, require_signed: bool) -> Self {
-        self.plugin_require_signed = require_signed;
         self
     }
 
@@ -1539,19 +1408,6 @@ impl SpawnTool {
         self
     }
 
-    /// Attach a cost / provenance accountant (M7.4). Every successful
-    /// MCP sub-agent dispatch routed through this tool records an
-    /// attribution on the accountant's ledger. If the accountant carries
-    /// a [`crate::cost_ledger::CostBudgetPolicy`], pre-spawn projections
-    /// reject dispatches that breach the configured ceiling.
-    pub fn with_cost_accountant(
-        mut self,
-        accountant: Arc<crate::cost_ledger::CostAccountant>,
-    ) -> Self {
-        self.cost_accountant = Some(accountant);
-        self
-    }
-
     /// M8 Runtime Parity W2.B1: inherit the parent session's
     /// `FileStateCache` so spawned child Agents short-circuit re-reads
     /// of unchanged files. Without this, every child re-reads the
@@ -1566,29 +1422,6 @@ impl SpawnTool {
     /// through the same on-disk log the parent dashboard tails.
     pub fn with_parent_subagent_output_router(mut self, router: Arc<SubAgentOutputRouter>) -> Self {
         self.parent_subagent_output_router = Some(router);
-        self
-    }
-
-    /// Set a callback that receives live `StreamChunk` text deltas from a
-    /// spawned background child. The WS/serve layer uses this to emit
-    /// `agent/output/delta` directly — bypassing the per-token `on_change`
-    /// persistence path (codex plan review: "per-token persistence/on_change
-    /// fan-out is too heavy"). The callback receives
-    /// `(agent_id, cursor_offset, text)`:
-    /// - `agent_id` is the spawn's `task_id` (the same id surfaced via
-    ///   `TurnSpawnCompleteEvent` and the agent dock).
-    /// - `cursor_offset` is the cumulative byte offset BEFORE this chunk —
-    ///   the START of the delta's window, matching every sibling
-    ///   `OutputCursor` producer (`TaskOutputDeltaTracker`, the
-    ///   agent_orchestrator read RPCs). Monotonic; lets clients detect
-    ///   gaps/reorder on reconnect. `u64` end to end so no lossy cast
-    ///   hides between here and `OutputCursor::offset` on the wire.
-    /// - `text` is the delta text.
-    pub fn with_child_stream_callback(
-        mut self,
-        cb: impl Fn(&str, u64, &str) + Send + Sync + 'static,
-    ) -> Self {
-        self.child_stream_callback = Some(Arc::new(cb));
         self
     }
 
@@ -1760,44 +1593,12 @@ impl SpawnTool {
         model: Option<&str>,
         context_window: Option<u32>,
     ) -> Result<Arc<dyn LlmProvider>> {
-        let (base, default_cw): (Arc<dyn LlmProvider>, Option<u32>) =
-            match (model, &self.provider_router) {
-                (Some(model_key), Some(router)) => {
-                    // An unresolvable model key must degrade to the parent
-                    // provider, matching the pipeline handler's fallback —
-                    // model-assignment may name catalog models this profile's
-                    // router never registered, and that must not fail the spawn.
-                    let provider = match router.resolve(model_key) {
-                        Ok(p) => p,
-                        // Keep the router's error — it lists the registered
-                        // keys, which is what makes the gap actionable.
-                        Err(err) => {
-                            warn!(
-                                model = model_key,
-                                %err,
-                                "sub-agent model not in provider router; using parent provider"
-                            );
-                            self.llm.clone()
-                        }
-                    };
-                    // Look up default_context_window from metadata
-                    let key = model_key.split_once('/').map_or(model_key, |(k, _)| k);
-                    let default_cw = router
-                        .list_models_with_meta()
-                        .iter()
-                        .find(|m| m.key == key)
-                        .and_then(|m| m.default_context_window);
-                    (provider, default_cw)
-                }
-                (Some(model_key), None) => {
-                    warn!(
-                        model = model_key,
-                        "model specified but no provider router configured; using parent provider"
-                    );
-                    (self.llm.clone(), None)
-                }
-                _ => (self.llm.clone(), None),
-            };
+        // The per-key sub-provider router was removed with the routing stack:
+        // a spawned worker always starts from the parent provider (a `model`
+        // hint only feeds the context-window default lookup below, which is
+        // gone with the router metadata, so it is informational today).
+        let _ = model;
+        let (base, default_cw): (Arc<dyn LlmProvider>, Option<u32>) = (self.llm.clone(), None);
 
         // LLM-specified context_window takes priority, then config default
         let effective_cw = context_window.or(default_cw);
@@ -2053,7 +1854,7 @@ fn encode_workflow_detail(workflow: &WorkflowMetadata) -> Option<String> {
 /// pass validation — so the curve is deliberately coarse: the runtime
 /// stamps a small starting value at spawn and a near-terminal value at
 /// the deliver_result transition. Finer-grained values come from the
-/// inner tools (e.g. `deep_search` inside `run_pipeline`) emitting
+/// inner tools (e.g. `deep_search` inside `bg_research`) emitting
 /// `HarnessEvent::progress`, which `task_supervisor::apply_harness_event`
 /// folds into the same `runtime_detail.progress` field.
 ///
@@ -2111,21 +1912,6 @@ fn workflow_terminal_artifact_kind(workflow: Option<&WorkflowMetadata>) -> Optio
         .filter(|kind| !kind.is_empty())
 }
 
-fn task_result_has_terminal_artifact_candidate(
-    task_result: &TaskResult,
-    workflow: Option<&WorkflowMetadata>,
-) -> bool {
-    let Some(required_kind) = workflow_terminal_artifact_kind(workflow) else {
-        return true;
-    };
-
-    task_result
-        .files_to_send
-        .iter()
-        .chain(task_result.files_modified.iter())
-        .any(|path| workflow_artifact_matches_kind(path, required_kind))
-}
-
 fn select_preferred_terminal_output(
     files: &[PathBuf],
     required_artifact_kind: &str,
@@ -2144,9 +1930,6 @@ fn select_preferred_terminal_output(
                 score += 20;
             }
             if required_artifact_kind == "audio" {
-                if name.contains("podcast") {
-                    score += 10;
-                }
                 if name.ends_with(".mp3") {
                     score += 5;
                 }
@@ -2202,48 +1985,6 @@ fn select_workflow_terminal_files(
     }
 
     Some(candidates)
-}
-
-fn workflow_uses_contract_terminal_delivery(workflow: &WorkflowMetadata) -> bool {
-    matches!(
-        workflow
-            .terminal_output
-            .as_ref()
-            .map(|policy| policy.required_artifact_kind.as_str()),
-        Some("presentation" | "site")
-    )
-}
-
-fn workflow_is_research_podcast(workflow: Option<&WorkflowMetadata>) -> bool {
-    workflow.is_some_and(|workflow| workflow.workflow_kind == "research_podcast")
-}
-
-fn extract_inline_podcast_script(task_desc: &str) -> Option<String> {
-    let header_re = Regex::new(r"\[[^\]\r\n]+?\s+-\s*[^\],\r\n]+,\s*[^\]\r\n]+\]").ok()?;
-    let matches = header_re.find_iter(task_desc).collect::<Vec<_>>();
-    if matches.len() < 2 {
-        return None;
-    }
-
-    let mut script_lines = Vec::new();
-    for (index, header_match) in matches.iter().enumerate() {
-        let text_start = header_match.end();
-        let text_end = matches
-            .get(index + 1)
-            .map(|next| next.start())
-            .unwrap_or(task_desc.len());
-        let dialogue = task_desc[text_start..text_end].trim();
-        if dialogue.is_empty() {
-            continue;
-        }
-        script_lines.push(format!(
-            "{} {}",
-            header_match.as_str().trim(),
-            dialogue.replace('\n', " ").trim()
-        ));
-    }
-
-    (script_lines.len() >= 2).then(|| script_lines.join("\n"))
 }
 
 /// M8 Runtime Parity W2.B2 — single-shot recovery wrapper around
@@ -2322,61 +2063,6 @@ fn build_spawn_recovery_prompt(task_desc: &str, error_message: &str) -> String {
     )
 }
 
-async fn maybe_generate_inline_research_podcast(
-    tools: &ToolRegistry,
-    workflow: Option<&WorkflowMetadata>,
-    task_desc: &str,
-    task_result: &mut TaskResult,
-) {
-    if !workflow_is_research_podcast(workflow)
-        || !task_result.success
-        || task_result_has_terminal_artifact_candidate(task_result, workflow)
-    {
-        return;
-    }
-
-    let Some(script) = extract_inline_podcast_script(task_desc) else {
-        return;
-    };
-
-    warn!(
-        workflow = "research_podcast",
-        "worker completed without audio; invoking podcast_generate directly from inline script"
-    );
-    match tools
-        .execute("podcast_generate", &serde_json::json!({ "script": script }))
-        .await
-    {
-        Ok(tool_result) if tool_result.success => {
-            if let Some(path) = tool_result.file_modified.clone() {
-                task_result.files_modified.push(path);
-            }
-            task_result
-                .files_to_send
-                .extend(tool_result.files_to_send.clone());
-            let existing = task_result.output.trim();
-            task_result.output = if existing.is_empty() {
-                tool_result.output
-            } else {
-                format!("{existing}\n\n{}", tool_result.output)
-            };
-        }
-        Ok(tool_result) => {
-            task_result.success = false;
-            task_result.output = format!(
-                "research_podcast completed without audio, and direct podcast_generate failed: {}",
-                tool_result.output
-            );
-        }
-        Err(error) => {
-            task_result.success = false;
-            task_result.output = format!(
-                "research_podcast completed without audio, and direct podcast_generate errored: {error}"
-            );
-        }
-    }
-}
-
 /// The EFFECTIVE allow-list for the two consumers that cannot apply the local
 /// [`ToolPolicy`] deny-list: `allowed_tools` with every manifest-`disallowed`
 /// tool removed.
@@ -2395,7 +2081,7 @@ fn effective_allowed_tools(allowed_tools: &[String], disallowed_tools: &[String]
     if disallowed_tools.is_empty() {
         return allowed_tools.to_vec();
     }
-    // Deny entries carry the same wildcard (`podcast_*`) and group
+    // Deny entries carry the same wildcard (`*_generate`) and group
     // (`group:runtime`) semantics ToolPolicy enforces locally — prune with a
     // deny-only policy (empty allow = allow everything not denied) so the
     // effective set agrees with what the local policy would actually deny.
@@ -2419,15 +2105,8 @@ fn effective_allowed_tools(allowed_tools: &[String], disallowed_tools: &[String]
 fn build_subagent_tool_policy(
     allowed_tools: Vec<String>,
     disallowed_tools: Vec<String>,
-    workflow: Option<&WorkflowMetadata>,
 ) -> ToolPolicy {
     let mut deny = vec!["spawn".to_string()];
-    if workflow.is_some_and(workflow_uses_contract_terminal_delivery) {
-        // Contract-owned workflow families must have exactly one runtime-owned
-        // terminal delivery path. Deny explicit send_file so child workers
-        // cannot double-deliver slides/site artifacts.
-        deny.push("send_file".to_string());
-    }
     // A manifest's `disallowed_tools` is enforced here as a DENY-list. Deny
     // wins over allow (see `ToolPolicy::evaluate`), so a forbidden tool is
     // blocked even if it appears in `allow` (inline/manifest) OR was added by
@@ -2489,112 +2168,6 @@ fn ensure_subagent_tools_available(
 }
 
 const PRIMARY_CONTRACT_ARTIFACT: &str = "primary";
-
-fn workflow_contract_kind_label(kind: WorkspaceProjectKind) -> &'static str {
-    match kind {
-        WorkspaceProjectKind::Slides => "slides",
-        WorkspaceProjectKind::Sites => "site",
-    }
-}
-
-fn workflow_contract_project_kind(workflow: &WorkflowMetadata) -> Option<WorkspaceProjectKind> {
-    match workflow
-        .terminal_output
-        .as_ref()
-        .map(|policy| policy.required_artifact_kind.as_str())
-    {
-        Some("presentation") => Some(WorkspaceProjectKind::Slides),
-        Some("site") => Some(WorkspaceProjectKind::Sites),
-        _ => None,
-    }
-}
-
-fn normalize_observed_path(base_dir: &std::path::Path, path: &std::path::Path) -> PathBuf {
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        base_dir.join(path)
-    }
-}
-
-fn is_matching_workspace_root(path: &std::path::Path, expected_kind: WorkspaceProjectKind) -> bool {
-    if !crate::workspace_policy_path(path).is_file() {
-        return false;
-    }
-
-    matches!(
-        (
-            expected_kind,
-            path.parent()
-                .and_then(|parent| parent.file_name())
-                .and_then(|name| name.to_str())
-        ),
-        (WorkspaceProjectKind::Slides, Some("slides"))
-            | (WorkspaceProjectKind::Sites, Some("sites"))
-    )
-}
-
-fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
-    if !paths.iter().any(|existing| existing == &path) {
-        paths.push(path);
-    }
-}
-
-fn resolve_contract_workspace_root(
-    working_dir: &std::path::Path,
-    files_to_send: &[PathBuf],
-    files_modified: &[PathBuf],
-    workflow: &WorkflowMetadata,
-) -> std::result::Result<PathBuf, String> {
-    let expected_kind = workflow_contract_project_kind(workflow).ok_or_else(|| {
-        "workflow contract root resolution requires a contract-owned artifact kind".to_string()
-    })?;
-    let kind_label = workflow_contract_kind_label(expected_kind);
-
-    let mut ancestry_candidates = Vec::new();
-    for path in files_to_send.iter().chain(files_modified.iter()) {
-        let observed = normalize_observed_path(working_dir, path);
-        for ancestor in observed.ancestors() {
-            if is_matching_workspace_root(ancestor, expected_kind) {
-                push_unique_path(&mut ancestry_candidates, ancestor.to_path_buf());
-                break;
-            }
-        }
-    }
-
-    match ancestry_candidates.as_slice() {
-        [single] => return Ok(single.clone()),
-        [] => {}
-        _ => {
-            return Err(format!(
-                "multiple {kind_label} workspace contracts matched observed output paths"
-            ));
-        }
-    }
-
-    if is_matching_workspace_root(working_dir, expected_kind) {
-        return Ok(working_dir.to_path_buf());
-    }
-
-    let matching_roots = crate::list_workspace_repos(working_dir)
-        .map_err(|error| format!("workspace contract discovery failed: {error}"))?
-        .into_iter()
-        .filter(|repo| repo.kind == expected_kind)
-        .map(|repo| repo.root)
-        .collect::<Vec<_>>();
-
-    match matching_roots.as_slice() {
-        [single] => Ok(single.clone()),
-        [] => Err(format!(
-            "no {kind_label} workspace contract found beneath {}",
-            working_dir.display()
-        )),
-        _ => Err(format!(
-            "multiple {kind_label} workspace contracts found beneath {}; unable to choose a terminal artifact root deterministically",
-            working_dir.display()
-        )),
-    }
-}
 
 /// Glob used when a spawn requests deliverable collection with an empty
 /// pattern: top-level files only (not `**/*`, which would also sweep up a
@@ -2667,20 +2240,18 @@ fn deliverable_artifact_glob(deliverable: Option<&str>) -> Option<String> {
 /// Seed a minimal workspace-contract policy in `output_dir` declaring a single
 /// `primary` artifact matching `artifact_glob`.
 ///
-/// This reuses the existing workspace-contract harness rather than inventing a
-/// bespoke scan: [`resolve_workspace_contract_artifact_paths`] reads this
-/// policy's declared glob and resolves matches on disk — the SAME artifact
-/// resolver the slides/sites contracts use — so a deliverable written by ANY
-/// means (a `shell` heredoc, `write_file`, a plugin) is surfaced, not just
-/// files reported through a tracked write tool. The seeded policy is `Session`
-/// kind with no validators or git auto-init: we want the artifact-glob
-/// resolution, not the slides/sites content validators (which would reject a
-/// plain document) or `inspect_workspace_contract_at_root`'s project-kind gate.
+/// This reuses the workspace-contract artifact resolver rather than inventing
+/// a bespoke scan: [`resolve_workspace_contract_artifact_paths`] reads this
+/// policy's declared glob and resolves matches on disk, so a deliverable
+/// written by ANY means (a `shell` heredoc, `write_file`, a plugin) is
+/// surfaced, not just files reported through a tracked write tool. The
+/// seeded policy is `Session` kind with no git auto-init — we only want the
+/// artifact-glob resolution.
 fn seed_deliverable_contract(output_dir: &Path, artifact_glob: &str) -> Result<()> {
     use crate::workspace_policy::{
-        ValidationPolicy, WorkspaceArtifactsPolicy, WorkspacePolicy, WorkspacePolicyKind,
-        WorkspacePolicyWorkspace, WorkspaceSnapshotTrigger, WorkspaceTrackingPolicy,
-        WorkspaceVersionControlPolicy, WorkspaceVersionControlProvider, write_workspace_policy,
+        WorkspaceArtifactsPolicy, WorkspacePolicy, WorkspacePolicyKind, WorkspacePolicyWorkspace,
+        WorkspaceSnapshotTrigger, WorkspaceTrackingPolicy, WorkspaceVersionControlPolicy,
+        WorkspaceVersionControlProvider, write_workspace_policy,
     };
     use std::collections::BTreeMap;
 
@@ -2703,7 +2274,6 @@ fn seed_deliverable_contract(output_dir: &Path, artifact_glob: &str) -> Result<(
             fail_on_error: false,
         },
         tracking: WorkspaceTrackingPolicy { ignore: Vec::new() },
-        validation: ValidationPolicy::default(),
         artifacts: WorkspaceArtifactsPolicy {
             entries: BTreeMap::from([(
                 PRIMARY_CONTRACT_ARTIFACT.to_string(),
@@ -2728,20 +2298,10 @@ fn resolve_deliverable_terminal_files(output_dir: &Path) -> Vec<PathBuf> {
 }
 
 fn resolve_background_terminal_files(
-    working_dir: &std::path::Path,
     files_to_send: &[PathBuf],
     files_modified: &[PathBuf],
     workflow: Option<&WorkflowMetadata>,
 ) -> std::result::Result<Vec<PathBuf>, String> {
-    if let Some(workflow) =
-        workflow.filter(|workflow| workflow_uses_contract_terminal_delivery(workflow))
-    {
-        let workspace_root =
-            resolve_contract_workspace_root(working_dir, files_to_send, files_modified, workflow)?;
-        return resolve_contract_terminal_files(&workspace_root, Some(workflow))?
-            .ok_or_else(|| "workspace contract returned no terminal files".to_string());
-    }
-
     let terminal_files = select_workflow_terminal_files(files_to_send, files_modified, workflow)
         .unwrap_or_else(|| {
             files_to_send
@@ -2765,130 +2325,6 @@ fn resolve_background_terminal_files(
     Ok(terminal_files)
 }
 
-fn format_workspace_contract_failure(status: &WorkspaceContractStatus) -> String {
-    let mut failures = Vec::new();
-    if let Some(error) = status.error.as_deref() {
-        failures.push(error.to_string());
-    }
-    failures.extend(
-        status
-            .turn_end_checks
-            .iter()
-            .chain(status.completion_checks.iter())
-            .filter(|check| !check.passed)
-            .map(|check| match check.reason.as_deref() {
-                Some(reason) if !reason.is_empty() => format!("{}: {}", check.spec, reason),
-                _ => format!("{}: failed", check.spec),
-            }),
-    );
-    failures.extend(
-        status
-            .artifacts
-            .iter()
-            .filter(|artifact| !artifact.present)
-            .map(|artifact| {
-                format!(
-                    "missing artifact '{}' matching '{}'",
-                    artifact.name, artifact.pattern
-                )
-            }),
-    );
-
-    if failures.is_empty() {
-        format!("workspace contract for {} is not ready", status.repo_label)
-    } else {
-        format!(
-            "workspace contract for {} is not ready: {}",
-            status.repo_label,
-            failures.join("; ")
-        )
-    }
-}
-
-fn resolve_contract_terminal_files(
-    workspace_root: &std::path::Path,
-    workflow: Option<&WorkflowMetadata>,
-) -> std::result::Result<Option<Vec<PathBuf>>, String> {
-    let Some(workflow) = workflow else {
-        return Ok(None);
-    };
-    if !workflow_uses_contract_terminal_delivery(workflow) {
-        return Ok(None);
-    }
-
-    let status = crate::inspect_workspace_contract_at_root(workspace_root)
-        .map_err(|error| format!("workspace contract inspection failed: {error}"))?;
-    if !status.policy_managed {
-        return Err(format!(
-            "workspace contract missing for {}",
-            status.repo_label
-        ));
-    }
-    if !status.ready {
-        return Err(format_workspace_contract_failure(&status));
-    }
-
-    let terminal_output = workflow
-        .terminal_output
-        .as_ref()
-        .ok_or_else(|| "workflow terminal output policy missing".to_string())?;
-    let mut selected = Vec::new();
-    let primary_declared = status
-        .artifacts
-        .iter()
-        .any(|artifact| artifact.name == PRIMARY_CONTRACT_ARTIFACT);
-    let primary_ready = status
-        .artifacts
-        .iter()
-        .any(|artifact| artifact.name == PRIMARY_CONTRACT_ARTIFACT && artifact.present);
-
-    if terminal_output.deliver_final_artifact_only {
-        if !primary_declared {
-            return Err(format!(
-                "workspace contract for {} is ready but does not declare a '{}' artifact",
-                status.repo_label, PRIMARY_CONTRACT_ARTIFACT
-            ));
-        }
-
-        if !primary_ready {
-            return Err(format!(
-                "workspace contract for {} is ready but its '{}' artifact is missing",
-                status.repo_label, PRIMARY_CONTRACT_ARTIFACT
-            ));
-        }
-
-        let path = resolve_preferred_workspace_contract_artifact_path(
-            workspace_root,
-            PRIMARY_CONTRACT_ARTIFACT,
-        )
-        .map_err(|error| format!("workspace contract resolution failed: {error}"))?;
-        return path.map(|path| Some(vec![path])).ok_or_else(|| {
-            format!(
-                "workspace contract for {} is ready but the '{}' artifact could not be resolved",
-                status.repo_label, PRIMARY_CONTRACT_ARTIFACT
-            )
-        });
-    }
-
-    for artifact in status.artifacts.iter().filter(|artifact| artifact.present) {
-        selected.extend(
-            resolve_workspace_contract_artifact_paths(workspace_root, &artifact.name)
-                .map_err(|error| format!("workspace contract resolution failed: {error}"))?,
-        );
-    }
-
-    selected.sort();
-    selected.dedup();
-
-    if !selected.is_empty() {
-        return Ok(Some(selected));
-    }
-
-    Err(format!(
-        "workspace contract for {} is ready but has no resolved artifact paths",
-        status.repo_label
-    ))
-}
 async fn deliver_background_result(
     sender: Option<BackgroundResultSender>,
     payload: BackgroundResultPayload,
@@ -2936,52 +2372,10 @@ impl Tool for SpawnTool {
     }
 
     fn input_schema(&self) -> serde_json::Value {
-        // Build dynamic model field based on available sub-providers
-        let model_prop = match &self.provider_router {
-            Some(router) => {
-                let models = router.list_models_with_meta();
-                if models.is_empty() {
-                    serde_json::json!({
-                        "type": "string",
-                        "description": "Prefixed model ID for the subagent. No sub-providers currently configured."
-                    })
-                } else {
-                    let mut desc_parts =
-                        vec!["Model key for the subagent. Available models:".to_string()];
-                    let mut enum_vals = Vec::new();
-                    for m in &models {
-                        let mut line =
-                            format!("- '{}': {} ({})", m.key, m.model_id, m.provider_name);
-                        if let Some(ref cost) = m.cost_info {
-                            line.push_str(&format!(", {cost}"));
-                        }
-                        line.push_str(&format!(", {}k max ctx", m.context_window / 1000));
-                        line.push_str(&format!(", {}k max output", m.max_output_tokens / 1000));
-                        if let Some(default_cw) = m.default_context_window {
-                            line.push_str(&format!(", {}k default budget", default_cw / 1000));
-                        }
-                        if let Some(ref desc) = m.description {
-                            line.push_str(&format!(". {desc}"));
-                        }
-                        desc_parts.push(line);
-                        enum_vals.push(serde_json::Value::String(m.key.clone()));
-                        enum_vals.push(serde_json::Value::String(format!(
-                            "{}/{}",
-                            m.key, m.model_id
-                        )));
-                    }
-                    serde_json::json!({
-                        "type": "string",
-                        "description": desc_parts.join("\n"),
-                        "enum": enum_vals
-                    })
-                }
-            }
-            None => serde_json::json!({
-                "type": "string",
-                "description": "Prefixed model ID for the subagent (e.g. 'anthropic/claude-haiku'). Requires a provider router."
-            }),
-        };
+        let model_prop = serde_json::json!({
+            "type": "string",
+            "description": "Optional model hint for the subagent. Sub-agents run on the parent provider; model selection follows the profile's provider chain."
+        });
 
         serde_json::json!({
             "type": "object",
@@ -3320,63 +2714,6 @@ impl Tool for SpawnTool {
                 }
             }
 
-            // Pre-dispatch budget reservation (F-003). Absent a
-            // configured accountant the reservation short-circuits to
-            // `None` and the dispatch proceeds unchanged — this keeps
-            // existing M7.1 dispatch tests passing when no policy is
-            // configured. With a policy, `reserve` closes the TOCTOU
-            // race on concurrent dispatches by inserting the projected
-            // amount into the accountant's in-memory map under the
-            // same lock as the historical-spend read.
-            let model_for_ledger = input
-                .model
-                .clone()
-                .unwrap_or_else(|| "unknown-model".to_string());
-            let contract_id_for_ledger = workflow_kind
-                .clone()
-                .unwrap_or_else(|| session_key_for_event.clone());
-            let reservation = if let Some(accountant) = self.cost_accountant.as_ref() {
-                if accountant.policy().is_some_and(|p| p.is_enforced()) {
-                    // Pre-spawn estimate: tokens_in ≈ UTF-8 length of
-                    // the outbound task description divided by 4
-                    // (the classic 1 token ≈ 4 chars rule of thumb).
-                    // Good enough for budget rejection — the ledger
-                    // replaces this with the real count on success.
-                    let tokens_in_estimate = task_desc.len().div_ceil(4) as u32;
-                    let projected_usd = crate::cost_ledger::project_cost_usd(
-                        &model_for_ledger,
-                        tokens_in_estimate,
-                        0,
-                    )
-                    .unwrap_or(0.0);
-                    match accountant
-                        .reserve(&contract_id_for_ledger, projected_usd)
-                        .await
-                    {
-                        Ok(handle) => Some(handle),
-                        Err(breach) => {
-                            let message = format!(
-                                "Status: FAILED\nDispatch rejected by cost budget policy: {breach}"
-                            );
-                            warn!(
-                                contract_id = %contract_id_for_ledger,
-                                reason = %breach,
-                                "rejecting MCP sub-agent dispatch before spawn"
-                            );
-                            return Ok(ToolResult {
-                                output: message,
-                                success: false,
-                                ..Default::default()
-                            });
-                        }
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
             let (response, event) = {
                 let request = DispatchRequest::new(tool_name, dispatch_payload)
                     .with_context_contract(
@@ -3429,277 +2766,22 @@ impl Tool for SpawnTool {
 
             let success = response.outcome == super::mcp_agent::DispatchOutcome::Success;
 
-            // Post-dispatch cost attribution (M7.4 + F-003). Only
-            // record when the remote agent returned a ready artifact;
-            // failures and timeouts are already visible via the
-            // dispatch event and should not inflate the ledger. On the
-            // failure path the reservation handle is dropped below,
-            // auto-refunding the pre-dispatch projection.
-            if success {
-                if let Some(accountant) = self.cost_accountant.as_ref() {
-                    let tokens_in_est = task_desc.len().div_ceil(4) as u32;
-                    let tokens_out_est = response.output.len().div_ceil(4) as u32;
-                    let cost_usd = crate::cost_ledger::project_cost_usd(
-                        &model_for_ledger,
-                        tokens_in_est,
-                        tokens_out_est,
-                    )
-                    .unwrap_or(0.0);
-                    let attribution = crate::cost_ledger::CostAttributionEvent::new(
-                        session_key_for_event.clone(),
-                        contract_id_for_ledger.clone(),
-                        task_id_for_event.clone(),
-                        model_for_ledger.clone(),
-                        tokens_in_est,
-                        tokens_out_est,
-                        cost_usd,
-                    )
-                    .with_workflow(workflow_kind.clone(), workflow_phase.clone())
-                    .with_backend_outcome(
-                        Some(backend.as_ref().backend_label().to_string()),
-                        Some("success".to_string()),
-                    );
-                    let attribution_id_for_event = attribution.attribution_id.clone();
-
-                    // Commit through the reservation handle if we hold
-                    // one (policy-enforced path). Otherwise fall back
-                    // to the legacy direct-record path for the
-                    // no-policy configuration. Failure to persist is
-                    // non-fatal — we log and continue so a bad disk
-                    // does not mask a successful agent run.
-                    let record_result = if let Some(handle) = reservation.as_ref() {
-                        handle.commit(attribution).await
-                    } else {
-                        accountant.ledger().record(attribution).await
-                    };
-
-                    if let Err(error) = record_result {
-                        warn!(
-                            task_id = %task_id_for_event,
-                            error = %error,
-                            "failed to persist cost attribution; dispatch succeeded"
-                        );
-                    } else {
-                        // Emit the typed event so downstream sinks,
-                        // including the operator summary aggregator,
-                        // see the spend even without re-reading the
-                        // ledger.
-                        let cost_event = HarnessEvent::cost_attribution(
-                            crate::harness_events::HarnessCostAttributionEvent {
-                                schema_version: crate::abi_schema::COST_ATTRIBUTION_SCHEMA_VERSION,
-                                session_id: session_key_for_event.clone(),
-                                task_id: task_id_for_event.clone(),
-                                workflow: workflow_kind.clone(),
-                                phase: workflow_phase.clone(),
-                                attribution_id: attribution_id_for_event,
-                                contract_id: contract_id_for_ledger.clone(),
-                                model: model_for_ledger.clone(),
-                                tokens_in: tokens_in_est,
-                                tokens_out: tokens_out_est,
-                                cost_usd,
-                                outcome: "success".to_string(),
-                                extra: std::collections::HashMap::new(),
-                            },
-                        );
-                        if let Err(error) = cost_event.validate() {
-                            warn!(
-                                task_id = %task_id_for_event,
-                                error = %error,
-                                "cost attribution event failed validation; skipping emission"
-                            );
-                        } else if let Some(supervisor) = self.task_supervisor.as_ref() {
-                            if let Err(error) =
-                                supervisor.apply_harness_event(&task_id_for_event, &cost_event)
-                            {
-                                warn!(
-                                    task_id = %task_id_for_event,
-                                    error = %error,
-                                    "cost attribution event could not be applied"
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-            // On the failure path, drop the reservation explicitly so
-            // the auto-refund fires before we return the `Status: FAILED`
-            // result. The handle is scoped to this block — either
-            // `commit` above consumed it successfully, or Drop refunds.
-            drop(reservation);
-
-            // Review A F-004: for the agent_mcp dispatch path the child
-            // session runs inside the remote backend and never touches the
-            // parent's ValidatorRunner. Before, the parent trusted the
-            // remote `SUCCESS` label — if the remote skipped its own
-            // contract-gate, the parent happily forwarded a non-validated
-            // artifact. Running the declared completion-phase validators
-            // here, against the parent's workspace root, restores the
-            // invariant: any required validator failure demotes the
-            // response to a typed failure before it leaves the tool.
-            //
-            // octos #997 (round-4 fix): run both the session-scope and
-            // project-scope validator blocks BEFORE
-            // `resolve_contract_terminal_files`. With
-            // `terminal_output.required_artifact_kind = "presentation"`
-            // (real `slides_delivery` shape),
-            // `resolve_contract_terminal_files` calls
-            // `inspect_workspace_contract_at_root` which reads the project
-            // ledger at
-            // `<session>/<kind>/<slug>/.octos/validator_outcomes.jsonl`.
-            // If validators run AFTER that gate, the gate returns
-            // `ready = false` (empty ledger) and the agent_mcp branch
-            // early-returns at `Err(error) => return Ok(...)` before
-            // either validator block executes. Re-ordering ensures the
-            // project ledger is populated first, so the contract gate
-            // inside `resolve_contract_terminal_files` sees the real
-            // `Pass` rows.
-            let mut mcp_success = success;
-            let mut mcp_output_override: Option<String> = None;
-            if mcp_success {
-                if let Ok(Some(policy)) =
-                    crate::workspace_policy::read_workspace_policy(&self.working_dir)
-                {
-                    if !policy.validation.validators.is_empty() {
-                        // #1607 (codex-review follow-up): build this
-                        // session-scope validator registry with the session's
-                        // sandbox so a workspace-authored `Command` validator
-                        // runs confined, not directly on the host. `with_builtins`
-                        // hardcodes `NoSandbox`, so `tools.sandbox()` inside
-                        // `build_validator_runner` would be a no-op here even
-                        // when the parent session is sandboxed. A no-op backend
-                        // (no helper present) still runs the argv directly, so
-                        // hosts without a real sandbox are unaffected.
-                        let validator_sandbox: std::sync::Arc<dyn crate::sandbox::Sandbox> =
-                            std::sync::Arc::from(create_sandbox(&self.sandbox));
-                        let mut registry_for_validators = ToolRegistry::with_builtins_and_sandbox(
-                            &self.working_dir,
-                            create_sandbox(&self.sandbox),
-                        );
-                        // Honour the parent's provider tool policy in the validator
-                        // registry too, so a workspace `ToolCall` validator can't
-                        // invoke a tool the policy denies (#1607 codex round 2).
-                        if let Some(policy) = self.provider_policy.clone() {
-                            registry_for_validators.set_provider_policy(policy);
-                        }
-                        if let Err(reason) = crate::workspace_contract::run_declared_validators(
-                            &registry_for_validators,
-                            &self.working_dir,
-                            &policy.validation.validators,
-                            "spawn-agent-mcp",
-                            crate::validators::ValidatorPhase::Completion,
-                            None,
-                            validator_sandbox,
-                        )
-                        .await
-                        {
-                            mcp_success = false;
-                            mcp_output_override = Some(format!(
-                                "Status: FAILED\nremote_agent_mcp: completion validator rejected child artifact: {reason}"
-                            ));
-                        }
-                    }
-                }
-            }
-
-            // octos #997 (round-3 fix): the session-scope validator block above
-            // runs against `self.working_dir` (the session root) and writes the
-            // session ledger only. The project-scope contract gate
-            // (`inspect_workspace_contract`) reads
-            // `<session>/<kind>/<slug>/.octos/validator_outcomes.jsonl`. Without
-            // this run, an `agent_mcp` slides dispatch that produces a valid
-            // PPTX would leave the project ledger empty and a downstream
-            // contract gate would surface `ready = false`. Mirror the sync
-            // (`:2312`) and background (`:2680`) spawn fixes so the agent_mcp
-            // branch closes the same bypass.
-            if mcp_success {
-                let expected_kind = workflow.as_ref().and_then(workflow_contract_project_kind);
-                // #1607 (codex-review follow-up): same rationale as the
-                // session-scope block above — the project-root validator pass
-                // runs `Command` validators declared by an untrusted
-                // `slides/<slug>` or `sites/<slug>` `workspace_policy.toml`, so
-                // it MUST inherit the session sandbox instead of `with_builtins`'
-                // hardcoded `NoSandbox`. This is the child mirror of the
-                // `build_validator_runner` chokepoint fix; without it the
-                // agent_mcp branch is a second unsandboxed construction site.
-                let validator_sandbox: std::sync::Arc<dyn crate::sandbox::Sandbox> =
-                    std::sync::Arc::from(create_sandbox(&self.sandbox));
-                let mut registry_for_validators = ToolRegistry::with_builtins_and_sandbox(
-                    &self.working_dir,
-                    create_sandbox(&self.sandbox),
-                );
-                // Honour the parent's provider tool policy in the validator
-                // registry too, so a workspace `ToolCall` validator can't invoke
-                // a tool the policy denies (#1607 codex round 2).
-                if let Some(policy) = self.provider_policy.clone() {
-                    registry_for_validators.set_provider_policy(policy);
-                }
-                let report = crate::workspace_contract::run_project_root_validators(
-                    &registry_for_validators,
-                    &self.working_dir,
-                    expected_kind,
-                    &response.files_to_send,
-                    validator_sandbox,
-                )
-                .await;
-                if let Some(reason) = report.first_failure_reason() {
-                    mcp_success = false;
-                    mcp_output_override = Some(format!(
-                        "Status: FAILED\nremote_agent_mcp: project-scope validator rejected child artifact: {reason}"
-                    ));
-                }
-            }
-
-            // Workflow contract families always gate outputs through the
-            // workspace contract. The dispatch response is advisory; the
-            // final delivery path remains owned by the runtime.
-            //
-            // Runs LAST so the validator blocks above have already written
-            // the session + project ledgers; `inspect_workspace_contract_at_root`
-            // (inside `resolve_contract_terminal_files`) reads those ledgers
-            // to decide `ready`. Skipped on validator failure — empty
-            // `files_to_send` is correct for a failed result.
-            let mut files_to_send = response.files_to_send.clone();
-            if mcp_success {
-                if let Some(workflow_meta) = workflow.as_ref() {
-                    if workflow_uses_contract_terminal_delivery(workflow_meta) {
-                        match resolve_contract_terminal_files(
-                            self.working_dir.as_path(),
-                            Some(workflow_meta),
-                        ) {
-                            Ok(Some(contract_files)) => files_to_send = contract_files,
-                            Ok(None) => {}
-                            Err(error) => {
-                                return Ok(ToolResult {
-                                    output: format!("Status: FAILED\n{error}"),
-                                    success: false,
-                                    ..Default::default()
-                                });
-                            }
-                        }
-                    }
-                }
-            }
+            let files_to_send = response.files_to_send.clone();
 
             return Ok(ToolResult {
-                output: mcp_output_override.unwrap_or_else(|| {
-                    if mcp_success {
-                        format!("Status: SUCCESS\n\n{}", response.output)
-                    } else {
-                        format!(
-                            "Status: FAILED\n{}",
-                            response
-                                .error
-                                .clone()
-                                .unwrap_or_else(|| response.output.clone())
-                        )
-                    }
-                }),
-                success: mcp_success,
-                files_to_send: if mcp_success {
-                    files_to_send
+                output: if success {
+                    format!("Status: SUCCESS\n\n{}", response.output)
                 } else {
-                    Vec::new()
+                    format!(
+                        "Status: FAILED\n{}",
+                        response
+                            .error
+                            .clone()
+                            .unwrap_or_else(|| response.output.clone())
+                    )
                 },
+                success,
+                files_to_send: if success { files_to_send } else { Vec::new() },
                 ..Default::default()
             });
         }
@@ -3802,7 +2884,7 @@ impl Tool for SpawnTool {
 
         // Review A F-004: snapshot the parent workspace policy once so both the
         // sync and async spawn branches propagate the same typed
-        // compaction / validator contracts to child sessions. Without this,
+        // compaction contracts to child sessions. Without this,
         // the child Agent silently runs without preflight compaction even
         // when the parent's workspace_policy.toml declares one.
         let parent_workspace_policy =
@@ -3813,7 +2895,7 @@ impl Tool for SpawnTool {
                         working_dir = %self.working_dir.display(),
                         error = %error,
                         "spawn: failed to read parent workspace policy; \
-                         child will run without propagated compaction/validator contracts"
+                         child will run without propagated compaction contracts"
                     );
                     None
                 }
@@ -3824,42 +2906,14 @@ impl Tool for SpawnTool {
             //
             // #1607 (codex-review follow-up): build the child registry with the
             // SESSION sandbox, not the hardcoded `NoSandbox` that
-            // `with_builtins` stores. The child's `child_tools_handle` feeds
-            // `run_declared_validators` / `run_project_root_validators` below,
-            // and `build_validator_runner` confines `ValidatorSpec::Command`
-            // validators to `tools.sandbox()`. A `NoSandbox` registry there
-            // would let an untrusted `workspace_policy.toml` command validator
-            // execute directly on the host from a sandboxed session. On hosts
-            // without a real backend `create_sandbox` yields `NoSandbox` and
-            // the validator runs the argv directly (unchanged).
+            // `with_builtins` stores, so child command execution stays
+            // confined to the same backend as the parent session. On hosts
+            // without a real backend `create_sandbox` yields `NoSandbox`
+            // (unchanged).
             let mut tools = ToolRegistry::with_builtins_and_sandbox(
                 &child_working_dir,
                 create_sandbox(&self.sandbox),
             );
-            // Load plugin tools so subagents can use fm_tts, etc.
-            // Section B (codex review P1.1): honour the parent's
-            // require_signed policy so unsigned plugins are rejected here
-            // when strict mode is on.
-            if !self.plugin_dirs.is_empty() {
-                let _ = crate::plugins::PluginLoader::load_into_with_options(
-                    &mut tools,
-                    &self.plugin_dirs,
-                    &self.plugin_extra_env,
-                    crate::plugins::PluginLoadOptions {
-                        work_dir: Some(&child_working_dir),
-                        synthesis_config: None,
-                        require_signed: self.plugin_require_signed,
-                        verified_cache_dir: None,
-                    },
-                );
-                // SPEC-VENDOR-NODE-V1 HTTP tool discovery — hard-fail per
-                // @ymote's Finding 2 contract. Subagents need the bridge tools
-                // the parent has; if discovery fails the spawn must error out
-                // rather than silently spawn a tool-blind subagent.
-                crate::plugins::register_http_skills_on_startup(&mut tools, &self.plugin_dirs)
-                    .await
-                    .map_err(|e| eyre::eyre!("subagent HTTP tool discovery failed: {e}"))?;
-            }
             for factory in &self.child_tool_factories {
                 tools.register_arc(factory());
             }
@@ -3886,7 +2940,7 @@ impl Tool for SpawnTool {
             // supervisor would (a) let `newest_spawned_task` mis-correlate
             // across CONCURRENT sibling spawners racing the same map,
             // (b) give the child's task-control aliases (wait/close/resume)
-            // session-wide reach, and (c) leak a child's own `run_pipeline`
+            // session-wide reach, and (c) leak a child's own `bg_research`
             // node tasks into the persisted session ledger. The trade-off:
             // grandchildren are not surfaced in the session task/list and the
             // fan-out cap is per-subtree, not global. The grandchild's RESULT
@@ -3913,13 +2967,6 @@ impl Tool for SpawnTool {
             // In subagent context, spawn_only tools should be regular tools —
             // the subagent IS the background, so no need to auto-background again.
             tools.clear_spawn_only();
-            // RFC-1 fixup (codex P1): also clear internal-hidden markers.
-            // In a subagent registry, the mofa_make dispatcher's targets
-            // (mofa_slides, mofa_cards, …) should be directly callable —
-            // the subagent's whole purpose may be to drive that target
-            // tool; routing through a dispatcher adds latency without
-            // value once we are already in a spawned context.
-            tools.clear_internal_hidden();
             // Preflight against the EFFECTIVE (post-deny) allow-list: a tool
             // the manifest forbids must not gate the spawn on availability,
             // since the policy below denies it regardless (codex P2).
@@ -3929,11 +2976,7 @@ impl Tool for SpawnTool {
                 allow_list_is_caller_explicit,
             )
             .map_err(|error| eyre::eyre!(error))?;
-            let policy = build_subagent_tool_policy(
-                allowed_tools,
-                manifest_disallowed_tools,
-                workflow.as_ref(),
-            );
+            let policy = build_subagent_tool_policy(allowed_tools, manifest_disallowed_tools);
             tools.apply_policy(&policy);
             if let Some(ref pp) = self.provider_policy {
                 tools.set_provider_policy(pp.clone());
@@ -3953,9 +2996,6 @@ impl Tool for SpawnTool {
             if let Some(scope) = child_session_scope.as_ref() {
                 worker = worker.with_session_scope(scope.clone());
             }
-            // Keep an Arc handle to the child's tool registry so we can run
-            // declared validators against it after `run_task` returns.
-            let child_tools_handle = worker.tool_registry().clone();
             // Apply the worker config plus the spawn's iteration budget: the
             // caller's `max_iterations` (clamped) or the generous spawn default
             // (`DEFAULT_SPAWN_MAX_ITERATIONS`) — a sub-agent does more than an
@@ -4057,78 +3097,12 @@ impl Tool for SpawnTool {
             // session-actor recovery contract.
             let result = run_task_with_m8_9_recovery(&worker, &subtask, &task_desc).await;
             let tool_result = match result {
-                Ok(r) => {
-                    // Review A F-004: run declared completion-phase validators
-                    // against the child's artifacts before surfacing success.
-                    // Matches `enforce_spawn_task_contract`'s gating for
-                    // spawn-only tools and closes the "vacuous pass" hole in
-                    // `contract_failure_summary` (which only reads the ledger).
-                    let mut output = r.output;
-                    let mut success = r.success;
-                    if success {
-                        if let Some(ref policy) = parent_workspace_policy {
-                            if !policy.validation.validators.is_empty() {
-                                match crate::workspace_contract::run_declared_validators(
-                                    child_tools_handle.as_ref(),
-                                    &child_working_dir,
-                                    &policy.validation.validators,
-                                    "spawn",
-                                    crate::validators::ValidatorPhase::Completion,
-                                    None,
-                                    std::sync::Arc::from(create_sandbox(&self.sandbox)),
-                                )
-                                .await
-                                {
-                                    Ok(_) => {}
-                                    Err(reason) => {
-                                        success = false;
-                                        output = format!(
-                                            "Subagent failed: contract validator rejected child artifact: {reason}"
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // octos #997 (round-2 fix): in addition to the session-scope
-                    // validator run above, ALSO run each project-scope policy
-                    // at its OWN project root. The session run writes its
-                    // outcome to `<session>/.octos/validator_outcomes.jsonl`,
-                    // but `inspect_workspace_contract` reads from
-                    // `<session>/<kind>/<slug>/.octos/validator_outcomes.jsonl`
-                    // — so without this run a real valid deck whose project
-                    // policy declares a hard-required validator (octos #997:
-                    // `slides.mofa_slides.pptx_magic_bytes`) would surface as
-                    // `ready = false`. Scope the iteration to the workflow's
-                    // expected kind when available so a slides spawn does not
-                    // run the sites validator chain.
-                    if success {
-                        let expected_kind =
-                            workflow.as_ref().and_then(workflow_contract_project_kind);
-                        let report = crate::workspace_contract::run_project_root_validators(
-                            child_tools_handle.as_ref(),
-                            &child_working_dir,
-                            expected_kind,
-                            &r.files_to_send,
-                            std::sync::Arc::from(create_sandbox(&self.sandbox)),
-                        )
-                        .await;
-                        if let Some(reason) = report.first_failure_reason() {
-                            success = false;
-                            output = format!(
-                                "Subagent failed: project-scope validator rejected child artifact: {reason}"
-                            );
-                        }
-                    }
-
-                    ToolResult {
-                        output,
-                        success,
-                        tokens_used: Some(r.token_usage),
-                        ..Default::default()
-                    }
-                }
+                Ok(r) => ToolResult {
+                    output: r.output,
+                    success: r.success,
+                    tokens_used: Some(r.token_usage),
+                    ..Default::default()
+                },
                 Err(e) => ToolResult {
                     output: format!("Subagent failed: {e}"),
                     success: false,
@@ -4244,7 +3218,6 @@ impl Tool for SpawnTool {
             // `read_task_output` derives (`agent:{tool_call_id}` with
             // `tool_call_id = "spawn-{worker_id}"` from the register above).
             let parent_output_router = self.parent_subagent_output_router.clone();
-            let child_stream_callback = self.child_stream_callback.clone();
             let child_router_session_id = format!("agent:spawn-{worker_id}");
             // PR #1250 finding 1: the fanout-cap refusal above was the last
             // refusal point on the background path — the detached worker is
@@ -4256,9 +3229,8 @@ impl Tool for SpawnTool {
             let provider_policy = self.provider_policy.clone();
             // #1607 (codex-review follow-up): capture the session sandbox so the
             // detached background child registry can be built with it (see the
-            // `with_builtins_and_sandbox` call inside the closure). Without this
-            // the background child's validator registry stored `NoSandbox`, so a
-            // workspace-declared command validator could escape to the host.
+            // `with_builtins_and_sandbox` call inside the closure), keeping
+            // child command execution on the session's backend.
             let child_sandbox = self.sandbox.clone();
             let additional_instructions = input.additional_instructions;
             // Spawn iteration budget (caller's clamped value or the generous
@@ -4269,9 +3241,6 @@ impl Tool for SpawnTool {
             let bg_sender = self.background_result_sender.clone();
             let child_session_sender = self.child_session_sender.clone();
             let task_label = label.clone();
-            let plugin_dirs = self.plugin_dirs.clone();
-            let plugin_extra_env = self.plugin_extra_env.clone();
-            let plugin_require_signed = self.plugin_require_signed;
             let child_tool_factories = self.child_tool_factories.clone();
             // Detached path: `self` is not available inside the `tokio::spawn`
             // closure below, so pre-build the child's native `spawn` delegate
@@ -4292,7 +3261,7 @@ impl Tool for SpawnTool {
             let hook_context_template = self.hook_context_template.clone();
             // Review A F-004: carry the parent workspace policy into the
             // background child task so the detached child inherits the same
-            // compaction + validator contracts the sync spawn path honours.
+            // compaction contract the sync spawn path honours.
             let child_workspace_policy = parent_workspace_policy.clone();
             // M8.10 follow-up (#649): snapshot the originating turn's
             // thread_id (= user message's client_message_id) at spawn
@@ -4387,7 +3356,7 @@ impl Tool for SpawnTool {
                         // (and the e2e live-progress gate) see
                         // `runtime_detail.progress == null` for the entire
                         // initial phase on workflows that drive a
-                        // `run_pipeline` graph rather than emitting their
+                        // `bg_research` graph rather than emitting their
                         // own `HarnessEvent::progress`. The deep_search
                         // built-in still overwrites this with finer values
                         // (~0.1, 0.4, 0.8, 1.0) as the pipeline cycles.
@@ -4462,49 +3431,14 @@ impl Tool for SpawnTool {
 
                 // #1607 (codex-review follow-up): build the detached child
                 // registry with the SESSION sandbox rather than the hardcoded
-                // `NoSandbox` `with_builtins` stores. Its `child_tools_handle`
-                // feeds `run_declared_validators` / `run_project_root_validators`
-                // below, and `build_validator_runner` confines command
-                // validators to `tools.sandbox()`. On hosts without a real
-                // backend `create_sandbox` yields `NoSandbox` (unchanged).
+                // `NoSandbox` `with_builtins` stores, so child command
+                // execution stays confined to the session's backend. On hosts
+                // without a real backend `create_sandbox` yields `NoSandbox`
+                // (unchanged).
                 let mut tools = ToolRegistry::with_builtins_and_sandbox(
                     &working_dir,
                     create_sandbox(&child_sandbox),
                 );
-                // Load plugin tools so subagents can use fm_tts, etc.
-                // Section B (codex review P1.1): inherit the parent's
-                // require_signed gate.
-                if !plugin_dirs.is_empty() {
-                    let _ = crate::plugins::PluginLoader::load_into_with_options(
-                        &mut tools,
-                        &plugin_dirs,
-                        &plugin_extra_env,
-                        crate::plugins::PluginLoadOptions {
-                            work_dir: Some(&working_dir),
-                            synthesis_config: None,
-                            require_signed: plugin_require_signed,
-                            verified_cache_dir: None,
-                        },
-                    );
-                    // SPEC-VENDOR-NODE-V1 HTTP tool discovery — this is the
-                    // ASYNC spawn-background path (`tokio::spawn(async move
-                    // { ... })`); the enclosing block returns `()` so there is
-                    // no Err-propagation channel. The contract therefore
-                    // diverges from the sync subagent and boot paths: a
-                    // failed catalog fetch in a background subagent is logged
-                    // and the subagent runs with whatever static tools loaded.
-                    // Documented divergence from @ymote's Finding 2 contract;
-                    // the sync subagent path (line ~2470) still hard-fails.
-                    if let Err(e) =
-                        crate::plugins::register_http_skills_on_startup(&mut tools, &plugin_dirs)
-                            .await
-                    {
-                        warn!(
-                            error = %e,
-                            "subagent (background) HTTP tool discovery failed; continuing with static tools only"
-                        );
-                    }
-                }
                 for factory in &child_tool_factories {
                     tools.register_arc(factory());
                 }
@@ -4536,11 +3470,6 @@ impl Tool for SpawnTool {
                 // In subagent context, spawn_only tools should be regular tools —
                 // the subagent IS the background, so no need to auto-background again.
                 tools.clear_spawn_only();
-                // RFC-1 fixup (codex P1): mirror the sync spawn path — clear
-                // internal-hidden markers so subagent registries can call
-                // dispatcher targets directly without going through
-                // `mofa_make`.
-                tools.clear_internal_hidden();
                 // Preflight against the EFFECTIVE (post-deny) allow-list —
                 // mirror the sync path so a manifest-forbidden tool that is
                 // absent from this registry does not fail the spawn (codex P2).
@@ -4550,11 +3479,7 @@ impl Tool for SpawnTool {
                     allow_list_is_caller_explicit,
                 )
                 .map_err(|error| eyre::eyre!(error));
-                let policy = build_subagent_tool_policy(
-                    allowed_tools,
-                    manifest_disallowed_tools,
-                    workflow_metadata.as_ref(),
-                );
+                let policy = build_subagent_tool_policy(allowed_tools, manifest_disallowed_tools);
                 tools.apply_policy(&policy);
                 if let Some(pp) = provider_policy {
                     tools.set_provider_policy(pp);
@@ -4575,8 +3500,6 @@ impl Tool for SpawnTool {
                                 router: router.clone(),
                                 router_session_id: child_router_session_id.clone(),
                                 task_id: task_id.clone(),
-                                stream_offset: AtomicU64::new(0),
-                                on_stream_chunk: child_stream_callback.clone(),
                             }))
                         }
                         _ => None,
@@ -4596,9 +3519,6 @@ impl Tool for SpawnTool {
                 if let Some(scope) = child_session_scope.as_ref() {
                     worker = worker.with_session_scope(scope.clone());
                 }
-                // Keep an Arc to the child's tool registry for the
-                // post-`run_task` validator invocation below.
-                let child_tools_handle = worker.tool_registry().clone();
                 let mut effective_config = worker_config.clone().unwrap_or_default();
                 effective_config.suppress_auto_send_files = true;
                 effective_config.max_iterations = bg_max_iters;
@@ -4694,101 +3614,23 @@ impl Tool for SpawnTool {
 
                 // M8 Runtime Parity W2.B2: wrap `run_task` with single-shot
                 // M8.9 recovery for the detached background path too.
-                let mut result = match availability_check {
+                let result = match availability_check {
                     Ok(()) => run_task_with_m8_9_recovery(&worker, &subtask, &task_desc).await,
                     Err(error) => Err(error),
                 };
-                if let Ok(task_result) = result.as_mut() {
-                    maybe_generate_inline_research_podcast(
-                        worker.tool_registry(),
+
+                let mut contract_failure = match &result {
+                    Ok(task_result) if task_result.success => resolve_background_terminal_files(
+                        &task_result.files_to_send,
+                        &task_result.files_modified,
                         workflow_metadata.as_ref(),
-                        &task_desc,
-                        task_result,
                     )
-                    .await;
-                }
-
-                // Review A F-004: actively run declared completion-phase
-                // validators before the existing ledger-read checks. The
-                // pre-fix path relied on `resolve_background_terminal_files`
-                // + ledger inspection, which trivially passed when the child
-                // never ran validators (the ledger was empty). Running the
-                // validators here guarantees the required rail is exercised
-                // before any downstream gate consults the ledger.
-                let mut contract_failure: Option<String> = None;
-                if let (Ok(task_result), Some(policy)) =
-                    (result.as_ref(), child_workspace_policy.as_ref())
-                {
-                    if task_result.success && !policy.validation.validators.is_empty() {
-                        if let Err(reason) = crate::workspace_contract::run_declared_validators(
-                            child_tools_handle.as_ref(),
-                            &working_dir,
-                            &policy.validation.validators,
-                            "spawn",
-                            crate::validators::ValidatorPhase::Completion,
-                            None,
-                            std::sync::Arc::from(create_sandbox(&child_sandbox)),
-                        )
-                        .await
-                        {
-                            contract_failure = Some(reason);
-                        }
-                    }
-                }
-
-                // octos #997 (round-2 fix): also run each project-scope
-                // policy AT its OWN project root. The session-scope run above
-                // writes to `<session>/.octos/validator_outcomes.jsonl`, but
-                // `inspect_workspace_contract` reads from
-                // `<session>/<kind>/<slug>/.octos/validator_outcomes.jsonl`.
-                // Without this run a real valid deck whose project policy
-                // declares a hard-required validator (octos #997:
-                // `slides.mofa_slides.pptx_magic_bytes`) would surface as
-                // `ready = false` because the persisted outcome is missing
-                // from the path `inspect_workspace_contract` reads.
-                if contract_failure.is_none()
-                    && matches!(&result, Ok(task_result) if task_result.success)
-                {
-                    let expected_kind = workflow_metadata
-                        .as_ref()
-                        .and_then(workflow_contract_project_kind);
-                    let bg_files_to_send: &[PathBuf] = match &result {
-                        Ok(task_result) => &task_result.files_to_send,
-                        Err(_) => &[],
-                    };
-                    let report = crate::workspace_contract::run_project_root_validators(
-                        child_tools_handle.as_ref(),
-                        &working_dir,
-                        expected_kind,
-                        bg_files_to_send,
-                        std::sync::Arc::from(create_sandbox(&child_sandbox)),
-                    )
-                    .await;
-                    if let Some(reason) = report.first_failure_reason() {
-                        contract_failure = Some(format!(
-                            "project-scope validator rejected child artifact: {reason}"
-                        ));
-                    }
-                }
-
-                if contract_failure.is_none() {
-                    contract_failure = match &result {
-                        Ok(task_result) if task_result.success => {
-                            resolve_background_terminal_files(
-                                &working_dir,
-                                &task_result.files_to_send,
-                                &task_result.files_modified,
-                                workflow_metadata.as_ref(),
-                            )
-                            .err()
-                        }
-                        _ => None,
-                    };
-                }
+                    .err(),
+                    _ => None,
+                };
                 let mut terminal_files = match (&result, contract_failure.as_ref()) {
                     (Ok(task_result), None) if task_result.success => {
                         resolve_background_terminal_files(
-                            &working_dir,
                             &task_result.files_to_send,
                             &task_result.files_modified,
                             workflow_metadata.as_ref(),

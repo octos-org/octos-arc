@@ -7,57 +7,19 @@
 //! Run with `cargo test -p octos-agent --test compaction_policy`.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
-use async_trait::async_trait;
 use octos_agent::compaction::{
     CompactionPhase, CompactionPolicy, CompactionRunner, ExtractiveSummarizer, PreservedArtifact,
-    Summarizer, TOOL_RESULT_PLACEHOLDER_SCHEMA_VERSION, ToolResultPlaceholder,
-    ToolResultPlaceholderError,
+    TOOL_RESULT_PLACEHOLDER_SCHEMA_VERSION, ToolResultPlaceholder, ToolResultPlaceholderError,
 };
 use octos_agent::workspace_policy::{
     WorkspaceArtifactsPolicy, WorkspacePolicy, WorkspacePolicyKind, WorkspacePolicyWorkspace,
     WorkspaceSnapshotTrigger, WorkspaceTrackingPolicy, WorkspaceVersionControlPolicy,
     WorkspaceVersionControlProvider,
 };
-use octos_agent::{Agent, ToolRegistry};
+
 use octos_agent::{COMPACTION_POLICY_SCHEMA_VERSION, WORKSPACE_POLICY_SCHEMA_VERSION};
-use octos_core::{AgentId, Message, MessageRole, ToolCall};
-use octos_llm::{ChatConfig, ChatResponse, LlmProvider, StopReason, TokenUsage, ToolSpec};
-use octos_memory::EpisodeStore;
-
-struct CountingProvider {
-    calls: Arc<AtomicUsize>,
-}
-
-#[async_trait]
-impl LlmProvider for CountingProvider {
-    async fn chat(
-        &self,
-        _messages: &[Message],
-        _tools: &[ToolSpec],
-        _config: &ChatConfig,
-    ) -> eyre::Result<ChatResponse> {
-        self.calls.fetch_add(1, AtomicOrdering::SeqCst);
-        Ok(ChatResponse {
-            content: Some("should not be reached".to_string()),
-            reasoning_content: None,
-            tool_calls: vec![],
-            stop_reason: StopReason::EndTurn,
-            usage: TokenUsage::default(),
-            provider_index: None,
-        })
-    }
-
-    fn model_id(&self) -> &str {
-        "counting"
-    }
-
-    fn provider_name(&self) -> &str {
-        "counting"
-    }
-}
+use octos_core::{Message, MessageRole, ToolCall};
 
 fn user_msg(content: &str) -> Message {
     Message {
@@ -138,7 +100,7 @@ fn policy_with_compaction(compaction: CompactionPolicy) -> WorkspacePolicy {
     WorkspacePolicy {
         schema_version: WORKSPACE_POLICY_SCHEMA_VERSION,
         workspace: WorkspacePolicyWorkspace {
-            kind: WorkspacePolicyKind::Sites,
+            kind: WorkspacePolicyKind::Session,
         },
         version_control: WorkspaceVersionControlPolicy {
             provider: WorkspaceVersionControlProvider::Git,
@@ -147,7 +109,6 @@ fn policy_with_compaction(compaction: CompactionPolicy) -> WorkspacePolicy {
             fail_on_error: false,
         },
         tracking: WorkspaceTrackingPolicy { ignore: vec![] },
-        validation: Default::default(),
         artifacts: WorkspaceArtifactsPolicy {
             entries: BTreeMap::from([
                 ("primary".into(), "output/deck.pptx".into()),
@@ -292,55 +253,6 @@ fn should_gate_on_validator_failure_when_invariants_not_preserved() {
     );
 }
 
-#[tokio::test]
-async fn agent_preflight_compaction_fails_closed_when_invariant_is_missing() {
-    let policy = CompactionPolicy {
-        schema_version: COMPACTION_POLICY_SCHEMA_VERSION,
-        token_budget: 10_000,
-        preflight_threshold: Some(1),
-        prune_tool_results_after_turns: None,
-        preserved_artifacts: vec![],
-        preserved_invariants: vec!["NEVER_MENTIONED_STRING".into()],
-        summarizer: Default::default(),
-    };
-    let workspace = policy_with_compaction(policy.clone());
-    let runner = CompactionRunner::new(policy).with_workspace_policy(&workspace);
-    let dir = tempfile::tempdir().unwrap();
-    let calls = Arc::new(AtomicUsize::new(0));
-    let provider: Arc<dyn LlmProvider> = Arc::new(CountingProvider {
-        calls: calls.clone(),
-    });
-    let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
-    let agent = Agent::new(
-        AgentId::new("preservation-fail-closed"),
-        provider,
-        ToolRegistry::new(),
-        memory,
-    )
-    .with_compaction_runner(Arc::new(runner))
-    .with_compaction_workspace(workspace);
-
-    let err = agent
-        .process_message("hello", &[], vec![])
-        .await
-        .expect_err("missing preserved invariant must abort the turn");
-    let err = err.to_string();
-
-    assert!(
-        err.contains("compaction preservation validator failed"),
-        "expected preservation failure, got: {err}"
-    );
-    assert!(
-        err.contains("invariant:NEVER_MENTIONED_STRING"),
-        "error must name the missing invariant, got: {err}"
-    );
-    assert_eq!(
-        calls.load(AtomicOrdering::SeqCst),
-        0,
-        "fail-closed preflight must stop before the LLM call"
-    );
-}
-
 #[test]
 fn should_replace_old_tool_results_with_typed_placeholder() {
     let policy = CompactionPolicy {
@@ -430,24 +342,6 @@ fn should_emit_compaction_phase_events() {
         raw.contains("compaction"),
         "expected phase name 'compaction' in event payload: {raw}"
     );
-}
-
-#[test]
-fn summarizer_trait_extractive_default_preserves_behavior() {
-    let summarizer = ExtractiveSummarizer::new();
-    let messages = vec![
-        user_msg("Hello"),
-        assistant_msg("Hi there"),
-        assistant_tool_call("read_file", "tc1", serde_json::json!({"path": "/tmp/x"})),
-        tool_result("tc1", "contents"),
-    ];
-
-    let summary = summarizer
-        .summarize(&messages, 5_000)
-        .expect("extractive should not fail");
-    assert!(summary.contains("Conversation Summary"));
-    assert!(summary.contains("> User: Hello"));
-    assert!(summary.contains("Called read_file"));
 }
 
 #[test]

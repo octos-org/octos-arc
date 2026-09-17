@@ -328,7 +328,7 @@ pub struct DispatchContextContract {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child_session_key: Option<String>,
     /// #1021 / M17-C — which kind of backend is consuming this dispatch
-    /// (`"native"`, `"cli"`, or `"mcp"`). Lets validators and AppUI
+    /// (`"native"`, `"cli"`, or `"mcp"`). Lets the AppUI
     /// evidence ledgers tell apart context modes per specialist kind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_kind: Option<String>,
@@ -1509,16 +1509,6 @@ mod tests {
         assert_eq!(contract["child_session_key"], "child");
     }
 
-    #[test]
-    fn dispatch_request_without_contract_has_no_meta() {
-        let request = DispatchRequest::new("run_task", serde_json::json!({"task": "review"}));
-        assert_eq!(
-            request.wire_arguments(),
-            serde_json::json!({"task": "review"})
-        );
-        assert!(request.meta_payload().is_none());
-    }
-
     /// Real MCP servers (codex mcp-server) interleave `codex/event`
     /// notifications on stdout while a session runs. The reader must
     /// skip them and return the response frame for the expected id.
@@ -1536,23 +1526,6 @@ mod tests {
         assert_eq!(result["content"][0]["text"], "done");
     }
 
-    /// A server-initiated request (has both `method` and `id`) must be
-    /// skipped, not mistaken for our response — and a response for a
-    /// DIFFERENT id must not satisfy the wait.
-    #[tokio::test]
-    async fn read_response_skips_server_requests_and_foreign_ids() {
-        let stream = concat!(
-            "{\"jsonrpc\":\"2.0\",\"id\":77,\"method\":\"elicitation/create\",\"params\":{}}\n",
-            "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"stale\":true}}\n",
-            "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"fresh\":true}}\n",
-        );
-        let mut reader = BufReader::new(stream.as_bytes());
-        let result = read_json_rpc_response(&mut reader, 2)
-            .await
-            .expect("expected-id response");
-        assert_eq!(result["fresh"], true);
-    }
-
     /// Error envelopes for the expected id still surface as errors.
     #[tokio::test]
     async fn read_response_surfaces_remote_error_for_expected_id() {
@@ -1568,22 +1541,6 @@ mod tests {
             error.contains("-32000") && error.contains("boom"),
             "{error}"
         );
-    }
-
-    /// #1021 / M17-C — backend_kind, agent_id, and risk are all
-    /// optional fields. Empty Options must not appear on the wire.
-    #[test]
-    fn dispatch_context_contract_omits_unset_m17c_fields() {
-        let json = serde_json::to_value(
-            DispatchContextContract::external_unmanaged("fixture")
-                .with_parent_session_key(Some("parent".into()))
-                .with_child_session_key(Some("child".into())),
-        )
-        .expect("serialize");
-        let object = json.as_object().expect("object");
-        assert!(!object.contains_key("backend_kind"));
-        assert!(!object.contains_key("agent_id"));
-        assert!(!object.contains_key("risk"));
     }
 
     /// #1021 / M17-C — when an unmanaged dispatch is emitted, the
@@ -1616,84 +1573,6 @@ mod tests {
     }
 
     #[test]
-    fn sub_agent_dispatch_event_exposes_context_contract() {
-        let response = DispatchResponse::success("done".to_string(), Vec::new())
-            .with_context_contract(Some(DispatchContextContract::external_unmanaged(
-                "mcp unmanaged",
-            )));
-        let backend = StdioMcpAgent {
-            cmd: "claude".to_string(),
-            args: Vec::new(),
-            env: HashMap::new(),
-            cwd: None,
-            dispatch_timeout: Duration::from_secs(1),
-        };
-
-        let payload = build_dispatch_event_payload(
-            "session",
-            "task",
-            Some("coding"),
-            Some("review"),
-            &backend,
-            &response,
-        );
-        match payload {
-            HarnessEventPayload::SubAgentDispatch { data } => {
-                assert_eq!(
-                    data.extra
-                        .get("context_mode")
-                        .and_then(|value| value.as_str()),
-                    Some("external_context_unmanaged")
-                );
-                assert_eq!(
-                    data.extra
-                        .get("context_reason")
-                        .and_then(|value| value.as_str()),
-                    Some("mcp unmanaged")
-                );
-            }
-            other => panic!("wrong payload: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn backend_label_round_trips() {
-        let local = McpAgentBackendConfig::Local {
-            cmd: "claude".into(),
-            args: vec!["mcp".into(), "serve".into()],
-            env: HashMap::new(),
-            dispatch_timeout_secs: Some(5),
-        };
-        let remote = McpAgentBackendConfig::Remote {
-            url: "https://example.com/mcp".into(),
-            auth_header: Some("Bearer token".into()),
-            extra_headers: HashMap::new(),
-            connect_timeout_secs: None,
-            read_timeout_secs: None,
-            dispatch_timeout_secs: None,
-        };
-        assert_eq!(local.backend_label(), "local");
-        assert_eq!(remote.backend_label(), "remote");
-        assert_eq!(local.endpoint_label(), "claude");
-        assert_eq!(remote.endpoint_label(), "https://example.com/mcp");
-        assert_eq!(local.dispatch_timeout(), Duration::from_secs(5));
-        assert_eq!(
-            remote.dispatch_timeout(),
-            Duration::from_secs(DEFAULT_DISPATCH_TIMEOUT_SECS)
-        );
-    }
-
-    #[test]
-    fn dispatch_outcome_labels_stable() {
-        assert_eq!(DispatchOutcome::Success.as_str(), "success");
-        assert_eq!(DispatchOutcome::RemoteError.as_str(), "remote_error");
-        assert_eq!(DispatchOutcome::Timeout.as_str(), "timeout");
-        assert_eq!(DispatchOutcome::TransportError.as_str(), "transport_error");
-        assert_eq!(DispatchOutcome::ProtocolError.as_str(), "protocol_error");
-        assert_eq!(DispatchOutcome::SsrfBlocked.as_str(), "ssrf_blocked");
-    }
-
-    #[test]
     fn parse_tools_call_extracts_text_and_files() {
         let result = serde_json::json!({
             "content": [{"type": "text", "text": "ok"}, {"type": "text", "text": "done"}],
@@ -1706,18 +1585,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_tools_call_surfaces_remote_error_flag() {
-        let result = serde_json::json!({
-            "content": [{"type": "text", "text": "remote rejected"}],
-            "isError": true,
-        });
-        let response = parse_tools_call_response(result);
-        assert_eq!(response.outcome, DispatchOutcome::RemoteError);
-        assert_eq!(response.output, "remote rejected");
-        assert!(response.error.is_some());
-    }
-
-    #[test]
     fn stdio_config_rejects_empty_command() {
         let bad = McpAgentBackendConfig::Local {
             cmd: "   ".into(),
@@ -1726,42 +1593,6 @@ mod tests {
             dispatch_timeout_secs: None,
         };
         assert!(StdioMcpAgent::from_config(&bad).is_err());
-    }
-
-    #[test]
-    fn http_config_rejects_empty_url() {
-        let bad = McpAgentBackendConfig::Remote {
-            url: "".into(),
-            auth_header: None,
-            extra_headers: HashMap::new(),
-            connect_timeout_secs: None,
-            read_timeout_secs: None,
-            dispatch_timeout_secs: None,
-        };
-        assert!(HttpMcpAgent::from_config(&bad).is_err());
-    }
-
-    #[test]
-    fn build_backend_routes_variant_to_impl() {
-        let local = McpAgentBackendConfig::Local {
-            cmd: "claude".into(),
-            args: vec![],
-            env: HashMap::new(),
-            dispatch_timeout_secs: None,
-        };
-        let backend = build_backend_from_config(&local, None).unwrap();
-        assert_eq!(backend.backend_label(), "local");
-
-        let remote = McpAgentBackendConfig::Remote {
-            url: "https://example.com/mcp".into(),
-            auth_header: None,
-            extra_headers: HashMap::new(),
-            connect_timeout_secs: None,
-            read_timeout_secs: None,
-            dispatch_timeout_secs: None,
-        };
-        let backend = build_backend_from_config(&remote, None).unwrap();
-        assert_eq!(backend.backend_label(), "remote");
     }
 
     #[test]

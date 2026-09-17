@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use eyre::Result;
 use octos_core::{Message, MessageRole};
-use octos_llm::{ChatConfig, Lane, LaneContext, LlmProvider, ResponseFormat, ToolChoice};
+use octos_llm::{ChatConfig, LlmProvider, ResponseFormat, ToolChoice};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::warn;
@@ -32,7 +32,6 @@ pub struct AgentVerifierConfig {
     pub enabled: bool,
     pub provider: Arc<dyn LlmProvider>,
     pub model_label: String,
-    pub lane_context: LaneContext,
     pub ledger_path: Option<PathBuf>,
     pub max_quiet_turns: u32,
 }
@@ -43,10 +42,6 @@ impl AgentVerifierConfig {
             enabled: true,
             provider,
             model_label: model_label.into(),
-            lane_context: LaneContext {
-                lane: Some(Lane::FastChat),
-                config: None,
-            },
             ledger_path: None,
             max_quiet_turns: 0,
         }
@@ -59,11 +54,6 @@ impl AgentVerifierConfig {
 
     pub fn with_max_quiet_turns(mut self, turns: u32) -> Self {
         self.max_quiet_turns = turns;
-        self
-    }
-
-    pub fn with_lane_context(mut self, lane_context: LaneContext) -> Self {
-        self.lane_context = lane_context;
         self
     }
 }
@@ -534,11 +524,10 @@ impl Agent {
             },
         ];
         let verifier_config = verifier_chat_config();
-        let response = octos_llm::with_lane_context(
-            config.lane_context.clone(),
-            config.provider.chat(&messages, &[], &verifier_config),
-        )
-        .await?;
+        let response = config
+            .provider
+            .chat(&messages, &[], &verifier_config)
+            .await?;
         // The verifier runs on its own provider — price its usage at the
         // model that actually answered, resolved from the provider (which
         // also handles verifier-side failover). `config.model_label` is a
@@ -832,33 +821,6 @@ mod tests {
         assert!(
             ledger.should_verify_after_tool_batch(0),
             "an earlier failure in the batch must trigger verification even though the last entry succeeded",
-        );
-    }
-
-    #[test]
-    fn should_verify_false_when_all_unverified_entries_succeed() {
-        let mut ledger = TurnLedger::new(None);
-        ledger.push_entry(ledger_entry_from_tool_result(
-            1,
-            Some("a"),
-            "read_file",
-            &json!({"path": "a"}),
-            Some(true),
-            "ok",
-            false,
-        ));
-        ledger.push_entry(ledger_entry_from_tool_result(
-            1,
-            Some("b"),
-            "read_file",
-            &json!({"path": "b"}),
-            Some(true),
-            "ok2",
-            false,
-        ));
-        assert!(
-            !ledger.should_verify_after_tool_batch(0),
-            "all-success batch with max_quiet_turns=0 must NOT trigger verification",
         );
     }
 

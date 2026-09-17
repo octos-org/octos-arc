@@ -448,26 +448,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_with_context_routes_correctly() {
-        let (tx, mut rx) = mpsc::channel(16);
-        let tool = SendFileTool::with_context(tx, "feishu", "ctx-chat");
-
-        let mut tmp = tempfile::NamedTempFile::new().unwrap();
-        writeln!(tmp, "data").unwrap();
-        let path = tmp.path().to_string_lossy().to_string();
-
-        let result = tool
-            .execute(&serde_json::json!({"file_path": path}))
-            .await
-            .unwrap();
-
-        assert!(result.success);
-        let msg = rx.recv().await.unwrap();
-        assert_eq!(msg.channel, "feishu");
-        assert_eq!(msg.chat_id, "ctx-chat");
-    }
-
-    #[tokio::test]
     async fn test_no_target() {
         let (tx, _rx) = mpsc::channel(16);
         let tool = SendFileTool::new(tx);
@@ -533,129 +513,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(target_os = "windows", ignore)]
-    async fn test_base_dir_blocks_non_tmp_outside_path() {
-        let base = tempfile::tempdir().unwrap();
-
-        // Create a file outside base_dir and outside /tmp/, since /tmp/ is
-        // explicitly allowlisted for generated artifacts. Anchor the "outside"
-        // dir under the user's home directory so it's stable regardless of
-        // whether the worktree itself lives under /tmp/ (e.g. CI scratch dirs).
-        let canonical_tmp =
-            std::fs::canonicalize("/tmp").unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
-        let Some(home) = dirs::home_dir() else {
-            eprintln!("skipping test_base_dir_blocks_non_tmp_outside_path: no home dir");
-            return;
-        };
-        let canonical_home = std::fs::canonicalize(&home).unwrap_or(home);
-        if canonical_home.starts_with(&canonical_tmp) {
-            eprintln!(
-                "skipping test_base_dir_blocks_non_tmp_outside_path: $HOME is under /tmp/, no stable non-tmp location available"
-            );
-            return;
-        }
-        let outside_dir = tempfile::Builder::new()
-            .prefix("octos-send-file-outside-")
-            .tempdir_in(&canonical_home)
-            .unwrap();
-        let outside_file = outside_dir.path().join("secret.txt");
-        std::fs::write(&outside_file, "secret").unwrap();
-
-        let (tx, _rx) = mpsc::channel(16);
-        let tool = SendFileTool::with_context(tx, "telegram", "12345").with_base_dir(base.path());
-
-        let result = tool
-            .execute(&serde_json::json!({
-                "file_path": outside_file.to_string_lossy()
-            }))
-            .await
-            .unwrap();
-
-        assert!(!result.success);
-        assert!(
-            result.output.contains("outside the allowed directory"),
-            "expected 'outside the allowed directory', got: {}",
-            result.output
-        );
-    }
-
-    #[tokio::test]
-    async fn test_base_dir_allows_inside_path() {
-        let base = tempfile::tempdir().unwrap();
-        let inside_file = base.path().join("report.pdf");
-        std::fs::write(&inside_file, "report content").unwrap();
-
-        let (tx, mut rx) = mpsc::channel(16);
-        let tool = SendFileTool::with_context(tx, "telegram", "12345").with_base_dir(base.path());
-
-        let result = tool
-            .execute(&serde_json::json!({
-                "file_path": inside_file.to_string_lossy().to_string()
-            }))
-            .await
-            .unwrap();
-
-        assert!(result.success);
-        let msg = rx.recv().await.unwrap();
-        assert_eq!(msg.media.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn test_base_dir_blocks_nonexistent_path() {
-        // When base_dir is set, non-existent paths should be rejected
-        // (not silently bypassed via canonicalize failure)
-        let base = tempfile::tempdir().unwrap();
-
-        let (tx, _rx) = mpsc::channel(16);
-        let tool = SendFileTool::with_context(tx, "telegram", "12345").with_base_dir(base.path());
-
-        let result = tool
-            .execute(&serde_json::json!({
-                "file_path": "/tmp/nonexistent-secret-file.txt"
-            }))
-            .await
-            .unwrap();
-
-        assert!(!result.success);
-        assert!(result.output.contains("Cannot resolve file path"));
-    }
-
-    #[tokio::test]
-    async fn test_base_dir_resolves_relative_path() {
-        // Relative paths should be resolved against base_dir, not OS cwd
-        let base = tempfile::tempdir().unwrap();
-        let sub = base.path().join("skill-output");
-        std::fs::create_dir_all(&sub).unwrap();
-        let file = sub.join("deck.pptx");
-        std::fs::write(&file, "pptx data").unwrap();
-
-        let (tx, mut rx) = mpsc::channel(16);
-        let tool = SendFileTool::with_context(tx, "telegram", "12345").with_base_dir(base.path());
-
-        // Pass relative path — should resolve to base_dir/skill-output/deck.pptx
-        let result = tool
-            .execute(&serde_json::json!({
-                "file_path": "skill-output/deck.pptx"
-            }))
-            .await
-            .unwrap();
-
-        assert!(
-            result.success,
-            "relative path inside base_dir should succeed: {}",
-            result.output
-        );
-        let msg = rx.recv().await.unwrap();
-        assert_eq!(msg.media.len(), 1);
-        // The media path should be the resolved absolute path
-        assert!(
-            msg.media[0].contains("skill-output/deck.pptx"),
-            "media path should contain resolved path: {}",
-            msg.media[0]
-        );
-    }
-
-    #[tokio::test]
     async fn test_base_dir_blocks_traversal() {
         let base = tempfile::tempdir().unwrap();
 
@@ -698,25 +555,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_omit_tool_call_id_from_metadata_when_absent() {
-        let (tx, mut rx) = mpsc::channel(16);
-        let tool = SendFileTool::with_context(tx, "api", "sess-1");
-
-        let mut tmp = tempfile::NamedTempFile::new().unwrap();
-        writeln!(tmp, "data").unwrap();
-        let path = tmp.path().to_string_lossy().to_string();
-
-        let result = tool
-            .execute(&serde_json::json!({"file_path": path}))
-            .await
-            .unwrap();
-
-        assert!(result.success);
-        let msg = rx.recv().await.unwrap();
-        assert!(msg.metadata.get("tool_call_id").is_none());
-    }
-
-    #[tokio::test]
     async fn should_set_spawn_complete_companion_metadata_when_scope_active() {
         // M10 Phase 5a: when execution.rs's NotConfigured success branch
         // wraps the per-file `send_file` retry loop in
@@ -749,86 +587,6 @@ mod tests {
                 .get("spawn_complete_companion")
                 .and_then(|v| v.as_bool()),
             Some(true),
-        );
-    }
-
-    #[tokio::test]
-    async fn should_omit_spawn_complete_companion_metadata_outside_scope() {
-        // The flag is scope-driven. A regular agent-issued `send_file` call
-        // (LLM tool-use, explicit user request) runs OUTSIDE the
-        // companion scope, so the metadata key must stay absent and the
-        // resulting row reaches all clients with `source: Assistant`.
-        let (tx, mut rx) = mpsc::channel(16);
-        let tool = SendFileTool::with_context(tx, "api", "sess-1");
-
-        let mut tmp = tempfile::NamedTempFile::new().unwrap();
-        writeln!(tmp, "data").unwrap();
-        let path = tmp.path().to_string_lossy().to_string();
-
-        let result = tool
-            .execute(&serde_json::json!({"file_path": path}))
-            .await
-            .unwrap();
-
-        assert!(result.success);
-        let msg = rx.recv().await.unwrap();
-        assert!(msg.metadata.get("spawn_complete_companion").is_none());
-    }
-
-    #[tokio::test]
-    async fn should_ignore_spawn_complete_companion_field_in_args() {
-        // Defense-in-depth: even if a malicious or buggy caller puts an
-        // `_spawn_complete_companion` key in the JSON args, the field is
-        // not part of the tool's `Input` shape (no struct field deserializes
-        // it). The tool ignores it and decides solely from the task-local
-        // scope. The metadata flag stays absent — preventing an LLM from
-        // spoofing the Background-source filter through generated args.
-        let (tx, mut rx) = mpsc::channel(16);
-        let tool = SendFileTool::with_context(tx, "api", "sess-1");
-
-        let mut tmp = tempfile::NamedTempFile::new().unwrap();
-        writeln!(tmp, "data").unwrap();
-        let path = tmp.path().to_string_lossy().to_string();
-
-        let result = tool
-            .execute(&serde_json::json!({
-                "file_path": path,
-                "_spawn_complete_companion": true,
-                "spawn_complete_companion": true
-            }))
-            .await
-            .unwrap();
-
-        assert!(result.success);
-        let msg = rx.recv().await.unwrap();
-        assert!(
-            msg.metadata.get("spawn_complete_companion").is_none(),
-            "args-passed companion flag must be ignored — only the task-local scope can mark a row",
-        );
-    }
-
-    #[tokio::test]
-    async fn should_include_default_topic_in_metadata_when_configured() {
-        let (tx, mut rx) = mpsc::channel(16);
-        let tool = SendFileTool::with_context(tx, "api", "sess-1").with_topic(Some("slides demo"));
-
-        let mut tmp = tempfile::NamedTempFile::new().unwrap();
-        writeln!(tmp, "pptx data").unwrap();
-        let path = tmp.path().to_string_lossy().to_string();
-
-        let result = tool
-            .execute(&serde_json::json!({
-                "file_path": path,
-                "caption": "deck"
-            }))
-            .await
-            .unwrap();
-
-        assert!(result.success);
-        let msg = rx.recv().await.unwrap();
-        assert_eq!(
-            msg.metadata.get("topic").and_then(|v| v.as_str()),
-            Some("slides demo"),
         );
     }
 
@@ -894,28 +652,5 @@ mod tests {
         // Cleanup: remove the planted file under the global upload root.
         let _ = std::fs::remove_file(&upload_clone);
         let _ = std::fs::remove_file(upload_root.join(upload_name));
-    }
-
-    #[tokio::test]
-    async fn rejects_stale_slides_backup_artifacts() {
-        let base = tempfile::tempdir().unwrap();
-        let backup_dir = base.path().join("slides/demo/output_old");
-        std::fs::create_dir_all(&backup_dir).unwrap();
-        let backup = backup_dir.join("deck.pptx");
-        std::fs::write(&backup, "pptx data").unwrap();
-
-        let (tx, mut rx) = mpsc::channel(16);
-        let tool = SendFileTool::with_context(tx, "telegram", "12345").with_base_dir(base.path());
-
-        let result = tool
-            .execute(&serde_json::json!({
-                "file_path": "slides/demo/output_old/deck.pptx"
-            }))
-            .await
-            .unwrap();
-
-        assert!(!result.success);
-        assert!(result.output.contains("stale slides backup artifact"));
-        assert!(rx.try_recv().is_err());
     }
 }

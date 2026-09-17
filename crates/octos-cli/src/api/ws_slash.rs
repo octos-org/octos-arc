@@ -10,7 +10,7 @@
 //! (`GatewayDispatcher::try_dispatch_session_command` plus
 //! `SessionActor::try_handle_command`) runs BEFORE the LLM round-trip
 //! and short-circuits commands like `/clear`, `/new slides …`, `/new
-//! site …`, `/queue`, `/adaptive`, `/router`, `/status`, `/reset`,
+//! site …`, `/queue`, `/status`, `/reset`,
 //! `/thinking`. Without this interception on the WS path, every such
 //! message reached the LLM and got a conversational response —
 //! breaking the slides + sites scaffolding flow on the SPA entirely.
@@ -21,7 +21,7 @@
 //! the gateway path and the WS turn path call the helper before
 //! constructing the LLM request. On the gateway path the existing
 //! `GatewayDispatcher` chain is left untouched (it's wired into
-//! per-actor mutable state — `adaptive_router`, `queue_mode`, etc. —
+//! per-actor mutable state — `queue_mode`, etc. —
 //! that the WS turn path doesn't carry). On the WS path
 //! [`try_dispatch_slash_command`] runs first; if it returns
 //! `Some(reply)` the WS turn path persists the reply as an assistant
@@ -40,7 +40,7 @@
 //! * `/new <topic>` (no template prefix) — synthesises a "session
 //!   switched" reply. On the WS transport the SPA controls active
 //!   session via URL; this is purely a status acknowledgement.
-//! * `/queue`, `/adaptive`, `/router`, `/status`, `/reset`,
+//! * `/queue`, `/status`, `/reset`,
 //!   `/thinking` — return a "not available on this transport"
 //!   acknowledgement. These per-session-actor commands depend on
 //!   gateway-only state. The point is to INTERCEPT them so they
@@ -143,10 +143,9 @@ pub async fn try_dispatch_slash_command(
             ))
         }
         // Per-session-actor commands. Gateway carries the state these
-        // mutate (queue mode, adaptive router, etc.); the WS turn
-        // path doesn't. Intercept so they don't leak into LLM
-        // context.
-        "/queue" | "/adaptive" | "/router" | "/status" | "/reset" | "/thinking" => Some(format!(
+        // mutate (queue mode, etc.); the WS turn path doesn't.
+        // Intercept so they don't leak into LLM context.
+        "/queue" | "/status" | "/reset" | "/thinking" => Some(format!(
             "`{cmd}` is not yet wired on the web chat transport \
              (gateway-only for now). Issue #1013 follow-up will surface \
              the matching control in the SPA."
@@ -223,67 +222,7 @@ async fn handle_new(ctx: &SlashCommandContext, name_arg: &str) -> String {
     // [`crate::project_templates::site_preset_from_topic`] parser only
     // recognises the singular form, so we hand it the normalized
     // string.
-    let normalized_topic = if name_arg == "sites" {
-        std::borrow::Cow::Borrowed("site")
-    } else if let Some(rest) = name_arg.strip_prefix("sites ") {
-        std::borrow::Cow::Owned(format!("site {rest}"))
-    } else {
-        std::borrow::Cow::Borrowed(name_arg)
-    };
-    let topic: &str = normalized_topic.as_ref();
-
-    if topic == "slides" || topic.starts_with("slides ") {
-        match crate::project_templates::try_activate_slides_template(&ctx.data_dir, topic) {
-            Some(template_reply) => {
-                let project_name = topic.strip_prefix("slides").unwrap_or("").trim();
-                let project_name = if project_name.is_empty() {
-                    "untitled"
-                } else {
-                    project_name
-                };
-                match crate::project_templates::scaffold_slides_project(
-                    &workspace_root,
-                    project_name,
-                ) {
-                    Ok(_) => template_reply,
-                    Err(error) => {
-                        tracing::warn!(
-                            topic = topic,
-                            error = %error,
-                            "ws slash: slides scaffold failed"
-                        );
-                        format!("{template_reply}\n\nSlides git/bootstrap failed: {error}")
-                    }
-                }
-            }
-            None => format!("Switched to session: {name_arg}"),
-        }
-    } else if topic == "site" || topic.starts_with("site ") {
-        let _ = crate::project_templates::try_activate_site_template(&ctx.data_dir, topic);
-        let profile_id = ctx
-            .profile_id
-            .clone()
-            .unwrap_or_else(|| octos_core::MAIN_PROFILE_ID.to_string());
-        match crate::project_templates::scaffold_site_project(
-            &workspace_root,
-            &profile_id,
-            crate::project_templates::preview_session_id(&ctx.session_id),
-            topic,
-            &ctx.data_dir,
-        ) {
-            Ok(metadata) => crate::project_templates::site_creation_reply(&metadata),
-            Err(error) => {
-                tracing::warn!(
-                    topic = topic,
-                    error = %error,
-                    "ws slash: site scaffold failed"
-                );
-                format!("Site scaffold failed: {error}")
-            }
-        }
-    } else {
-        format!("Switched to session: {name_arg}")
-    }
+    format!("Switched to session: {name_arg}")
 }
 
 /// Default workspace root layout when the caller did not thread a
@@ -366,30 +305,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_scaffold_slides_under_user_workspace() {
-        let (ctx, tmp, key) = setup().await;
-        let reply = try_dispatch_slash_command("/new slides demo", &ctx)
-            .await
-            .unwrap();
-        assert!(reply.contains("demo"));
-
-        let encoded = octos_bus::session::encode_path_component(key.base_key());
-        let project = tmp
-            .path()
-            .join("users")
-            .join(&encoded)
-            .join("workspace")
-            .join("slides")
-            .join("demo");
-        assert!(
-            project.is_dir(),
-            "expected scaffold at {}",
-            project.display()
-        );
-        assert!(project.join("script.js").is_file());
-    }
-
-    #[tokio::test]
     async fn should_return_unknown_help_for_garbage_slash() {
         let (ctx, _tmp, _key) = setup().await;
         let reply = try_dispatch_slash_command("/blorpus quack", &ctx)
@@ -402,14 +317,7 @@ mod tests {
     #[tokio::test]
     async fn should_intercept_session_actor_style_commands() {
         let (ctx, _tmp, _key) = setup().await;
-        for cmd in [
-            "/queue",
-            "/adaptive",
-            "/router",
-            "/status",
-            "/reset",
-            "/thinking",
-        ] {
+        for cmd in ["/queue", "/status", "/reset", "/thinking"] {
             assert!(
                 try_dispatch_slash_command(cmd, &ctx).await.is_some(),
                 "{cmd} must be intercepted"

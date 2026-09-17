@@ -1,98 +1,40 @@
 //! CLI commands for octos.
 
-mod account;
-pub mod acp;
-mod admin;
-mod auth;
+pub mod auth;
 mod cache;
-mod channels;
 pub mod chat;
-mod clean;
-mod completions;
 mod config;
-mod cron;
-mod docs;
-mod doctor;
 pub mod gateway;
-mod goal;
 
-mod inbox;
-
-mod init;
-mod ledger;
-pub mod mcp;
-pub mod mcp_serve;
-mod memory;
-pub(crate) mod obs_resolve;
-mod office;
+#[cfg(all(test, feature = "api"))]
+mod agent_factory;
 #[cfg(feature = "api")]
 pub(crate) mod oup_client;
 #[cfg(feature = "api")]
-pub(crate) mod oup_peers;
 #[cfg(feature = "api")]
 pub(crate) mod oup_session;
 #[cfg(feature = "api")]
 mod oup_text;
 #[cfg_attr(test, allow(unused_imports))]
-mod peer;
-mod profile;
 #[cfg(feature = "api")]
 mod serve;
 pub mod serve_console;
 pub mod skills;
-mod status;
-mod steer;
-mod update;
-
-use std::path::PathBuf;
+pub use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use eyre::Result;
 
-pub use account::AccountCommand;
-pub use acp::AcpCommand;
-pub use octos_arc::ArcCommand;
-// Test-support seam for the `octos acp` bridge: the end-to-end integration test
-// in `crates/octos-cli/tests/acp_integration.rs` drives the real ACP handler
-// wiring with a `MockLlm`-backed agent over an in-process transport. Hidden
-// from docs; not part of the stable surface.
-#[doc(hidden)]
-#[cfg(feature = "api")]
-pub use acp::{OctosAcpAgentTransport, TestAgentFactory};
-pub use admin::AdminCommand;
 pub use auth::AuthCommand;
 pub use cache::CacheCommand;
-pub use channels::ChannelsCommand;
 pub use chat::ChatCommand;
-pub use clean::CleanCommand;
-pub use completions::CompletionsCommand;
 pub use config::ConfigCommand;
-pub use cron::CronCommand;
-pub use docs::DocsCommand;
-pub use doctor::DoctorCommand;
-pub use gateway::GatewayCommand;
-pub use goal::GoalCommand;
+pub use octos_arc::ArcCommand;
 
-pub use inbox::InboxCommand;
-
-pub use init::InitCommand;
-pub use ledger::LedgerCommand;
-pub use mcp::McpCommand;
-pub use mcp_serve::McpServeCommand;
-pub use memory::MemoryCommand;
-pub(crate) use obs_resolve as obs;
-pub use office::OfficeCommand;
 #[cfg_attr(not(test), allow(unused_imports))]
-pub use peer::PeerCommand;
-#[cfg(test)]
-pub(crate) use peer::peer_list_for_test;
-pub use profile::ProfileCommand;
 #[cfg(feature = "api")]
 pub use serve::ServeCommand;
 pub use skills::SkillsCommand;
-pub use status::StatusCommand;
-pub use steer::SteerCommand;
-pub use update::UpdateCommand;
 
 /// octos: Rust-native coding agent orchestration.
 #[derive(Debug, Parser)]
@@ -128,16 +70,8 @@ fn version_string() -> &'static str {
 /// Available commands.
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Manage sub-accounts under profiles.
-    Account(AccountCommand),
-    /// Run as an Agent Client Protocol (ACP) agent over stdio (Zed, etc.).
-    Acp(AcpCommand),
-    /// Admin commands for tenant and tunnel management.
-    Admin(AdminCommand),
     /// Manage authentication for LLM providers.
     Auth(AuthCommand),
-    /// Manage messaging channels.
-    Channels(ChannelsCommand),
     /// Interactive multi-turn chat with an agent.
     Chat(ChatCommand),
     Arc(ArcCommand),
@@ -145,81 +79,27 @@ pub enum Command {
     Cache(CacheCommand),
     /// Inspect the saved startup config (`show` / `path`); read-only.
     Config(ConfigCommand),
-    /// Manage scheduled cron jobs.
-    Cron(CronCommand),
-    /// Run local environment diagnostics (flutter-doctor style).
-    Doctor(DoctorCommand),
-    /// Generate documentation for tools and providers.
-    Docs(DocsCommand),
-    /// Initialize a new .octos configuration.
-    Init(InitCommand),
-    /// Query inbox notes file paths (read-only; OLP observability).
-    Inbox(InboxCommand),
-    /// Manage OAuth-authenticated MCP servers (`login`/`logout`).
-    Mcp(McpCommand),
-    /// Inspect and drive the memory-refresh pipeline.
-    Memory(MemoryCommand),
-    /// Portable profile export (QR) and payload inspection.
-    Profile(ProfileCommand),
-    /// Run as an MCP server so outer orchestrators can invoke octos as a sub-agent.
-    McpServe(McpServeCommand),
-    /// Start the REST API server (requires --features api).
+    /// Start the stdio JSON-RPC server (requires --features api).
     #[cfg(feature = "api")]
     Serve(ServeCommand),
+
     /// Manage agent skills (list, install, remove).
     Skills(SkillsCommand),
-    /// Show system status.
-    Status(StatusCommand),
-    /// Queue an external-reviewer steer into a session (OLP control).
-    Steer(SteerCommand),
-    /// Check for a newer octos release (`--check`); self-update is Stage 3.
-    Update(UpdateCommand),
-    /// Run as a persistent messaging gateway.
-    Gateway(GatewayCommand),
-
-    /// Operator goal transitions (reopen a blocked/paused goal, archive a goal terminally).
-    Goal(GoalCommand),
-    /// Read-only goal-ledger tail (findings/escalations/decisions; OLP).
-    Ledger(LedgerCommand),
-
-    /// Clean up stale state and cache files.
-    Clean(CleanCommand),
-    /// Generate shell completions.
-    Completions(CompletionsCommand),
-    /// Office file manipulation (extract, unpack, pack, clean, add-slide, validate).
-    Office(OfficeCommand),
-    /// Read-only peer listing (direct peers/ dir read; OLP observability).
-    Peer(PeerCommand),
 }
 
 /// Whether stdout is reserved for protocol or assistant output, so tracing
 /// must use stderr instead of interleaving log lines with that output.
 ///
-/// * `acp` speaks ACP JSON-RPC on stdout (one stray log line → a `-32700`
-///   parse error at strict clients like Zed);
-/// * `mcp-serve --transport stdio` speaks MCP JSON-RPC on stdout;
-/// * `profile` emits payloads meant for `$(...)` capture / piping;
 /// * `chat` streams assistant text (or one `--json` result) on stdout;
-/// * `doctor --json` emits the diagnostics support bundle on stdout — the
-///   config-parse check loads the real config, whose tracing INFO lines
-///   ("no config.json found, using defaults") would otherwise corrupt the
-///   JSON.
+/// * `arc` drives `chat` sub-processes and captures their stdout.
 ///
 /// Every other command keeps its historical stdout console routing untouched.
 pub fn reserve_stdout(command: &Command) -> bool {
     match command {
-        Command::Acp(_)
-        | Command::Profile(_)
-        | Command::McpServe(_)
-        | Command::Chat(_)
-        | Command::Arc(_) => true,
-        // `inbox path` is a machine-readable single path.
-        Command::Inbox(_) => true,
-        Command::Doctor(cmd) => cmd.json,
+        Command::Chat(_) | Command::Arc(_) => true,
         // `octos cache <sub> --json` emits a machine-readable object meant
-        // for scripting / the outer loop's gate check — same rule as
-        // `doctor --json`. Without `--json` the human table stays on the
-        // historical stdout routing.
+        // for scripting / the outer loop's gate check. Without `--json` the
+        // human table stays on the historical stdout routing.
         Command::Cache(cmd) => cmd.emits_json(),
         _ => false,
     }
@@ -270,84 +150,6 @@ pub(crate) fn load_prompt(name: &str, compiled_default: &str) -> String {
         }
     }
     compiled_default.to_string()
-}
-
-/// Build a [`PersistentCredentialPool`](octos_llm::PersistentCredentialPool)
-/// from top-level `CredentialPoolConfig` (F-005). Returns `None` when
-/// the config is absent, has no declared `credential_ids`, or when
-/// opening the redb file fails — the caller falls back to the legacy
-/// single-credential flow in that case. Errors are logged but never
-/// fatal so a broken pool configuration cannot brick `octos serve`.
-#[cfg(feature = "api")]
-pub(crate) fn build_credential_pool(
-    config: Option<&crate::config::CredentialPoolConfig>,
-    data_dir: &std::path::Path,
-) -> Option<std::sync::Arc<octos_llm::PersistentCredentialPool>> {
-    let cfg = config?;
-    if cfg.credential_ids.is_empty() {
-        tracing::debug!("credential pool config present but `credential_ids` empty; skipping");
-        return None;
-    }
-
-    let strategy = match cfg.strategy.as_str() {
-        "fill_first" => octos_llm::RotationStrategy::FillFirst,
-        "round_robin" => octos_llm::RotationStrategy::RoundRobin,
-        "random" => octos_llm::RotationStrategy::Random,
-        "least_used" => octos_llm::RotationStrategy::LeastUsed,
-        other => {
-            tracing::warn!(
-                strategy = other,
-                "unknown credential pool strategy; defaulting to round_robin"
-            );
-            octos_llm::RotationStrategy::RoundRobin
-        }
-    };
-
-    let credentials: Vec<octos_llm::Credential> = cfg
-        .credential_ids
-        .iter()
-        .map(|id| {
-            // Env var lookup: <ID>_API_KEY uppercased. Missing env →
-            // empty secret. The provider adapter will surface the
-            // explicit auth error on first use rather than at startup.
-            let env_var = format!("{}_API_KEY", id.replace('-', "_").to_uppercase());
-            let secret = std::env::var(&env_var).unwrap_or_default();
-            octos_llm::Credential::new(id.clone(), secret)
-        })
-        .collect();
-
-    let path = cfg
-        .state_path
-        .as_ref()
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| data_dir.join(octos_llm::DEFAULT_CREDENTIAL_POOL_DB_FILENAME));
-
-    let mut options =
-        octos_llm::PersistentCredentialPoolOptions::new(cfg.name.clone(), credentials)
-            .with_strategy(strategy);
-    if let Some(ms) = cfg.default_cooldown_ms {
-        options = options.with_default_cooldown_us(ms.saturating_mul(1_000));
-    }
-
-    match octos_llm::PersistentCredentialPool::open(&path, options) {
-        Ok(pool) => {
-            tracing::info!(
-                path = %path.display(),
-                name = %cfg.name,
-                strategy = %cfg.strategy,
-                "credential pool opened"
-            );
-            Some(std::sync::Arc::new(pool))
-        }
-        Err(error) => {
-            tracing::warn!(
-                path = %path.display(),
-                error = %error,
-                "failed to open credential pool; falling back to single-credential flow"
-            );
-            None
-        }
-    }
 }
 
 /// Load optional bootstrap/personality files from the .octos/ directory.
@@ -406,26 +208,10 @@ pub(crate) fn load_profile_prompt_template(
 impl Executable for Command {
     fn execute(self) -> Result<()> {
         match self {
-            Self::Account(cmd) => cmd.execute(),
-            Self::Acp(cmd) => cmd.execute(),
-            Self::Admin(cmd) => cmd.execute(),
             Self::Auth(cmd) => cmd.execute(),
-            Self::Channels(cmd) => cmd.execute(),
+            Self::Skills(cmd) => cmd.execute(),
             Self::Chat(cmd) => cmd.execute(),
             Self::Arc(cmd) => {
-                match cmd.subcommand {
-                    Some(octos_arc::ArcSubcommand::Run(run)) => {
-                        let code = octos_arc::execute_run(run)?;
-                        if code != 0 {
-                            std::process::exit(code);
-                        }
-                        return Ok(());
-                    }
-                    Some(octos_arc::ArcSubcommand::DenyProtected(deny)) => {
-                        std::process::exit(octos_arc::execute_deny_protected(deny));
-                    }
-                    None => {}
-                }
                 eyre::ensure!(
                     cfg!(feature = "api") || cmd.prepare_only,
                     "ARC coding requires an Octos build with the api feature"
@@ -445,29 +231,8 @@ impl Executable for Command {
             }
             Self::Cache(cmd) => cmd.execute(),
             Self::Config(cmd) => cmd.execute(),
-            Self::Cron(cmd) => cmd.execute(),
-            Self::Doctor(cmd) => cmd.execute(),
-            Self::Docs(cmd) => cmd.execute(),
-            Self::Init(cmd) => cmd.execute(),
-            Self::Inbox(cmd) => cmd.execute(),
-            Self::Mcp(cmd) => cmd.execute(),
-            Self::Profile(cmd) => cmd.execute(),
-            Self::McpServe(cmd) => cmd.execute(),
             #[cfg(feature = "api")]
             Self::Serve(cmd) => cmd.execute(),
-            Self::Skills(cmd) => cmd.execute(),
-            Self::Status(cmd) => cmd.execute(),
-            Self::Steer(cmd) => cmd.execute(),
-            Self::Update(cmd) => cmd.execute(),
-            Self::Gateway(cmd) => cmd.execute(),
-            Self::Goal(cmd) => cmd.execute(),
-            Self::Ledger(cmd) => cmd.execute(),
-            Self::Clean(cmd) => cmd.execute(),
-            Self::Memory(cmd) => cmd.execute(),
-            Self::Completions(cmd) => cmd.execute(),
-            Self::Office(cmd) => cmd.execute(),
-
-            Self::Peer(cmd) => cmd.execute(),
         }
     }
 }
@@ -492,35 +257,5 @@ mod reserve_stdout_tests {
         let args =
             Args::try_parse_from(["octos", "chat", "--message", "hi"]).expect("`chat` must parse");
         assert!(reserve_stdout(&args.command));
-    }
-
-    #[test]
-    fn should_reserve_stdout_only_for_doctor_json() {
-        // `octos doctor --json` emits the support bundle on stdout; the
-        // config-parse check's tracing INFO lines must route to stderr so the
-        // JSON stays parseable. Plain `octos doctor` keeps stdout logging.
-        let json = Args::try_parse_from(["octos", "doctor", "--json"])
-            .expect("`doctor --json` must parse");
-        assert!(reserve_stdout(&json.command));
-        let human = Args::try_parse_from(["octos", "doctor"]).expect("`doctor` must parse");
-        assert!(!reserve_stdout(&human.command));
-    }
-
-    #[test]
-    fn should_not_reserve_stdout_for_ordinary_command() {
-        // A non-protocol command (e.g. `status`) is unchanged by the chat-json
-        // extension — Serve, Status, etc. never reserve stdout.
-        let args = Args::try_parse_from(["octos", "status"]).expect("`status` must parse");
-        assert!(!reserve_stdout(&args.command));
-    }
-
-    #[test]
-    fn should_reserve_stdout_for_stdio_protocol_commands() {
-        // Pre-existing reservations must remain: acp / mcp-serve speak a
-        // machine protocol on stdout.
-        let acp = Args::try_parse_from(["octos", "acp"]).expect("`acp` must parse");
-        assert!(reserve_stdout(&acp.command));
-        let mcp = Args::try_parse_from(["octos", "mcp-serve"]).expect("`mcp-serve` must parse");
-        assert!(reserve_stdout(&mcp.command));
     }
 }

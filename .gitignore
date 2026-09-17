@@ -1,10 +1,7 @@
 # Build artifacts
 /target/
 /dist/
-/scripts/octos-bundle-*.tar.gz
 **/*.rs.bk
-/book/public/
-/book-zh/public/
 
 # IDE
 .idea/
@@ -29,144 +26,28 @@ Thumbs.db
 # Node
 node_modules/
 
-# Playwright/tmux test artifacts
-e2e/test-results*/
-
-# Dashboard build output.
-#
-# Policy: ephemeral bundle — the compiled dashboard lives in a release binary
-# via `rust-embed` (baked in at compile time) and is produced on demand by
-# `scripts/build-dashboard.sh`. It is NOT committed to the repo, to avoid
-# per-PR noise from minified hash-named files and merge conflicts on
-# rebuilt assets. CI + `scripts/install.sh` (via release tarball) + any
-# source-clone build are responsible for regenerating it.
-crates/octos-cli/static/admin/
-
-# Swarm-app build output
-crates/octos-cli/static/swarm/
-
-# octos-web build output (scripts/build-web-app.sh; embedded at /app)
-crates/octos-cli/static/web/
-
 # Environment
 .env
 .env.local
 .envrc
 
-# Deploy script (contains credentials)
-scripts/deploy.sh
-
 # Internal working docs and per-developer notes — never commit to PR history.
 # These directories frequently contain local absolute paths (e.g. /Users/...)
-# and other operator-specific context. Anything tracked here in upstream is
-# fine; this just prevents accidental new commits via `git add -f`.
-docs/superpowers/
+# and other operator-specific context.
 .project_notes/
-test_a2.md
 
-# Agent research output
+# Agent research output: ignore all markdown by default, whitelist tracked docs.
 *.md
-!README.md
-!README-zh.md
-!ORG-README.md
 !CLAUDE.md
-!CHANGELOG.md
+!ARC_BASELINE.md
 !.octos/AGENTS.md
-!specs/task-issue-2236-fenced-peer-build-cache.spec.md
-# ARC harness prompt templates are data read at runtime (and compiled in as defaults)
-!arc/prompts/*.md
-!specs/task-issue-2237-goal-create-admits-archived.spec.md
-!specs/task-olp-obs-p2-producers.spec.md
-!specs/task-approval-post-tool-continuation.spec.md
-!specs/kv-cache-friendly-compaction.spec.md
-!specs/task-compaction-instruction-priority.spec.md
-# User-facing docs only (internal analysis/audits stay local)
-!docs/user-guide.md
-!docs/user-guide-zh.md
-!workstreams/
-!workstreams/open-issue-closure-contract-2026-05-23.md
-!docs/app-skill-dev-guide.md
-!docs/app-skill-dev-guide-zh.md
-!docs/TESTING.md
-!docs/ARCHITECTURE.md
-!docs/OCTOS_RUNTIME_PHASE2.md
-!docs/OCTOS_RUNTIME_PHASE3.md
-!docs/OCTOS_RUNTIME_PHASE3_CONTRACT.md
-!docs/OCTOS_RUNTIME_PHASE3_KICKOFF.md
-!docs/OCTOS_RELEASE_CONTRACT_2026-04-17.md
-!docs/OCTOS_HARNESS_MASTER_PLAN.md
-!docs/OCTOS_HARNESS_DEVELOPER_INTERFACE.md
-!docs/OCTOS_ROBOTICS_ARCHITECTURE.md
-!docs/OCTOS_ROBOTICS_FAMILY.md
-!docs/OCTOS_ROBOTICS_CONTRACTS.md
-!docs/OCTOS_ROBOTICS_PR270_DELIVERY.md
-!docs/OCTOS_HARNESS_DEVELOPER_GUIDE.md
-!docs/OCTOS_HARNESS_ABI_VERSIONING.md
-!docs/OCTOS_HARNESS_M4_WORKSTREAMS_2026-04-21.md
-!docs/OCTOS_HARNESS_M4_1A_LIVE_GATE.md
-!docs/OCTOS_SWARM_M7_LIVE_GATE.md
-!docs/OCTOS_HARNESS_SKILL_COMPAT.md
-!docs/SANDBOX.md
-!docs/SECURITY_ARCHITECTURE.md
-!docs/OCTOS_ROBOTICS_PR270_RP06_NOTE.md
-!docs/OCTOS_FAILURE_MODES_INVENTORY.md
-!docs/m8-runtime-parity-prd.md
-!docs/m8-runtime-contract.md
-!docs/m8-runtime-migration-runbook.md
-!docs/OCTOS_HARNESS_ENGINEERING_REQUIREMENTS_M6_M9.md
-!docs/OCTOS_HARNESS_AUDIT_M6_M9_2026-04-30.md
-!docs/HANDOFF_BUILD_AND_E2E_SOAK_2026-04-30.md
-!docs/M9-FIX-11-16-SUPERVISION-PLAN.md
-!docs/M9-LEDGER-DURABILITY-ADR.md
-!docs/M9-ALPHA-SOLE-TRANSPORT-ADR.md
-!docs/M9-GAMMA-SERVER-PROJECTION-ADR.md
-!docs/M11-PROFILE-SESSION-RUNTIME-ADR.md
-!docs/ROBRIX-PHASE4-APPROVAL-FLOW-ADR.md
-!docs/SKILL_DEPLOYMENT.md
-!workstreams/M11-runtime-unification.md
-!workstreams/M11-SOAK-TESTS.md
-!workstreams/robrix-integration.md
-# #2073 — e2e/tests/m15-agent-orchestrator-contract.spec.ts reads this
-# contract doc with fs.readFileSync. It was never on this allow-list, so
-# CI could not see it and both specs died with ENOENT while looking like
-# contract coverage.
-!workstreams/M15-agent-goal-loop-autonomy.md
-# Canonical product/engineering spec docs under api/. The UI Protocol v1
-# spec (api/OCTOS_UI_PROTOCOL_V1_SPEC_*.md) was tracked manually before
-# this rule existed; the server/app/tui feature-requirement specs added
-# 2026-04-30 follow the same convention.
 !api/*.md
-# UI Protocol change requests (UPCR) — required by check-ui-protocol-upcr.sh
-# whenever protocol-visible code changes; listed in
-# api/OCTOS_UI_PROTOCOL_V1_SPEC_2026-04-24.md.
-!docs/OCTOS_UI_PROTOCOL_CHANGE_REQUEST_TEMPLATE.md
-!docs/OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_*.md
-# Architecture Decision Records — landed under docs/adr/ to keep the
-# top-level docs/ flat for one-off design notes. Allowlist the whole
-# directory so future ADRs don't need per-file edits.
-!docs/adr/*.md
-
-# mdBook documentation site (EN + ZH)
-!book/book.toml
-!book/src/**/*.md
-!book/theme/*.css
-!book/theme/*.hbs
-!book-zh/book.toml
-!book-zh/src/**/*.md
-!book-zh/theme/*.css
-!book-zh/theme/*.hbs
 !crates/octos-agent/skills/**/SKILL.md
-!crates/app-skills/**/SKILL.md
-!crates/platform-skills/**/SKILL.md
 # Companion docs/ markdown for in-tree skill manifest discovery hints
 # (split out of SKILL.md when the body exceeds the ≤80-line discovery cap).
 !crates/octos-agent/skills/**/docs/*.md
-!crates/app-skills/**/docs/*.md
-!crates/platform-skills/**/docs/*.md
 # Crate-level developer documentation (SDK contracts, protocol specs)
 !crates/octos-plugin/docs/*.md
-# Crate test fixtures (sample reports, fake API payloads)
-!crates/app-skills/**/tests/fixtures/*.md
 # Harness M4.4 compat-gate fixture (SKILL.md + manifest.json must be tracked)
 !e2e/fixtures/compat-test-skill/SKILL.md
 !e2e/fixtures/compat-test-skill/manifest.json
@@ -185,8 +66,9 @@ tsconfig.tsbuildinfo
 /audit/
 
 # Agent/dev scratch space — soak runs, driver scripts, issue drafts, captured
-# transcripts. Local only, and large (a single peer-goal soak leaves tens of MB
-# of session ledgers and server logs). Ignored because an accidental
+# transcripts. Local only, and large. Ignored because an accidental
 # `git add -A` here otherwise sweeps hundreds of artifact files — and any
 # workspace dirs the soaks `git init` — into a commit.
 /scratchpad/
+.claude/
+/.zcode/

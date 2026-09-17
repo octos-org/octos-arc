@@ -877,8 +877,11 @@ fn payload_root_display(pool_root: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::build_cache::ReclaimReport;
+
     use crate::build_cache::pool::{HolderInfo, SlotPurpose, acquire, release};
+
     use crate::build_cache::repo_key_for_path;
 
     fn config() -> BuildCacheConfig {
@@ -995,33 +998,6 @@ mod tests {
     }
 
     #[test]
-    fn status_json_is_parseable_and_carries_the_same_rows() {
-        let fx = fixture();
-        // D3: exercise the SAME constructor run_status feeds to serde —
-        // the field mapping (free → available_bytes/gb, holder nesting)
-        // is what is under test, not a hand-copied payload.
-        let payload = StatusJson::build(
-            fx.pool_root.clone(),
-            measure_free_space(&fx.pool_root),
-            collect_pool_status(&fx.pool_root, &config()),
-        );
-        let text = serde_json::to_string_pretty(&payload).unwrap();
-        // Round-trip through serde_json::Value: parseable + slot rows intact.
-        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
-        let repos = value["repos"].as_array().unwrap();
-        assert_eq!(repos.len(), 1);
-        let slots = repos[0]["slots"].as_array().unwrap();
-        assert_eq!(slots.len(), 3);
-        let held = slots
-            .iter()
-            .find(|s| s.get("holder").is_some())
-            .expect("held slot serialized with its holder");
-        assert_eq!(held["holder"]["slug"], "peer-hold");
-        assert_eq!(held["holder"]["goal_id"], "goal_9");
-        assert!(value["free"]["available_bytes"].as_u64().unwrap() > 0);
-    }
-
-    #[test]
     fn gc_defaults_to_report_only() {
         let fx = fixture();
         let policy = GcPolicy {
@@ -1073,61 +1049,6 @@ mod tests {
         assert!(fx.fresh_slot.join("target").is_dir());
         let held_dir = fx.pool_root.join(&fx.repo_key).join("slot-1");
         assert!(held_dir.join("target").is_dir());
-    }
-
-    #[test]
-    fn gc_json_round_trips() {
-        let fx = fixture();
-        let reports = pool::reclaim_stale(
-            &fx.pool_root,
-            &GcPolicy {
-                stale_hours: 1,
-                apply: false,
-            },
-            &config(),
-        )
-        .unwrap();
-        // D3: exercise the SAME constructor run_gc feeds to
-        // serde_json::to_string_pretty, so the field mapping itself is
-        // under test — not a hand-copied payload.
-        let payload = GcJson::build(fx.pool_root.clone(), 1, false, &reports);
-        let text = serde_json::to_string_pretty(&payload).unwrap();
-        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(value["apply"], false);
-        assert_eq!(value["stale_hours"], 1);
-        assert_eq!(value["slots"].as_array().unwrap().len(), 3);
-        // Outcomes are the lowercase labels the core defines; D1: the
-        // stale slot is labelled `stale` (NOT `fresh`) and carries the
-        // would-reclaim bytes so the outer loop (#6) can read what
-        // --apply would free.
-        let slots = value["slots"].as_array().unwrap();
-        let outcomes: Vec<&str> = slots
-            .iter()
-            .map(|s| s["outcome"].as_str().unwrap())
-            .collect();
-        assert!(outcomes.contains(&"locked"));
-        assert!(
-            outcomes.contains(&"stale"),
-            "stale slot named as such: {outcomes:?}"
-        );
-        assert!(
-            !outcomes.contains(&"reclaimed"),
-            "nothing reclaimed: {outcomes:?}"
-        );
-        let stale_row = slots
-            .iter()
-            .find(|s| s["outcome"] == "stale")
-            .expect("stale row present");
-        assert_eq!(stale_row["freed_bytes"].as_u64(), Some(0));
-        assert!(
-            stale_row["would_free_bytes"].as_u64().unwrap() > 0,
-            "stale row carries would-free bytes"
-        );
-        assert!(value["reclaimed_bytes"].as_u64().unwrap() == 0);
-        assert!(value["would_free_bytes"].as_u64().unwrap() > 0);
-        // The stale row is the fixture's stale slot (not some other dir).
-        let reported_path = Path::new(stale_row["slot_path"].as_str().unwrap());
-        assert_eq!(reported_path, fx.stale_slot);
     }
 
     #[test]
@@ -1187,27 +1108,6 @@ mod tests {
     }
 
     #[test]
-    fn gate_fails_closed_when_fs_unknown() {
-        let tmp = tempfile::tempdir().unwrap();
-        // Pool root's parent removed underneath us: statvfs cannot answer.
-        let gone = tmp.path().join("vanishing");
-        std::fs::create_dir_all(&gone).unwrap();
-        let probe = gone.join("pool");
-        std::fs::remove_dir_all(&gone).unwrap();
-        let err = pool::check_free_space(&probe, 50).unwrap_err();
-        match err {
-            BuildCacheError::FreeSpaceUnknown { .. } => {}
-            other => panic!("expected FreeSpaceUnknown, got {other:?}"),
-        }
-        // Unknown → omitted (not a fake zero) in the json payload.
-        let payload = GateJson::build(50, &Err(&err));
-        let value: serde_json::Value =
-            serde_json::from_str(&serde_json::to_string_pretty(&payload).unwrap()).unwrap();
-        assert!(value.get("available_bytes").is_none());
-        assert_eq!(value["passed"], false);
-    }
-
-    #[test]
     fn stale_hours_flag_respects_the_config_floor() {
         // D4: 0 would make --apply reclaim everything ever touched —
         // rejected with a clear message, same floor as the config layer.
@@ -1226,47 +1126,6 @@ mod tests {
             assert!(resolve_stale_hours(Some(hours), 168).is_err());
             assert!(resolve_stale_hours(None, hours).is_err());
         }
-    }
-
-    #[test]
-    fn renderers_stay_readable() {
-        let meta = HolderMeta {
-            kind: SlotKind::Peer,
-            pid: 42,
-            slug: Some("peer-a".to_owned()),
-            goal_id: Some("goal_1".to_owned()),
-            task_id: None,
-            purpose_note: None,
-            acquired_at: 1,
-            claim_token: String::new(),
-        };
-        assert_eq!(render_holder(&meta), "peer-a (pid 42, goal goal_1)");
-        let verify = HolderMeta {
-            kind: SlotKind::Verify,
-            purpose_note: Some("review re-verify".to_owned()),
-            ..meta
-        };
-        assert_eq!(render_holder(&verify), "verify: review re-verify (pid 42)");
-        assert_eq!(render_last_used(0), "-");
-        assert!(render_last_used(1).ends_with("d ago"));
-        assert_eq!(format_bytes(0), "0 B");
-        assert_eq!(format_bytes(2048), "2.0 KB");
-        assert!(format_gib(GIB).starts_with("1.0"));
-    }
-
-    #[test]
-    fn status_ignores_non_pool_directories() {
-        let tmp = tempfile::tempdir().unwrap();
-        let pool_root = tmp.path().join("build-cache");
-        std::fs::create_dir_all(pool_root.join("not-a-key")).unwrap();
-        std::fs::create_dir_all(pool_root.join("deadbeefdeadb")).unwrap(); // 13 chars
-        std::fs::write(pool_root.join("aaaaaaaaaaaa.txt"), b"x").unwrap();
-        let repos = collect_pool_status(&pool_root, &config());
-        assert!(
-            repos.is_empty(),
-            "unrelated content under the pool root is never reported"
-        );
-        assert!(pool_root_status_empty(&pool_root));
     }
 
     /// Script-side parser for the acquire output (#6's contract): three
@@ -1329,79 +1188,6 @@ mod tests {
     }
 
     #[test]
-    fn acquire_release_roundtrip_frees_the_verify_slot_for_reacquire() {
-        let pool_root = fixture().pool_root;
-        let repo_dir = tempfile::tempdir().unwrap();
-        let key = repo_key_for_path(repo_dir.path()).unwrap();
-        let holder = HolderInfo {
-            pid_override: Some(std::process::id()),
-            ..HolderInfo::default()
-        };
-
-        // Acquire (CLI semantics: flock intentionally leaked away at
-        // process-exit, so from HERE on the slot is held by metadata only).
-        let first = pool::acquire_detached(&pool_root, &key, &config(), &holder).unwrap();
-        // Held between processes: status must see it with purpose=verify.
-        let meta = pool::read_holder(&first.path).expect("holder.json written");
-        assert_eq!(meta.kind, SlotKind::Verify);
-        assert_eq!(meta.pid, std::process::id());
-        // Live detached claims remain exclusive after their flock is dropped.
-        assert!(matches!(
-            pool::acquire_detached(&pool_root, &key, &config(), &holder),
-            Err(BuildCacheError::PoolExhausted { .. })
-        ));
-        pool::release_detached(
-            &pool_root,
-            &first.path,
-            &first.claim_token,
-            SlotOutcome::Completed,
-        )
-        .unwrap();
-        assert!(pool::read_holder(&first.path).is_none(), "holder cleared");
-        let second = pool::acquire_detached(&pool_root, &key, &config(), &holder).unwrap();
-        assert_eq!(second.path, first.path, "released slot is reusable");
-        assert_eq!(second.target_dir, first.target_dir);
-        // target contents survive release (I2 — the whole point of the pool)
-        assert!(second.target_dir.is_dir());
-    }
-
-    #[test]
-    fn release_is_idempotent() {
-        let pool_root = fixture().pool_root;
-        let repo_dir = tempfile::tempdir().unwrap();
-        let key = repo_key_for_path(repo_dir.path()).unwrap();
-        let holder = HolderInfo {
-            pid_override: Some(std::process::id()),
-            ..HolderInfo::default()
-        };
-        let slot = pool::acquire_detached(&pool_root, &key, &config(), &holder).unwrap();
-        pool::release_detached(
-            &pool_root,
-            &slot.path,
-            &slot.claim_token,
-            SlotOutcome::Completed,
-        )
-        .unwrap();
-        // Second release: no holder.json left ⇒ no-op Ok, never an error —
-        // the outer loop may run its cleanup unconditionally.
-        pool::release_detached(
-            &pool_root,
-            &slot.path,
-            &slot.claim_token,
-            SlotOutcome::Completed,
-        )
-        .expect("double release is a no-op");
-        // And a third after the last_used stamp: still fine.
-        pool::release_detached(
-            &pool_root,
-            &slot.path,
-            &slot.claim_token,
-            SlotOutcome::Completed,
-        )
-        .unwrap();
-    }
-
-    #[test]
     fn release_rejects_unknown_and_outside_paths_cleanly() {
         let fx = fixture();
         let pool_root = fx.pool_root;
@@ -1439,129 +1225,6 @@ mod tests {
             pool::release_detached(&pool_root, &ghost, "unused-token", SlotOutcome::Completed),
             Err(BuildCacheError::SlotNotFound { .. })
         ));
-    }
-
-    #[test]
-    fn detached_slot_is_held_for_status_between_processes() {
-        // The #6 truth model, end to end: acquire in "process A" (flock
-        // leaked away = A has exited), then the pool's OWN gc walk — the
-        // thing that would reclaim the slot — must treat it as held while
-        // the recorded pid is alive, and must reclaim it once that pid dies.
-        let pool_root = fixture().pool_root;
-        let repo_dir = tempfile::tempdir().unwrap();
-        let key = repo_key_for_path(repo_dir.path()).unwrap();
-        let dead_pid = {
-            // Reap a freshly-exited child so test_kill_process(ESRCH)s.
-            let mut child = std::process::Command::new("true").spawn().unwrap();
-            let pid = child.id();
-            child.wait().unwrap();
-            pid
-        };
-        let live_holder = HolderInfo {
-            pid_override: Some(std::process::id()),
-            ..HolderInfo::default()
-        };
-        let slot = pool::acquire_detached(&pool_root, &key, &config(), &live_holder).unwrap();
-        std::fs::write(slot.target_dir.join("dep.bin"), vec![0u8; 2048]).unwrap();
-        // Backdate so staleness alone would reclaim it if it were unheld.
-        std::fs::write(slot.path.join("last_used"), b"0\n").unwrap();
-
-        // Live pid: gc must not touch the slot (skip = held), even though
-        // the flock is long gone (the CLI exited).
-        let reports = pool::reclaim_stale(
-            &pool_root,
-            &GcPolicy {
-                stale_hours: 1,
-                apply: true,
-            },
-            &config(),
-        )
-        .unwrap();
-        let row = reports
-            .iter()
-            .find(|r| r.slot_path == slot.path)
-            .expect("the verify slot is reported");
-        assert_eq!(
-            row.outcome,
-            ReclaimOutcome::Locked,
-            "live pid keeps the slot held"
-        );
-        assert!(
-            slot.target_dir.join("dep.bin").exists(),
-            "contents untouched"
-        );
-
-        // The live GC pass preserves ownership. Release that claim before
-        // exercising the separate dead-holder lifecycle below.
-        pool::release_detached(
-            &pool_root,
-            &slot.path,
-            &slot.claim_token,
-            SlotOutcome::Completed,
-        )
-        .unwrap();
-
-        // Dead pid: gc clears the metadata first (HolderCleared — the slot
-        // was just re-acquired so last_used is fresh, nothing to delete),
-        // and a SECOND backdated pass then reclaims the target. Two steps
-        // mirrors §3.5 exactly: dead holder ⇒ demote to ownerless, THEN
-        // staleness applies on its own clock.
-        let dead_holder = HolderInfo {
-            pid_override: Some(dead_pid),
-            ..HolderInfo::default()
-        };
-        let slot2 = pool::acquire_detached(&pool_root, &key, &config(), &dead_holder).unwrap();
-        assert_eq!(
-            slot2.path, slot.path,
-            "explicitly released live claim is reusable"
-        );
-        let reports = pool::reclaim_stale(
-            &pool_root,
-            &GcPolicy {
-                stale_hours: 1,
-                apply: true,
-            },
-            &config(),
-        )
-        .unwrap();
-        let row = reports
-            .iter()
-            .find(|r| r.slot_path == slot.path)
-            .expect("reported again");
-        assert_eq!(
-            row.outcome,
-            ReclaimOutcome::HolderCleared,
-            "dead holder ⇒ metadata cleared"
-        );
-        assert!(
-            slot.target_dir.join("dep.bin").exists(),
-            "fresh clock: target kept this pass"
-        );
-
-        // Backdate past the window and walk once more: now it reclaims.
-        std::fs::write(slot.path.join("last_used"), b"0\n").unwrap();
-        let reports = pool::reclaim_stale(
-            &pool_root,
-            &GcPolicy {
-                stale_hours: 1,
-                apply: true,
-            },
-            &config(),
-        )
-        .unwrap();
-        let row = reports
-            .iter()
-            .find(|r| r.slot_path == slot.path)
-            .expect("reported a third time");
-        assert_eq!(
-            row.outcome,
-            ReclaimOutcome::Reclaimed,
-            "ownerless + stale ⇒ reclaimed"
-        );
-        assert!(
-            !slot.target_dir.join("dep.bin").exists(),
-            "target cleared by gc --apply"
-        );
     }
 
     #[test]

@@ -86,7 +86,6 @@ async fn bootstrap_with_profile_root(
             BootstrapRole::Serve
         },
         options.config,
-        None,
         options.no_retry,
         options.provider,
     )
@@ -154,8 +153,6 @@ pub(crate) fn resolve_stored_profile(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::oup_session::{OupFrontend, OupSession};
-    use octos_core::ui_protocol::{UiCommand, UiNotification};
 
     #[derive(Default)]
     struct ContextModel(std::sync::Mutex<Vec<Vec<octos_core::Message>>>);
@@ -188,15 +185,6 @@ mod tests {
         }
     }
 
-    struct Frontend;
-
-    #[async_trait::async_trait]
-    impl OupFrontend for Frontend {
-        async fn event(&self, _event: UiNotification) -> Result<Option<UiCommand>> {
-            Ok(None)
-        }
-    }
-
     fn options(data_dir: &Path, config_home: &Path, model: Arc<ContextModel>) -> LocalOupOptions {
         let config = Config {
             provider: Some("local".into()),
@@ -220,24 +208,6 @@ mod tests {
             tool_profile: None,
             save_episodes: false,
         }
-    }
-
-    fn transcript_files(root: &Path) -> Vec<PathBuf> {
-        let mut found = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(root) {
-            for entry in entries {
-                let path = entry.unwrap().path();
-                if path.is_dir() {
-                    found.extend(transcript_files(&path));
-                } else if path
-                    .extension()
-                    .is_some_and(|extension| extension == "jsonl")
-                {
-                    found.push(path);
-                }
-            }
-        }
-        found
     }
 
     #[tokio::test]
@@ -268,175 +238,6 @@ mod tests {
         let sampling = config.chat_sampling_params.as_ref().unwrap();
         assert_eq!(sampling["top_p"], serde_json::json!(0.8_f32));
         assert_eq!(sampling["repeat_penalty"], serde_json::json!(1.1));
-    }
-
-    #[tokio::test]
-    async fn should_preserve_shared_profile_context_in_ephemeral_oup_turn() {
-        let home = tempfile::tempdir().unwrap();
-        let shared = home.path().join("profiles/ephemeral-fixture/data");
-        let transient = tempfile::tempdir().unwrap();
-        let workspace = tempfile::tempdir().unwrap();
-        let memory = octos_memory::MemoryStore::open(&shared).await.unwrap();
-        memory
-            .write_long_term("SHARED-MEMORY-CONTEXT")
-            .await
-            .unwrap();
-        let config = octos_agent::ToolConfigStore::open(&shared).await.unwrap();
-        config
-            .set(
-                "read_file",
-                "fixture",
-                serde_json::json!("SHARED-TOOL-CONFIG"),
-            )
-            .await
-            .unwrap();
-        let skill = shared.join("skills/ephemeral-context-fixture");
-        std::fs::create_dir_all(&skill).unwrap();
-        std::fs::write(
-            skill.join("manifest.json"),
-            r#"{
-            "name":"ephemeral-context-fixture", "version":"1.0.0", "tools":[],
-            "prompts":{"include":["SKILL.md"]}
-        }"#,
-        )
-        .unwrap();
-        std::fs::write(skill.join("SKILL.md"), "SHARED-PROFILE-SKILL-CONTEXT").unwrap();
-        let model = Arc::new(ContextModel::default());
-        let state = bootstrap_ephemeral(
-            options(transient.path(), home.path(), model.clone()),
-            &shared,
-        )
-        .await
-        .unwrap();
-        let profile = &state.profiles["ephemeral-fixture"];
-
-        assert_eq!(
-            profile.memory_store.read_long_term().await.unwrap(),
-            "SHARED-MEMORY-CONTEXT"
-        );
-        assert_eq!(
-            profile.tool_config.get("read_file", "fixture").await,
-            Some(serde_json::json!("SHARED-TOOL-CONFIG"))
-        );
-        assert_eq!(
-            profile.skills_dir.as_deref(),
-            Some(shared.join("skills").as_path())
-        );
-        assert!(!profile.session_defaults.as_ref().unwrap().save_episodes);
-        for sessions_in_cwd in [false, true] {
-            for hint in [None, Some(workspace.path())] {
-                assert_eq!(
-                    crate::runtime::session::resolve_sessions_root_from_hint(
-                        profile,
-                        hint,
-                        sessions_in_cwd,
-                    ),
-                    transient.path(),
-                    "cache identity must use the same temporary root as the session store"
-                );
-            }
-        }
-
-        let session = OupSession::open(
-            state.clone(),
-            octos_core::SessionKey::with_profile("ephemeral-fixture", "cli", "context"),
-            workspace.path(),
-            octos_agent::EffectivePermissions::workspace_write(),
-        )
-        .await
-        .unwrap();
-        let reply = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            session.turn(
-                "ephemeral-private-turn-marker",
-                None,
-                &std::sync::atomic::AtomicBool::new(false),
-                &Frontend,
-            ),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        assert_eq!(reply.text, "ephemeral-fixture-answer");
-        assert!(
-            session
-                .hydrate()
-                .await
-                .unwrap()
-                .messages
-                .unwrap()
-                .iter()
-                .any(|message| message.content == "ephemeral-fixture-answer")
-        );
-        session.close().await.unwrap();
-        assert!(
-            profile
-                .memory
-                .find_relevant(workspace.path(), "ephemeral-private-turn-marker", 10)
-                .await
-                .unwrap()
-                .is_empty(),
-            "the ephemeral turn must not save an episode"
-        );
-        let prompt = {
-            let seen = model.0.lock().unwrap();
-            seen.first()
-                .unwrap()
-                .iter()
-                .map(|message| message.content.as_str())
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
-        for marker in [
-            "SHARED-MEMORY-CONTEXT",
-            "SHARED-TOOL-CONFIG",
-            "SHARED-PROFILE-SKILL-CONTEXT",
-        ] {
-            assert!(
-                prompt.contains(marker),
-                "missing actual model context: {marker}"
-            );
-        }
-        assert!(
-            transcript_files(transient.path()).iter().any(|path| {
-                std::fs::read_to_string(path)
-                    .unwrap()
-                    .contains("ephemeral-private-turn-marker")
-            }),
-            "canonical OUP transcript must exist only in the temporary runtime"
-        );
-        assert!(
-            transcript_files(&shared).is_empty(),
-            "no shared-profile transcript writes"
-        );
-        assert!(
-            transcript_files(workspace.path()).is_empty(),
-            "no workspace transcript writes"
-        );
-
-        let rebuilt = profile.rebuild_plugin_layer().await.unwrap();
-        assert_eq!(rebuilt.data_dir, shared);
-        assert_eq!(
-            rebuilt.session_store_root.as_deref(),
-            Some(transient.path())
-        );
-        assert!(
-            rebuilt
-                .system_prompt
-                .contains("SHARED-PROFILE-SKILL-CONTEXT")
-        );
-
-        // Even an explicit per-cwd storage request cannot override ephemeral ownership.
-        let scoped = crate::runtime::SessionRuntime::bootstrap_in_cwd(
-            profile,
-            octos_core::SessionKey::with_profile("ephemeral-fixture", "cli", "cwd"),
-            Some(workspace.path().to_owned()),
-            true,
-        )
-        .await
-        .unwrap();
-        assert_eq!(scoped.sessions_root, transient.path());
-        assert!(!workspace.path().join(".octos").exists());
     }
 
     #[tokio::test]

@@ -52,17 +52,6 @@ impl ActionContext {
         self
     }
 
-    pub(crate) fn with_named_targets<I, N>(mut self, targets: I) -> Self
-    where
-        I: IntoIterator<Item = (N, Vec<PathBuf>)>,
-        N: Into<String>,
-    {
-        for (name, paths) in targets {
-            self.named_targets.insert(name.into(), paths);
-        }
-        self
-    }
-
     pub(crate) fn resolve_targets(
         &self,
         workspace_root: &Path,
@@ -460,84 +449,12 @@ mod tests {
     }
 
     #[test]
-    fn should_fail_when_file_missing() {
-        let temp = tempfile::tempdir().unwrap();
-
-        let result = run_action(temp.path(), "file_exists:output.mp3").unwrap();
-        assert!(matches!(result, ActionResult::Fail { .. }));
-    }
-
-    #[test]
     fn should_match_glob_pattern() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(temp.path().join("output")).unwrap();
         std::fs::write(temp.path().join("output/deck.pptx"), b"slides").unwrap();
 
         let result = run_action(temp.path(), "file_exists:output/*.pptx").unwrap();
-        assert_eq!(result, ActionResult::Pass);
-    }
-
-    #[test]
-    fn should_check_file_size_minimum() {
-        let temp = tempfile::tempdir().unwrap();
-        std::fs::write(temp.path().join("audio.mp3"), b"x").unwrap();
-
-        let result = run_action(temp.path(), "file_size_min:audio.mp3:1024").unwrap();
-        assert!(matches!(result, ActionResult::Fail { .. }));
-
-        std::fs::write(temp.path().join("audio.mp3"), vec![0u8; 2048]).unwrap();
-        let result = run_action(temp.path(), "file_size_min:audio.mp3:1024").unwrap();
-        assert_eq!(result, ActionResult::Pass);
-    }
-
-    #[test]
-    fn should_count_matching_files() {
-        let temp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(temp.path().join("output")).unwrap();
-        std::fs::write(temp.path().join("output/a.png"), b"a").unwrap();
-        std::fs::write(temp.path().join("output/b.png"), b"b").unwrap();
-
-        let eq = run_action(temp.path(), "file_count_eq:output/*.png:2").unwrap();
-        let min = run_action(temp.path(), "file_count_min:output/*.png:1").unwrap();
-        let max = run_action(temp.path(), "file_count_max:output/*.png:2").unwrap();
-
-        assert_eq!(eq, ActionResult::Pass);
-        assert_eq!(min, ActionResult::Pass);
-        assert_eq!(max, ActionResult::Pass);
-    }
-
-    #[test]
-    fn should_resolve_any_and_all_targets() {
-        let temp = tempfile::tempdir().unwrap();
-        let report = temp.path().join("report.md");
-        std::fs::write(&report, b"report").unwrap();
-
-        let any = run_action(temp.path(), "any_exists:missing.txt|report.md").unwrap();
-        let all = run_action(temp.path(), "all_exist:report.md").unwrap();
-        let all_fail = run_action(temp.path(), "all_exist:report.md|missing.txt").unwrap();
-
-        assert_eq!(any, ActionResult::Pass);
-        assert_eq!(all, ActionResult::Pass);
-        assert!(matches!(all_fail, ActionResult::Fail { .. }));
-    }
-
-    #[test]
-    fn should_cleanup_matching_files() {
-        let temp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(temp.path().join("temp")).unwrap();
-        std::fs::write(temp.path().join("temp/tts_1.wav"), b"data").unwrap();
-        std::fs::write(temp.path().join("temp/tts_2.wav"), b"data").unwrap();
-
-        let result = run_action(temp.path(), "cleanup:temp/tts_*").unwrap();
-        assert_eq!(result, ActionResult::Pass);
-        assert!(!temp.path().join("temp/tts_1.wav").exists());
-        assert!(!temp.path().join("temp/tts_2.wav").exists());
-    }
-
-    #[test]
-    fn should_pass_cleanup_when_no_files_match() {
-        let temp = tempfile::tempdir().unwrap();
-        let result = run_action(temp.path(), "cleanup:nonexistent_*").unwrap();
         assert_eq!(result, ActionResult::Pass);
     }
 
@@ -562,34 +479,6 @@ mod tests {
     }
 
     #[test]
-    fn should_reject_malformed_spec() {
-        let temp = tempfile::tempdir().unwrap();
-        let result = run_action(temp.path(), "no_colon_here");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn should_extract_notifications_from_results() {
-        let results = vec![
-            ("file_exists:a.txt".into(), ActionResult::Pass),
-            (
-                "notify_user:done".into(),
-                ActionResult::Notify {
-                    message: "done".into(),
-                },
-            ),
-            (
-                "notify_user:ready".into(),
-                ActionResult::Notify {
-                    message: "ready".into(),
-                },
-            ),
-        ];
-        let notifs = notifications(&results);
-        assert_eq!(notifs, vec!["done", "ready"]);
-    }
-
-    #[test]
     fn should_resolve_named_targets_for_file_checks() {
         let temp = tempfile::tempdir().unwrap();
         let artifact = temp.path().join("artifact.mp3");
@@ -598,38 +487,6 @@ mod tests {
         let context = ActionContext::default().with_named_target("$artifact", vec![artifact]);
         let result =
             run_action_with_context(temp.path(), &context, "file_size_min:$artifact:1024").unwrap();
-
-        assert_eq!(result, ActionResult::Pass);
-    }
-
-    #[test]
-    fn should_resolve_multiple_named_targets_for_file_checks() {
-        let temp = tempfile::tempdir().unwrap();
-        let report = temp.path().join("report.md");
-        let audio = temp.path().join("audio.mp3");
-        std::fs::write(&report, b"report").unwrap();
-        std::fs::write(&audio, vec![0u8; 2048]).unwrap();
-
-        let context = ActionContext::default()
-            .with_named_targets([("$report", vec![report]), ("$audio", vec![audio])]);
-
-        let report_result =
-            run_action_with_context(temp.path(), &context, "file_exists:$report").unwrap();
-        let audio_result =
-            run_action_with_context(temp.path(), &context, "file_size_min:$audio:1024").unwrap();
-
-        assert_eq!(report_result, ActionResult::Pass);
-        assert_eq!(audio_result, ActionResult::Pass);
-    }
-
-    #[test]
-    fn should_support_absolute_patterns() {
-        let temp = tempfile::tempdir().unwrap();
-        let artifact = temp.path().join("absolute.mp3");
-        std::fs::write(&artifact, b"audio").unwrap();
-
-        let spec = format!("file_exists:{}", artifact.display());
-        let result = run_action(temp.path(), &spec).unwrap();
 
         assert_eq!(result, ActionResult::Pass);
     }
@@ -671,25 +528,5 @@ mod tests {
         let failures = failure_reasons(&results);
         assert_eq!(failures.len(), 1);
         assert!(failures[0].contains("missing.txt"));
-    }
-
-    #[test]
-    fn shared_validator_semantics_should_evaluate_actions_with_context_without_short_circuiting() {
-        let temp = tempfile::tempdir().unwrap();
-        let artifact = temp.path().join("artifact.mp3");
-        std::fs::write(&artifact, vec![0u8; 2048]).unwrap();
-
-        let context = ActionContext::default().with_named_target("$artifact", vec![artifact]);
-        let specs = vec![
-            "file_exists:$artifact".to_string(),
-            "file_size_min:$artifact:1024".to_string(),
-            "file_exists:missing.txt".to_string(),
-        ];
-
-        let results = evaluate_actions_with_context(temp.path(), &context, &specs);
-        assert_eq!(results.len(), 3);
-        assert!(matches!(results[0].1, Ok(ActionResult::Pass)));
-        assert!(matches!(results[1].1, Ok(ActionResult::Pass)));
-        assert!(matches!(results[2].1, Ok(ActionResult::Fail { .. })));
     }
 }

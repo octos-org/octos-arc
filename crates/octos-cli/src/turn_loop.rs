@@ -2,8 +2,8 @@
 //! event loop decides what to do next. Extracted so the interrupt-vs-progress
 //! race is unit-testable: an interrupt must be reported the moment it lands,
 //! never "after the next progress event" — a long tool with no output
-//! (`bash sleep …`) used to hold the terminal back until the ~8 s status_word
-//! heartbeat, so the client's 5 s `turn/interrupt` ack timed out.
+//! (`bash sleep …`) used to hold the terminal back until the next progress
+//! event, so the client's 5 s `turn/interrupt` ack timed out.
 
 use tokio::sync::mpsc;
 

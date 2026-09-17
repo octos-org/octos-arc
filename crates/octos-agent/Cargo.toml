@@ -11,10 +11,6 @@ octos-core = { workspace = true }
 octos-bus = { workspace = true }
 octos-memory = { workspace = true }
 octos-llm = { workspace = true }
-octos-plugin = { workspace = true }
-# codex-execpolicy = { workspace = true }  # Enable when codex builds
-# codex-file-search = { workspace = true }
-# codex-linux-sandbox = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -84,13 +80,9 @@ tree-sitter-python = { workspace = true, optional = true }
 tree-sitter-javascript = { workspace = true, optional = true }
 tree-sitter-typescript = { workspace = true, optional = true }
 base64 = { workspace = true }
-chromiumoxide = { workspace = true }
 pdf-extract = { workspace = true }
 tempfile = { workspace = true }
-lettre = { workspace = true }
 redb = { workspace = true }
-hound = { workspace = true }
-symphonia = { workspace = true, optional = true }
 
 # Persistent keyring backend per OS for MCP OAuth token storage. Feature-unioned
 # with the base `keyring` dep above; each is compiled only for its target.
@@ -115,20 +107,8 @@ keyring = { workspace = true, features = ["windows-native"] }
 rustix = { workspace = true }
 
 [features]
-# `browser` is ON by default: it gates the headless-Chrome (CDP) search
-# provider that `web_search` uses as a last-resort fallback (after every HTTP
-# provider yields nothing). The underlying `chromiumoxide` dependency and the
-# `browser` tool itself are always compiled; this feature only toggles the new
-# CDP-backed `web_search` fallback so `--no-default-features` builds keep the
-# pre-existing HTTP-only `web_search` behaviour byte-for-byte.
-default = ["browser"]
-browser = []
 git = ["dep:gix", "dep:similar"]
 ast = ["dep:tree-sitter", "dep:tree-sitter-rust", "dep:tree-sitter-python", "dep:tree-sitter-javascript", "dep:tree-sitter-typescript"]
-# Enable MP3 decoding for the `AudioNonSilent` workspace-policy validator.
-# WAV decoding is always-on via `hound`; MP3 pulls in `symphonia` which is
-# heavier so we keep it opt-in for non-audio workspaces.
-audio_mp3 = ["dep:symphonia"]
 
 [lints]
 workspace = true

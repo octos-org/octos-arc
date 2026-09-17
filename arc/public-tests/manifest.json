@@ -3,11 +3,5 @@
  "smoke--counter": "ARC Counter Smoke Test",
  "smoke--dice": "ARC Dice Smoke Test",
  "smoke-evolution--counter": "ARC Counter Evolution Smoke Test",
- "smoke-evolution--dice": "ARC Dice Evolution Smoke Test",
- "arc-bench-web--12306": "Train Ticket Booking System",
- "arc-bench-web--bookstack": "BookStack Knowledge Base System",
- "arc-bench-web--ctrip": "Ctrip Travel System",
- "arc-bench-web--keep": "Keep",
- "arc-bench-web--prestashop": "PrestaShop E-commerce Website",
- "arc-bench-web--stackoverflow": "Stack Overflow Platform"
+ "smoke-evolution--dice": "ARC Dice Evolution Smoke Test"
 }

@@ -8,9 +8,6 @@ import uuid
 
 parser = argparse.ArgumentParser()
 parser.add_argument("task", nargs="?"); parser.add_argument("--check", action="store_true"); parser.add_argument("--name", default=None)
-parser.add_argument("--port", type=int, default=43100, help="grading port the app must serve (default 43100)")
-parser.add_argument("--smoke-port", type=int, default=None, help="port for the agent's own smoke tests (default port+1)")
-parser.add_argument("--template", default=None, help="existing generated app to evolve (copied into the output dir first)")
 arguments = parser.parse_args()
 root = Path(__file__).resolve().parent
 adapter = root
@@ -40,8 +37,8 @@ environment.update(
     OCTOS_PROVIDER="custom",
     OCTOS_MAX_ITERATIONS=os.environ.get("OCTOS_MAX_ITERATIONS", "60"),
     OCTOS_NODE_TIMEOUT=os.environ.get("OCTOS_NODE_TIMEOUT", "1200"),
-    OCTOS_TIME_BUDGET=os.environ.get("OCTOS_TIME_BUDGET", "3600"),
-    OCTOS_SMOKE_PORT=str(arguments.smoke_port or arguments.port + 1),
+    OCTOS_TIME_BUDGET=os.environ.get("OCTOS_TIME_BUDGET", "2400"),
+    OCTOS_SMOKE_PORT="43101",
 )
 environment["PATH"] = os.environ.get("NODE_BIN", "/opt/homebrew/opt/node@24/bin") + ":" + environment.get("PATH", "")
 print(f"运行时：{binary}", flush=True)
@@ -49,7 +46,7 @@ print(f"需求：{task / 'requirements.yaml'}", flush=True)
 print(f"模型：{config['model']}；密钥：已读取（不显示）", flush=True)
 if arguments.check:
     sys.exit(0)
-for port in (arguments.port, arguments.smoke_port or arguments.port + 1):
+for port in (43100, 43101):
     with socket.socket() as listener:
         try:
             listener.bind(("127.0.0.1", port))
@@ -57,18 +54,5 @@ for port in (arguments.port, arguments.smoke_port or arguments.port + 1):
             sys.exit(f"端口 {port} 已占用，未启动；不会终止已有服务。")
 output = root / "arc-output" / (arguments.name or f"{task.name}-{uuid.uuid4().hex[:8]}")
 print(f"交付目录：{output}", flush=True)
-if arguments.template:
-    template = Path(arguments.template).resolve()
-    if not (template / "frontend").is_dir() or not (template / "backend").is_dir():
-        sys.exit(f"模板目录缺少 frontend/ 或 backend/：{template}")
-    if output.exists():
-        sys.exit(f"交付目录已存在，不覆盖：{output}")
-    # Mirror the platform: the template is the committed repo, so per-run
-    # event streams (.arc/*.jsonl, .arc/design) do not carry over; only
-    # .arc/traceability (committed) does.
-    shutil.copytree(template, output, symlinks=True,
-                    ignore=shutil.ignore_patterns("node_modules", "dist", "requirements", "skill-output", ".octos",
-                                                  "octos-events.jsonl", "runner-events.jsonl", "llm-usage.jsonl", "design"))
-    print(f"模板：{template}（已复制，进入 evolution 模式）", flush=True)
 os.chdir(adapter)
-os.execve(str(python), [str(python), "main.py", str(task), "--output-dir", str(output), "--type", "web", "--web-port", str(arguments.port)], environment)
+os.execve(str(python), [str(python), "main.py", str(task), "--output-dir", str(output), "--type", "web", "--web-port", "43100"], environment)

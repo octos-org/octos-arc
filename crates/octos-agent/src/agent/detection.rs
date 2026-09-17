@@ -4,7 +4,7 @@ use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use octos_core::ToolCall;
-use octos_llm::{ChatConfig, ChatResponse, ReasoningEffort, StopReason};
+use octos_llm::{ChatResponse, StopReason};
 use regex::Regex;
 
 use super::Agent;
@@ -21,8 +21,8 @@ use super::Agent;
 /// the orphan-sweep liveness gate's tool_call_id-family exemption
 /// (fix/orphan-sweep-liveness-gate) all key on it. A per-response positional
 /// index reset every turn, so two first-position inline calls to the SAME tool
-/// (e.g. `run_pipeline`) in different turns both got
-/// `call_inline_0_run_pipeline` — colliding, which could match a stale
+/// (e.g. `bg_research`) in different turns both got
+/// `call_inline_0_bg_research` — colliding, which could match a stale
 /// synth-ack or let a live task's tcid falsely exempt a dead one from orphan
 /// reaping. A process-global monotonic counter never repeats within the
 /// process; the `call_inline_` prefix keeps it disjoint from the other two
@@ -160,25 +160,6 @@ impl Agent {
             || msg.contains("stream error")
             || msg.contains("connection reset")
             || msg.contains("broken pipe")
-            || Self::is_streaming_unsupported_error(err)
-    }
-
-    /// Detect the stable error shape returned when a provider accepts normal
-    /// chat completions but rejects SSE. Only this narrow class disables
-    /// streaming for the rest of the current agent session.
-    pub(super) fn is_streaming_unsupported_error(err: &eyre::Report) -> bool {
-        let msg = err.to_string().to_lowercase();
-        msg.contains("failed to send streaming request")
-            || msg.contains("streaming not supported")
-            || msg.contains("text/event-stream")
-            || msg.contains("sse not supported")
-    }
-
-    /// A provider that rejects SSE still gets one ordinary-completion attempt,
-    /// even under the latency-oriented FailFast policy. Other transport and
-    /// provider errors retain FailFast's direct-return behavior.
-    pub(super) fn should_fallback_after_stream_error(fail_fast: bool, err: &eyre::Report) -> bool {
-        !fail_fast || Self::is_streaming_unsupported_error(err)
     }
 
     /// Whether an error is specifically a truncated tool call (`#1712`): the
@@ -191,56 +172,6 @@ impl Agent {
             Some(octos_llm::StreamError::TruncatedToolCall { .. })
         )
     }
-}
-
-/// Build the session-local key used to remember that one provider/model pair
-/// rejected SSE. A delimiter outside the provider/model grammar keeps pairs
-/// such as (`acme:edge`, `chat`) distinct from (`acme`, `edge:chat`).
-pub(super) fn streaming_provider_key(provider: &str, model: &str) -> String {
-    format!("{provider}\u{001f}{model}")
-}
-
-/// Build the one-shot recovery request for a reasoning model that consumed its
-/// entire output allowance without producing text or a tool call. Prefer
-/// reducing reasoning first (it preserves the request's bounded size); when
-/// no effort was configured, increase the output allowance up to the provider
-/// ceiling. The caller deliberately invokes this at most once per model turn.
-pub(super) fn empty_max_tokens_recovery_config(
-    config: &ChatConfig,
-    provider_max_output_tokens: u32,
-) -> Option<ChatConfig> {
-    let mut retry = config.clone();
-    if let Some(effort) = config.reasoning_effort {
-        retry.reasoning_effort = Some(match effort {
-            ReasoningEffort::Max => ReasoningEffort::High,
-            ReasoningEffort::High => ReasoningEffort::Medium,
-            ReasoningEffort::Medium => ReasoningEffort::Low,
-            ReasoningEffort::Low => ReasoningEffort::Disabled,
-            ReasoningEffort::Disabled => return None,
-        });
-        return Some(retry);
-    }
-
-    let current = config.max_tokens.unwrap_or(1_024);
-    let raised = current.saturating_mul(2).min(provider_max_output_tokens);
-    (raised > current).then(|| {
-        retry.max_tokens = Some(raised);
-        retry
-    })
-}
-
-/// Return whether a completed response consumed its output allowance without
-/// producing anything the agent can deliver. Keeping this predicate beside
-/// the recovery-config builder prevents the call loop from accidentally
-/// retrying a truncated response that already contains useful content or a
-/// native tool call.
-pub(super) fn is_empty_max_tokens_response(response: &ChatResponse) -> bool {
-    response.stop_reason == StopReason::MaxTokens
-        && response
-            .content
-            .as_ref()
-            .is_none_or(|content| content.trim().is_empty())
-        && response.tool_calls.is_empty()
 }
 
 fn extract_inline_invokes(content: &str) -> (String, Vec<ToolCall>) {
@@ -513,26 +444,6 @@ fn strip_code_fence(input: &str) -> &str {
         .trim()
 }
 
-/// `OCTOS_DISABLE_STREAMING=1` sends every chat request non-streaming from
-/// the first call (the platform-side meter of ARC-Bench summed the cumulative
-/// usage of every SSE chunk, over-billing streamed turns many times over).
-/// Read once per process; the P1-4 per-provider fallback still applies on top.
-pub(super) fn streaming_disabled_by_env() -> bool {
-    static FLAG: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
-        streaming_disabled_flag(std::env::var("OCTOS_DISABLE_STREAMING").ok().as_deref())
-    });
-    *FLAG
-}
-
-/// Pure parser behind [`streaming_disabled_by_env`]: `1`, `true`, `yes`, `on`
-/// disable streaming; anything else (including unset) keeps it.
-pub(super) fn streaming_disabled_flag(value: Option<&str>) -> bool {
-    matches!(
-        value.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
-        Some("1") | Some("true") | Some("yes") | Some("on")
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -576,70 +487,11 @@ mod tests {
     }
 
     #[test]
-    fn repair_empty_or_blank_is_empty_object() {
-        assert_eq!(repair_tool_arguments_to_object(""), serde_json::json!({}));
-        assert_eq!(
-            repair_tool_arguments_to_object("   "),
-            serde_json::json!({})
-        );
-    }
-
-    #[test]
-    fn repair_never_returns_a_bare_string() {
-        // The old fallback stored `Value::String(raw)`, which serialized back to
-        // the provider as an invalid `function.arguments` → fatal HTTP 400.
-        let v = repair_tool_arguments_to_object("not json at all");
-        assert!(v.is_object(), "must coerce to an object, got {v}");
-        assert_eq!(v, serde_json::json!({}));
-    }
-
-    #[test]
     fn repair_closes_a_truncated_object() {
         // finish_reason=length cut the JSON mid-value.
         let v = repair_tool_arguments_to_object(r#"{"command":"cat report.md"#);
         assert!(v.is_object());
         assert_eq!(v["command"], "cat report.md");
-    }
-
-    #[test]
-    fn repair_closes_a_string_and_object_truncated_mid_heredoc() {
-        // Truncated in the middle of a heredoc command string.
-        let v = repair_tool_arguments_to_object("{\"command\":\"cat > f <<EOF\nline1\nline2");
-        assert!(v.is_object());
-        assert!(
-            v["command"].as_str().unwrap().contains("line1"),
-            "salvaged command: {}",
-            v["command"]
-        );
-    }
-
-    #[test]
-    fn repair_escapes_literal_control_chars_in_strings() {
-        // A heredoc payload with LITERAL newlines/tabs (unescaped) is invalid
-        // JSON; the repair escapes them instead of failing.
-        let v = repair_tool_arguments_to_object("{\"command\":\"echo a\nb\tc\"}");
-        assert!(v.is_object());
-        assert_eq!(v["command"], "echo a\nb\tc");
-    }
-
-    #[test]
-    fn repair_strips_trailing_commas() {
-        let v = repair_tool_arguments_to_object(r#"{"a":1,"b":2,}"#);
-        assert_eq!(v["a"], 1);
-        assert_eq!(v["b"], 2);
-    }
-
-    #[test]
-    fn repair_of_a_json_non_object_degrades_to_empty_object() {
-        // A bare JSON array/string/number is not valid tool arguments.
-        assert_eq!(
-            repair_tool_arguments_to_object("[1,2,3]"),
-            serde_json::json!({})
-        );
-        assert_eq!(
-            repair_tool_arguments_to_object("\"just a string\""),
-            serde_json::json!({})
-        );
     }
 
     #[test]
@@ -665,42 +517,6 @@ mod tests {
     }
 
     // ---------- parse_invoke_parameter_tags (#1711) ----------
-
-    #[test]
-    fn parameter_tags_parse_a_single_string_param() {
-        let v = parse_invoke_parameter_tags("<parameter name=\"command\">ls -la /tmp</parameter>")
-            .expect("params");
-        assert_eq!(v["command"], "ls -la /tmp");
-    }
-
-    #[test]
-    fn parameter_tags_type_numbers_and_bools_but_keep_commands_as_strings() {
-        let v = parse_invoke_parameter_tags(
-            "<parameter name=\"command\">grep -r foo .</parameter>\
-             <parameter name=\"timeout_seconds\">30</parameter>\
-             <parameter name=\"recursive\">true</parameter>",
-        )
-        .expect("params");
-        assert_eq!(v["command"], "grep -r foo .");
-        assert_eq!(v["timeout_seconds"], 30);
-        assert_eq!(v["recursive"], true);
-    }
-
-    #[test]
-    fn parameter_tags_preserve_multiline_heredoc_value() {
-        let body =
-            "<parameter name=\"command\">cat > /tmp/r.md <<'EOF'\n# Review\nline\nEOF</parameter>";
-        let v = parse_invoke_parameter_tags(body).expect("params");
-        let cmd = v["command"].as_str().unwrap();
-        assert!(cmd.contains("<<'EOF'"), "cmd: {cmd}");
-        assert!(cmd.contains("# Review"));
-    }
-
-    #[test]
-    fn parameter_tags_absent_returns_none() {
-        assert!(parse_invoke_parameter_tags(r#"{"command":"ls"}"#).is_none());
-        assert!(parse_invoke_parameter_tags("plain text").is_none());
-    }
 
     #[test]
     fn inline_invoke_with_parameter_tags_recovers_real_args() {
@@ -747,128 +563,6 @@ mod tests {
         assert!(Agent::is_retriable_response(&r2));
     }
 
-    #[test]
-    fn should_not_retry_with_content() {
-        let r = make_response(Some("hello"), vec![], 0);
-        assert!(!Agent::is_retriable_response(&r));
-    }
-
-    #[test]
-    fn should_not_retry_with_tool_calls() {
-        let tc = ToolCall {
-            id: "1".into(),
-            name: "test".into(),
-            arguments: serde_json::json!({}),
-            metadata: None,
-        };
-        let r = make_response(None, vec![tc], 0);
-        assert!(!Agent::is_retriable_response(&r));
-    }
-
-    #[test]
-    fn should_retry_with_tokens_but_no_content() {
-        let r = make_response(None, vec![], 10);
-        assert!(Agent::is_retriable_response(&r));
-    }
-
-    #[test]
-    fn should_retry_when_content_filtered() {
-        let r = make_response_with_stop(None, vec![], 0, StopReason::ContentFiltered);
-        assert!(Agent::is_retriable_response(&r));
-
-        // Even with partial content, content_filtered should retry
-        let r2 = make_response_with_stop(Some("partial"), vec![], 10, StopReason::ContentFiltered);
-        assert!(Agent::is_retriable_response(&r2));
-    }
-
-    #[test]
-    fn should_retry_when_stop_reason_tooluse_but_no_calls() {
-        let r = make_response_with_stop(Some("thinking"), vec![], 5, StopReason::ToolUse);
-        assert!(Agent::is_retriable_response(&r));
-    }
-
-    #[test]
-    fn should_normalize_inline_invoke_block_into_tool_call() {
-        let mut r = make_response_with_stop(
-            Some("<invoke name=\"cron\">{\"action\":\"list\"}</invoke>"),
-            vec![],
-            10,
-            StopReason::EndTurn,
-        );
-        Agent::normalize_inline_invokes(&mut r);
-        assert_eq!(r.stop_reason, StopReason::ToolUse);
-        assert_eq!(r.tool_calls.len(), 1);
-        assert_eq!(r.tool_calls[0].name, "cron");
-        assert_eq!(r.tool_calls[0].arguments["action"], "list");
-        assert!(r.content.is_none());
-    }
-
-    #[test]
-    fn should_normalize_inline_invoke_self_closing_with_args_attr() {
-        let mut r = make_response_with_stop(
-            Some("before <invoke name=\"cron\" args='{\"action\":\"list\"}' /> after"),
-            vec![],
-            10,
-            StopReason::EndTurn,
-        );
-        Agent::normalize_inline_invokes(&mut r);
-        assert_eq!(r.stop_reason, StopReason::ToolUse);
-        assert_eq!(r.tool_calls.len(), 1);
-        assert_eq!(r.tool_calls[0].name, "cron");
-        assert_eq!(r.tool_calls[0].arguments["action"], "list");
-        assert_eq!(r.content.as_deref(), Some("before  after"));
-    }
-
-    /// Regression (codex round-4 / fix/orphan-sweep-liveness-gate): inline
-    /// `<invoke>` tool-call ids must be PROCESS-UNIQUE, not positional. The id
-    /// previously embedded the within-response index, so the FIRST inline call
-    /// to a given tool in any response was always `call_inline_0_<tool>`. Two
-    /// separate responses each calling `run_pipeline` first thus collided —
-    /// breaking the tool_call_id-uniqueness invariant the supervisor's
-    /// synth-ack set, the `mark_descendants_failed` pipeline cascade, and the
-    /// orphan-sweep tool_call_id-family exemption all rely on.
-    #[test]
-    fn inline_invoke_ids_are_unique_across_responses() {
-        let body = "<invoke name=\"run_pipeline\">{\"k\":\"deep_research\"}</invoke>";
-        let (_, calls1) = extract_inline_invokes(body);
-        let (_, calls2) = extract_inline_invokes(body);
-        assert_eq!(calls1.len(), 1);
-        assert_eq!(calls2.len(), 1);
-        assert!(
-            calls1[0].id.starts_with("call_inline_"),
-            "got {}",
-            calls1[0].id
-        );
-        assert!(
-            calls1[0].id.ends_with("_run_pipeline"),
-            "keeps the readable tool-name suffix: {}",
-            calls1[0].id
-        );
-        assert_ne!(
-            calls1[0].id, calls2[0].id,
-            "the same tool at position 0 in two responses must NOT collide",
-        );
-    }
-
-    /// Within a single response, multiple inline calls still get distinct ids
-    /// (the monotonic counter increments per call).
-    #[test]
-    fn inline_invoke_ids_distinct_within_one_response() {
-        let body = "<invoke name=\"a\">{}</invoke><invoke name=\"b\">{}</invoke>";
-        let (_, calls) = extract_inline_invokes(body);
-        assert_eq!(calls.len(), 2);
-        assert_ne!(calls[0].id, calls[1].id);
-    }
-
-    #[test]
-    fn should_downgrade_empty_tooluse_to_endturn_after_normalization() {
-        let mut r = make_response_with_stop(Some("plain text"), vec![], 10, StopReason::ToolUse);
-        Agent::normalize_inline_invokes(&mut r);
-        assert_eq!(r.stop_reason, StopReason::EndTurn);
-        assert!(r.tool_calls.is_empty());
-        assert_eq!(r.content.as_deref(), Some("plain text"));
-    }
-
     // ---------- Agent::is_repetitive_output ----------
 
     #[test]
@@ -876,21 +570,6 @@ mod tests {
         let repeated = "This is a test phrase. ".repeat(30);
         assert!(Agent::is_repetitive_output(&repeated));
     }
-
-    #[test]
-    fn should_not_flag_normal_output() {
-        let normal = "The quick brown fox jumps over the lazy dog. \
-                      Pack my box with five dozen liquor jugs. \
-                      How vexingly quick daft zebras jump.";
-        assert!(!Agent::is_repetitive_output(normal));
-    }
-
-    #[test]
-    fn should_not_flag_short_text() {
-        assert!(!Agent::is_repetitive_output("hello hello hello"));
-    }
-
-    // ---------- Agent::is_retryable_stream_error ----------
 
     #[test]
     fn is_retryable_stream_error_transient_errors() {
@@ -909,144 +588,10 @@ mod tests {
         assert!(!Agent::is_retryable_stream_error(&err));
     }
 
-    #[test]
-    fn streaming_unsupported_error_is_session_fallback_signal() {
-        let err = eyre::eyre!("failed to send streaming request to OpenAI");
-        assert!(Agent::is_streaming_unsupported_error(&err));
-        assert!(Agent::is_retryable_stream_error(&err));
-        assert!(!Agent::is_streaming_unsupported_error(&eyre::eyre!(
-            "503 server error"
-        )));
-    }
-
-    #[test]
-    fn fail_fast_still_allows_sse_fallback_but_not_other_errors() {
-        let sse = eyre::eyre!("failed to send streaming request to OpenAI");
-        let transport = eyre::eyre!("connection reset by peer");
-        assert!(Agent::should_fallback_after_stream_error(true, &sse));
-        assert!(!Agent::should_fallback_after_stream_error(true, &transport));
-        assert!(Agent::should_fallback_after_stream_error(false, &transport));
-    }
-
-    #[test]
-    fn streaming_provider_key_keeps_provider_and_model_boundaries() {
-        let left = streaming_provider_key("acme:edge", "chat");
-        let right = streaming_provider_key("acme", "edge:chat");
-        assert_ne!(left, right);
-        assert_eq!(left, streaming_provider_key("acme:edge", "chat"));
-        assert!(left.contains('\u{001f}'));
-    }
-
     // ──────────────────────────────────────────────────────────────────────
     // Codex round (PR #1355): typed StreamError downcast — these tests
     // pin the boundary contract. Without the downcast path, MalformedArgs
     // would match the string "stream" fallback and get retried forever,
     // hiding the diagnostic from the model.
     // ──────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn is_retryable_stream_error_idle_timeout_is_typed_retryable() {
-        let typed = octos_llm::StreamError::IdleTimeout { idle_secs: 180 };
-        let err = eyre::Report::new(typed);
-        assert!(
-            Agent::is_retryable_stream_error(&err),
-            "IdleTimeout must be retryable through the typed downcast"
-        );
-    }
-
-    #[test]
-    fn is_retryable_stream_error_malformed_args_is_typed_not_retryable() {
-        let typed = octos_llm::StreamError::MalformedArgs {
-            tool_id: "call_0".to_string(),
-            tool_name: "mofa_slides".to_string(),
-            error: "EOF while parsing a string at column 4123".to_string(),
-        };
-        let err = eyre::Report::new(typed);
-        // The rendered string contains "stream" / similar substrings under
-        // some formatters; the downcast path must short-circuit BEFORE the
-        // string match falls through.
-        assert!(
-            !Agent::is_retryable_stream_error(&err),
-            "MalformedArgs must be NOT retryable so the model sees the diagnostic"
-        );
-    }
-
-    #[test]
-    fn is_retryable_stream_error_incomplete_is_typed_retryable() {
-        let typed = octos_llm::StreamError::Incomplete {
-            detail: "stream ended without Done".to_string(),
-        };
-        let err = eyre::Report::new(typed);
-        assert!(Agent::is_retryable_stream_error(&err));
-    }
-
-    #[test]
-    fn is_retryable_stream_error_transport_is_typed_retryable() {
-        let typed = octos_llm::StreamError::Transport {
-            detail: "broken pipe".to_string(),
-        };
-        let err = eyre::Report::new(typed);
-        assert!(Agent::is_retryable_stream_error(&err));
-    }
-
-    #[test]
-    fn empty_max_tokens_recovery_lowers_reasoning_once() {
-        let config = ChatConfig {
-            reasoning_effort: Some(ReasoningEffort::Max),
-            max_tokens: Some(32_768),
-            ..ChatConfig::default()
-        };
-        let retry = empty_max_tokens_recovery_config(&config, 384_000).unwrap();
-        assert_eq!(retry.reasoning_effort, Some(ReasoningEffort::High));
-        assert_eq!(retry.max_tokens, config.max_tokens);
-    }
-
-    #[test]
-    fn empty_max_tokens_recovery_raises_output_when_effort_is_unset() {
-        let config = ChatConfig {
-            max_tokens: Some(4_096),
-            ..ChatConfig::default()
-        };
-        let retry = empty_max_tokens_recovery_config(&config, 32_768).unwrap();
-        assert_eq!(retry.max_tokens, Some(8_192));
-    }
-
-    #[test]
-    fn empty_max_tokens_recovery_stops_when_no_safe_change_exists() {
-        let config = ChatConfig {
-            reasoning_effort: Some(ReasoningEffort::Disabled),
-            max_tokens: Some(32_768),
-            ..ChatConfig::default()
-        };
-        assert!(empty_max_tokens_recovery_config(&config, 32_768).is_none());
-    }
-
-    #[test]
-    fn empty_max_tokens_response_requires_length_and_no_deliverable() {
-        let empty = make_response_with_stop(None, vec![], 100, StopReason::MaxTokens);
-        assert!(is_empty_max_tokens_response(&empty));
-
-        let ended = make_response_with_stop(None, vec![], 100, StopReason::EndTurn);
-        assert!(!is_empty_max_tokens_response(&ended));
-
-        let content = make_response_with_stop(Some("partial"), vec![], 100, StopReason::MaxTokens);
-        assert!(!is_empty_max_tokens_response(&content));
-
-        let tool = ToolCall {
-            id: "length-tool".into(),
-            name: "check".into(),
-            arguments: serde_json::json!({}),
-            metadata: None,
-        };
-        let with_tool = make_response_with_stop(None, vec![tool], 100, StopReason::MaxTokens);
-        assert!(!is_empty_max_tokens_response(&with_tool));
-    }
-
-    #[test]
-    fn should_disable_streaming_only_for_truthy_env_values() {
-        assert!(streaming_disabled_flag(Some("1")));
-        assert!(streaming_disabled_flag(Some(" true ")));
-        assert!(!streaming_disabled_flag(Some("0")));
-        assert!(!streaming_disabled_flag(None));
-    }
 }

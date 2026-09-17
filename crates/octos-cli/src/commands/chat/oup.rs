@@ -20,7 +20,6 @@ struct TerminalFrontend {
     segments: std::sync::Mutex<AssistantTextProjection>,
     input_active: AtomicBool,
     pending_prompts: std::sync::Mutex<Vec<UiNotification>>,
-    peers: Option<crate::commands::oup_peers::OupPeerHost>,
 }
 
 fn finish_turn<T>(result: Result<T>, shutdown: Result<()>) -> Result<T> {
@@ -33,9 +32,6 @@ fn finish_turn<T>(result: Result<T>, shutdown: Result<()>) -> Result<T> {
 #[async_trait::async_trait]
 impl OupFrontend for TerminalFrontend {
     async fn event(&self, event: UiNotification) -> Result<Option<UiCommand>> {
-        if let Some(peers) = &self.peers {
-            peers.event(&event);
-        }
         if self.input_active.load(Ordering::Acquire)
             && matches!(
                 &event,
@@ -161,7 +157,7 @@ impl ChatCommand {
         let mut config = if let Some(file) = &self.config {
             Config::from_file(file)?
         } else if let Some(profile) = &stored_profile {
-            crate::profiles::config_from_profile(profile, None, None)
+            crate::profiles::config_from_profile(profile)
         } else {
             Config::load_with_context(&cwd, &ctx)?
         };
@@ -177,18 +173,11 @@ impl ChatCommand {
                 .get_or_insert_with(Default::default)
                 .reasoning_effort = Some(effort.into());
         }
-        let mut tool_profile = match resolve_profile(&self.profile) {
+        let tool_profile = match resolve_profile(&self.profile) {
             Ok((profile, _)) => profile,
             Err(_) if stored_profile.is_some() => resolve_profile(&None)?.0,
             Err(error) => return Err(error),
         };
-        if self.goals {
-            let mut wanted = CHAT_GOAL_TOOLS.to_vec();
-            if self.peers {
-                wanted.extend_from_slice(CHAT_PEER_TOOLS);
-            }
-            widen_allow_list(&mut tool_profile.tools, &wanted);
-        }
         let permissions = resolve_chat_permissions(
             self.dangerously_bypass_approvals_and_sandbox,
             self.sandbox,
@@ -235,25 +224,14 @@ impl ChatCommand {
         };
         let runtime = &state.profiles[&profile_id];
         let model = runtime.primary_model_id.clone();
-        let tool_config = runtime.tool_config.clone();
         if !self.json {
             eprintln!("Model: {model}");
         }
-        if self.goals {
-            let orchestrator = crate::autonomy::agent_orchestrator::default_agent_orchestrator();
-            orchestrator
-                .configure_goal_scopes_sidecar(runtime.data_dir.join("goal-scopes.json"))?;
-            orchestrator.configure_supervisor_store(runtime.data_dir.join("supervisor"))?;
-        }
-        let session_key = if self.goals {
-            octos_core::SessionKey(chat_goal_session_key(&profile_id))
-        } else {
-            octos_core::SessionKey::with_profile(
-                &profile_id,
-                "cli",
-                &uuid::Uuid::now_v7().to_string(),
-            )
-        };
+        let session_key = octos_core::SessionKey::with_profile(
+            &profile_id,
+            "cli",
+            &uuid::Uuid::now_v7().to_string(),
+        );
         let session = OupSession::open(state.clone(), session_key, &cwd, permissions).await?;
         let frontend = TerminalFrontend {
             json: self.json,
@@ -262,9 +240,6 @@ impl ChatCommand {
             segments: std::sync::Mutex::new(AssistantTextProjection::default()),
             input_active: AtomicBool::new(false),
             pending_prompts: std::sync::Mutex::new(Vec::new()),
-            peers: self
-                .peers
-                .then(|| crate::commands::oup_peers::OupPeerHost::new(state, permissions)),
         };
         let cancelled = Arc::new(AtomicBool::new(false));
         let signal = cancelled.clone();
@@ -278,9 +253,6 @@ impl ChatCommand {
         let effort = None;
         if let Some(message) = self.message {
             let result = session.turn(&message, effort, &cancelled, &frontend).await;
-            if let Some(peers) = &frontend.peers {
-                peers.close().await;
-            }
             let result = finish_turn(result, session.close().await)?;
             if result.interrupted {
                 eyre::bail!("turn interrupted");
@@ -355,15 +327,6 @@ impl ChatCommand {
             if EXIT_COMMANDS.contains(&input.to_lowercase().as_str()) {
                 break;
             }
-            if input == "/config" || input.starts_with("/config ") {
-                println!(
-                    "{}",
-                    tool_config
-                        .handle_config_command(input.trim_start_matches("/config").trim())
-                        .await
-                );
-                continue;
-            }
             cancelled.store(false, Ordering::Release);
             if let Err(error) = session.turn(input, effort, &cancelled, &frontend).await {
                 eprintln!("Error: {error}");
@@ -371,9 +334,6 @@ impl ChatCommand {
             println!();
         }
         let _ = readline.save_history(&history_path);
-        if let Some(peers) = &frontend.peers {
-            peers.close().await;
-        }
         session.close().await?;
         println!("Goodbye!");
         Ok(())

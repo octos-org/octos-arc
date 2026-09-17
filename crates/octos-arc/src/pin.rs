@@ -56,7 +56,7 @@ pub fn verify(path: &Path, identity: &BinaryIdentity<'_>) -> Result<RuntimeRelea
         "Runtime version must be fixed"
     );
     let prefix = format!(
-        "https://github.com/octos-org/octos-arc/releases/download/{}/",
+        "https://github.com/octos-org/octos-arc-runtime/releases/download/{}/",
         release.version
     );
     ensure!(
@@ -101,15 +101,16 @@ mod tests {
                 .to_string()
                 .contains("Source-only")
         );
-        let mut value = json!({"schema_version":1,"runtime_release":{"version":"arc-v1","source_commit":identity.source_commit,"target":"test","binary_sha256":file_digest(&binary).unwrap(),"archive_sha256":"a".repeat(64),"url":"https://github.com/octos-org/octos-arc/releases/download/arc-v1/runtime.tar.gz"}});
+        let mut value = json!({"schema_version":1,"runtime_release":{"version":"arc-v1","source_commit":identity.source_commit,"target":"test","binary_sha256":file_digest(&binary).unwrap(),"archive_sha256":"a".repeat(64),"url":"https://github.com/octos-org/octos-arc-runtime/releases/download/arc-v1/runtime.tar.gz"}});
         std::fs::write(&lock, serde_json::to_vec(&value).unwrap()).unwrap();
         assert!(verify(&lock, &identity).is_ok());
         value["runtime_release"]["url"] =
             json!("https://github.com/octos-org/octos/releases/latest/download/runtime.tar.gz");
         std::fs::write(&lock, serde_json::to_vec(&value).unwrap()).unwrap();
         assert!(verify(&lock, &identity).is_err());
-        value["runtime_release"]["url"] =
-            json!("https://github.com/octos-org/octos-arc/releases/download/arc-v1/runtime.tar.gz");
+        value["runtime_release"]["url"] = json!(
+            "https://github.com/octos-org/octos-arc-runtime/releases/download/arc-v1/runtime.tar.gz"
+        );
         std::fs::write(&lock, serde_json::to_vec(&value).unwrap()).unwrap();
         std::fs::write(&binary, "other binary").unwrap();
         assert!(

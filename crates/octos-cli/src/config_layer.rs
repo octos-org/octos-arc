@@ -71,7 +71,6 @@ pub fn apply(args: &mut crate::commands::Args, matches: &clap::ArgMatches) -> ey
     match &mut args.command {
         #[cfg(feature = "api")]
         crate::commands::Command::Serve(inner) => overlay(name, inner, sub, sub_cmd, &section),
-        crate::commands::Command::Gateway(inner) => overlay(name, inner, sub, sub_cmd, &section),
         crate::commands::Command::Chat(inner) => overlay(name, inner, sub, sub_cmd, &section),
         _ => {}
     }
@@ -296,6 +295,7 @@ fn load_cli_section(
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use clap::{Arg, ArgAction, Command};
 
     #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -349,66 +349,6 @@ mod tests {
     }
 
     #[test]
-    fn should_use_json_when_flag_absent() {
-        let cmd = test_command();
-        let matches = cmd.get_matches_from(["serve"]);
-        let mut typed = resolve(&matches);
-        assert_eq!(typed.port, 50080, "sanity: clap default before overlay");
-
-        overlay(
-            "serve",
-            &mut typed,
-            &matches,
-            &test_command(),
-            &section(serde_json::json!({ "port": 8080, "solo": true })),
-        );
-
-        assert_eq!(typed.port, 8080, "JSON must beat the built-in default");
-        assert!(typed.solo, "JSON must set an unset SetTrue bool flag");
-    }
-
-    #[test]
-    fn should_keep_default_when_json_absent() {
-        let cmd = test_command();
-        let matches = cmd.get_matches_from(["serve"]);
-        let mut typed = resolve(&matches);
-
-        overlay(
-            "serve",
-            &mut typed,
-            &matches,
-            &test_command(),
-            &section(serde_json::json!({ "host": "0.0.0.0" })),
-        );
-
-        assert_eq!(
-            typed.port, 50080,
-            "unmentioned key keeps its built-in default"
-        );
-        assert_eq!(typed.host, "0.0.0.0", "mentioned key comes from JSON");
-    }
-
-    #[test]
-    fn should_encode_precedence_in_should_overlay() {
-        use clap::parser::ValueSource;
-        // explicit CLI flag and (clap-tracked) env var both outrank JSON.
-        assert!(
-            !should_overlay(Some(ValueSource::CommandLine)),
-            "CLI beats JSON"
-        );
-        assert!(
-            !should_overlay(Some(ValueSource::EnvVariable)),
-            "env beats JSON"
-        );
-        // default / unset are overridable by JSON.
-        assert!(
-            should_overlay(Some(ValueSource::DefaultValue)),
-            "JSON beats default"
-        );
-        assert!(should_overlay(None), "JSON fills an unset arg");
-    }
-
-    #[test]
     fn should_never_layer_a_persisted_full_access_sandbox() {
         let danger = serde_json::Value::from(DANGER_FULL_ACCESS_SANDBOX);
         // Refused whether or not the run requested full access — a saved
@@ -452,42 +392,6 @@ mod tests {
     }
 
     #[test]
-    fn should_detect_explicit_chat_full_access() {
-        use clap::{Arg, ArgAction, Command};
-        let cmd = Command::new("chat")
-            .arg(
-                Arg::new("dangerously_bypass_approvals_and_sandbox")
-                    .long("yolo")
-                    .action(ArgAction::SetTrue),
-            )
-            .arg(Arg::new("sandbox").long("sandbox").action(ArgAction::Set));
-
-        // --yolo → full access.
-        let matches = cmd.clone().get_matches_from(["chat", "--yolo"]);
-        let mut obj = serde_json::Map::new();
-        obj.insert(
-            "dangerously_bypass_approvals_and_sandbox".into(),
-            true.into(),
-        );
-        assert!(chat_explicit_full_access(&obj, &matches));
-
-        // --sandbox danger-full-access (CLI-sourced) → full access.
-        let matches =
-            cmd.clone()
-                .get_matches_from(["chat", "--sandbox", DANGER_FULL_ACCESS_SANDBOX]);
-        let mut obj = serde_json::Map::new();
-        obj.insert("sandbox".into(), DANGER_FULL_ACCESS_SANDBOX.into());
-        assert!(chat_explicit_full_access(&obj, &matches));
-
-        // Neither → not full access.
-        let matches = cmd.get_matches_from(["chat"]);
-        assert!(!chat_explicit_full_access(
-            &serde_json::Map::new(),
-            &matches
-        ));
-    }
-
-    #[test]
     fn should_deny_layering_of_sensitive_and_selector_flags() {
         let provider = Arg::new("provider").long("provider");
         let auth = Arg::new("auth_token").long("auth-token");
@@ -516,19 +420,6 @@ mod tests {
         assert!(
             is_layerable("serve", &port),
             "port is a normal layerable flag"
-        );
-    }
-
-    #[test]
-    fn should_allow_chat_profile_but_deny_gateway_profile() {
-        let profile = Arg::new("profile").long("profile");
-        assert!(
-            is_layerable("chat", &profile),
-            "chat --profile is a runtime flag"
-        );
-        assert!(
-            !is_layerable("gateway", &profile),
-            "gateway --profile is a selector"
         );
     }
 

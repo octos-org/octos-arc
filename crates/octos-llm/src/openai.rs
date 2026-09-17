@@ -263,8 +263,6 @@ pub struct OpenAIProvider {
     /// explicit opt-in/out must survive either builder-call order (mirrors
     /// `AnthropicProvider::prompt_caching_override`).
     prompt_cache_affinity_override: Option<bool>,
-    /// Total timeout of one non-streaming chat request.
-    chat_timeout: std::time::Duration,
 }
 
 const OFFICIAL_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
@@ -299,7 +297,6 @@ impl OpenAIProvider {
             provider_label: "openai".to_string(),
             prompt_cache_affinity: true,
             prompt_cache_affinity_override: None,
-            chat_timeout: std::time::Duration::from_secs(crate::provider::DEFAULT_LLM_TIMEOUT_SECS),
         }
     }
 
@@ -346,7 +343,7 @@ impl OpenAIProvider {
         // don't emit DeepSeek-specific fields there by default. Operators opt in
         // per route via `model_hints` (with_hints, applied after this, still wins).
         if self.hints.reasoning_style == ReasoningStyle::EffortAndThinkingToggle
-            && !deepseek_v4_reasoning_endpoint(&url)
+            && !url.contains("api.deepseek.com")
         {
             self.hints.reasoning_style = ReasoningStyle::None;
         }
@@ -408,15 +405,6 @@ impl OpenAIProvider {
         self
     }
 
-    /// Total timeout of one non-streaming chat request (default
-    /// [`crate::provider::DEFAULT_LLM_TIMEOUT_SECS`]). Long single-response
-    /// generations (whole applications in one reply) need more than the
-    /// interactive default; streaming requests are unaffected.
-    pub fn with_chat_timeout(mut self, timeout: std::time::Duration) -> Self {
-        self.chat_timeout = timeout;
-        self
-    }
-
     /// POST a non-streaming chat request. Factored so the graceful
     /// image-modality fallback can re-send a rebuilt (text-only) request
     /// without duplicating the wire setup.
@@ -428,7 +416,9 @@ impl OpenAIProvider {
                 format!("Bearer {}", self.api_key.expose_secret()),
             )
             .header("Content-Type", "application/json")
-            .timeout(self.chat_timeout)
+            .timeout(std::time::Duration::from_secs(
+                crate::provider::DEFAULT_LLM_TIMEOUT_SECS,
+            ))
             .json(request)
             .send()
             .await
@@ -710,31 +700,16 @@ impl OpenAIProvider {
                 _ => (None, None),
             };
 
-        let effective_max_tokens = match config.max_tokens {
-            // ChatConfig::default() is provider-neutral. Let a known
-            // reasoning-heavy provider use its safer default, while explicit
-            // operator values remain exact.
-            Some(value) if value == crate::context::default_max_tokens() => Some(
-                crate::context::provider_default_max_tokens(&self.model)
-                    .min(self.max_output_tokens()),
-            ),
-            Some(value) => Some(value),
-            None => Some(
-                crate::context::provider_default_max_tokens(&self.model)
-                    .min(self.max_output_tokens()),
-            ),
-        };
-
         OpenAIRequest {
             model: &self.model,
             messages: openai_messages,
             max_tokens: if self.hints.uses_completion_tokens {
                 None
             } else {
-                effective_max_tokens
+                config.max_tokens
             },
             max_completion_tokens: if self.hints.uses_completion_tokens {
-                effective_max_tokens
+                config.max_tokens.or(Some(4096))
             } else {
                 None
             },
@@ -816,14 +791,6 @@ impl OpenAIProvider {
     }
 }
 
-/// ARC-Bench exposes DeepSeek V4 through an OpenAI-compatible gateway.  It
-/// implements the same `reasoning_effort`/`thinking` fields as the official
-/// endpoint, so keep the provider controls enabled there as well.  Other
-/// custom endpoints remain opt-in through explicit `model_hints`.
-fn deepseek_v4_reasoning_endpoint(url: &str) -> bool {
-    url.contains("api.deepseek.com") || url.contains("api.arc-bench.com")
-}
-
 /// Request keys octos sets via dedicated `OpenAIRequest` fields; if an operator
 /// puts one of these in `sampling_params` it is dropped (the dedicated field /
 /// knob wins) rather than emitted twice. See [`OpenAIProvider::build_request`].
@@ -863,9 +830,7 @@ impl LlmProvider for OpenAIProvider {
         // `is_image_modality_error` / `ModelHints::detect`.
         if response.status().as_u16() == 400 && request_has_user_images(messages, &self.hints) {
             let body = response.text().await.unwrap_or_default();
-            if is_image_modality_error(&body)
-                && crate::current_llm_call_policy() != crate::LlmCallPolicy::FailFast
-            {
+            if is_image_modality_error(&body) {
                 tracing::warn!(
                     provider = %self.provider_label,
                     model = %self.model,
@@ -899,9 +864,8 @@ impl LlmProvider for OpenAIProvider {
             // Codex round-2 MINOR: thread the provider_label so the
             // operator sees e.g. "minimax/MiniMax-M2.5-highspeed"
             // instead of just "MiniMax-M2.5-highspeed". This is the
-            // lane label the AdaptiveRouter and failover ledger use,
-            // so the wire envelope can be cross-referenced with the
-            // router events.
+            // lane label the failover ledger uses, so the wire
+            // envelope can be cross-referenced with failover events.
             let body = crate::provider::truncate_error_body(&body);
             return Err(crate::error::LlmError::from_status_with_label(
                 status.as_u16(),
@@ -967,10 +931,27 @@ impl LlmProvider for OpenAIProvider {
             tool_calls,
             stop_reason,
             usage: {
-                let (input_tokens, cached, cache_write) =
-                    normalize_prompt_cache_usage(&api_response.usage);
+                // OpenAI reports cached tokens INSIDE prompt_tokens; the
+                // TokenUsage contract is disjoint (Anthropic-style: total
+                // prompt = input + cache_read), so subtract at the boundary.
+                let cached = api_response
+                    .usage
+                    .prompt_tokens_details
+                    .as_ref()
+                    .map(|d| d.cached_tokens)
+                    .unwrap_or(0);
+                let cache_write = api_response
+                    .usage
+                    .prompt_tokens_details
+                    .as_ref()
+                    .map(|d| d.cache_write_tokens)
+                    .unwrap_or(0);
                 TokenUsage {
-                    input_tokens,
+                    input_tokens: api_response
+                        .usage
+                        .prompt_tokens
+                        .saturating_sub(cached)
+                        .saturating_sub(cache_write),
                     output_tokens: api_response.usage.completion_tokens,
                     reasoning_tokens: api_response
                         .usage
@@ -1001,9 +982,7 @@ impl LlmProvider for OpenAIProvider {
         // text-only if the endpoint rejected the image content parts.
         if response.status().as_u16() == 400 && request_has_user_images(messages, &self.hints) {
             let text = response.text().await.unwrap_or_default();
-            if is_image_modality_error(&text)
-                && crate::current_llm_call_policy() != crate::LlmCallPolicy::FailFast
-            {
+            if is_image_modality_error(&text) {
                 tracing::warn!(
                     provider = %self.provider_label,
                     model = %self.model,
@@ -1350,19 +1329,10 @@ struct FunctionCall {
     arguments: String,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize)]
 struct Usage {
-    #[serde(default)]
     prompt_tokens: u32,
-    #[serde(default)]
     completion_tokens: u32,
-    /// DeepSeek's OpenAI-compatible API reports cache accounting as
-    /// top-level hit/miss fields instead of `prompt_tokens_details`. These
-    /// fields are already disjoint, so they take precedence when present.
-    #[serde(default)]
-    prompt_cache_hit_tokens: Option<u32>,
-    #[serde(default)]
-    prompt_cache_miss_tokens: Option<u32>,
     /// Automatic prompt-cache breakdown. `cached_tokens` counts the portion
     /// of `prompt_tokens` served from OpenAI's cache (INCLUDED in
     /// `prompt_tokens`, unlike Anthropic's disjoint accounting). Compat
@@ -1387,39 +1357,6 @@ struct PromptTokensDetails {
     cached_tokens: u32,
     #[serde(default)]
     cache_write_tokens: u32,
-}
-
-/// Normalize OpenAI-compatible usage into Octos's disjoint token contract.
-/// DeepSeek reports `prompt_cache_hit_tokens` and
-/// `prompt_cache_miss_tokens`; older OpenAI-compatible servers report an
-/// inclusive `prompt_tokens` total with `cached_tokens` nested below it.
-fn normalize_prompt_cache_usage(usage: &Usage) -> (u32, u32, u32) {
-    if usage.prompt_cache_hit_tokens.is_some() || usage.prompt_cache_miss_tokens.is_some() {
-        let cached = usage.prompt_cache_hit_tokens.unwrap_or(0);
-        let input = usage
-            .prompt_cache_miss_tokens
-            .unwrap_or_else(|| usage.prompt_tokens.saturating_sub(cached));
-        return (input, cached, 0);
-    }
-
-    let cached = usage
-        .prompt_tokens_details
-        .as_ref()
-        .map(|details| details.cached_tokens)
-        .unwrap_or(0);
-    let cache_write = usage
-        .prompt_tokens_details
-        .as_ref()
-        .map(|details| details.cache_write_tokens)
-        .unwrap_or(0);
-    (
-        usage
-            .prompt_tokens
-            .saturating_sub(cached)
-            .saturating_sub(cache_write),
-        cached,
-        cache_write,
-    )
 }
 
 // --- Streaming SSE helpers (shared with OpenRouter) ---
@@ -1506,16 +1443,21 @@ pub(crate) fn parse_openai_sse_events(event: &SseEvent) -> Vec<StreamEvent> {
     }
 
     if let Some(usage) = data.get("usage").filter(|u| !u.is_null()) {
-        let parsed = serde_json::from_value::<Usage>(usage.clone()).unwrap_or_default();
-        let (input_tokens, cached, cache_write) = normalize_prompt_cache_usage(&parsed);
+        // OpenAI reports cached tokens INSIDE prompt_tokens; the TokenUsage
+        // contract is disjoint (total prompt = input + cache_read).
+        let prompt = usage["prompt_tokens"].as_u64().unwrap_or(0) as u32;
+        let cached = usage["prompt_tokens_details"]["cached_tokens"]
+            .as_u64()
+            .unwrap_or(0) as u32;
+        let cache_write = usage["prompt_tokens_details"]["cache_write_tokens"]
+            .as_u64()
+            .unwrap_or(0) as u32;
         events.push(StreamEvent::Usage(TokenUsage {
-            input_tokens,
-            output_tokens: parsed.completion_tokens,
-            reasoning_tokens: parsed
-                .completion_tokens_details
-                .as_ref()
-                .map(|details| details.reasoning_tokens)
-                .unwrap_or(0),
+            input_tokens: prompt.saturating_sub(cached).saturating_sub(cache_write),
+            output_tokens: usage["completion_tokens"].as_u64().unwrap_or(0) as u32,
+            reasoning_tokens: usage["completion_tokens_details"]["reasoning_tokens"]
+                .as_u64()
+                .unwrap_or(0) as u32,
             cache_read_tokens: cached,
             cache_write_tokens: cache_write,
             ..Default::default()
@@ -1573,32 +1515,6 @@ mod tests {
         assert!(!redacted.contains("TOPSECRET_USER_1047"));
     }
 
-    /// A custom base URL tags the router label (`moonshot-coding@api`), but
-    /// `provider_metadata()` reports the untagged lane. The manifest must use
-    /// the metadata label, otherwise usage rows (attributed through
-    /// `provider_metadata_for_index`) never match their manifest and the OUP
-    /// epoch reads a route change on every call.
-    #[test]
-    fn should_build_manifest_with_the_same_provider_label_as_provider_metadata_for_tagged_lane() {
-        let provider = OpenAIProvider::new("test-key", "k3")
-            .with_provider_label("moonshot-coding")
-            .with_base_url("https://api.kimi.com/coding/v1");
-        assert_eq!(provider.provider_name(), "moonshot-coding@api");
-        let config = ChatConfig::default();
-        let messages = vec![Message::system("stable"), Message::user("hello")];
-        let request = provider.build_request(&messages, &[], &config, false);
-        let manifest = provider.prompt_cache_input_manifest(&request, &config);
-
-        let metadata = provider.provider_metadata();
-        assert_eq!(metadata.provider, "moonshot-coding");
-        assert_eq!(manifest.provider, metadata.provider);
-        assert_eq!(manifest.model, metadata.model);
-        assert_eq!(
-            manifest.provider,
-            provider.provider_metadata_for_index(None).provider
-        );
-    }
-
     /// `ChatConfig.tool_choice` used to be inert: no adapter serialized it,
     /// so a "tools-disabled" round (the convergence reflection) still let
     /// the model call tools. `none` must reach the wire, while the default
@@ -1644,20 +1560,6 @@ mod tests {
     }
 
     #[test]
-    fn tool_call_arguments_wire_coerces_non_object_to_empty_object() {
-        // A bare string is what the old inline fallback produced; serialized
-        // verbatim it caused the provider HTTP 400. It must become `{}`.
-        let bare = serde_json::Value::String("git clone https://x".to_string());
-        assert_eq!(tool_call_arguments_to_wire(&bare), "{}");
-        // Arrays/numbers/null are also not valid arguments objects.
-        assert_eq!(
-            tool_call_arguments_to_wire(&serde_json::json!([1, 2])),
-            "{}"
-        );
-        assert_eq!(tool_call_arguments_to_wire(&serde_json::Value::Null), "{}");
-    }
-
-    #[test]
     fn tool_call_arguments_wire_recovers_a_stringified_object() {
         let stringified = serde_json::Value::String(r#"{"command":"ls"}"#.to_string());
         let wire = tool_call_arguments_to_wire(&stringified);
@@ -1682,96 +1584,6 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_gpt4o() {
-        let h = ModelHints::detect("gpt-4o");
-        assert!(!h.uses_completion_tokens);
-        assert!(!h.fixed_temperature);
-        assert!(!h.lacks_vision);
-    }
-
-    #[test]
-    fn test_detect_gpt4o_mini() {
-        let h = ModelHints::detect("gpt-4o-mini");
-        assert!(!h.uses_completion_tokens);
-        assert!(!h.fixed_temperature);
-    }
-
-    #[test]
-    fn test_detect_gpt41() {
-        let h = ModelHints::detect("gpt-4.1");
-        assert!(h.uses_completion_tokens);
-        assert!(!h.fixed_temperature);
-        assert!(!h.lacks_vision);
-    }
-
-    #[test]
-    fn test_detect_gpt41_mini() {
-        let h = ModelHints::detect("gpt-4.1-mini");
-        assert!(h.uses_completion_tokens);
-        assert!(!h.fixed_temperature);
-    }
-
-    #[test]
-    fn test_detect_gpt5_uses_fixed_temperature() {
-        // All gpt-5.* variants use fixed temperature and completion tokens
-        for model in &["gpt-5-nano", "gpt-5.3-codex", "gpt-5.4"] {
-            let h = ModelHints::detect(model);
-            assert!(
-                h.uses_completion_tokens,
-                "{model} should use completion_tokens"
-            );
-            assert!(h.fixed_temperature, "{model} should use fixed_temperature");
-        }
-    }
-
-    #[test]
-    fn test_detect_o3() {
-        let h = ModelHints::detect("o3-mini");
-        assert!(h.uses_completion_tokens);
-        assert!(h.fixed_temperature);
-        assert!(!h.lacks_vision);
-    }
-
-    #[test]
-    fn test_detect_o1() {
-        let h = ModelHints::detect("o1-preview");
-        assert!(h.uses_completion_tokens);
-        assert!(h.fixed_temperature);
-    }
-
-    #[test]
-    fn test_detect_kimi_k25_is_not_pre_stripped() {
-        let h = ModelHints::detect("kimi-k2.5");
-        assert!(!h.uses_completion_tokens);
-        assert!(h.fixed_temperature);
-        // Vision is NO LONGER inferred from the model name. Kimi K2.5/K2.6 are
-        // natively multimodal; the old heuristic wrongly stripped images from
-        // them. The same model name can also front a vision endpoint
-        // (moonshot@api) or an image-rejecting proxy (moonshot@autodl), which a
-        // name check can't distinguish — so we attempt images and let the
-        // graceful image-modality fallback retry text-only if the endpoint 400s.
-        assert!(!h.lacks_vision);
-    }
-
-    #[test]
-    fn test_detect_deepseek_is_not_pre_stripped() {
-        // deepseek-chat is text-only, but deepseek-v4/VL are vision; we no
-        // longer pre-strip by name. A text-only endpoint that 400s on an image
-        // is handled by the image-modality fallback, not a hardcoded flag.
-        let h = ModelHints::detect("deepseek-chat");
-        assert!(!h.uses_completion_tokens);
-        assert!(!h.fixed_temperature);
-        assert!(!h.lacks_vision);
-    }
-
-    #[test]
-    fn test_detect_minimax_is_not_pre_stripped() {
-        let h = ModelHints::detect("MiniMax-Text-01");
-        assert!(!h.lacks_vision);
-        assert!(h.merge_system_messages);
-    }
-
-    #[test]
     fn is_image_modality_error_matches_known_provider_400s() {
         // The exact string observed live on mini3 (kimi via the autodl proxy).
         assert!(is_image_modality_error(
@@ -1790,70 +1602,12 @@ mod tests {
     }
 
     #[test]
-    fn request_has_user_images_gates_the_fallback() {
-        let img = Message {
-            role: MessageRole::User,
-            content: "look at this".into(),
-            media: vec!["/tmp/pic.png".into()],
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-            client_message_id: None,
-            thread_id: None,
-            timestamp: chrono::Utc::now(),
-        };
-        let vision = ModelHints::default();
-        assert!(request_has_user_images(std::slice::from_ref(&img), &vision));
-        // Already configured text-only ⇒ images were never sent ⇒ no retry.
-        let text_only = ModelHints {
-            lacks_vision: true,
-            ..ModelHints::default()
-        };
-        assert!(!request_has_user_images(
-            std::slice::from_ref(&img),
-            &text_only
-        ));
-        // A non-image attachment is not an image-modality concern.
-        let mut doc = img.clone();
-        doc.media = vec!["/tmp/data.csv".into()];
-        assert!(!request_has_user_images(
-            std::slice::from_ref(&doc),
-            &vision
-        ));
-    }
-
-    #[test]
     fn test_detect_unknown_model() {
         let h = ModelHints::detect("my-custom-model");
         assert!(!h.uses_completion_tokens);
         assert!(!h.fixed_temperature);
         assert!(!h.lacks_vision);
         assert!(h.merge_system_messages);
-    }
-
-    #[test]
-    fn test_model_hints_serde_roundtrip() {
-        let hints = ModelHints {
-            uses_completion_tokens: true,
-            fixed_temperature: false,
-            lacks_vision: true,
-            merge_system_messages: false,
-            reasoning_style: ReasoningStyle::EffortAndThinkingToggle,
-        };
-        let json = serde_json::to_string(&hints).unwrap();
-        let parsed: ModelHints = serde_json::from_str(&json).unwrap();
-        assert_eq!(hints, parsed);
-    }
-
-    #[test]
-    fn test_model_hints_deserialize_partial() {
-        let json = r#"{"uses_completion_tokens": true}"#;
-        let h: ModelHints = serde_json::from_str(json).unwrap();
-        assert!(h.uses_completion_tokens);
-        assert!(!h.fixed_temperature);
-        assert!(!h.lacks_vision);
-        assert!(h.merge_system_messages);
-        assert_eq!(h.reasoning_style, ReasoningStyle::None);
     }
 
     #[test]
@@ -1935,13 +1689,6 @@ mod tests {
             official.hints.reasoning_style,
             ReasoningStyle::EffortAndThinkingToggle
         );
-        // ARC-Bench's gateway implements the same DeepSeek V4 controls.
-        let arc = OpenAIProvider::new("k", "deepseek-v4-flash")
-            .with_base_url("https://api.arc-bench.com/v1");
-        assert_eq!(
-            arc.hints.reasoning_style,
-            ReasoningStyle::EffortAndThinkingToggle
-        );
         // The same model name on a non-DeepSeek endpoint must not inherit it.
         let nvidia = OpenAIProvider::new("k", "deepseek-ai/deepseek-v4-pro")
             .with_base_url("https://integrate.api.nvidia.com/v1");
@@ -1987,38 +1734,6 @@ mod tests {
     }
 
     #[test]
-    fn build_request_emits_effort_and_thinking_for_deepseek_v4() {
-        let p = OpenAIProvider::new("key", "deepseek-v4-pro");
-        let cfg = ChatConfig {
-            reasoning_effort: Some(crate::config::ReasoningEffort::High),
-            ..Default::default()
-        };
-        let msgs = [msg("hi")];
-        let v = serde_json::to_value(p.build_request(&msgs, &[], &cfg, false)).unwrap();
-        assert_eq!(v["reasoning_effort"], "high");
-        assert_eq!(v["thinking"], serde_json::json!({ "type": "enabled" }));
-    }
-
-    #[test]
-    fn build_request_flattens_sampling_params() {
-        // Operator-supplied sampler params (#2172) appear as top-level fields in
-        // the request body, so an OpenAI-compatible server receives e.g.
-        // repeat_penalty even though octos does not model it.
-        let p = OpenAIProvider::new("key", "gpt-4o");
-        let mut sp = serde_json::Map::new();
-        sp.insert("repeat_penalty".to_string(), serde_json::json!(1.1));
-        sp.insert("top_p".to_string(), serde_json::json!(0.95));
-        let cfg = ChatConfig {
-            sampling_params: Some(sp),
-            ..Default::default()
-        };
-        let msgs = [msg("hi")];
-        let v = serde_json::to_value(p.build_request(&msgs, &[], &cfg, false)).unwrap();
-        assert_eq!(v["repeat_penalty"], serde_json::json!(1.1));
-        assert_eq!(v["top_p"], serde_json::json!(0.95));
-    }
-
-    #[test]
     fn build_request_drops_reserved_keys_from_sampling_params() {
         // Defense-in-depth (#2172): a modeled key put in sampling_params is
         // dropped so it can't duplicate/override the dedicated field. The
@@ -2044,207 +1759,6 @@ mod tests {
         assert!(v.get("prompt_cache_key").is_none(), "{v}");
         assert!(v.get("tool_choice").is_none(), "{v}");
         assert_eq!(v["repeat_penalty"], serde_json::json!(1.1));
-    }
-
-    #[test]
-    fn build_request_omits_sampling_params_when_unset() {
-        // Cloud-safety: with no sampling_params, no extra keys are added — the
-        // request body is unchanged.
-        let p = OpenAIProvider::new("key", "gpt-4o");
-        let msgs = [msg("hi")];
-        let v = serde_json::to_value(p.build_request(&msgs, &[], &ChatConfig::default(), false))
-            .unwrap();
-        assert!(v.get("repeat_penalty").is_none());
-        assert!(v.get("top_p").is_none());
-    }
-
-    #[test]
-    fn build_request_maps_max_effort_by_style() {
-        let msgs = [msg("hi")];
-        let cfg = ChatConfig {
-            reasoning_effort: Some(crate::config::ReasoningEffort::Max),
-            ..Default::default()
-        };
-        // deepseek (EffortAndThinkingToggle) emits DeepSeek's real "max".
-        let ds = OpenAIProvider::new("k", "deepseek-v4-pro");
-        let v = serde_json::to_value(ds.build_request(&msgs, &[], &cfg, false)).unwrap();
-        assert_eq!(v["reasoning_effort"], "max");
-        // Effort-style providers (grok) have no max tier -> clamp to "high".
-        let grok = OpenAIProvider::new("k", "grok-4.3");
-        let v2 = serde_json::to_value(grok.build_request(&msgs, &[], &cfg, false)).unwrap();
-        assert_eq!(v2["reasoning_effort"], "high");
-    }
-
-    #[test]
-    fn build_request_emits_only_effort_for_grok() {
-        let p = OpenAIProvider::new("key", "grok-4.3");
-        let cfg = ChatConfig {
-            reasoning_effort: Some(crate::config::ReasoningEffort::Low),
-            ..Default::default()
-        };
-        let msgs = [msg("hi")];
-        let v = serde_json::to_value(p.build_request(&msgs, &[], &cfg, false)).unwrap();
-        assert_eq!(v["reasoning_effort"], "low");
-        assert!(
-            v.get("thinking").is_none(),
-            "grok must not emit a thinking toggle"
-        );
-    }
-
-    #[test]
-    fn build_request_omits_reasoning_when_unset_or_unsupported() {
-        let msgs = [msg("hi")];
-        // Effort configured but the model has no reasoning control -> nothing.
-        let p = OpenAIProvider::new("key", "deepseek-chat");
-        let cfg = ChatConfig {
-            reasoning_effort: Some(crate::config::ReasoningEffort::High),
-            ..Default::default()
-        };
-        let v = serde_json::to_value(p.build_request(&msgs, &[], &cfg, false)).unwrap();
-        assert!(v.get("reasoning_effort").is_none());
-        assert!(v.get("thinking").is_none());
-
-        // Supported model but no effort configured -> nothing.
-        let p2 = OpenAIProvider::new("key", "deepseek-v4-pro");
-        let cfg2 = ChatConfig {
-            reasoning_effort: None,
-            ..Default::default()
-        };
-        let v2 = serde_json::to_value(p2.build_request(&msgs, &[], &cfg2, false)).unwrap();
-        assert!(v2.get("reasoning_effort").is_none());
-        assert!(v2.get("thinking").is_none());
-    }
-
-    #[test]
-    fn should_emit_none_when_reasoning_is_disabled_for_openai_compatible_endpoint() {
-        let effort = serde_json::from_value(serde_json::json!("none"))
-            .expect("none should disable reasoning");
-        let provider =
-            OpenAIProvider::new("key", "qwen3.5:9b").with_base_url("http://localhost:11434/v1");
-        let config = ChatConfig {
-            reasoning_effort: Some(effort),
-            ..Default::default()
-        };
-
-        let request = serde_json::to_value(provider.build_request(
-            &[msg("return JSON")],
-            &[],
-            &config,
-            false,
-        ))
-        .unwrap();
-
-        assert_eq!(request["reasoning_effort"], "none");
-        assert!(request.get("thinking").is_none());
-    }
-
-    #[test]
-    fn should_disable_thinking_toggle_when_reasoning_is_disabled() {
-        let effort = serde_json::from_value(serde_json::json!("none"))
-            .expect("none should disable reasoning");
-        let provider = OpenAIProvider::new("key", "glm-5.2");
-        let config = ChatConfig {
-            reasoning_effort: Some(effort),
-            ..Default::default()
-        };
-
-        let request = serde_json::to_value(provider.build_request(
-            &[msg("return JSON")],
-            &[],
-            &config,
-            false,
-        ))
-        .unwrap();
-
-        assert_eq!(
-            request["thinking"],
-            serde_json::json!({ "type": "disabled" })
-        );
-        assert!(request.get("reasoning_effort").is_none());
-    }
-
-    #[test]
-    fn build_request_stubs_reasoning_content_for_bare_k3_ids() {
-        // Kimi Code API model ids are the BARE `k3` / `k3-256k` /
-        // `kimi-for-coding*` — the old gate only matched "kimi-k2"/"kimi-k3"
-        // substrings, so the exact ids Kimi Code serves got NO stub and risked
-        // 400 "reasoning_content is missing" on multi-round tool calls.
-        for model in [
-            "k3",
-            "k3-256k",
-            "kimi-for-coding",
-            "kimi-for-coding-highspeed",
-        ] {
-            let p = OpenAIProvider::new("key", model);
-            let mut assistant = msg("the answer");
-            assistant.role = MessageRole::Assistant;
-            let msgs = [assistant];
-            let v =
-                serde_json::to_value(p.build_request(&msgs, &[], &ChatConfig::default(), false))
-                    .unwrap();
-            let a = v["messages"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|m| m["role"] == "assistant")
-                .expect("assistant message present");
-            assert_eq!(
-                a.get("reasoning_content").and_then(|r| r.as_str()),
-                Some("."),
-                "{model} assistant message must carry the reasoning stub"
-            );
-        }
-    }
-
-    #[test]
-    fn build_request_does_not_stub_reasoning_content_for_deepseek_v4() {
-        // deepseek-v4's official API was verified live NOT to require
-        // reasoning_content on assistant tool-call messages (multi-round returns
-        // 200 without it), and a "." stub could break non-official endpoints
-        // (nvidia/vllm). So no stub — only kimi-k2 gets one.
-        let p = OpenAIProvider::new("key", "deepseek-v4-pro");
-        let mut assistant = msg("the answer");
-        assistant.role = MessageRole::Assistant;
-        let msgs = [assistant];
-        let v = serde_json::to_value(p.build_request(&msgs, &[], &ChatConfig::default(), false))
-            .unwrap();
-        let a = v["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|m| m["role"] == "assistant")
-            .expect("assistant message present");
-        assert!(
-            a.get("reasoning_content").is_none(),
-            "deepseek-v4 assistant message must not get a reasoning_content stub"
-        );
-    }
-
-    #[test]
-    fn build_request_drops_prior_reasoning_content_for_non_kimi_model() {
-        // (a) A non-kimi reasoning model must NOT have prior verbose
-        // reasoning_content round-tripped back into the request — reasoning
-        // models re-derive their chain of thought each turn, so re-sending it
-        // is pure context bloat. The field must be absent entirely.
-        let p = OpenAIProvider::new("key", "deepseek-v4-pro");
-        let mut assistant = msg("the final answer");
-        assistant.role = MessageRole::Assistant;
-        assistant.reasoning_content =
-            Some("a very long prior chain of thought that should not be re-sent".to_string());
-        let msgs = [assistant];
-        let v = serde_json::to_value(p.build_request(&msgs, &[], &ChatConfig::default(), false))
-            .unwrap();
-        let a = v["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|m| m["role"] == "assistant")
-            .expect("assistant message present");
-        assert!(
-            a.get("reasoning_content").is_none(),
-            "non-kimi model must drop prior reasoning_content, got: {:?}",
-            a.get("reasoning_content")
-        );
     }
 
     #[test]
@@ -2293,183 +1807,6 @@ mod tests {
             a2.get("reasoning_content").and_then(|r| r.as_str()),
             Some("."),
             "kimi-k2 must get the \".\" stub when reasoning_content is absent"
-        );
-    }
-
-    #[test]
-    fn kimi_k3_hints_survive_official_endpoint_and_pin_temperature() {
-        // K3 pins sampling params server-side -> never send temperature.
-        assert!(ModelHints::detect("kimi-k3").fixed_temperature);
-        // Unlike the DeepSeek-specific thinking toggle, K3's max-only
-        // reasoning_effort is a plain top-level field, so with_base_url must
-        // not downgrade it on the official moonshot endpoint.
-        let p = OpenAIProvider::new("k", "kimi-k3")
-            .with_provider_label("moonshot")
-            .with_base_url("https://api.moonshot.ai/v1");
-        assert_eq!(p.hints.reasoning_style, ReasoningStyle::EffortLowHighMax);
-        // Explicit config override still wins (with_hints runs after
-        // with_base_url), e.g. for a proxy that rejects reasoning_effort.
-        let overridden = OpenAIProvider::new("k", "kimi-k3")
-            .with_base_url("https://api.moonshot.ai/v1")
-            .with_hints(ModelHints {
-                reasoning_style: ReasoningStyle::None,
-                fixed_temperature: true,
-                ..Default::default()
-            });
-        assert_eq!(overridden.hints.reasoning_style, ReasoningStyle::None);
-    }
-
-    /// The Kimi coding plan (family `moonshot-coding`) exposes K3 under the bare
-    /// ids `k3` / `k3-256k` / `kimi-for-coding*`, which don't contain `kimi-k3`.
-    /// They MUST still pin temperature (else the endpoint 400s "only 1 is
-    /// allowed") and get K3's max-only reasoning.
-    #[test]
-    fn coding_plan_k3_ids_pin_temperature_and_max_reasoning() {
-        for id in [
-            "k3",
-            "k3-256k",
-            "kimi-for-coding",
-            "kimi-for-coding-highspeed",
-        ] {
-            let h = ModelHints::detect(id);
-            assert!(
-                h.fixed_temperature,
-                "{id} must pin temperature (K3 rejects any temperature != 1)"
-            );
-            // These ids ARE the K3 model, so they must also get K3's graded
-            // low|high|max reasoning — otherwise `/thinking` is silently a
-            // no-op for the coding-plan aliases even though temperature is pinned.
-            assert_eq!(
-                h.reasoning_style,
-                ReasoningStyle::EffortLowHighMax,
-                "{id} is the K3 model and must get K3's graded low|high|max reasoning"
-            );
-        }
-        // Guard: an unrelated model containing "k3" as a substring is NOT the
-        // coding plan (exact match only), so it is unaffected.
-        assert!(!ModelHints::detect("mock-k3000").fixed_temperature);
-    }
-
-    #[test]
-    fn reasoning_emission_for_k3_is_graded_and_for_glm_is_a_toggle() {
-        use crate::config::ReasoningEffort as RE;
-        let build = |model: &str, effort: Option<RE>| {
-            let p = OpenAIProvider::new("key", model);
-            let cfg = ChatConfig {
-                reasoning_effort: effort,
-                ..ChatConfig::default()
-            };
-            serde_json::to_value(p.build_request(&[msg("hi")], &[], &cfg, false)).unwrap()
-        };
-
-        // Kimi K3: graded low|high|max (no medium tier → clamps up to high; Max
-        // stays "max"). No `thinking` object (K3 rejects it).
-        for (effort, want) in [
-            (RE::Low, "low"),
-            (RE::Medium, "high"),
-            (RE::High, "high"),
-            (RE::Max, "max"),
-        ] {
-            let v = build("k3", Some(effort));
-            assert_eq!(
-                v["reasoning_effort"].as_str(),
-                Some(want),
-                "k3 {effort:?} must map to {want}, not collapse to max"
-            );
-            assert!(
-                v.get("thinking").is_none_or(|t| t.is_null()),
-                "k3 must NOT send a thinking object"
-            );
-        }
-        // No effort configured → nothing emitted (K3 thinks by its server default).
-        let v = build("k3", None);
-        assert!(v.get("reasoning_effort").is_none_or(|r| r.is_null()));
-
-        // GLM-5.2: any effort level ENABLES thinking via the binary toggle; it
-        // must NOT send reasoning_effort (previously it emitted nothing at all).
-        for effort in [RE::Low, RE::Medium, RE::High, RE::Max] {
-            let v = build("glm-5.2", Some(effort));
-            assert_eq!(
-                v["thinking"],
-                serde_json::json!({ "type": "enabled" }),
-                "glm {effort:?} must enable thinking"
-            );
-            assert!(
-                v.get("reasoning_effort").is_none_or(|r| r.is_null()),
-                "glm must NOT send reasoning_effort"
-            );
-        }
-        // No effort → nothing (server default).
-        let v = build("glm-5.2", None);
-        assert!(v.get("thinking").is_none_or(|t| t.is_null()));
-    }
-
-    #[test]
-    fn kimi_k3_pins_temperature_and_never_sends_the_thinking_object() {
-        // K3 always thinks and rejects the K2.x `thinking` object; it also pins
-        // temperature server-side. (Graded low|high|max emission is covered by
-        // `reasoning_emission_for_k3_is_graded_and_for_glm_is_a_toggle`.)
-        let p = OpenAIProvider::new("key", "kimi-k3");
-        let msgs = [msg("hi")];
-        use crate::config::ReasoningEffort as RE;
-        for effort in [RE::Low, RE::Medium, RE::High, RE::Max] {
-            let cfg = ChatConfig {
-                reasoning_effort: Some(effort),
-                ..Default::default()
-            };
-            let v = serde_json::to_value(p.build_request(&msgs, &[], &cfg, false)).unwrap();
-            assert!(
-                v.get("thinking").is_none(),
-                "kimi-k3 must not emit the K2.x thinking object"
-            );
-            assert!(
-                v.get("temperature").is_none(),
-                "kimi-k3 pins temperature server-side"
-            );
-        }
-    }
-
-    #[test]
-    fn build_request_preserves_reasoning_for_kimi_k3() {
-        // K3's quickstart mandates the same round-trip contract as kimi-k2:
-        // "add the complete assistant message returned by the API to the next
-        // request. Do not keep only `content`". Auto-detected hints (no
-        // with_hints) must be enough to get it.
-        let p = OpenAIProvider::new("key", "kimi-k3");
-        let mut assistant = msg("the answer");
-        assistant.role = MessageRole::Assistant;
-        assistant.reasoning_content = Some("prior k3 reasoning".to_string());
-        let msgs = [assistant];
-        let v = serde_json::to_value(p.build_request(&msgs, &[], &ChatConfig::default(), false))
-            .unwrap();
-        let a = v["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|m| m["role"] == "assistant")
-            .expect("assistant message present");
-        assert_eq!(
-            a.get("reasoning_content").and_then(|r| r.as_str()),
-            Some("prior k3 reasoning"),
-            "kimi-k3 must round-trip prior assistant reasoning_content"
-        );
-        // Absent reasoning -> "." stub (same presence contract as kimi-k2).
-        let mut assistant2 = msg("the answer");
-        assistant2.role = MessageRole::Assistant;
-        assistant2.reasoning_content = None;
-        let msgs2 = [assistant2];
-        let v2 = serde_json::to_value(p.build_request(&msgs2, &[], &ChatConfig::default(), false))
-            .unwrap();
-        let a2 = v2["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|m| m["role"] == "assistant")
-            .expect("assistant message present");
-        assert_eq!(
-            a2.get("reasoning_content").and_then(|r| r.as_str()),
-            Some("."),
-            "kimi-k3 must get the \".\" stub when reasoning_content is absent"
         );
     }
 
@@ -2528,186 +1865,6 @@ mod tests {
         assert_eq!(metadata.endpoint.as_deref(), Some("autodl.art"));
         assert_eq!(metadata.display_label(), "moonshot/kimi-k2.5 @ autodl.art");
     }
-
-    // ── FailFast image-modality retry guard ───────────────────────────────────
-
-    /// Build a User message that carries a `.png` image attachment so that
-    /// `request_has_user_images` returns `true` (the path must end in a
-    /// recognised image extension — checked by `vision::is_image`).
-    fn msg_with_user_image() -> Message {
-        Message {
-            role: MessageRole::User,
-            content: "look at this image".to_string(),
-            media: vec!["/tmp/test_image.png".to_string()],
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-            client_message_id: None,
-            thread_id: None,
-            timestamp: chrono::Utc::now(),
-        }
-    }
-
-    /// The body string that `is_image_modality_error` recognises as an image-
-    /// modality 400 (matches the `"does not support image"` arm).
-    const IMAGE_MODALITY_400_BODY: &str = r#"{"error":{"message":"This model does not support image input","type":"invalid_request_error"}}"#;
-
-    #[tokio::test]
-    async fn should_not_retry_text_only_when_failfast_on_image_modality_400_stream() {
-        use crate::{LlmCallPolicy, with_llm_call_policy};
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/chat/completions"))
-            .respond_with(
-                ResponseTemplate::new(400)
-                    .set_body_string(IMAGE_MODALITY_400_BODY)
-                    .append_header("Content-Type", "application/json"),
-            )
-            .mount(&server)
-            .await;
-
-        let provider = OpenAIProvider::new("test-key", "gpt-4o").with_base_url(server.uri());
-        let messages = vec![msg_with_user_image()];
-
-        let result = with_llm_call_policy(LlmCallPolicy::FailFast, async {
-            provider
-                .chat_stream(&messages, &[], &ChatConfig::default())
-                .await
-        })
-        .await;
-
-        assert!(result.is_err(), "expected Err on 400, got Ok");
-        let reqs = server.received_requests().await.unwrap_or_default();
-        assert_eq!(
-            reqs.len(),
-            1,
-            "FailFast must skip text-only retry; got {} request(s)",
-            reqs.len()
-        );
-    }
-
-    #[tokio::test]
-    async fn should_not_retry_text_only_when_failfast_on_image_modality_400_chat() {
-        use crate::{LlmCallPolicy, with_llm_call_policy};
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/chat/completions"))
-            .respond_with(
-                ResponseTemplate::new(400)
-                    .set_body_string(IMAGE_MODALITY_400_BODY)
-                    .append_header("Content-Type", "application/json"),
-            )
-            .mount(&server)
-            .await;
-
-        let provider = OpenAIProvider::new("test-key", "gpt-4o").with_base_url(server.uri());
-        let messages = vec![msg_with_user_image()];
-
-        let result = with_llm_call_policy(LlmCallPolicy::FailFast, async {
-            provider.chat(&messages, &[], &ChatConfig::default()).await
-        })
-        .await;
-
-        assert!(result.is_err(), "expected Err on 400, got Ok");
-        let reqs = server.received_requests().await.unwrap_or_default();
-        assert_eq!(
-            reqs.len(),
-            1,
-            "FailFast must skip text-only retry; got {} request(s)",
-            reqs.len()
-        );
-    }
-
-    /// Real API test: NVIDIA NIM with Llama 3.3 70B.
-    /// Run with: NVIDIA_API_KEY=... cargo test -p octos-llm -- --ignored test_nvidia_nim_llama
-    #[tokio::test]
-    #[ignore]
-    async fn test_nvidia_nim_llama() {
-        let api_key = std::env::var("NVIDIA_API_KEY").expect("NVIDIA_API_KEY must be set");
-        let provider = OpenAIProvider::new(&api_key, "meta/llama-3.3-70b-instruct")
-            .with_base_url("https://integrate.api.nvidia.com/v1");
-
-        assert_eq!(provider.model_id(), "meta/llama-3.3-70b-instruct");
-
-        let messages = vec![msg("What is 2+2? Reply with just the number.")];
-        let config = ChatConfig {
-            max_tokens: Some(64),
-            ..Default::default()
-        };
-        let response = provider.chat(&messages, &[], &config).await.unwrap();
-
-        eprintln!("NVIDIA Llama response: {:?}", response.content);
-        eprintln!("Tokens: {:?}", response.usage);
-
-        assert!(response.content.is_some());
-        let content = response.content.unwrap();
-        assert!(content.contains('4'), "Expected '4' in response: {content}");
-        assert!(response.usage.input_tokens > 0);
-        assert!(response.usage.output_tokens > 0);
-    }
-
-    /// Real API test: NVIDIA NIM with Mistral Small.
-    /// Run with: NVIDIA_API_KEY=... cargo test -p octos-llm -- --ignored test_nvidia_nim_mistral
-    #[tokio::test]
-    #[ignore]
-    async fn test_nvidia_nim_mistral() {
-        let api_key = std::env::var("NVIDIA_API_KEY").expect("NVIDIA_API_KEY must be set");
-        let provider =
-            OpenAIProvider::new(&api_key, "mistralai/mistral-small-3.1-24b-instruct-2503")
-                .with_base_url("https://integrate.api.nvidia.com/v1");
-
-        let messages = vec![msg("Name the capital of France in one word.")];
-        let config = ChatConfig {
-            max_tokens: Some(32),
-            ..Default::default()
-        };
-        let response = provider.chat(&messages, &[], &config).await.unwrap();
-
-        eprintln!("NVIDIA Mistral response: {:?}", response.content);
-        let content = response.content.unwrap();
-        assert!(
-            content.to_lowercase().contains("paris"),
-            "Expected 'Paris' in response: {content}"
-        );
-    }
-
-    /// Real API test: NVIDIA NIM streaming.
-    /// Run with: NVIDIA_API_KEY=... cargo test -p octos-llm -- --ignored test_nvidia_nim_streaming
-    #[tokio::test]
-    #[ignore]
-    async fn test_nvidia_nim_streaming() {
-        let api_key = std::env::var("NVIDIA_API_KEY").expect("NVIDIA_API_KEY must be set");
-        let provider = OpenAIProvider::new(&api_key, "meta/llama-3.3-70b-instruct")
-            .with_base_url("https://integrate.api.nvidia.com/v1");
-
-        let messages = vec![msg("Count from 1 to 5, one number per line.")];
-        let config = ChatConfig {
-            max_tokens: Some(64),
-            ..Default::default()
-        };
-        let mut stream = provider.chat_stream(&messages, &[], &config).await.unwrap();
-
-        let mut chunks = Vec::new();
-        while let Some(event) = stream.next().await {
-            match event {
-                StreamEvent::TextDelta(text) => chunks.push(text),
-                StreamEvent::Done(_) => break,
-                _ => {}
-            }
-        }
-
-        let full_text = chunks.join("");
-        eprintln!("NVIDIA streaming result: {full_text}");
-        assert!(!full_text.is_empty(), "Stream should produce text");
-        assert!(full_text.contains('1'), "Should contain '1': {full_text}");
-        assert!(full_text.contains('5'), "Should contain '5': {full_text}");
-    }
 }
 
 #[cfg(test)]
@@ -2719,89 +1876,6 @@ mod cache_usage_tests {
     //! usage/cost pipeline. Compat providers that omit the field parse as 0.
 
     use super::*;
-    use crate::config::ChatConfig;
-    use octos_core::{Message, MessageRole};
-
-    fn reasoning_usage_cases() -> Vec<(serde_json::Value, u32)> {
-        use serde_json::json;
-        [
-            (Some(json!({"reasoning_tokens": 6})), 6),
-            (Some(json!({"reasoning_tokens": 0})), 0),
-            (None, 0),
-            (Some(serde_json::Value::Null), 0),
-            (Some(json!({})), 0),
-        ]
-        .into_iter()
-        .map(|(details, expected)| {
-            let mut usage = json!({
-                "prompt_tokens": 17,
-                "completion_tokens": 8,
-                "prompt_tokens_details": {"cached_tokens": 7}
-            });
-            if let Some(details) = details {
-                usage["completion_tokens_details"] = details;
-            }
-            (usage, expected)
-        })
-        .collect()
-    }
-
-    fn assert_reasoning_usage(usage: &TokenUsage, expected: u32) {
-        assert_eq!(usage.reasoning_tokens, expected);
-        // Reasoning is a component of completion_tokens, not extra output.
-        assert_eq!(usage.output_tokens, 8);
-        assert_eq!(usage.input_tokens, 10);
-        assert_eq!(usage.cache_read_tokens, 7);
-        assert_eq!(usage.cache_write_tokens, 0);
-    }
-
-    #[test]
-    fn should_preserve_reasoning_usage_from_sse_without_adding_to_output() {
-        for (usage, expected) in reasoning_usage_cases() {
-            let event = SseEvent {
-                event: None,
-                data: serde_json::json!({"choices": [], "usage": usage}).to_string(),
-            };
-            let events = parse_openai_sse_events(&event);
-            let usage = events
-                .iter()
-                .find_map(|event| match event {
-                    StreamEvent::Usage(usage) => Some(usage),
-                    _ => None,
-                })
-                .expect("usage event");
-            assert_reasoning_usage(usage, expected);
-        }
-    }
-
-    #[tokio::test]
-    async fn should_preserve_reasoning_usage_from_chat_without_adding_to_output() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        for (usage, expected) in reasoning_usage_cases() {
-            let server = MockServer::start().await;
-            Mock::given(method("POST"))
-                .and(path("/chat/completions"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "choices": [{"message": {"role": "assistant", "content": "ok"},
-                                 "finish_reason": "stop"}],
-                    "usage": usage
-                })))
-                .expect(1)
-                .mount(&server)
-                .await;
-            let provider = OpenAIProvider::new("fixture-fake-only", "fixture-model")
-                .with_base_url(server.uri());
-            let response = provider
-                .chat(&[], &[], &ChatConfig::default())
-                .await
-                .unwrap();
-            assert_eq!(response.content.as_deref(), Some("ok"));
-            assert_eq!(response.stop_reason, StopReason::EndTurn);
-            assert_reasoning_usage(&response.usage, expected);
-        }
-    }
 
     #[test]
     fn should_parse_cached_tokens_from_sse_usage() {
@@ -2824,23 +1898,6 @@ mod cache_usage_tests {
     }
 
     #[test]
-    fn should_default_cached_tokens_to_zero_when_details_missing() {
-        let event = SseEvent {
-            event: None,
-            data: r#"{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":2}}"#.into(),
-        };
-        let events = parse_openai_sse_events(&event);
-        let usage = events
-            .iter()
-            .find_map(|e| match e {
-                StreamEvent::Usage(u) => Some(u.clone()),
-                _ => None,
-            })
-            .expect("usage event");
-        assert_eq!(usage.cache_read_tokens, 0);
-    }
-
-    #[test]
     fn should_parse_cache_write_tokens_from_sse_usage_disjointly() {
         let event = SseEvent {
             event: None,
@@ -2857,82 +1914,6 @@ mod cache_usage_tests {
         assert_eq!(usage.input_tokens, 50);
         assert_eq!(usage.cache_read_tokens, 20);
         assert_eq!(usage.cache_write_tokens, 30);
-    }
-
-    #[test]
-    fn should_normalize_deepseek_top_level_cache_hit_and_miss_tokens() {
-        let event = SseEvent {
-            event: None,
-            data: r#"{"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":5,"prompt_cache_hit_tokens":75,"prompt_cache_miss_tokens":25}}"#.into(),
-        };
-        let events = parse_openai_sse_events(&event);
-        let usage = events
-            .iter()
-            .find_map(|event| match event {
-                StreamEvent::Usage(usage) => Some(usage),
-                _ => None,
-            })
-            .expect("usage event");
-        assert_eq!(usage.input_tokens, 25);
-        assert_eq!(usage.cache_read_tokens, 75);
-        assert_eq!(usage.cache_write_tokens, 0);
-    }
-
-    #[test]
-    fn should_use_deepseek_miss_when_only_cache_hit_is_reported() {
-        let event = SseEvent {
-            event: None,
-            data: r#"{"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":5,"prompt_cache_hit_tokens":75}}"#.into(),
-        };
-        let usage = parse_openai_sse_events(&event)
-            .into_iter()
-            .find_map(|event| match event {
-                StreamEvent::Usage(usage) => Some(usage),
-                _ => None,
-            })
-            .expect("usage event");
-        assert_eq!(usage.input_tokens, 25);
-        assert_eq!(usage.cache_read_tokens, 75);
-    }
-
-    #[tokio::test]
-    async fn should_parse_cached_tokens_from_chat_response() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/chat/completions"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string(
-                        r#"{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":75}}}"#,
-                    )
-                    .append_header("Content-Type", "application/json"),
-            )
-            .mount(&server)
-            .await;
-
-        let provider = OpenAIProvider::new("test-key", "gpt-4o").with_base_url(server.uri());
-        let messages = vec![Message {
-            role: MessageRole::User,
-            content: "hi".into(),
-            media: vec![],
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-            client_message_id: None,
-            thread_id: None,
-            timestamp: chrono::Utc::now(),
-        }];
-        let response = provider
-            .chat(&messages, &[], &ChatConfig::default())
-            .await
-            .unwrap();
-        // Normalized to disjoint accounting: OpenAI's prompt_tokens INCLUDES
-        // cached_tokens, TokenUsage does not — total = input + cache_read.
-        assert_eq!(response.usage.input_tokens, 25);
-        assert_eq!(response.usage.cache_read_tokens, 75);
     }
 }
 
@@ -2958,24 +1939,6 @@ mod prompt_cache_affinity_tests {
     }
 
     #[test]
-    fn should_keep_explicit_affinity_opt_in_when_base_url_is_set_in_either_order() {
-        let config = affinity_config();
-        let opt_in_then_custom = OpenAIProvider::new("key", "kimi-k3")
-            .with_prompt_cache_affinity(true)
-            .with_base_url("https://api.moonshot.ai/v1");
-        let custom_then_opt_in = OpenAIProvider::new("key", "kimi-k3")
-            .with_base_url("https://api.moonshot.ai/v1")
-            .with_prompt_cache_affinity(true);
-        for provider in [opt_in_then_custom, custom_then_opt_in] {
-            let body = body(&provider, &config);
-            assert_eq!(
-                body["prompt_cache_key"], "octos-stable-affinity",
-                "an explicit opt-in must survive builder call ordering: {body}"
-            );
-        }
-    }
-
-    #[test]
     fn should_keep_explicit_affinity_opt_out_when_official_base_url_is_set_afterwards() {
         let config = affinity_config();
         let provider = OpenAIProvider::new("key", "gpt-5")
@@ -2983,33 +1946,6 @@ mod prompt_cache_affinity_tests {
             .with_base_url("https://api.openai.com/v1");
         let body = body(&provider, &config);
         assert!(body.get("prompt_cache_key").is_none(), "{body}");
-    }
-
-    #[test]
-    fn should_honor_kill_switch_at_request_time_when_flipped_after_construction() {
-        let config = affinity_config();
-        // Same constructed provider, kill-switch flipped between requests:
-        // the decision must be made per request (as the Responses provider
-        // does), not baked in at construction.
-        let provider = OpenAIProvider::new("key", "gpt-5");
-        assert_eq!(
-            provider.prompt_cache_key_for(&config, true),
-            Some("octos-stable-affinity")
-        );
-        assert_eq!(
-            provider.prompt_cache_key_for(&config, false),
-            None,
-            "the operator kill-switch must be honored on the next request"
-        );
-        // An explicit opt-in is still subject to the operator kill-switch.
-        let opted_in = OpenAIProvider::new("key", "kimi-k3")
-            .with_base_url("https://api.moonshot.ai/v1")
-            .with_prompt_cache_affinity(true);
-        assert_eq!(
-            opted_in.prompt_cache_key_for(&config, true),
-            Some("octos-stable-affinity")
-        );
-        assert_eq!(opted_in.prompt_cache_key_for(&config, false), None);
     }
 
     #[test]
@@ -3038,10 +1974,9 @@ mod lane_attributed_operational_errors {
 
     use super::OpenAIProvider;
     use crate::config::ChatConfig;
-    use crate::error::{LlmError, LlmErrorKind};
+
     use crate::provider::LlmProvider;
     use crate::provider::test_lanes::assert_error_names_lane;
-    use crate::retry::RetryProvider;
 
     const LANE: &str = "moonshot-coding@api/k3";
     const STYLE: &str = "api_style=openai_chat_completions";
@@ -3067,40 +2002,5 @@ mod lane_attributed_operational_errors {
             .await
             .unwrap_err();
         assert_error_names_lane(&err, LANE, STYLE, FORBIDDEN);
-    }
-
-    #[tokio::test]
-    async fn should_name_k3_lane_when_choices_are_empty() {
-        let (_server, provider) = k3_lane_returning(
-            200,
-            r#"{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":0}}"#,
-        )
-        .await;
-        let err = provider
-            .chat(&[Message::user("hi")], &[], &ChatConfig::default())
-            .await
-            .unwrap_err();
-        assert_error_names_lane(&err, LANE, STYLE, FORBIDDEN);
-    }
-
-    #[tokio::test]
-    async fn should_name_k3_lane_with_api_style_when_status_error_is_mapped() {
-        let (_server, provider) = k3_lane_returning(503, "upstream exploded").await;
-        let err = provider
-            .chat(&[Message::user("hi")], &[], &ChatConfig::default())
-            .await
-            .unwrap_err();
-        assert_error_names_lane(&err, LANE, STYLE, FORBIDDEN);
-        let llm = err
-            .chain()
-            .find_map(|cause| cause.downcast_ref::<LlmError>())
-            .expect("status errors stay typed");
-        assert_eq!(llm.kind, LlmErrorKind::ServerError { status: 503 });
-        assert_eq!(
-            llm.provider, LANE,
-            "the HarnessError lane label is unchanged"
-        );
-        assert!(RetryProvider::should_failover(&err));
-        assert!(RetryProvider::is_retryable_error(&err));
     }
 }

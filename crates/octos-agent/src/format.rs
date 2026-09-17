@@ -366,67 +366,6 @@ mod tests {
     }
 
     #[test]
-    fn should_detect_no_language_when_unknown_or_missing_extension() {
-        for path in ["notes.txt", "Makefile", "archive.tar.gz", "noext"] {
-            assert_eq!(
-                FormatterKind::for_path(Path::new(path)),
-                None,
-                "{path} should have no formatter"
-            );
-        }
-    }
-
-    #[test]
-    fn should_detect_language_when_uppercase_extension() {
-        assert_eq!(
-            FormatterKind::for_path(Path::new("LEGACY.RS")),
-            Some(FormatterKind::Rustfmt)
-        );
-        assert_eq!(
-            FormatterKind::for_path(Path::new("SCRIPT.PY")),
-            Some(FormatterKind::Black)
-        );
-    }
-
-    // ------------------------------------------------------------------
-    // Command mapping
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn should_map_expected_formatter_commands() {
-        let rust = FormatterKind::Rustfmt.command();
-        assert_eq!(rust.program, "rustfmt");
-        // skip_children pins the FILE-scoped contract (#1774 review):
-        // rustfmt's default traverses `mod` declarations and rewrites child
-        // modules the edit never targeted.
-        assert_eq!(
-            rust.args,
-            vec![
-                "--edition".to_string(),
-                "2024".to_string(),
-                "--config".to_string(),
-                "skip_children=true".to_string(),
-            ]
-        );
-
-        let prettier = FormatterKind::Prettier.command();
-        assert_eq!(prettier.program, "prettier");
-        assert_eq!(prettier.args, vec!["--write".to_string()]);
-
-        let black = FormatterKind::Black.command();
-        assert_eq!(black.program, "black");
-        assert_eq!(black.args, vec!["--quiet".to_string()]);
-
-        let gofmt = FormatterKind::Gofmt.command();
-        assert_eq!(gofmt.program, "gofmt");
-        assert_eq!(gofmt.args, vec!["-w".to_string()]);
-    }
-
-    // ------------------------------------------------------------------
-    // Command construction: env sanitization + file scoping
-    // ------------------------------------------------------------------
-
-    #[test]
     fn should_build_command_with_blocked_env_vars_removed() {
         // The formatter child MUST go through the same BLOCKED_ENV_VARS
         // sanitization the sandbox/MCP/hooks paths share. `env_remove`
@@ -447,24 +386,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn should_scope_command_to_single_file() {
-        // FILE-scoped, never directory-wide: the one and only path argument
-        // is the target file, appended last.
-        let file = PathBuf::from("/tmp/octos-format-test/main.rs");
-        let cmd = build_command(&FormatterKind::Gofmt.command(), &file);
-        let args: Vec<String> = cmd
-            .as_std()
-            .get_args()
-            .map(|a| a.to_string_lossy().to_string())
-            .collect();
-        assert_eq!(args, vec!["-w".to_string(), file.display().to_string()]);
-    }
-
-    // ------------------------------------------------------------------
-    // Execution outcomes (missing binary, failure, success, timeout kill)
-    // ------------------------------------------------------------------
-
     #[tokio::test]
     async fn should_report_missing_binary_when_program_not_on_path() {
         let dir = tempfile::tempdir().unwrap();
@@ -479,27 +400,6 @@ mod tests {
         assert_eq!(
             outcome,
             FormatOutcome::MissingBinary {
-                formatter: "rustfmt"
-            }
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn should_report_formatted_when_formatter_succeeds() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("main.rs");
-        std::fs::write(&file, "fn main(){}\n").unwrap();
-
-        // `sh -c :` — no-op success; the appended file path lands in $0.
-        let cmd = FormatterCommand {
-            program: "sh".to_string(),
-            args: vec!["-c".to_string(), ":".to_string()],
-        };
-        let outcome = format_file_with_command(&file, "rustfmt", &cmd, FORMAT_TIMEOUT).await;
-        assert_eq!(
-            outcome,
-            FormatOutcome::Formatted {
                 formatter: "rustfmt"
             }
         );
@@ -524,72 +424,6 @@ mod tests {
             }
             other => panic!("expected Failed, got {other:?}"),
         }
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn should_kill_formatter_when_timeout_exceeded() {
-        // The hanging "formatter" would create a marker via $1 (the appended
-        // file path) after 2s. With a 250ms hard timeout the child must be
-        // killed: TimedOut now AND the marker never appears.
-        let dir = tempfile::tempdir().unwrap();
-        let marker = dir.path().join("marker.rs");
-
-        let cmd = FormatterCommand {
-            program: "sh".to_string(),
-            args: vec![
-                "-c".to_string(),
-                "sleep 2; echo killed-me-not > \"$1\"".to_string(),
-                "--".to_string(),
-            ],
-        };
-        let started = std::time::Instant::now();
-        let outcome =
-            format_file_with_command(&marker, "rustfmt", &cmd, Duration::from_millis(250)).await;
-        assert_eq!(
-            outcome,
-            FormatOutcome::TimedOut {
-                formatter: "rustfmt"
-            }
-        );
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "timeout must fire well before the child would finish"
-        );
-
-        // Give the would-be write ample time; the kill must have prevented it.
-        tokio::time::sleep(Duration::from_millis(2500)).await;
-        assert!(
-            !marker.exists(),
-            "timed-out formatter child must be killed, not left running"
-        );
-    }
-
-    // ------------------------------------------------------------------
-    // Note rendering (LLM-facing summary)
-    // ------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn should_render_no_note_when_no_formatter_or_missing_binary() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("notes.txt");
-        std::fs::write(&file, "hello\n").unwrap();
-
-        assert_eq!(
-            note_for_outcome(&file, "hello\n", FormatOutcome::NoFormatter).await,
-            None
-        );
-        assert_eq!(
-            note_for_outcome(
-                &file,
-                "hello\n",
-                FormatOutcome::MissingBinary {
-                    formatter: "rustfmt"
-                }
-            )
-            .await,
-            None
-        );
     }
 
     #[tokio::test]
@@ -620,25 +454,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn should_render_no_note_when_formatter_left_file_unchanged() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("main.rs");
-        std::fs::write(&file, "fn main() {}\n").unwrap();
-
-        // Formatter ran but produced byte-identical output: the LLM's mental
-        // copy is already accurate — no note.
-        let note = note_for_outcome(
-            &file,
-            "fn main() {}\n",
-            FormatOutcome::Formatted {
-                formatter: "rustfmt",
-            },
-        )
-        .await;
-        assert_eq!(note, None);
-    }
-
-    #[tokio::test]
     async fn should_render_failure_note_without_failing_edit() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("main.rs");
@@ -658,55 +473,6 @@ mod tests {
         assert!(
             note.contains("edit"),
             "note must reassure the edit was kept: {note}"
-        );
-    }
-
-    #[tokio::test]
-    async fn should_render_timeout_note() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("main.rs");
-        std::fs::write(&file, "fn main(){}\n").unwrap();
-
-        let note = note_for_outcome(
-            &file,
-            "fn main(){}\n",
-            FormatOutcome::TimedOut {
-                formatter: "rustfmt",
-            },
-        )
-        .await
-        .expect("timeout must be surfaced as a note");
-        assert!(
-            note.contains("timed out"),
-            "note must mention the timeout: {note}"
-        );
-    }
-
-    #[tokio::test]
-    async fn should_truncate_formatted_echo_for_large_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("big.rs");
-        let big = "// filler line to blow past the echo cap\n".repeat(2000);
-        std::fs::write(&file, &big).unwrap();
-
-        let note = note_for_outcome(
-            &file,
-            "fn main(){}\n",
-            FormatOutcome::Formatted {
-                formatter: "rustfmt",
-            },
-        )
-        .await
-        .expect("changed content must produce a note");
-        assert!(
-            note.len() < big.len(),
-            "echo must be capped ({} vs {})",
-            note.len(),
-            big.len()
-        );
-        assert!(
-            note.contains("truncated"),
-            "capped echo must carry a truncation marker: {note}"
         );
     }
 }

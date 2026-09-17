@@ -182,11 +182,6 @@ async fn make_m11g_profile(profile_id: &str, data_dir: &std::path::Path) -> Arc<
             .await
             .expect("memory store"),
     );
-    let tool_config = Arc::new(
-        octos_agent::ToolConfigStore::open(data_dir)
-            .await
-            .expect("tool config store"),
-    );
     let sandbox = octos_agent::SandboxConfig::default();
     let base_tools = octos_agent::ToolRegistry::with_builtins_and_sandbox(
         data_dir,
@@ -199,14 +194,11 @@ async fn make_m11g_profile(profile_id: &str, data_dir: &std::path::Path) -> Arc<
         config: octos_cli::config::Config::default(),
         snapshots: None,
         llm: Arc::new(ReadFileStubLlm),
-        goal_verifier_llm: None,
-        adaptive_router: None,
         runtime_qos_catalog: None,
         primary_model_id: "m11g-readfile-stub".to_string(),
         provider_name: "stub".to_string(),
         credentials: HashMap::new(),
         skills_dir: None,
-        plugin_env_template: Vec::new(),
         tool_policy: None,
         default_sandbox: sandbox,
         max_iterations: None,
@@ -214,32 +206,18 @@ async fn make_m11g_profile(profile_id: &str, data_dir: &std::path::Path) -> Arc<
         agent_profile: None,
         format_after_edit: false,
         tool_specs: Arc::new(base_tools),
-        plugin_tool_names: Vec::new(),
-        skill_actions: Vec::new(),
-        plugin_reload: None,
-        plugin_dirs: Vec::new(),
-        plugin_prompt_fragments: Vec::new(),
-        plugin_hooks: Vec::new(),
-        review_config: None,
         human_approval_rules: None,
         system_prompt: "test-system-prompt".to_string(),
         prompt_parts: octos_cli::commands::gateway::prompt::GatewayPromptParts {
             pre_memory: "test-system-prompt".to_string(),
             post_memory: String::new(),
         },
-        voice: octos_cli::config::VoiceConfig::default(),
         memory,
         memory_store,
         embedder: None,
         memory_inject_tokens: 2500,
         memory_refresh_enabled: false,
-        memory_refresh: None,
-        tool_config,
-        cron_service: None,
-        runtime_lifecycle: None,
-        pipeline_factory: None,
         hook_executor: None,
-        lane_routing: None,
     })
 }
 

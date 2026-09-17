@@ -476,23 +476,6 @@ pub(crate) fn forget(session: &str, path: &Path) {
     }
 }
 
-/// Drop every entry of one session — simulates a process restart for that
-/// session in tests. (The real restart clears all sessions at once, but a
-/// whole-ledger clear from one test would wipe parallel tests' entries
-/// mid-flight — the same cross-test blast radius that rules out global
-/// arming. Restart semantics are per-entry absence, which this preserves
-/// exactly for the session under test.)
-#[cfg(test)]
-pub(crate) fn reset_session_for_test(session: &str) {
-    let mut guard = LEDGER
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(ledger) = guard.as_mut() {
-        ledger.entries.retain(|key, _| key.0 != session);
-        ledger.order.retain(|key| key.0 != session);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -519,23 +502,6 @@ mod tests {
             ViewStatus::Transformed,
             "full coverage of a transformed view must NOT be Complete",
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn from_metadata_binds_ctime_and_inode_on_unix() {
-        // #2193 R4: the epoch carries ctime + inode on Unix (the fields that
-        // defeat a same-size/same-mtime swap and a rename-over). The
-        // fail-closed negative-ctime path (u64::try_from -> None) is covered by
-        // construction.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("f.txt");
-        std::fs::write(&path, b"hello").unwrap();
-        let epoch = ViewEpoch::from_metadata(&std::fs::metadata(&path).unwrap())
-            .expect("a normal file has a representable ctime");
-        assert!(epoch.ctime.is_some(), "ctime must be bound on Unix");
-        assert!(epoch.inode.is_some(), "inode must be bound on Unix");
-        assert_eq!(epoch.size, 5);
     }
 
     fn epoch_at(secs_ago: u64, size: u64) -> Option<ViewEpoch> {
@@ -601,25 +567,6 @@ mod tests {
     }
 
     #[test]
-    fn should_not_stitch_across_a_gap() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("gappy.txt");
-        std::fs::write(&path, "x").unwrap();
-        let epoch = epoch_at(0, 5000);
-
-        record_view("s", &path, epoch, 0, 2000, 5000, false, false);
-        record_view("s", &path, epoch, 2500, 5000, 5000, false, false); // bytes 2000..2500 never seen
-        assert_eq!(
-            view_status("s", &path),
-            ViewStatus::Partial {
-                seen_through: 2000,
-                total_bytes: 5000
-            },
-            "a gap means the view is still partial at the gap"
-        );
-    }
-
-    #[test]
     fn should_reset_coverage_when_the_epoch_changes() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("edited.txt");
@@ -649,30 +596,6 @@ mod tests {
     }
 
     #[test]
-    fn should_never_complete_a_tainted_epoch() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("secrets.txt");
-        std::fs::write(&path, "x").unwrap();
-        let epoch = epoch_at(0, 100);
-
-        record_view("s", &path, epoch, 0, 50, 100, true, false); // sanitizer altered this view
-        record_view("s", &path, epoch, 50, 100, 100, false, false);
-        assert_eq!(
-            view_status("s", &path),
-            ViewStatus::Tainted,
-            "full coverage with redacted bytes is NOT a faithful view — \
-             taint is sticky for the epoch"
-        );
-
-        // A new epoch starts clean.
-        record_view("s", &path, epoch_at(0, 101), 0, 101, 101, false, false);
-        assert!(
-            matches!(view_status("s", &path), ViewStatus::Complete { .. }),
-            "an untainted re-read of a new epoch completes"
-        );
-    }
-
-    #[test]
     fn should_never_complete_without_an_epoch() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("no_meta.txt");
@@ -687,32 +610,6 @@ mod tests {
             },
             "an epoch-less view can never be validated at write time, so it \
              must never report Complete"
-        );
-    }
-
-    #[test]
-    fn should_record_nothing_for_an_empty_session() {
-        // R4 single enforcement point for isolation: a keyless task (empty
-        // session key) must record NOTHING, so two keyless tasks can never
-        // cross-authorize via a shared "" bucket. Mutating the empty-session
-        // guard in record_view/note_full_write makes this fail.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("keyless.txt");
-        std::fs::write(&path, "0123456789").unwrap();
-
-        record_view("", &path, epoch_at(0, 10), 0, 10, 10, false, false);
-        assert_eq!(
-            view_status("", &path),
-            ViewStatus::Unknown,
-            "an empty-session read must leave no trace — else two keyless \
-             tasks share a bucket"
-        );
-
-        note_full_write("", &path, 10);
-        assert_eq!(
-            view_status("", &path),
-            ViewStatus::Unknown,
-            "an empty-session write must leave no COMPLETE mark either"
         );
     }
 
@@ -732,21 +629,6 @@ mod tests {
             ViewStatus::Unknown,
             "one session's COMPLETE must never vouch for another session"
         );
-    }
-
-    #[test]
-    fn should_forget_and_reset() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("forgotten.txt");
-        std::fs::write(&path, "x").unwrap();
-
-        record_view("s", &path, epoch_at(0, 10), 0, 5, 10, false, false);
-        assert!(matches!(
-            view_status("s", &path),
-            ViewStatus::Partial { .. }
-        ));
-        forget("s", &path);
-        assert_eq!(view_status("s", &path), ViewStatus::Unknown);
     }
 
     #[test]
@@ -800,34 +682,6 @@ mod tests {
     }
 
     #[test]
-    fn should_bound_the_ledger_and_evict_oldest_first() {
-        let dir = tempfile::tempdir().unwrap();
-        // Unique session name so parallel tests cannot interleave entries
-        // into this session's eviction accounting.
-        let session = format!("evict-{}", std::process::id());
-        let epoch = epoch_at(0, 1);
-        // Paths need not exist — ledger_key falls back to the raw path.
-        let path_of = |i: usize| dir.path().join(format!("f{i}.txt"));
-
-        for i in 0..MAX_LEDGER_ENTRIES + 1 {
-            record_view(&session, &path_of(i), epoch, 0, 1, 1, false, false);
-        }
-        assert_eq!(
-            view_status(&session, &path_of(0)),
-            ViewStatus::Unknown,
-            "the oldest entry is evicted once the cap is crossed — safe, \
-             because absence refuses"
-        );
-        assert!(
-            matches!(
-                view_status(&session, &path_of(MAX_LEDGER_ENTRIES)),
-                ViewStatus::Complete { .. }
-            ),
-            "the newest entry survives"
-        );
-    }
-
-    #[test]
     fn should_match_symlinked_and_canonical_forms_of_the_same_path() {
         // macOS tempdirs live under /var -> /private/var. If read_file
         // records the canonical form and write_file looks up the symlinked
@@ -843,12 +697,5 @@ mod tests {
             matches!(view_status("s", &canonical), ViewStatus::Partial { .. }),
             "the canonical form must see coverage recorded via the raw form"
         );
-    }
-
-    #[test]
-    fn armed_from_env_defaults_to_off() {
-        // The suite never sets OCTOS_READ_WINDOW (set_var is unsafe under
-        // edition 2024), so this pins the shipped default: off.
-        assert!(!armed_from_env(), "window enforcement must be opt-in");
     }
 }

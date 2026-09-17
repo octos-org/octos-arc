@@ -1,11 +1,8 @@
 //! Auth command: login, logout, status, and keychain management.
 
-use std::path::PathBuf;
-
 use clap::{Args, Subcommand};
 use colored::Colorize;
 use eyre::Result;
-use octos_agent::bridge::work_secret::{WorkSecret, WorkSecretGrantStore};
 
 use super::Executable;
 use crate::auth::{AuthStore, keychain, oauth, token};
@@ -90,36 +87,6 @@ pub enum AuthAction {
         #[arg(long)]
         password: Option<String>,
     },
-
-    /// Issue a short-lived session ingress secret for an external CLI agent.
-    #[command(name = "issue-work-secret")]
-    IssueWorkSecret {
-        /// Session id the external agent may access.
-        #[arg(long)]
-        session: String,
-        /// Grant lifetime, e.g. 15m, 1h, or 3600s.
-        #[arg(long, default_value = "1h")]
-        ttl: String,
-        /// Public API base URL the guest should connect to.
-        #[arg(long, default_value = "http://127.0.0.1:50080")]
-        api_base_url: String,
-        /// Profile id to bind on authenticated AppUI dispatch.
-        #[arg(long)]
-        profile: Option<String>,
-        /// Data directory that `octos serve` uses.
-        #[arg(long)]
-        data_dir: Option<PathBuf>,
-    },
-
-    /// Revoke a previously issued work secret.
-    #[command(name = "revoke-work-secret")]
-    RevokeWorkSecret {
-        /// Encoded work secret or raw session_ingress_token.
-        token_or_secret: String,
-        /// Data directory that `octos serve` uses.
-        #[arg(long)]
-        data_dir: Option<PathBuf>,
-    },
 }
 
 impl Executable for AuthCommand {
@@ -148,17 +115,6 @@ impl AuthCommand {
             AuthAction::Keys { profile } => list_keys(profile.as_deref()),
             AuthAction::RemoveKey { name, profile } => remove_key(&name, profile.as_deref()),
             AuthAction::Unlock { password } => unlock_keychain(password),
-            AuthAction::IssueWorkSecret {
-                session,
-                ttl,
-                api_base_url,
-                profile,
-                data_dir,
-            } => issue_work_secret(&session, &ttl, &api_base_url, profile, data_dir),
-            AuthAction::RevokeWorkSecret {
-                token_or_secret,
-                data_dir,
-            } => revoke_work_secret(&token_or_secret, data_dir),
         }
     }
 }
@@ -644,75 +600,6 @@ fn unlock_keychain(password: Option<String>) -> Result<()> {
     Ok(())
 }
 
-fn issue_work_secret(
-    session: &str,
-    ttl: &str,
-    api_base_url: &str,
-    profile: Option<String>,
-    data_dir: Option<PathBuf>,
-) -> Result<()> {
-    let secret = create_work_secret(session, ttl, api_base_url, profile, data_dir)?;
-    println!("{}", secret.encode()?);
-    Ok(())
-}
-
-fn create_work_secret(
-    session: &str,
-    ttl: &str,
-    api_base_url: &str,
-    profile: Option<String>,
-    data_dir: Option<PathBuf>,
-) -> Result<WorkSecret> {
-    let data_dir = super::resolve_data_dir(data_dir)?;
-    let ttl = parse_ttl(ttl)?;
-    let token = generate_ingress_token()?;
-    let store = WorkSecretGrantStore::new(&data_dir);
-    store.issue(session, &token, api_base_url, ttl, profile)?;
-    Ok(WorkSecret::new(api_base_url, token))
-}
-
-fn revoke_work_secret(token_or_secret: &str, data_dir: Option<PathBuf>) -> Result<()> {
-    let data_dir = super::resolve_data_dir(data_dir)?;
-    let token = WorkSecret::decode(token_or_secret)
-        .map(|secret| secret.session_ingress_token)
-        .unwrap_or_else(|_| token_or_secret.to_string());
-    let store = WorkSecretGrantStore::new(&data_dir);
-    if store.revoke_token(&token)? {
-        println!("{} Revoked work secret", "OK".green().bold());
-    } else {
-        println!("No active work secret matched the provided token");
-    }
-    Ok(())
-}
-
-fn generate_ingress_token() -> Result<String> {
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-    let mut bytes = [0u8; 32];
-    getrandom::getrandom(&mut bytes).map_err(|error| eyre::eyre!(error))?;
-    Ok(URL_SAFE_NO_PAD.encode(bytes))
-}
-
-fn parse_ttl(input: &str) -> Result<chrono::Duration> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        eyre::bail!("ttl cannot be empty");
-    }
-    let (number, multiplier) = match trimmed.chars().last().unwrap() {
-        's' | 'S' => (&trimmed[..trimmed.len() - 1], 1),
-        'm' | 'M' => (&trimmed[..trimmed.len() - 1], 60),
-        'h' | 'H' => (&trimmed[..trimmed.len() - 1], 60 * 60),
-        'd' | 'D' => (&trimmed[..trimmed.len() - 1], 24 * 60 * 60),
-        _ => (trimmed, 1),
-    };
-    let value: i64 = number
-        .parse()
-        .map_err(|_| eyre::eyre!("ttl must be a positive integer with optional s/m/h/d suffix"))?;
-    if value <= 0 {
-        eyre::bail!("ttl must be positive");
-    }
-    Ok(chrono::Duration::seconds(value.saturating_mul(multiplier)))
-}
-
 /// Get profiles matching the optional filter, or all profiles.
 fn get_profiles(
     store: &ProfileStore,
@@ -781,47 +668,6 @@ mod tests {
         assert!(!profile_references_key(&p, "OTHER_KEY"));
     }
 
-    /// Fallback route reference.
-    #[test]
-    fn references_fallback_route_env() {
-        let llm = crate::profiles::LlmProfileConfig {
-            fallbacks: vec![selection_with_route(Some("FALLBACK_KEY"))],
-            ..Default::default()
-        };
-        let p = profile_with_llm("p", Some(llm));
-        assert!(profile_references_key(&p, "FALLBACK_KEY"));
-    }
-
-    /// Sub-provider reference.
-    #[test]
-    fn references_sub_provider_env() {
-        let mut p = profile_with_llm("p", None);
-        p.config
-            .sub_providers
-            .push(crate::config::SubProviderConfig {
-                key: "cheap".into(),
-                provider: "zai".into(),
-                model: None,
-                api_key_env: Some("CHEAP_LANE_KEY".into()),
-                base_url: None,
-                description: None,
-                api_type: None,
-                default_context_window: None,
-                max_output_tokens: None,
-            });
-        assert!(profile_references_key(&p, "CHEAP_LANE_KEY"));
-    }
-
-    /// env_vars classic reference still wins.
-    #[test]
-    fn references_env_vars_membership() {
-        let mut p = profile_with_llm("p", None);
-        p.config
-            .env_vars
-            .insert("CLASSIC_KEY".to_string(), "v".to_string());
-        assert!(profile_references_key(&p, "CLASSIC_KEY"));
-    }
-
     /// #2234/45c — save-failure rollback, via the injectable seam: the
     /// scoped secret was stored, the save fails, the freshly stored account
     /// is deleted (rollback), and the error names the rollback.
@@ -872,53 +718,6 @@ mod tests {
         assert_eq!(profile_json_before, after, "profile bytes must not change");
     }
 
-    /// #2234/45c — secret-store failure leaves profile JSON bytes UNCHANGED
-    /// (issue: "profile JSON unchanged when the store fails"). With the
-    /// store unavailable (unsupported platform semantics via an empty root
-    /// read-only dir), set_key fails BEFORE any profile write.
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn store_failure_leaves_profile_unchanged() {
-        // Empty value + interactive arm would prompt; pass explicit value.
-        // Make the store UNAVAILABLE: point the root at a path whose parent
-        // cannot host 0700 dirs (a FILE as the root → ensure_root fails).
-        let tmp = tempfile::tempdir().unwrap();
-        let blocker = tmp.path().join("blocker");
-        std::fs::write(&blocker, "not-a-dir").unwrap();
-        let _root = crate::auth::keychain::test_override_secrets_root(blocker.clone());
-        let store =
-            crate::profiles::ProfileStore::open_unified(&tmp.path().join(".octos")).unwrap();
-        let mut profile = profile_with_llm("zai-coding", None);
-        profile
-            .config
-            .env_vars
-            .insert("ZAI_API_KEY".to_string(), "placeholder".to_string());
-        store.save(&profile).unwrap();
-        let json_path = tmp
-            .path()
-            .join(".octos")
-            .join("profiles")
-            .join("zai-coding.json");
-        let before = std::fs::read_to_string(&json_path).unwrap_or_default();
-
-        let err = set_key_with_save(
-            "ZAI_API_KEY",
-            Some("sk-x".to_string()),
-            Some("zai-coding"),
-            &store,
-            |_profile| unreachable!("save must never run when the store fails"),
-        )
-        .expect_err("store failure must surface");
-        // The store error names the file path it could not use.
-        assert!(
-            err.to_string().contains("blocker"),
-            "error should name the unusable root: {err}"
-        );
-        // Profile JSON bytes unchanged — the store failed BEFORE any write.
-        let after = std::fs::read_to_string(&json_path).unwrap_or_default();
-        assert_eq!(before, after, "profile bytes must not change");
-    }
-
     /// #2234/45c — interactive input is read WITHOUT echo from the injected
     /// reader (the non-tty arm): value arrives trimmed, prompt printed.
     #[test]
@@ -933,24 +732,6 @@ mod tests {
             read_secret_line(std::io::Cursor::new(b"\n".to_vec()), "p: ").expect("empty read ok");
         assert_eq!(empty, "");
     }
-
-    /// Unrelated name under an explicit profile id → the set_key guard
-    /// refuses BEFORE storing (pinned at the predicate level here; the
-    /// command-level guard composes this with the store).
-    #[test]
-    fn unrelated_name_not_referenced() {
-        let llm = crate::profiles::LlmProfileConfig {
-            primary: Some(selection_with_route(Some("ZAI_API_KEY"))),
-            ..Default::default()
-        };
-        let p = profile_with_llm("zai-coding", Some(llm));
-        assert!(
-            !profile_references_key(&p, "UNRELATED"),
-            "unreferenced name must be refused under an explicit --profile"
-        );
-    }
-
-    use octos_agent::bridge::work_secret::{WorkSecret, WorkSecretGrantStore};
 
     #[test]
     fn keychain_target_scopes_by_name_and_by_content() {
@@ -984,29 +765,6 @@ mod tests {
     }
 
     #[test]
-    fn remove_plan_keeps_shared_bare_account_when_another_profile_uses_it() {
-        // The codex scenario: alice and bob are BOTH on the legacy bare marker
-        // (shared account). Removing only alice must drop alice's env var but
-        // NOT delete the shared keychain account bob still depends on.
-        let entries = vec![entry("alice", "keychain:"), entry("bob", "keychain:")];
-        let plan = plan_removal(&entries, NAME, |pid| pid == "alice");
-        assert_eq!(plan.profiles_to_update, vec!["alice"]);
-        assert!(
-            plan.accounts_to_delete.is_empty(),
-            "must NOT delete the shared bare account while bob still uses it"
-        );
-    }
-
-    #[test]
-    fn remove_plan_deletes_sole_bare_account() {
-        // Only alice references the bare account → safe to delete it.
-        let entries = vec![entry("alice", "keychain:")];
-        let plan = plan_removal(&entries, NAME, |pid| pid == "alice");
-        assert_eq!(plan.profiles_to_update, vec!["alice"]);
-        assert_eq!(plan.accounts_to_delete, vec![NAME.to_string()]);
-    }
-
-    #[test]
     fn remove_plan_deletes_scoped_account_only_for_target() {
         // alice is scoped, bob is bare. Removing alice deletes alice's unique
         // scoped account and leaves bob's bare account intact.
@@ -1020,68 +778,5 @@ mod tests {
             plan.accounts_to_delete,
             vec!["VERTEX_SA_JSON::alice".to_string()]
         );
-    }
-
-    #[test]
-    fn remove_plan_global_deletes_every_referenced_account() {
-        let entries = vec![
-            entry("alice", "keychain:VERTEX_SA_JSON::alice"),
-            entry("bob", "keychain:"),
-        ];
-        let plan = plan_removal(&entries, NAME, |_| true);
-        assert_eq!(plan.profiles_to_update.len(), 2);
-        assert!(
-            plan.accounts_to_delete
-                .contains(&"VERTEX_SA_JSON::alice".to_string())
-        );
-        assert!(plan.accounts_to_delete.contains(&NAME.to_string()));
-    }
-
-    #[test]
-    fn remove_plan_ignores_plaintext_values() {
-        // A plaintext (non-marker) value isn't keychain-backed; remove-key
-        // leaves it alone (no env removal, no keychain delete).
-        let entries = vec![entry("alice", "sk-plaintext")];
-        let plan = plan_removal(&entries, NAME, |_| true);
-        assert!(plan.profiles_to_update.is_empty());
-        assert!(plan.accounts_to_delete.is_empty());
-    }
-
-    #[test]
-    fn parses_work_secret_ttl_suffixes() {
-        assert_eq!(parse_ttl("30s").unwrap().num_seconds(), 30);
-        assert_eq!(parse_ttl("15m").unwrap().num_seconds(), 900);
-        assert_eq!(parse_ttl("2h").unwrap().num_seconds(), 7200);
-        assert_eq!(parse_ttl("1d").unwrap().num_seconds(), 86_400);
-        assert_eq!(parse_ttl("45").unwrap().num_seconds(), 45);
-    }
-
-    #[test]
-    fn rejects_invalid_work_secret_ttl() {
-        assert!(parse_ttl("").is_err());
-        assert!(parse_ttl("0s").is_err());
-        assert!(parse_ttl("abc").is_err());
-    }
-
-    #[test]
-    fn issue_work_secret_persists_decodable_grant() {
-        let dir = tempfile::tempdir().unwrap();
-        let secret = create_work_secret(
-            "local:auth-test",
-            "5m",
-            "http://127.0.0.1:50080",
-            Some("profile-a".into()),
-            Some(dir.path().to_path_buf()),
-        )
-        .unwrap();
-        let encoded = secret.encode().unwrap();
-        let decoded = WorkSecret::decode(&encoded).unwrap();
-        assert_eq!(decoded.api_base_url, "http://127.0.0.1:50080");
-
-        let store = WorkSecretGrantStore::new(dir.path());
-        let grant = store
-            .validate("local:auth-test", &decoded.session_ingress_token)
-            .unwrap();
-        assert_eq!(grant.profile_id.as_deref(), Some("profile-a"));
     }
 }

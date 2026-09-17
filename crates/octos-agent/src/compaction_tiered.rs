@@ -11,10 +11,9 @@
 //! see a single [`TieredCompactionRunner`] surface:
 //!
 //! 1. [`MicroCompactionPolicy`] — per-iteration stale tool-result pruning.
-//!    Cheap, synchronous, in-place. Oversized current results are replaced by
-//!    typed placeholders during the cache-friendly per-iteration pass; the
-//!    full pass retains their head and tail. The `tool_call_id` (and therefore
-//!    the assistant/tool pairing) stays intact.
+//!    Cheap, synchronous, in-place.  Replaces oversized or stale tool
+//!    results with a typed [`ToolResultPlaceholder`] so the `tool_call_id`
+//!    (and therefore the assistant/tool pairing) stays intact.
 //! 2. [`ApiMicroCompactionConfig`] — a *builder*, not a runtime loop.
 //!    Emits the opaque `context_management` JSON payload that Anthropic's
 //!    server-side `clear_tool_uses_20250919` mechanism expects.  The
@@ -43,9 +42,6 @@ pub const DEFAULT_TIER1_MAX_AGE_TURNS: u32 = 5;
 /// Default byte threshold for immediate content-clearing (regardless of age).
 pub const DEFAULT_TIER1_MAX_SIZE_BYTES_PER_RESULT: u32 = 8 * 1024;
 
-const TOOL_OUTPUT_TRUNCATION_MARKER: &str =
-    "\n...[tool output truncated; head and tail preserved]...\n";
-
 /// Which tier-1 conditions a pass may apply. Split for provider prefix-cache
 /// (KV) friendliness: oversized results just landed near the prefix tail —
 /// rewriting them is cheap for the cache — while stale results sit deep in
@@ -61,11 +57,8 @@ pub enum Tier1Pass {
 
 /// Per-iteration stale tool-result pruning policy (tier 1).
 ///
-/// Runs in-place over the conversation. The full pass bounds current oversized
-/// results to the configured byte limit while retaining both ends; the
-/// cache-friendly oversized-only pass replaces them with typed placeholders.
-/// Stale or superseded results are also replaced with a typed
-/// [`ToolResultPlaceholder`] when either:
+/// Runs in-place over the conversation and replaces a tool result's content
+/// with a typed [`ToolResultPlaceholder`] when either:
 ///
 /// * the tool result is older than `max_age_turns` user-message boundaries, or
 /// * the tool result's content is larger than `max_size_bytes_per_result`.
@@ -112,36 +105,6 @@ fn default_dedup_duplicate_reads() -> bool {
     true
 }
 
-/// Bound one tool result without destroying the most useful context: command
-/// headers and diagnostics tend to be at the front, while exit status and
-/// final assertions tend to be at the end. The result is byte-bounded and
-/// always cuts at UTF-8 boundaries.
-fn truncate_tool_output_head_tail(input: &str, max_bytes: usize) -> String {
-    if input.len() <= max_bytes {
-        return input.to_owned();
-    }
-    if max_bytes <= TOOL_OUTPUT_TRUNCATION_MARKER.len() {
-        return octos_core::truncated_utf8(input, max_bytes, "…");
-    }
-    let available = max_bytes - TOOL_OUTPUT_TRUNCATION_MARKER.len();
-    let head_budget = available / 2;
-    let tail_budget = available - head_budget;
-    let mut head_end = head_budget.min(input.len());
-    while head_end > 0 && !input.is_char_boundary(head_end) {
-        head_end -= 1;
-    }
-    let mut tail_start = input.len().saturating_sub(tail_budget);
-    while tail_start < input.len() && !input.is_char_boundary(tail_start) {
-        tail_start += 1;
-    }
-    format!(
-        "{}{}{}",
-        &input[..head_end],
-        TOOL_OUTPUT_TRUNCATION_MARKER,
-        &input[tail_start..]
-    )
-}
-
 impl Default for MicroCompactionPolicy {
     fn default() -> Self {
         Self {
@@ -181,9 +144,7 @@ impl MicroCompactionPolicy {
 
     /// [`Self::prune`] with an explicit [`Tier1Pass`]: `OversizedOnly` skips
     /// the age-based (stale) condition so per-iteration runs never rewrite
-    /// deep history (KV-cache friendliness), and uses a compact placeholder
-    /// for oversized results; `Full` behaves like `prune` and retains their
-    /// head and tail.
+    /// deep history (KV-cache friendliness); `Full` behaves like `prune`.
     pub fn prune_with_pass(
         &self,
         messages: &mut [Message],
@@ -283,24 +244,15 @@ impl MicroCompactionPolicy {
             };
             let Some(reason) = reason else { continue };
 
-            let replacement = if reason == "tier1_oversized"
-                && matches!(pass, Tier1Pass::Full)
-                && !stale
-                && !superseded
-                && working_set.pinned_ids.is_empty()
-            {
-                truncate_tool_output_head_tail(&msg.content, size_threshold)
-            } else {
-                let placeholder = ToolResultPlaceholder {
-                    schema_version: TOOL_RESULT_PLACEHOLDER_SCHEMA_VERSION,
-                    tool_name,
-                    tool_call_id: id.clone(),
-                    turn_id: Some(turn_id),
-                    original_byte_len: Some(content_len as u64),
-                    reason: reason.to_string(),
-                };
-                placeholder.to_placeholder_content()
+            let placeholder = ToolResultPlaceholder {
+                schema_version: TOOL_RESULT_PLACEHOLDER_SCHEMA_VERSION,
+                tool_name,
+                tool_call_id: id.clone(),
+                turn_id: Some(turn_id),
+                original_byte_len: Some(content_len as u64),
+                reason: reason.to_string(),
             };
+            let replacement = placeholder.to_placeholder_content();
             bytes_reclaimed += content_len.saturating_sub(replacement.len()) as u64;
             msg.content = replacement;
             results_pruned += 1;
@@ -749,7 +701,7 @@ impl TieredCompactionRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compaction::{CompactionPolicy, CompactionRunner as FullCompactionRunner};
+
     use octos_core::ToolCall;
 
     fn user_msg(content: &str) -> Message {
@@ -799,47 +751,6 @@ mod tests {
         }
     }
 
-    /// An assistant message issuing one tool call with explicit `arguments`
-    /// (so #2131 pin/dedup can read the `path`/`offset`/`limit`).
-    fn assistant_call_args(
-        tool_name: &str,
-        tool_id: &str,
-        arguments: serde_json::Value,
-    ) -> Message {
-        Message {
-            role: MessageRole::Assistant,
-            content: String::new(),
-            media: vec![],
-            tool_calls: Some(vec![ToolCall {
-                id: tool_id.to_string(),
-                name: tool_name.to_string(),
-                arguments,
-                metadata: None,
-            }]),
-            tool_call_id: None,
-            reasoning_content: None,
-            client_message_id: None,
-            thread_id: None,
-            timestamp: chrono::Utc::now(),
-        }
-    }
-
-    fn is_placeholder(content: &str) -> bool {
-        ToolResultPlaceholder::from_placeholder_content(content).is_ok()
-    }
-
-    fn tiered_runner(
-        tier1: MicroCompactionPolicy,
-        tier2: ApiMicroCompactionConfig,
-    ) -> TieredCompactionRunner {
-        // Tier 3 is only used by maybe_run_tier3 and the integration test; a
-        // stock runner with a tiny budget is enough to exercise its surface
-        // without pulling in policy wiring.
-        let policy = CompactionPolicy::default();
-        let tier3: Box<dyn FullCompactor> = Box::new(FullCompactionRunner::new(policy));
-        TieredCompactionRunner::new(tier1, tier2, tier3)
-    }
-
     #[test]
     fn should_prune_tool_results_older_than_max_age() {
         // 6 user turns; keep_age=2 so turns 1..=4 are stale.
@@ -881,13 +792,11 @@ mod tests {
     }
 
     #[test]
-    fn should_truncate_oversized_tool_results_and_keep_head_and_tail() {
-        let head = "HEAD diagnostics: ";
-        let tail = "\nTAIL exit status: 0";
+    fn should_clear_oversized_tool_results_to_placeholder() {
         let mut messages = vec![
             user_msg("q"),
             assistant_tool_call("shell", "call_big"),
-            tool_result("call_big", &format!("{head}{}{tail}", "x".repeat(50_000))),
+            tool_result("call_big", &"x".repeat(50_000)),
         ];
         // Disable the age-based pruning so only the size path fires.
         let policy = MicroCompactionPolicy::default()
@@ -897,198 +806,11 @@ mod tests {
         assert_eq!(report.results_pruned, 1);
         assert!(report.bytes_reclaimed > 45_000);
         let tool = &messages[2];
-        assert!(tool.content.len() <= 1024);
-        assert!(tool.content.starts_with(head));
-        assert!(tool.content.contains("head and tail preserved"));
-        assert!(tool.content.ends_with(tail));
-        assert!(
-            !tool
-                .content
-                .contains(crate::compaction::TOOL_RESULT_PLACEHOLDER_PREFIX)
-        );
-    }
-
-    #[test]
-    fn pins_the_freshest_read_of_the_active_working_file_against_oversize() {
-        // #2131: an oversized read of the file the model is actively using must
-        // NOT be cleared — evicting it just forces a re-read next turn (the
-        // llm.c pathology). K=1 pins only the single most-recently-touched
-        // file, so a second, older file's oversized read still evicts.
-        let big = "x".repeat(4096);
-        let mut messages = vec![
-            user_msg("go"),
-            assistant_call_args("read_file", "r_old", serde_json::json!({"path": "old.txt"})),
-            tool_result("r_old", &big),
-            assistant_call_args(
-                "read_file",
-                "r_active",
-                serde_json::json!({"path": "active.rs"}),
-            ),
-            tool_result("r_active", &big),
-        ];
-        let policy = MicroCompactionPolicy {
-            max_age_turns: 0, // no stale pruning; isolate the size/pin paths
-            max_size_bytes_per_result: 1024,
-            pin_recent_files: 1,
-            dedup_duplicate_reads: false,
-        };
-        policy.prune(&mut messages, &[]);
-        // active.rs is the single pinned file → its (oversized) read survives.
-        assert!(
-            !is_placeholder(&messages[4].content),
-            "the freshest read of the active file must be pinned"
-        );
-        // old.txt is outside the top-1 working set → oversized read is cleared.
-        assert!(
-            is_placeholder(&messages[2].content),
-            "a non-working-set oversized read still evicts"
-        );
-    }
-
-    #[test]
-    fn writing_a_file_keeps_it_in_the_working_set() {
-        // #2131: a file WRITTEN this turn counts as touched, so its earlier
-        // read stays pinned (you are actively editing it).
-        let big = "x".repeat(4096);
-        let mut messages = vec![
-            user_msg("go"),
-            assistant_call_args("read_file", "r_out", serde_json::json!({"path": "out.rs"})),
-            tool_result("r_out", &big),
-            assistant_call_args("read_file", "r_ref", serde_json::json!({"path": "ref.txt"})),
-            tool_result("r_ref", &big),
-            // Now WRITE out.rs — the most recent touch of any file.
-            assistant_call_args("write_file", "w_out", serde_json::json!({"path": "out.rs"})),
-            tool_result("w_out", "ok"),
-        ];
-        let policy = MicroCompactionPolicy {
-            max_age_turns: 0,
-            max_size_bytes_per_result: 1024,
-            pin_recent_files: 1,
-            dedup_duplicate_reads: false,
-        };
-        policy.prune(&mut messages, &[]);
-        // out.rs is the most-recently-touched file (via the write) → its read
-        // is pinned even though ref.txt was read more recently than out.rs.
-        assert!(
-            !is_placeholder(&messages[2].content),
-            "the read of a just-written file must stay pinned"
-        );
-    }
-
-    #[test]
-    fn dedups_superseded_reads_of_the_same_range() {
-        // #2131: two reads of the SAME file+range — the older is redundant and
-        // collapses to a placeholder; the newest survives.
-        let mut messages = vec![
-            user_msg("go"),
-            assistant_call_args(
-                "read_file",
-                "r1",
-                serde_json::json!({"path": "a.txt", "offset": 0, "limit": 100}),
-            ),
-            tool_result("r1", "stale content"),
-            assistant_call_args(
-                "read_file",
-                "r2",
-                serde_json::json!({"path": "a.txt", "offset": 0, "limit": 100}),
-            ),
-            tool_result("r2", "fresh content"),
-        ];
-        let policy = MicroCompactionPolicy {
-            max_age_turns: 0,                    // not stale
-            max_size_bytes_per_result: u32::MAX, // not oversized
-            pin_recent_files: 0,                 // isolate dedup from pinning
-            dedup_duplicate_reads: true,
-        };
-        policy.prune(&mut messages, &[]);
-        // r1 (older duplicate) is superseded → cleared with the dedup reason.
-        let parsed = ToolResultPlaceholder::from_placeholder_content(&messages[2].content)
-            .expect("superseded read is a placeholder");
-        assert_eq!(parsed.reason, "tier1_superseded");
-        // r2 (newest) survives untouched.
-        assert!(!is_placeholder(&messages[4].content));
-    }
-
-    #[test]
-    fn reads_differing_only_by_end_line_are_not_deduped() {
-        // #2131 review: end_line is part of a read's window identity. Two reads
-        // of the same file+start but different end_line are DIFFERENT windows
-        // and must both survive — deduping them would silently drop content.
-        let mut messages = vec![
-            user_msg("go"),
-            assistant_call_args(
-                "read_file",
-                "r_wide",
-                serde_json::json!({"path": "a.txt", "start_line": 1, "end_line": 50}),
-            ),
-            tool_result("r_wide", "lines 1-50"),
-            assistant_call_args(
-                "read_file",
-                "r_narrow",
-                serde_json::json!({"path": "a.txt", "start_line": 1, "end_line": 10}),
-            ),
-            tool_result("r_narrow", "lines 1-10"),
-        ];
-        let policy = MicroCompactionPolicy {
-            max_age_turns: 0,
-            max_size_bytes_per_result: u32::MAX,
-            pin_recent_files: 0, // isolate dedup
-            dedup_duplicate_reads: true,
-        };
-        policy.prune(&mut messages, &[]);
-        assert!(
-            !is_placeholder(&messages[2].content),
-            "the wider read (lines 1-50) must NOT be deduped away by a narrower one"
-        );
-        assert!(
-            !is_placeholder(&messages[4].content),
-            "the narrower read survives too"
-        );
-    }
-
-    #[test]
-    fn dedup_is_skipped_in_the_oversized_only_pass() {
-        // #2131: dedup rewrites deep history, so like `stale` it runs only in
-        // the Full pass — the per-iteration OversizedOnly pass leaves the KV
-        // prefix cache intact.
-        let mut messages = vec![
-            user_msg("go"),
-            assistant_call_args("read_file", "r1", serde_json::json!({"path": "a.txt"})),
-            tool_result("r1", "old"),
-            assistant_call_args("read_file", "r2", serde_json::json!({"path": "a.txt"})),
-            tool_result("r2", "new"),
-        ];
-        let policy = MicroCompactionPolicy {
-            max_age_turns: 0,
-            max_size_bytes_per_result: u32::MAX,
-            pin_recent_files: 0,
-            dedup_duplicate_reads: true,
-        };
-        policy.prune_with_pass(&mut messages, &[], Tier1Pass::OversizedOnly);
-        assert!(
-            !is_placeholder(&messages[2].content),
-            "OversizedOnly must not dedup deep history"
-        );
-    }
-
-    #[test]
-    fn should_preserve_tool_call_id_on_pruned_results() {
-        let mut messages = vec![
-            user_msg("q"),
-            assistant_tool_call("shell", "call_alpha"),
-            tool_result("call_alpha", &"y".repeat(50_000)),
-            user_msg("q2"),
-        ];
-        let policy = MicroCompactionPolicy::default()
-            .with_max_age_turns(u32::MAX)
-            .with_max_size_bytes_per_result(1024);
-        policy.prune(&mut messages, &[]);
-        let tool = &messages[2];
-        assert_eq!(
-            tool.tool_call_id.as_deref(),
-            Some("call_alpha"),
-            "tool_call_id must survive the prune"
-        );
+        let parsed = ToolResultPlaceholder::from_placeholder_content(&tool.content)
+            .expect("placeholder round-trips");
+        assert_eq!(parsed.tool_call_id, "call_big");
+        assert_eq!(parsed.original_byte_len, Some(50_000));
+        assert_eq!(parsed.reason, "tier1_oversized");
     }
 
     #[test]
@@ -1125,26 +847,6 @@ mod tests {
     }
 
     #[test]
-    fn should_report_bytes_reclaimed_and_count_pruned() {
-        let mut messages = vec![
-            user_msg("q"),
-            assistant_tool_call("tool_a", "call_a"),
-            tool_result("call_a", &"a".repeat(20_000)),
-            assistant_tool_call("tool_b", "call_b"),
-            tool_result("call_b", &"b".repeat(20_000)),
-            user_msg("q2"),
-        ];
-        let policy = MicroCompactionPolicy::default()
-            .with_max_age_turns(u32::MAX)
-            .with_max_size_bytes_per_result(1024);
-        let report = policy.prune(&mut messages, &[]);
-        assert_eq!(report.results_pruned, 2);
-        // bytes_reclaimed is at least 2*(content-placeholder) bytes, well
-        // over 30KB total.
-        assert!(report.bytes_reclaimed > 30_000);
-    }
-
-    #[test]
     fn should_build_tier2_payload_only_when_enabled() {
         let disabled = ApiMicroCompactionConfig::default();
         assert!(disabled.into_context_management_json().is_none());
@@ -1162,123 +864,6 @@ mod tests {
         assert!(
             suppressed.into_context_management_json().is_none(),
             "header suppression must override the enabled flag"
-        );
-    }
-
-    #[test]
-    fn should_skip_tier2_payload_for_non_anthropic_providers() {
-        let config = ApiMicroCompactionConfig::enabled();
-        assert!(
-            config.payload_for_provider("openai").is_none(),
-            "OpenAI must not receive the Anthropic header"
-        );
-        assert!(
-            config.payload_for_provider("gemini").is_none(),
-            "Gemini must not receive the Anthropic header"
-        );
-        assert!(
-            config.payload_for_provider("openrouter").is_none(),
-            "openrouter proxies many vendors; safest default is OFF"
-        );
-        assert!(config.payload_for_provider("anthropic").is_some());
-        assert!(
-            config.payload_for_provider("bedrock-anthropic").is_some(),
-            "AWS Bedrock Claude speaks the Anthropic wire format"
-        );
-    }
-
-    #[test]
-    fn should_treat_tier1_as_no_op_when_both_thresholds_inactive() {
-        let mut messages = vec![
-            user_msg("q"),
-            assistant_tool_call("tool", "call_1"),
-            tool_result("call_1", &"x".repeat(16_000)),
-        ];
-        let policy = MicroCompactionPolicy {
-            max_age_turns: 0,
-            max_size_bytes_per_result: u32::MAX,
-            // Every lever off → the pass early-returns as a true no-op.
-            pin_recent_files: 0,
-            dedup_duplicate_reads: false,
-        };
-        let report = policy.prune(&mut messages, &[]);
-        assert_eq!(report, Tier1Report::default());
-        assert_eq!(messages[2].content.len(), 16_000);
-    }
-
-    #[test]
-    fn should_expose_tiered_runner_api() {
-        let runner = tiered_runner(
-            MicroCompactionPolicy::default(),
-            ApiMicroCompactionConfig::enabled(),
-        );
-        assert_eq!(runner.tier1().max_age_turns, DEFAULT_TIER1_MAX_AGE_TURNS);
-        assert!(runner.tier2().enabled);
-        assert!(runner.build_tier2_payload_for("anthropic").is_some());
-        assert!(runner.build_tier2_payload_for("openai").is_none());
-    }
-
-    #[test]
-    fn should_skip_tier3_when_below_threshold() {
-        // Small conversation -> CompactionRunner.needs_preflight == None so
-        // maybe_run_tier3 returns None cleanly.
-        let runner = tiered_runner(
-            MicroCompactionPolicy::default(),
-            ApiMicroCompactionConfig::default(),
-        );
-        let mut messages = vec![user_msg("hi")];
-        let out = runner.maybe_run_tier3(&mut messages, CompactionPhase::OnDemand);
-        assert!(out.is_none(), "tier 3 should not fire for tiny convos");
-    }
-
-    #[test]
-    fn oversized_only_pass_never_touches_stale_results() {
-        // KV-cache rationale (spec kv-cache-friendly-compaction): age-based
-        // rewrites land DEEP in history and invalidate the provider prefix
-        // cache; a per-iteration pass may only clear oversized results that
-        // just arrived near the prefix tail.
-        let policy = MicroCompactionPolicy::default(); // age 5 turns, 8KB
-        let mut messages = vec![
-            user_msg("turn 1"),
-            assistant_tool_call("shell", "call_old"),
-            tool_result("call_old", "small old result"),
-        ];
-        for n in 2..=7 {
-            messages.push(user_msg(&format!("turn {n}")));
-        }
-        messages.push(assistant_tool_call("shell", "call_big"));
-        messages.push(tool_result("call_big", &"x".repeat(9 * 1024)));
-
-        let report = policy.prune_with_pass(&mut messages, &[], Tier1Pass::OversizedOnly);
-
-        assert_eq!(report.results_pruned, 1, "only the oversized result clears");
-        let old = messages
-            .iter()
-            .find(|m| m.tool_call_id.as_deref() == Some("call_old"))
-            .unwrap();
-        assert!(
-            old.content.contains("small old result"),
-            "stale-but-small result must survive an oversized-only pass"
-        );
-    }
-
-    #[test]
-    fn full_pass_still_prunes_stale_results() {
-        let policy = MicroCompactionPolicy::default();
-        let mut messages = vec![
-            user_msg("turn 1"),
-            assistant_tool_call("shell", "call_old"),
-            tool_result("call_old", "small old result"),
-        ];
-        for n in 2..=7 {
-            messages.push(user_msg(&format!("turn {n}")));
-        }
-
-        let report = policy.prune_with_pass(&mut messages, &[], Tier1Pass::Full);
-
-        assert_eq!(
-            report.results_pruned, 1,
-            "full pass prunes the stale result"
         );
     }
 

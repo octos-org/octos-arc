@@ -124,74 +124,6 @@ fn compose_turn_user_content(
     }
 }
 
-/// Audit Gap-8 helper: consult the workspace-contract layer at EndTurn time
-/// and return a human-readable summary of failing validators when the
-/// contract is NOT ready. Returns `None` when the workspace has no
-/// policy-managed repos under `working_dir` (today's silent-success path).
-///
-/// This is the harness-side mirror of the LLM-callable
-/// `check_workspace_contract` tool — same source of truth
-/// (`inspect_workspace_contracts`), no parallel framework. Errors from the
-/// underlying inspector are swallowed with a warning so a transient git
-/// failure (e.g. corrupt `.git` directory) cannot block an otherwise
-/// successful task; the previous behaviour is preserved on inspector error.
-fn inspect_workspace_contract_failures(working_dir: &std::path::Path) -> Option<String> {
-    let contracts = match crate::workspace_git::inspect_workspace_contracts(working_dir) {
-        Ok(contracts) => contracts,
-        Err(err) => {
-            warn!(
-                workspace_root = %working_dir.display(),
-                error = %err,
-                "workspace contract inspector failed at EndTurn; treating as no-policy"
-            );
-            return None;
-        }
-    };
-
-    // Only fail on policy-managed repos that aren't ready.
-    let failing: Vec<_> = contracts
-        .iter()
-        .filter(|status| status.policy_managed && !status.ready)
-        .collect();
-    if failing.is_empty() {
-        return None;
-    }
-
-    let mut lines = Vec::with_capacity(failing.len() * 2);
-    // Lowercase "workspace contract" so the message matches the same
-    // grep predicate used by the existing spawn-task contract failure
-    // assertions (`error.contains("workspace contract")` in spawn.rs).
-    lines.push(format!(
-        "workspace contract not ready for {} repo(s):",
-        failing.len()
-    ));
-    for status in failing {
-        lines.push(format!("- {} (kind={})", status.repo_label, status.kind));
-        if let Some(ref error) = status.error {
-            lines.push(format!("    error: {error}"));
-        }
-        for check in &status.completion_checks {
-            if !check.passed {
-                let reason = check.reason.as_deref().unwrap_or("(no reason given)");
-                lines.push(format!("    completion failed: {} — {reason}", check.spec));
-            }
-        }
-        for check in &status.turn_end_checks {
-            if !check.passed {
-                let reason = check.reason.as_deref().unwrap_or("(no reason given)");
-                lines.push(format!("    turn_end failed: {} — {reason}", check.spec));
-            }
-        }
-        for missing in status.artifacts.iter().filter(|a| !a.present) {
-            lines.push(format!(
-                "    artifact missing: {} (pattern={})",
-                missing.name, missing.pattern
-            ));
-        }
-    }
-    Some(lines.join("\n"))
-}
-
 fn split_tool_calls(
     tool_calls: &[octos_core::ToolCall],
     batch_size: usize,
@@ -276,7 +208,7 @@ pub(crate) struct ShellRetryRecovery {
 /// The in-band `RotateAndRetry` arm degrades to `Bail` in this release
 /// because no in-band credential-rotation hook is wired on `Agent` yet;
 /// lane rotation is already handled by the outer provider chain
-/// (`RetryProvider` → `AdaptiveRouter`) one layer down, so surfacing
+/// (`RetryProvider` → `ProviderChain`) one layer down, so surfacing
 /// the error is safe — the next inbound message starts a fresh retry
 /// state anyway.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -607,47 +539,6 @@ impl Agent {
         }
     }
 
-    /// Task 8 — FailFast foreground-LLM-call failure handling.
-    ///
-    /// Called ONLY from the foreground LLM call sites (not from tool/verifier
-    /// dispatch). When the loop runs under
-    /// [`octos_llm::LlmCallPolicy::FailFast`] and a foreground LLM call fails,
-    /// this:
-    ///   1. Excludes hook-deny errors (`"LLM call denied by hook"`): returns
-    ///      `false` WITHOUT emitting a [`crate::TurnFailure`] so the caller
-    ///      falls through to the existing dispatch path and the permission
-    ///      behaviour is preserved byte-for-byte.
-    ///   2. Otherwise runs [`Self::classify_loop_error`] EXACTLY ONCE (records
-    ///      the metric + harness event; honours the "all escaping Reports go
-    ///      through the classifier" invariant), emits a single
-    ///      [`crate::TurnFailure::LlmError`] on the voice failure sink (if one
-    ///      is attached), and returns `true` so the caller bails with the
-    ///      ORIGINAL `report` (NOT through `handle_loop_error_with_dispatch`).
-    ///
-    /// Returns `false` under Normal policy so non-FailFast behaviour — and the
-    /// entire `handle_loop_error_with_dispatch` path — is unchanged.
-    fn failfast_llm_bail(&self, report: &eyre::Report) -> bool {
-        if octos_llm::current_llm_call_policy() != octos_llm::LlmCallPolicy::FailFast {
-            return false;
-        }
-        // Exclude hook-deny: preserve existing permission behaviour (no
-        // TurnFailure, fall through to the caller's dispatch path).
-        if report.to_string().starts_with("LLM call denied by hook") {
-            return false;
-        }
-        // Classify exactly once (keeps metric + harness-event side effects and
-        // the #488 invariant). The classified error is carried by the voice
-        // projection; the original `report` still bubbles out to the caller.
-        let classified = self.classify_loop_error(report, None);
-        if let Some(sink) = &self.voice_failure_sink {
-            let _ = sink.send(crate::TurnFailure::LlmError {
-                error: classified,
-                raw_detail: report.to_string(),
-            });
-        }
-        true
-    }
-
     /// Budget grace-call dispatch (M6.2). When the loop hits a hard iteration
     /// or token budget, this asks the retry state machine whether to grant
     /// one free iteration past budget. Only `MaxIterations` and `MaxTokens`
@@ -862,10 +753,6 @@ impl Agent {
         history: &[Message],
         media: Vec<String>,
     ) -> Result<ConversationResponse> {
-        // Observe-only (#read-paging probe): report the running totals when
-        // this turn ends, on every path including errors. `None` when the
-        // probe is disarmed, which is the default.
-        let _probe_summary = crate::tools::read_paging_probe::TurnSummaryGuard::new();
         self.process_message_inner(
             user_content,
             history,
@@ -953,8 +840,7 @@ impl Agent {
 
                 // Build the system prompt via the shared helper in
                 // execution.rs so conversation + task loops compose the same
-                // prompt. This is where realtime sensor summary gets appended
-                // once per turn (bounded by `sensor_budget_tokens`).
+                // prompt.
                 let mut messages = vec![Message {
                     role: MessageRole::System,
                     content: super::execution::compose_system_prompt(self),
@@ -1067,7 +953,7 @@ impl Agent {
                 let mut files_to_send = Vec::new();
                 // Accumulate the structured side-channel metadata that tools
                 // surface during this turn (today: `node_costs` from
-                // `run_pipeline`). Threaded into every `ConversationResponse`
+                // `bg_research`). Threaded into every `ConversationResponse`
                 // built below so the session actor can plumb it into the SSE
                 // `done` event for the W1.G4 cost panel.
                 let mut tool_structured_metadata: Vec<(String, serde_json::Value)> = Vec::new();
@@ -1293,15 +1179,6 @@ impl Agent {
                              your final answer) before you run out."
                         )));
                         budget_reminder_sent = true;
-                    }
-                    // Realtime heartbeat: beat first, then abort the iteration
-                    // with a typed error if the controller reports stalled.
-                    // A None controller / disabled config is a no-op so the
-                    // 830+ existing tests see identical behavior.
-                    // #1969: a heartbeat interrupt/stall is an error EXIT too —
-                    // carry the turn's accumulated usage out with it.
-                    if let Err(e) = self.beat_heartbeat(iteration) {
-                        return Err(attach_partial_usage(e, turn.total_usage().clone()));
                     }
                     self.reporter()
                         .report(ProgressEvent::Thinking { iteration });
@@ -1540,18 +1417,6 @@ impl Agent {
                     {
                         Ok(r) => r,
                         Err(e) if e.to_string().contains("empty response after") => {
-                            // Task 8: under FailFast an empty response is
-                            // TERMINAL — do NOT make the adaptive 2nd call.
-                            // Emit the voice EmptyResponse projection once and
-                            // bail with the original error.
-                            if octos_llm::current_llm_call_policy()
-                                == octos_llm::LlmCallPolicy::FailFast
-                            {
-                                if let Some(sink) = &self.voice_failure_sink {
-                                    let _ = sink.send(crate::TurnFailure::EmptyResponse);
-                                }
-                                return Err(attach_partial_usage(e, turn.total_usage().clone()));
-                            }
                             // Empty response after retries -- try once more (adaptive router
                             // may select a different provider on this second attempt).
                             turn.record_retry(LoopRetryReason::ProviderFailover {
@@ -1575,9 +1440,6 @@ impl Agent {
                             {
                                 Ok(r) => r,
                                 Err(e) => {
-                                    if self.failfast_llm_bail(&e) {
-                                        return Err(attach_partial_usage(e, turn.total_usage().clone()));
-                                    }
                                     match self.handle_loop_error_with_dispatch(
                                         &e,
                                         &mut retry_state,
@@ -1662,9 +1524,6 @@ impl Agent {
                                     ),
                                     turn.total_usage().clone(),
                                 ));
-                            }
-                            if self.failfast_llm_bail(&e) {
-                                return Err(attach_partial_usage(e, turn.total_usage().clone()));
                             }
                             match self.handle_loop_error_with_dispatch(
                                 &e,
@@ -2262,7 +2121,7 @@ impl Agent {
                             // spawn_only tool. Once flipped it stays true
                             // until the next turn begins, so on a
                             // multi-iteration turn the LLM could call
-                            // run_pipeline (spawn_only) in iter 1, get an
+                            // bg_research (spawn_only) in iter 1, get an
                             // error response, react by calling read_file
                             // (regular) in iter 2, then EndTurn in iter 3 —
                             // and the iter-2 ToolUse arm would still see
@@ -2642,12 +2501,6 @@ impl Agent {
 
                 let iteration = turn.advance_iteration();
                 let iter_start = Instant::now();
-                // Realtime heartbeat beat + stall check (no-op when realtime
-                // is disabled or unattached).
-                // #1969: carry accumulated usage out on an interrupt/stall exit.
-                if let Err(e) = self.beat_heartbeat(iteration) {
-                    return Err(attach_partial_usage(e, turn.total_usage().clone()));
-                }
                 self.reporter()
                     .report(ProgressEvent::Thinking { iteration });
 
@@ -2689,9 +2542,6 @@ impl Agent {
                 {
                     Ok(pair) => pair,
                     Err(e) => {
-                        if self.failfast_llm_bail(&e) {
-                            return Err(attach_partial_usage(e, turn.total_usage().clone()));
-                        }
                         match self.handle_loop_error_with_dispatch(
                             &e,
                             &mut retry_state,
@@ -2812,49 +2662,8 @@ impl Agent {
 
                         self.emit_cost_update(&turn, &final_response, attributed_cost);
 
-                        // Audit Gap-8: auto-fire `check_workspace_contract`
-                        // on Completion. The LLM-callable wrapper stays for
-                        // introspection but no longer the only enforcement
-                        // path — the harness consults the contract before
-                        // declaring SUCCESS.
-                        //
-                        // Workspaces without a policy-managed repo under the
-                        // working_dir stay Success unchanged (returns
-                        // `None`). When at least one policy-managed repo is
-                        // not ready, the result is demoted to `success =
-                        // false` and the failing validators are appended to
-                        // the result output so the caller (or LLM next turn)
-                        // sees the contract failure.
-                        //
-                        // octos #997 (round-2 fix): RUN declared project-root
-                        // validators BEFORE inspecting the contract. The
-                        // contract gate reads
-                        // `<kind>/<slug>/.octos/validator_outcomes.jsonl` — a
-                        // path that was never written to in production
-                        // pre-round-2 because the declared validator chain
-                        // was only invoked at the SESSION root. Without this
-                        // call, a real valid deck whose project policy
-                        // declares a hard-required validator (octos #997:
-                        // `slides.mofa_slides.pptx_magic_bytes`) shows
-                        // `ready = false` purely because the persisted
-                        // outcome is missing.
-                        let _project_root_report =
-                            crate::workspace_contract::run_project_root_validators(
-                                self.tools.as_ref(),
-                                &task.context.working_dir,
-                                None,
-                                &files_to_send,
-                                // #1607: the Agent's own registry is built
-                                // sandboxed in `session_actor`, so its stored
-                                // sandbox is the session backend.
-                                self.tools.sandbox(),
-                            )
-                            .await;
-                        let contract_failures =
-                            inspect_workspace_contract_failures(&task.context.working_dir);
-
                         self.reporter().report(ProgressEvent::TaskCompleted {
-                            success: contract_failures.is_none(),
+                            success: true,
                             iterations: iteration,
                             duration: task_start.elapsed(),
                         });
@@ -2865,27 +2674,14 @@ impl Agent {
                             iterations = iteration,
                             files_modified = files_modified.len(),
                             duration_ms = task_start.elapsed().as_millis() as u64,
-                            contract_failed = contract_failures.is_some(),
                             "task completed"
                         );
-                        let mut result = self.build_result(
+                        let result = self.build_result(
                             &final_response,
                             turn.total_usage().clone(),
                             files_modified,
                             files_to_send,
                         );
-                        if let Some(failure_msg) = contract_failures {
-                            warn!(
-                                workspace_root = %task.context.working_dir.display(),
-                                "task EndTurn but workspace contract is not ready; demoting to ContractFailed"
-                            );
-                            result.success = false;
-                            if result.output.is_empty() {
-                                result.output = failure_msg;
-                            } else {
-                                result.output = format!("{}\n\n{}", result.output, failure_msg);
-                            }
-                        }
                         return Ok(result);
                     }
                     StopReason::ToolUse => {

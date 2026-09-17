@@ -1,8 +1,8 @@
-# Workspace policy fixture — pre-M4.6 sites policy WITHOUT schema_version.
+# Workspace policy fixture — pre-M4.6 session policy WITHOUT schema_version.
 # This shape predates the harness ABI versioning milestone and must still
 # load cleanly: the harness treats a missing version as v1.
 [workspace]
-kind = "sites"
+kind = "session"
 
 [version_control]
 provider = "git"
@@ -12,9 +12,6 @@ fail_on_error = true
 
 [tracking]
 ignore = [
-    "node_modules/**",
-    "dist/**",
-    "out/**",
-    ".next/**",
+    "tmp/**",
     ".DS_Store",
 ]

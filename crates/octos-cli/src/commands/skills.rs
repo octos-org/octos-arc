@@ -28,17 +28,14 @@ fn validate_skill_manifest(skill_dir: &Path) -> Result<()> {
     if !manifest_path.exists() {
         return Ok(());
     }
-    // `PluginManifest::from_file` runs both structural and schema
-    // validation, threading through `OCTOS_MANIFEST_VALIDATION` for
-    // the strict-rule layer.
-    octos_plugin::PluginManifest::from_file(&manifest_path)
-        .map(|_| ())
-        .wrap_err_with(|| {
-            format!(
-                "manifest at {} failed RFC-2 schema validation\n\nSet OCTOS_MANIFEST_VALIDATION=lenient to skip the strict octos rules, or =off to skip validation entirely.",
-                manifest_path.display()
-            )
-        })
+    // Binary plugin retirement: keep a lightweight structural check — the
+    // manifest must be well-formed JSON. The RFC-2 schema validation that
+    // used to live in `octos-plugin` is gone with the plugin protocol.
+    let raw = std::fs::read_to_string(&manifest_path)
+        .wrap_err_with(|| format!("failed to read manifest at {}", manifest_path.display()))?;
+    serde_json::from_str::<serde_json::Value>(&raw)
+        .wrap_err_with(|| format!("manifest at {} is not valid JSON", manifest_path.display()))?;
+    Ok(())
 }
 
 // ── Public types for programmatic access ─────────────────────────────
@@ -50,6 +47,24 @@ pub struct SkillEntry {
     pub version: Option<String>,
     pub tool_count: usize,
     pub source_repo: Option<String>,
+}
+
+/// Minimal subset of a skill manifest used for binary download during
+/// install (binary plugin retirement: the full RFC-2 schema in
+/// `octos-plugin` is gone).
+#[derive(Debug, serde::Deserialize)]
+struct SkillManifestBinaries {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    binaries: std::collections::HashMap<String, SkillManifestBinaryInfo>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct SkillManifestBinaryInfo {
+    url: String,
+    #[serde(default)]
+    sha256: Option<String>,
 }
 
 /// Result of a skill installation operation.
@@ -409,12 +424,6 @@ fn install_from_local(skills_dir: &Path, src: &Path, force: bool) -> Result<Inst
     // Build binary if needed
     maybe_install_binary(&dest)?;
 
-    // Run hardware lifecycle phases (preflight → init → ready_check) if the
-    // skill has a manifest.json. Best-effort: only skills with manifest.json
-    // and a `hardware_lifecycle` section are affected. Failure is fatal here so
-    // the user gets a clear error and re-install starts from a clean state.
-    run_activate_lifecycle(&dest, &name)?;
-
     println!("  {} Installed '{}' from local path", "OK".green(), name);
     Ok(InstallResult {
         installed: vec![name],
@@ -442,28 +451,6 @@ pub fn remove_skill(skills_dir: &Path, name: &str) -> Result<()> {
     if !dest.exists() {
         // Idempotent: already removed.
         return Ok(());
-    }
-
-    // Run shutdown lifecycle phase (best-effort — failure is logged but does
-    // not block removal). Only runs if the skill has manifest.json with a
-    // `hardware_lifecycle.shutdown` section.
-    {
-        use octos_agent::plugins::run_shutdown_phase;
-
-        match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => {
-                rt.block_on(run_shutdown_phase(&dest));
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "failed to build runtime for shutdown phase; skipping (skill removal continues)"
-                );
-            }
-        }
     }
 
     std::fs::remove_dir_all(&dest)?;
@@ -1137,14 +1124,6 @@ fn install_via_git_result(
         write_source_info(&dest, spec, branch)?;
     }
 
-    // Run hardware lifecycle phases for each installed skill that has a
-    // manifest.json. Skills without manifest.json (SKILL.md-only, shared dep
-    // dirs) are silently skipped inside `run_activate_lifecycle`.
-    for name in installed.iter().chain(deps_installed.iter()) {
-        let dest = skills_dir.join(name);
-        run_activate_lifecycle(&dest, name)?;
-    }
-
     Ok(InstallResult {
         installed,
         skipped,
@@ -1662,10 +1641,7 @@ fn maybe_install_binary(dir: &Path) -> Result<()> {
     // Try 1: download from manifest.json binaries (skill repo's own CI/CD)
     if has_manifest {
         if let Ok(manifest_str) = std::fs::read_to_string(dir.join("manifest.json")) {
-            if let Ok(manifest) = serde_json::from_str::<
-                octos_agent::plugins::manifest::PluginManifest,
-            >(&manifest_str)
-            {
+            if let Ok(manifest) = serde_json::from_str::<SkillManifestBinaries>(&manifest_str) {
                 if let Some(info) = manifest.binaries.get(&key) {
                     println!("  Downloading binary for {} from manifest...", key.cyan());
                     if download_binary_from_url(dir, &info.url, info.sha256.as_deref())? {
@@ -1854,42 +1830,6 @@ fn install_main_to_cargo_bin(dir: &Path, name: &str) {
     );
 }
 
-/// Run `activate_skill` lifecycle phases for a freshly-installed skill directory.
-///
-/// Only fires when `manifest.json` is present (i.e. skills installed via git or
-/// local path, not the HTTP-only SKILL.md-only fallback). On failure the skill
-/// directory is removed so re-install starts clean.
-fn run_activate_lifecycle(skill_dir: &Path, name: &str) -> Result<()> {
-    // Skip if no manifest.json — HTTP-only installs have only SKILL.md.
-    if !skill_dir.join("manifest.json").exists() {
-        return Ok(());
-    }
-
-    use eyre::eyre;
-    use octos_agent::plugins::activate_skill;
-    use octos_agent::tools::ToolRegistry;
-
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| eyre!("failed to build runtime for skill activation: {e}"))?;
-
-    let mut registry = ToolRegistry::new();
-    let activation = runtime.block_on(activate_skill(&mut registry, skill_dir, &[]));
-
-    if let Err(e) = activation {
-        // Best-effort cleanup: remove the partially-installed skill dir so
-        // re-install starts from a clean state.
-        let _ = std::fs::remove_dir_all(skill_dir);
-        return Err(eyre!("skill '{name}' activation failed: {e}"));
-    }
-
-    // The `registry` is intentionally discarded here — we call `activate_skill`
-    // for its side effects (lifecycle phases start the dataflow). At runtime,
-    // agent startup's PluginLoader scan re-registers tools via the same path.
-    Ok(())
-}
-
 fn cmd_remove(skills_dir: &Path, name: &str) -> Result<()> {
     remove_skill(skills_dir, name)?;
     println!("{} Removed skill '{}'", "OK".green(), name.cyan());
@@ -1912,70 +1852,6 @@ mod tests {
         assert_eq!(spec.repo_name, "system-skills");
         assert_eq!(spec.subdir, None);
         assert!(spec.github_shorthand);
-    }
-
-    #[test]
-    fn resolve_install_source_tracks_subdir_separately() {
-        let source = resolve_install_source("octos-org/system-skills/custom-skill").unwrap();
-        let InstallSource::Repo(spec) = source else {
-            panic!("expected repo source");
-        };
-
-        assert_eq!(spec.source, "octos-org/system-skills");
-        assert_eq!(
-            spec.requested_source,
-            "octos-org/system-skills/custom-skill"
-        );
-        assert_eq!(spec.subdir.as_deref(), Some("custom-skill"));
-    }
-
-    #[test]
-    fn resolve_install_source_supports_full_git_url() {
-        let source =
-            resolve_install_source("https://gitlab.example.com/acme/custom-skills.git").unwrap();
-        let InstallSource::Repo(spec) = source else {
-            panic!("expected repo source");
-        };
-
-        assert_eq!(
-            spec.source,
-            "https://gitlab.example.com/acme/custom-skills.git"
-        );
-        assert_eq!(
-            spec.clone_url,
-            "https://gitlab.example.com/acme/custom-skills.git"
-        );
-        assert_eq!(spec.repo_name, "custom-skills");
-        assert_eq!(spec.subdir, None);
-        assert!(!spec.github_shorthand);
-    }
-
-    #[test]
-    fn resolve_install_source_supports_ssh_git_url() {
-        let source = resolve_install_source("git@github.com:octos-org/system-skills.git").unwrap();
-        let InstallSource::Repo(spec) = source else {
-            panic!("expected repo source");
-        };
-
-        assert_eq!(spec.source, "git@github.com:octos-org/system-skills.git");
-        assert_eq!(spec.repo_name, "system-skills");
-        assert_eq!(spec.subdir, None);
-        assert!(!spec.github_shorthand);
-    }
-
-    #[test]
-    fn resolve_install_source_supports_local_path() {
-        let tmp = tempfile::tempdir().unwrap();
-        let skill_dir = tmp.path().join("local-skill");
-        std::fs::create_dir_all(&skill_dir).unwrap();
-        std::fs::write(skill_dir.join("SKILL.md"), "# local").unwrap();
-
-        let source = resolve_install_source(&skill_dir.to_string_lossy()).unwrap();
-        let InstallSource::Local(path) = source else {
-            panic!("expected local source");
-        };
-
-        assert_eq!(path, std::fs::canonicalize(&skill_dir).unwrap());
     }
 
     #[test]
@@ -2057,214 +1933,6 @@ fi
         assert!(has_installed_skill_executable(&skill_dir, "mofa-fm"));
     }
 
-    /// Installing a local skill with `hardware_lifecycle.init` containing
-    /// `touch $OCTOS_SKILL_DIR/init_marker` must produce `init_marker` in the
-    /// installed skill directory.
-    ///
-    /// Uses a fake skill source (local temp dir) so no network or git is needed.
-    #[cfg(unix)]
-    #[test]
-    fn should_run_init_lifecycle_when_installing_local_skill_with_manifest() {
-        let tmp = tempfile::tempdir().unwrap();
-
-        // ── Build a fake skill source directory ───────────────────────────
-        let src_dir = tmp.path().join("hw-test-skill");
-        std::fs::create_dir_all(&src_dir).unwrap();
-
-        // SKILL.md (required by install_from_local)
-        std::fs::write(src_dir.join("SKILL.md"), "# hw-test-skill\n").unwrap();
-
-        // manifest.json with a hardware_lifecycle.init step that writes a
-        // sentinel file into $OCTOS_SKILL_DIR.
-        let manifest = r#"{
-            "name": "hw-test-skill",
-            "version": "0.1.0",
-            "tools": [],
-            "hardware_lifecycle": {
-                "init": [
-                    {"label": "write-marker", "command": "touch \"$OCTOS_SKILL_DIR/init_marker\""}
-                ]
-            }
-        }"#;
-        std::fs::write(src_dir.join("manifest.json"), manifest).unwrap();
-
-        // ── Install into a temp skills dir ────────────────────────────────
-        let skills_dir = tmp.path().join("skills");
-        std::fs::create_dir_all(&skills_dir).unwrap();
-
-        let result = install_from_local(&skills_dir, &src_dir, false);
-        assert!(
-            result.is_ok(),
-            "install_from_local failed: {:?}",
-            result.err()
-        );
-
-        // ── Verify init_marker was created by the lifecycle step ──────────
-        let marker = skills_dir.join("hw-test-skill").join("init_marker");
-        assert!(
-            marker.exists(),
-            "init_marker should exist after lifecycle init phase, but was not found at {}",
-            marker.display()
-        );
-    }
-
-    /// Removing a skill with `hardware_lifecycle.shutdown` must run the
-    /// shutdown phase before deleting the directory.
-    #[cfg(unix)]
-    #[test]
-    fn should_run_shutdown_lifecycle_when_removing_skill_with_manifest() {
-        let tmp = tempfile::tempdir().unwrap();
-        let skills_dir = tmp.path().join("skills");
-        let skill_dir = skills_dir.join("shutdown-test-skill");
-        std::fs::create_dir_all(&skill_dir).unwrap();
-
-        // Sentinel file path — the shutdown step will touch a sibling marker
-        // that we can detect *before* remove_dir_all runs.
-        // We write it outside the skill dir so it survives the removal.
-        let sentinel = tmp.path().join("shutdown_ran.txt");
-        let sentinel_str = sentinel.to_string_lossy().to_string();
-
-        std::fs::write(skill_dir.join("SKILL.md"), "# shutdown-test-skill\n").unwrap();
-        let manifest = format!(
-            r#"{{
-                "name": "shutdown-test-skill",
-                "version": "0.1.0",
-                "tools": [],
-                "hardware_lifecycle": {{
-                    "shutdown": [
-                        {{"label": "write-sentinel", "command": "touch \"{sentinel_str}\""}}
-                    ]
-                }}
-            }}"#
-        );
-        std::fs::write(skill_dir.join("manifest.json"), manifest).unwrap();
-
-        // Remove the skill — should trigger shutdown then delete.
-        let result = remove_skill(&skills_dir, "shutdown-test-skill");
-        assert!(result.is_ok(), "remove_skill failed: {:?}", result.err());
-
-        // Skill directory should be gone.
-        assert!(!skill_dir.exists(), "skill dir should have been removed");
-
-        // Sentinel should exist (shutdown phase ran before removal).
-        assert!(
-            sentinel.exists(),
-            "shutdown sentinel should exist after remove_skill, but was not found at {}",
-            sentinel.display()
-        );
-    }
-
-    /// PR #1347 review (Critical #2): `remove_skill` builds its own
-    /// current-thread tokio runtime via `block_on` to drive the
-    /// `hardware_lifecycle.shutdown` phase. If a caller invokes
-    /// `remove_skill` directly from inside an existing tokio runtime
-    /// (the four `octos serve` API handlers all did, before the
-    /// `spawn_blocking` wrap landed), tokio panics with
-    /// "Cannot start a runtime from within a runtime".
-    ///
-    /// This regression test invokes `remove_skill` for a
-    /// shutdown-bearing skill from inside `tokio::spawn` (mirrors the
-    /// axum handler context) WITH the `spawn_blocking` wrap. It
-    /// asserts no panic and that the shutdown phase still ran. A
-    /// future refactor that drops the `spawn_blocking` wrap will
-    /// fail this test instead of silently breaking production.
-    #[cfg(unix)]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn remove_skill_from_async_context_does_not_panic() {
-        let tmp = tempfile::tempdir().unwrap();
-        let skills_dir = tmp.path().join("skills");
-        let skill_dir = skills_dir.join("async-shutdown-skill");
-        std::fs::create_dir_all(&skill_dir).unwrap();
-
-        let sentinel = tmp.path().join("async_shutdown_ran.txt");
-        let sentinel_str = sentinel.to_string_lossy().to_string();
-
-        std::fs::write(skill_dir.join("SKILL.md"), "# async-shutdown-skill\n").unwrap();
-        let manifest = format!(
-            r#"{{
-                "name": "async-shutdown-skill",
-                "version": "0.1.0",
-                "tools": [],
-                "hardware_lifecycle": {{
-                    "shutdown": [
-                        {{"label": "write-sentinel", "command": "touch \"{sentinel_str}\""}}
-                    ]
-                }}
-            }}"#
-        );
-        std::fs::write(skill_dir.join("manifest.json"), manifest).unwrap();
-
-        // Mirrors the axum handler pattern (auth_handlers.rs:1013,
-        // admin.rs:1923 + :2063, gateway/skills_handler.rs:98 after this
-        // PR's fix): we are inside a tokio runtime; remove_skill MUST
-        // be deferred to `spawn_blocking` so its internal
-        // current-thread runtime constructs on a separate OS thread.
-        let skills_dir_clone = skills_dir.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            remove_skill(&skills_dir_clone, "async-shutdown-skill")
-        })
-        .await
-        .expect("spawn_blocking join must not panic");
-
-        assert!(result.is_ok(), "remove_skill failed: {:?}", result.err());
-        assert!(!skill_dir.exists(), "skill dir should have been removed");
-        assert!(
-            sentinel.exists(),
-            "shutdown phase must run even from an async caller (was looking at {})",
-            sentinel.display()
-        );
-    }
-
-    /// RFC-2 (issue #1291): a skill that ships the mofa-slides v0.5.0
-    /// `anyOf`-without-`type` shape must be rejected at install time
-    /// with a descriptive error, BEFORE we copy the skill onto disk.
-    /// The skills dir must remain unchanged after the failure.
-    #[test]
-    fn install_from_local_rejects_invalid_manifest() {
-        let tmp = tempfile::tempdir().unwrap();
-        let src = tmp.path().join("bad-skill");
-        std::fs::create_dir_all(&src).unwrap();
-        std::fs::write(src.join("SKILL.md"), "# bad\n").unwrap();
-        std::fs::write(
-            src.join("manifest.json"),
-            r#"{
-              "id": "bad-skill",
-              "version": "0.1.0",
-              "tools": [{
-                "name": "do_thing",
-                "description": "...",
-                "input_schema": {
-                  "type": "object",
-                  "anyOf": [
-                    { "required": ["a"] },
-                    { "required": ["b"] }
-                  ]
-                }
-              }]
-            }"#,
-        )
-        .unwrap();
-
-        let skills_dir = tmp.path().join("skills");
-        let err = install_skill(
-            &skills_dir,
-            &src.to_string_lossy(),
-            /* force */ false,
-            "main",
-        )
-        .expect_err("install must reject malformed manifest");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("RFC-2") || msg.contains("schema violation"),
-            "expected RFC-2 violation message, got: {msg}"
-        );
-        // Critically — skills_dir must NOT contain the bad skill.
-        assert!(
-            !skills_dir.join("bad-skill").exists(),
-            "validator must run before copy; bad-skill dir leaked"
-        );
-    }
-
     /// RFC-2 (codex round 3, 2026-05-25): a malformed local manifest
     /// whose destination already exists and `--force` is NOT set must
     /// NOT block the install — the skip path preserves whatever the
@@ -2316,46 +1984,5 @@ fi
             std::fs::read_to_string(dest.join("SKILL.md")).unwrap(),
             "# existing\n"
         );
-    }
-
-    /// RFC-2: a clean, valid local skill manifest is still accepted by
-    /// the install path. Sanity test that the validator hook didn't
-    /// regress the happy path.
-    #[test]
-    fn install_from_local_accepts_valid_manifest() {
-        let tmp = tempfile::tempdir().unwrap();
-        let src = tmp.path().join("good-skill");
-        std::fs::create_dir_all(&src).unwrap();
-        std::fs::write(src.join("SKILL.md"), "# good\n").unwrap();
-        std::fs::write(
-            src.join("manifest.json"),
-            r#"{
-              "id": "good-skill",
-              "version": "0.1.0",
-              "tools": [{
-                "name": "do_thing",
-                "description": "Does a thing.",
-                "input_schema": {
-                  "type": "object",
-                  "properties": {
-                    "x": { "type": "string" }
-                  },
-                  "required": ["x"]
-                }
-              }]
-            }"#,
-        )
-        .unwrap();
-
-        let skills_dir = tmp.path().join("skills");
-        let result = install_skill(
-            &skills_dir,
-            &src.to_string_lossy(),
-            /* force */ false,
-            "main",
-        )
-        .expect("clean manifest must install");
-        assert_eq!(result.installed, vec!["good-skill".to_string()]);
-        assert!(skills_dir.join("good-skill").join("manifest.json").exists());
     }
 }

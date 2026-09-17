@@ -35,7 +35,6 @@ pub(crate) const MCP_STATUS_DISABLED: &str = "disabled";
 pub(crate) const CODING_PATCH_TOOL_CAPABILITY_V1: &str = "coding.patch_tool.v1";
 pub(crate) const CODING_EXEC_SESSION_CAPABILITY_V1: &str = "coding.exec_session.v1";
 pub(crate) const CODING_PLAN_TOOL_CAPABILITY_V1: &str = "coding.plan_tool.v1";
-pub(crate) const CODING_USER_INPUT_TOOL_CAPABILITY_V1: &str = "coding.user_input_tool.v1";
 pub(crate) const CODING_SUBAGENT_ALIASES_CAPABILITY_V1: &str = "coding.subagent_aliases.v1";
 // Optional capabilities declared by UPCR-2026-020 §3.
 //
@@ -44,21 +43,14 @@ pub(crate) const CODING_SUBAGENT_ALIASES_CAPABILITY_V1: &str = "coding.subagent_
 // `view_image`, `tool_search`, and `tool_suggest` (see
 // `ui_protocol_transport::derived_capabilities`).
 //
-// `image_generation` has no native or skill backend bound to it yet, so the
-// constant exists for vocabulary parity but the capability is not
-// advertised. See UPCR §5: capability-gated fields must be omitted when the
-// corresponding capability is not negotiated.
 pub(crate) const CODING_IMAGE_VIEW_CAPABILITY_V1: &str = "coding.image_view.v1";
 pub(crate) const CODING_DYNAMIC_TOOL_SEARCH_CAPABILITY_V1: &str = "coding.dynamic_tool_search.v1";
-#[allow(dead_code)]
-pub(crate) const CODING_IMAGE_GENERATION_CAPABILITY_V1: &str = "coding.image_generation.v1";
 // #1172 — Codex naming-parity aliases. The underlying capability already
-// rides on `shell` / `exec_command`, `spawn_agent` + `wait_agent`, and the
-// (compile-time) browser tool, so these flags exist to advertise the
-// Codex-compatible spellings to clients negotiating tool surface area.
+// rides on `shell` / `exec_command` and `spawn_agent` + `wait_agent`, so
+// these flags exist to advertise the Codex-compatible spellings to clients
+// negotiating tool surface area.
 pub(crate) const CODING_BASH_CAPABILITY_V1: &str = "coding.bash.v1";
 pub(crate) const CODING_DELEGATE_CAPABILITY_V1: &str = "coding.delegate.v1";
-pub(crate) const CODING_BROWSER_CAPABILITY_V1: &str = "coding.browser.v1";
 
 // UPCR-2026-020 §8 typed error kinds. Used in structured RpcError `data.kind`
 // fields when the corresponding failure mode is hit. Declared centrally so
@@ -72,22 +64,12 @@ pub(crate) const ERROR_KIND_CODING_TOOL_DENIED: &str = "coding_tool_denied";
 pub(crate) const ERROR_KIND_CODING_TOOL_MISSING: &str = "coding_tool_missing";
 #[allow(dead_code)]
 pub(crate) const ERROR_KIND_EXEC_SESSION_UNKNOWN: &str = "exec_session_unknown";
-/// #1149 — typed error kind returned by `image_generation` when the tool
-/// is registered but no native or skill backend is bound for the active
-/// profile. Distinguishes "the contract advertises this name, but no
-/// implementation is available right now" from `coding_tool_missing`
-/// (path/resource not found) and `coding_tool_denied` (policy refusal),
-/// so AppUI clients can surface the right next step (install a skill,
-/// switch provider) instead of generic "tool error".
-#[allow(dead_code)]
-pub(crate) const ERROR_KIND_CODING_TOOL_UNSUPPORTED: &str = "coding_tool_unsupported";
 
 pub(crate) const CODING_P0_REQUIRED_TOOL_NAMES: &[&str] = &[
     "apply_patch",
     "exec_command",
     "write_stdin",
     "update_plan",
-    "request_user_input",
     "spawn_agent",
     "send_input",
     "resume_agent",
@@ -100,7 +82,6 @@ pub(crate) const OCTOS_KNOWN_MODEL_VISIBLE_TOOLS: &[&str] = &[
     "exec_command",
     "write_stdin",
     "update_plan",
-    "request_user_input",
     "spawn_agent",
     "send_input",
     "resume_agent",
@@ -114,18 +95,8 @@ pub(crate) const OCTOS_KNOWN_MODEL_VISIBLE_TOOLS: &[&str] = &[
     "glob",
     "grep",
     "list_dir",
-    "web_search",
-    "web_fetch",
-    "browser",
     "spawn",
     "read_task_output",
-    "activate_tools",
-    "configure_tool",
-    "manage_skills",
-    "check_workspace_contract",
-    "workspace_log",
-    "workspace_show",
-    "workspace_diff",
     // #972 / M14-B P1 — Codex-compatible image inspection and dynamic
     // tool discovery. These resolve through the same profile runtime as
     // the P0 set and respect the active filesystem scope.
@@ -138,14 +109,6 @@ pub(crate) const OCTOS_KNOWN_MODEL_VISIBLE_TOOLS: &[&str] = &[
     // alongside the canonical primitives.
     "bash",
     "delegate",
-    // #1149 / M14-B P2 — Codex-compatible `image_generation` entry. The
-    // tool is registered so the wire-level contract is complete and the
-    // model gets a typed `coding_tool_unsupported` response instead of a
-    // generic "tool not found", but no native or skill backend is bound
-    // yet. See `crates/octos-agent/src/tools/coding_tools.rs`
-    // (`ImageGenerationTool`) and #1149 for the follow-up to wire a
-    // real backend (OpenAI image API or a bundled skill).
-    "image_generation",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -275,14 +238,6 @@ const REQUIRED_CODING_TOOLS: &[RequiredToolSpec] = &[
         partial_alias_detail: None,
     },
     RequiredToolSpec {
-        name: "request_user_input",
-        category: "interaction",
-        capability: CODING_USER_INPUT_TOOL_CAPABILITY_V1,
-        aliases: &[],
-        policy: "allowed",
-        partial_alias_detail: None,
-    },
-    RequiredToolSpec {
         name: "spawn_agent",
         category: "agent",
         capability: CODING_SUBAGENT_ALIASES_CAPABILITY_V1,
@@ -356,13 +311,6 @@ const OCTOS_TOOL_SPECS: &[OctosToolSpec] = &[
         aliases: &[],
         policy: "allowed",
         detail: None,
-    },
-    OctosToolSpec {
-        name: "request_user_input",
-        category: "interaction",
-        aliases: &[],
-        policy: "allowed",
-        detail: Some("Visible host-interaction shim; synchronous UI blocking is host-dependent."),
     },
     OctosToolSpec {
         name: "spawn_agent",
@@ -460,27 +408,6 @@ const OCTOS_TOOL_SPECS: &[OctosToolSpec] = &[
         detail: None,
     },
     OctosToolSpec {
-        name: "web_search",
-        category: "web",
-        aliases: &[],
-        policy: "allowed",
-        detail: None,
-    },
-    OctosToolSpec {
-        name: "web_fetch",
-        category: "web",
-        aliases: &[],
-        policy: "allowed",
-        detail: None,
-    },
-    OctosToolSpec {
-        name: "browser",
-        category: "web",
-        aliases: &[],
-        policy: "allowed",
-        detail: None,
-    },
-    OctosToolSpec {
         name: "spawn",
         category: "agent",
         aliases: &["spawn_agent"],
@@ -496,29 +423,6 @@ const OCTOS_TOOL_SPECS: &[OctosToolSpec] = &[
         policy: "allowed",
         detail: Some(
             "Background task output reader; wait_agent inspects the same TaskSupervisor state.",
-        ),
-    },
-    OctosToolSpec {
-        name: "activate_tools",
-        category: "discovery",
-        aliases: &[],
-        policy: "allowed",
-        detail: None,
-    },
-    OctosToolSpec {
-        name: "configure_tool",
-        category: "configuration",
-        aliases: &[],
-        policy: "allowed",
-        detail: None,
-    },
-    OctosToolSpec {
-        name: "manage_skills",
-        category: "discovery",
-        aliases: &[],
-        policy: "allowed",
-        detail: Some(
-            "Skill management. Codex dynamic tool discovery aliases live on dedicated tool_search / tool_suggest entries.",
         ),
     },
     // #972 / M14-B P1: canonical Codex dynamic tool discovery surface.
@@ -549,53 +453,6 @@ const OCTOS_TOOL_SPECS: &[OctosToolSpec] = &[
         detail: Some(
             "Canonical Codex view_image entry. Returns format / MIME / byte length for a workspace image.",
         ),
-    },
-    // #1149 / M14-B P2: canonical Codex image-generation surface.
-    //
-    // Registered as a model-visible stub so the wire-level contract is
-    // complete; the tool currently returns `coding_tool_unsupported` for
-    // every call because no native or skill backend is bound yet. The
-    // `coding.image_generation.v1` capability is intentionally NOT
-    // advertised in `ui_protocol_transport::advertised_capabilities` so clients
-    // don't render it as usable (UPCR-2026-020 §5: capability-gated
-    // fields are omitted when the implementation isn't bound). Follow-up
-    // to wire a real backend tracked in #1149.
-    OctosToolSpec {
-        name: "image_generation",
-        category: "media",
-        aliases: &[],
-        policy: "allowed",
-        detail: Some(
-            "Canonical Codex image_generation entry. Stub: no native or skill backend bound yet; calls return a typed coding_tool_unsupported response (#1149 follow-up).",
-        ),
-    },
-    OctosToolSpec {
-        name: "check_workspace_contract",
-        category: "workspace",
-        aliases: &[],
-        policy: "allowed",
-        detail: None,
-    },
-    OctosToolSpec {
-        name: "workspace_log",
-        category: "workspace",
-        aliases: &[],
-        policy: "allowed",
-        detail: None,
-    },
-    OctosToolSpec {
-        name: "workspace_show",
-        category: "workspace",
-        aliases: &[],
-        policy: "allowed",
-        detail: None,
-    },
-    OctosToolSpec {
-        name: "workspace_diff",
-        category: "workspace",
-        aliases: &[],
-        policy: "allowed",
-        detail: None,
     },
     // #1172 — Codex naming-parity aliases. Surface them in the tool
     // contract so `tool/status/list` advertises the new spellings.
@@ -979,10 +836,6 @@ mod tests {
         assert_eq!(CODING_EXEC_SESSION_CAPABILITY_V1, "coding.exec_session.v1");
         assert_eq!(CODING_PLAN_TOOL_CAPABILITY_V1, "coding.plan_tool.v1");
         assert_eq!(
-            CODING_USER_INPUT_TOOL_CAPABILITY_V1,
-            "coding.user_input_tool.v1"
-        );
-        assert_eq!(
             CODING_SUBAGENT_ALIASES_CAPABILITY_V1,
             "coding.subagent_aliases.v1"
         );
@@ -991,14 +844,9 @@ mod tests {
             CODING_DYNAMIC_TOOL_SEARCH_CAPABILITY_V1,
             "coding.dynamic_tool_search.v1"
         );
-        assert_eq!(
-            CODING_IMAGE_GENERATION_CAPABILITY_V1,
-            "coding.image_generation.v1"
-        );
         // #1172 — Codex naming-parity capability flags.
         assert_eq!(CODING_BASH_CAPABILITY_V1, "coding.bash.v1");
         assert_eq!(CODING_DELEGATE_CAPABILITY_V1, "coding.delegate.v1");
-        assert_eq!(CODING_BROWSER_CAPABILITY_V1, "coding.browser.v1");
 
         // Typed error kinds (UPCR §8).
         assert_eq!(
@@ -1008,14 +856,6 @@ mod tests {
         assert_eq!(ERROR_KIND_CODING_TOOL_DENIED, "coding_tool_denied");
         assert_eq!(ERROR_KIND_CODING_TOOL_MISSING, "coding_tool_missing");
         assert_eq!(ERROR_KIND_EXEC_SESSION_UNKNOWN, "exec_session_unknown");
-        // #1149 — typed error kind for the registered-but-unimplemented
-        // `image_generation` stub. Pinned so a future spec rename
-        // (`coding_tool_unsupported` -> `tool_unsupported`, etc.) becomes a
-        // compile-time diff.
-        assert_eq!(
-            ERROR_KIND_CODING_TOOL_UNSUPPORTED,
-            "coding_tool_unsupported"
-        );
     }
 
     fn required_tool<'a>(contract: &'a Value, name: &str) -> &'a Value {
@@ -1112,25 +952,6 @@ mod tests {
     }
 
     #[test]
-    fn contract_becomes_ready_when_canonical_required_tools_are_available() {
-        let context = ToolStatusListContext {
-            available_model_tools: CODING_P0_REQUIRED_TOOL_NAMES,
-            ..ToolStatusListContext::default_for_session("coding:test")
-        };
-        let payload = tool_status_list_payload(context);
-        let contract = &payload["coding_tool_contract"];
-
-        assert_eq!(contract["status"], json!("ready"));
-        assert_eq!(contract["missing_required_tools"], json!([]));
-        for name in CODING_P0_REQUIRED_TOOL_NAMES {
-            assert_eq!(
-                required_tool(contract, name)["status"],
-                json!(TOOL_STATUS_AVAILABLE)
-            );
-        }
-    }
-
-    #[test]
     fn deferred_canonical_tool_is_reported_as_available_via_deferred_status() {
         // #970: when ProfileRuntime auto-defers `group:runtime` /
         // `group:sessions`, the P0 tools `shell`, `exec_command`,
@@ -1148,7 +969,7 @@ mod tests {
             "wait_agent",
             "close_agent",
         ];
-        let available = &["apply_patch", "update_plan", "request_user_input"];
+        let available = &["apply_patch", "update_plan"];
         let context = ToolStatusListContext {
             available_model_tools: available,
             deferred_model_tools: deferred,
@@ -1171,98 +992,6 @@ mod tests {
 
         let apply_patch = required_tool(contract, "apply_patch");
         assert_eq!(apply_patch["status"], json!(TOOL_STATUS_AVAILABLE));
-    }
-
-    #[test]
-    fn deferred_required_tools_win_over_registered_hidden_policy_status() {
-        // The live AppUI status path derives disabled tools from
-        // `tool_names() - specs()`. Auto-deferred P0 tools therefore
-        // appear in both disabled_model_tools and deferred_model_tools;
-        // the contract must still report them as recoverable deferred
-        // tools so the real UX gate does not fail M19 readiness.
-        let deferred = &[
-            "exec_command",
-            "write_stdin",
-            "spawn_agent",
-            "send_input",
-            "resume_agent",
-            "wait_agent",
-            "close_agent",
-        ];
-        let available = &["apply_patch", "update_plan", "request_user_input"];
-        let context = ToolStatusListContext {
-            available_model_tools: available,
-            disabled_model_tools: deferred,
-            deferred_model_tools: deferred,
-            ..ToolStatusListContext::default_for_session("coding:test")
-        };
-        let payload = tool_status_list_payload(context);
-        let contract = &payload["coding_tool_contract"];
-
-        assert_eq!(contract["status"], json!("ready"));
-        assert_eq!(contract["missing_required_tools"], json!([]));
-        for name in deferred {
-            let tool = required_tool(contract, name);
-            assert_eq!(tool["status"], json!(TOOL_STATUS_DEFERRED), "{name}");
-            assert_eq!(tool["backend_tool"], json!(name), "{name}");
-        }
-    }
-
-    #[test]
-    fn deferred_alias_resolves_required_tool_as_deferred_not_missing() {
-        // #970: also exercise the alias-deferred path — when the
-        // canonical name is absent but a deferred alias is registered
-        // (e.g. `shell` aliasing `exec_command`), the contract should
-        // surface `deferred` against the alias rather than `missing`.
-        let context = ToolStatusListContext {
-            available_model_tools: &["apply_patch", "update_plan", "request_user_input"],
-            deferred_model_tools: &["shell", "spawn"],
-            ..ToolStatusListContext::default_for_session("coding:test")
-        };
-        let payload = tool_status_list_payload(context);
-        let contract = &payload["coding_tool_contract"];
-
-        let exec_command = required_tool(contract, "exec_command");
-        assert_eq!(exec_command["status"], json!(TOOL_STATUS_DEFERRED));
-        assert_eq!(exec_command["backend_tool"], json!("shell"));
-
-        let spawn_agent = required_tool(contract, "spawn_agent");
-        assert_eq!(spawn_agent["status"], json!(TOOL_STATUS_DEFERRED));
-        assert_eq!(spawn_agent["backend_tool"], json!("spawn"));
-
-        // Tools with no canonical or deferred coverage still report
-        // missing — verify by leaving write_stdin out of every set.
-        let write_stdin = required_tool(contract, "write_stdin");
-        assert_eq!(write_stdin["status"], json!(TOOL_STATUS_MISSING));
-    }
-
-    #[test]
-    fn subagent_backend_aliases_are_reported_as_policy_equivalent_aliases() {
-        let context = ToolStatusListContext {
-            available_model_tools: &[
-                "apply_patch",
-                "exec_command",
-                "write_stdin",
-                "update_plan",
-                "request_user_input",
-                "spawn",
-                "read_task_output",
-                "send_input",
-                "resume_agent",
-                "close_agent",
-            ],
-            ..ToolStatusListContext::default_for_session("coding:test")
-        };
-        let payload = tool_status_list_payload(context);
-        let contract = &payload["coding_tool_contract"];
-
-        let spawn_agent = required_tool(contract, "spawn_agent");
-        assert_eq!(spawn_agent["status"], json!(TOOL_STATUS_ALIASED));
-        assert_eq!(spawn_agent["backend_tool"], json!("spawn"));
-
-        let wait_agent = required_tool(contract, "wait_agent");
-        assert_eq!(wait_agent["status"], json!(TOOL_STATUS_ALIASED));
-        assert_eq!(wait_agent["backend_tool"], json!("read_task_output"));
     }
 
     /// #972 — guard against accidental removal of any P0 canonical tool
@@ -1294,148 +1023,6 @@ mod tests {
              so the M14 coding tool contract can resolve them as active or deferred. \
              Missing: {missing:?}. Registered tool names: {names:?}"
         );
-    }
-
-    /// #972 / M14-B P1 — sibling guard for the optional Codex parity surface.
-    /// Once these tools land, the OCTOS_KNOWN_MODEL_VISIBLE_TOOLS / OctosToolSpec
-    /// arrays and the `with_builtins` registration must all stay in lockstep
-    /// so the contract's tools array surfaces them as `available` whenever
-    /// the live registry registers them.
-    #[test]
-    fn p1_canonical_tools_are_registered_by_session_builtins() {
-        use octos_agent::ToolRegistry;
-        use octos_agent::sandbox::NoSandbox;
-
-        let cwd = std::path::Path::new("/tmp");
-        let registry = ToolRegistry::with_builtins_and_sandbox(cwd, Box::new(NoSandbox));
-        let names: std::collections::HashSet<String> = registry.tool_names().into_iter().collect();
-
-        for required in &["view_image", "tool_search", "tool_suggest"] {
-            assert!(
-                names.contains(*required),
-                "P1 canonical tool {required} must be registered by \
-                 ToolRegistry::with_builtins_and_sandbox so the M14 coding \
-                 tool contract can advertise it. Registered tool names: {names:?}"
-            );
-        }
-    }
-
-    /// #1172 — Codex naming-parity aliases (`bash`, `delegate`) must
-    /// be registered by `with_builtins` so a Codex-trained model hits
-    /// them on first call. Browser stays under the same registration
-    /// table; if it ever moves behind a feature flag, this guard fires.
-    #[test]
-    fn codex_naming_aliases_are_registered_by_session_builtins() {
-        use octos_agent::ToolRegistry;
-        use octos_agent::sandbox::NoSandbox;
-
-        let cwd = std::path::Path::new("/tmp");
-        let registry = ToolRegistry::with_builtins_and_sandbox(cwd, Box::new(NoSandbox));
-        let names: std::collections::HashSet<String> = registry.tool_names().into_iter().collect();
-
-        for required in &["bash", "delegate", "browser"] {
-            assert!(
-                names.contains(*required),
-                "{required} must be registered by \
-                 ToolRegistry::with_builtins_and_sandbox so the Codex \
-                 naming-parity contract can advertise it. Registered: {names:?}"
-            );
-        }
-    }
-
-    /// #1172 — `bash`, `delegate`, `browser` must appear in the
-    /// contract's `tools` array when the runtime reports them as
-    /// available. Without these entries the AppUI inspection flow
-    /// can't render the new aliases.
-    #[test]
-    fn codex_naming_aliases_appear_in_contract_tools_array() {
-        let available = &["bash", "delegate", "browser"];
-        let context = ToolStatusListContext {
-            available_model_tools: available,
-            ..ToolStatusListContext::default_for_session("coding:test")
-        };
-        let payload = tool_status_list_payload(context);
-        let tools = payload["tools"].as_array().expect("tools array");
-
-        for name in available {
-            let entry = tools
-                .iter()
-                .find(|tool| tool["name"] == json!(name))
-                .unwrap_or_else(|| panic!("alias {name} must appear in contract tools array"));
-            assert_eq!(
-                entry["status"],
-                json!(TOOL_STATUS_AVAILABLE),
-                "alias {name} must report `available` when registered",
-            );
-        }
-    }
-
-    /// #1149 / M14-B P2 — `image_generation` must be registered by
-    /// `ToolRegistry::with_builtins_and_sandbox` as a stub so the
-    /// canonical Codex tool surface is wire-complete. Real backend
-    /// wiring (OpenAI image API / bundled skill) is tracked in #1149.
-    #[test]
-    fn p2_image_generation_is_registered_by_session_builtins() {
-        use octos_agent::ToolRegistry;
-        use octos_agent::sandbox::NoSandbox;
-
-        let cwd = std::path::Path::new("/tmp");
-        let registry = ToolRegistry::with_builtins_and_sandbox(cwd, Box::new(NoSandbox));
-        let names: std::collections::HashSet<String> = registry.tool_names().into_iter().collect();
-
-        assert!(
-            names.contains("image_generation"),
-            "P2 canonical tool image_generation must be registered by \
-             ToolRegistry::with_builtins_and_sandbox so the M14 coding \
-             tool contract can advertise it. Registered tool names: {names:?}"
-        );
-    }
-
-    /// #1149 / M14-B P2 — when the runtime reports `image_generation` as
-    /// available, the contract's `tools` array must surface it through the
-    /// OCTOS_TOOL_SPECS entry (status `available`, category `media`).
-    #[test]
-    fn p2_image_generation_appears_in_contract_tools_array() {
-        let available = &["image_generation"];
-        let context = ToolStatusListContext {
-            available_model_tools: available,
-            ..ToolStatusListContext::default_for_session("coding:test")
-        };
-        let payload = tool_status_list_payload(context);
-        let tools = payload["tools"].as_array().expect("tools array");
-        let entry = tools
-            .iter()
-            .find(|tool| tool["name"] == json!("image_generation"))
-            .expect("image_generation must appear in contract tools array");
-        assert_eq!(entry["status"], json!(TOOL_STATUS_AVAILABLE));
-        assert_eq!(entry["category"], json!("media"));
-    }
-
-    /// #972 / M14-B P1 — the contract's `tools` array (driven by
-    /// OCTOS_TOOL_SPECS) must surface every P1 tool when the runtime
-    /// reports it as available. Otherwise the AppUI inspection flow can't
-    /// see the new entries even though the live registry has them.
-    #[test]
-    fn p1_canonical_tools_appear_in_contract_tools_array() {
-        let available = &["view_image", "tool_search", "tool_suggest"];
-        let context = ToolStatusListContext {
-            available_model_tools: available,
-            ..ToolStatusListContext::default_for_session("coding:test")
-        };
-        let payload = tool_status_list_payload(context);
-        let tools = payload["tools"].as_array().expect("tools array");
-
-        for name in available {
-            let found = tools
-                .iter()
-                .find(|tool| tool["name"] == json!(name))
-                .unwrap_or_else(|| panic!("P1 tool {name} must appear in contract tools array"));
-            assert_eq!(
-                found["status"],
-                json!(TOOL_STATUS_AVAILABLE),
-                "P1 tool {name} should be `available` when registered"
-            );
-        }
     }
 
     #[test]
@@ -1495,48 +1082,5 @@ mod tests {
         assert_eq!(payload["summary"]["failed"], json!(1));
         assert_eq!(payload["servers"][0]["tools"], json!(["stat", "read"]));
         assert_eq!(payload["servers"][1]["error"], json!("connection refused"));
-    }
-
-    #[test]
-    fn runtime_policy_stamp_extensions_are_contract_shaped() {
-        let servers = [McpServerStatusView {
-            id: "github",
-            display_name: Some("GitHub"),
-            transport: Some("stdio"),
-            status: MCP_STATUS_CONNECTED,
-            tool_count: 4,
-            tools: &["issue_read"],
-            error: None,
-        }];
-        let mut stamp = json!({
-            "tool_policy_id": "profile",
-            "sandbox_mode": "workspace-write",
-        });
-
-        apply_coding_runtime_policy_stamp_extensions(
-            &mut stamp,
-            RuntimePolicyStampContext {
-                policy: ToolPolicyView {
-                    tool_policy_id: CODING_TOOL_POLICY_ID,
-                    sandbox_mode: "danger-full-access",
-                    approval_policy: "never",
-                },
-                mcp_servers: &servers,
-            },
-        );
-
-        assert_eq!(stamp["tool_policy_id"], json!(CODING_TOOL_POLICY_ID));
-        assert_eq!(stamp["tool_contract_id"], json!(CODING_TOOL_CONTRACT_ID));
-        assert_eq!(
-            stamp["tool_contract_version"],
-            json!(CODING_TOOL_CONTRACT_VERSION)
-        );
-        assert_eq!(stamp["model_toolset"], json!(CODING_MODEL_TOOLSET));
-        assert_eq!(
-            stamp["dynamic_tool_discovery"],
-            json!(CODING_DYNAMIC_TOOL_DISCOVERY)
-        );
-        assert_eq!(stamp["mcp_servers"][0]["id"], json!("github"));
-        assert_eq!(stamp["mcp_servers"][0]["tool_count"], json!(4));
     }
 }

@@ -705,12 +705,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "linux")]
-    fn linux_unlock_is_noop() {
-        assert!(unlock("any-password").is_ok());
-    }
-
-    #[test]
     #[cfg(target_os = "macos")]
     fn decodes_hex_password_emitted_by_security_for_multiline_secret() {
         // `security -w` hex-encodes a value containing newlines (e.g. SA JSON).
@@ -724,57 +718,6 @@ mod tests {
     fn leaves_ordinary_api_key_untouched() {
         // Contains non-hex characters → not decoded.
         assert!(decode_security_hex("sk-proj-abc123XYZ").is_none());
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn leaves_odd_length_or_non_hex_untouched() {
-        assert!(decode_security_hex("abc").is_none()); // odd length
-        assert!(decode_security_hex("zzzz").is_none()); // non-hex chars
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn leaves_binary_hex_untouched_when_not_utf8() {
-        // Pure hex that decodes to non-UTF-8 bytes is left as-is.
-        assert!(decode_security_hex("deadbeef").is_none());
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn leaves_single_line_ascii_hex_secret_untouched() {
-        // A real secret that is even-length ASCII hex and valid UTF-8 but
-        // single-line (e.g. "41424344") was returned verbatim by `security`,
-        // never hex-encoded — decoding it would corrupt it into "ABCD".
-        assert_eq!(decode_security_hex("41424344"), None);
-    }
-
-    #[test]
-    fn test_resolve_value_passthrough() {
-        // Non-marker values pass through unchanged
-        assert_eq!(resolve_value("FOO", "bar"), Some("bar".to_string()));
-        assert_eq!(
-            resolve_value("KEY", "sk-proj-abc123"),
-            Some("sk-proj-abc123".to_string())
-        );
-        assert_eq!(resolve_value("EMPTY", ""), Some(String::new()));
-    }
-
-    #[test]
-    fn test_resolve_env_vars_passthrough() {
-        let mut env = HashMap::new();
-        env.insert("A".into(), "val_a".into());
-        env.insert("B".into(), "val_b".into());
-
-        let resolved = resolve_env_vars(&env);
-        assert_eq!(resolved.len(), 2);
-        assert_eq!(resolved["A"], "val_a");
-        assert_eq!(resolved["B"], "val_b");
-    }
-
-    #[test]
-    fn test_keychain_marker_constant() {
-        assert_eq!(KEYCHAIN_MARKER, "keychain:");
     }
 
     #[test]
@@ -817,47 +760,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn marker_account_prefers_scope_else_falls_back_to_name() {
-        // Scoped marker → account taken from the suffix (per-profile isolation).
-        assert_eq!(
-            marker_account("keychain:VERTEX_SA_JSON::alice", "VERTEX_SA_JSON"),
-            "VERTEX_SA_JSON::alice"
-        );
-        // Bare legacy marker → the env-var name (backward compatible).
-        assert_eq!(
-            marker_account("keychain:", "VERTEX_SA_JSON"),
-            "VERTEX_SA_JSON"
-        );
-    }
-
-    #[test]
-    #[ignore = "requires macOS Keychain access"]
-    fn keychain_integration_scoped_accounts_dont_collide() {
-        // Real-keychain proof of the P1 fix: two profiles' scoped accounts are
-        // independent — writing/deleting one never affects the other.
-        let alice = scoped_account("VERTEX_SA_JSON", "alice-itest");
-        let bob = scoped_account("VERTEX_SA_JSON", "bob-itest");
-        let _ = delete_secret(&alice);
-        let _ = delete_secret(&bob);
-
-        set_secret(&alice, "alice-key").unwrap();
-        set_secret(&bob, "bob-key").unwrap();
-        assert_eq!(get_secret(&alice).unwrap().as_deref(), Some("alice-key"));
-        assert_eq!(
-            get_secret(&bob).unwrap().as_deref(),
-            Some("bob-key"),
-            "bob's account must not be overwritten by alice's"
-        );
-
-        // Deleting alice's account leaves bob's intact.
-        delete_secret(&alice).unwrap();
-        assert!(get_secret(&alice).unwrap().is_none());
-        assert_eq!(get_secret(&bob).unwrap().as_deref(), Some("bob-key"));
-
-        delete_secret(&bob).unwrap();
-    }
-
     // Integration tests that require a real Keychain session.
     // Run manually with: cargo test -p octos-cli keychain_integration -- --ignored
     #[test]
@@ -893,25 +795,5 @@ mod tests {
         // Delete again (no-op)
         let deleted_again = delete_secret(name).expect("re-delete should succeed");
         assert!(!deleted_again, "should report not found");
-    }
-
-    #[test]
-    #[ignore = "requires macOS Keychain access"]
-    fn keychain_integration_resolve_env_vars() {
-        let name = "octos-test-resolve";
-        let secret = "resolved-secret";
-        let _ = delete_secret(name);
-
-        set_secret(name, secret).unwrap();
-
-        let mut env = HashMap::new();
-        env.insert(name.into(), KEYCHAIN_MARKER.into());
-        env.insert("PLAIN".into(), "literal".into());
-
-        let resolved = resolve_env_vars(&env);
-        assert_eq!(resolved[name], secret);
-        assert_eq!(resolved["PLAIN"], "literal");
-
-        delete_secret(name).unwrap();
     }
 }

@@ -6,7 +6,6 @@ mod budget;
 
 /// #27h-r1 — shared result.md ownership judgment (see `budget::result_md_owner_content_is_peer`);
 /// re-exported at the crate surface for the cli-side peer-result writer.
-pub use budget::result_md_owner_content_is_peer;
 mod compaction;
 mod convergence;
 mod detection;
@@ -19,14 +18,10 @@ pub mod memory;
 mod message_repair;
 mod prompt_cache;
 pub mod prompt_segments;
-pub mod realtime;
-pub mod rich_output;
 mod streaming;
-pub mod turn_failure;
 mod turn_state;
 pub mod verifier;
 
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
@@ -46,7 +41,6 @@ use crate::tools::ToolRegistry;
 use verifier::AgentVerifierConfig;
 
 pub use message_repair::normalize_tool_call_id;
-pub use realtime::RealtimeController;
 pub use turn_state::PartialTurnUsage;
 
 tokio::task_local! {
@@ -83,7 +77,7 @@ pub struct AgentConfig {
     /// Default timeout (seconds) for a batch of ordinary interactive/fast
     /// tools (`glob`, `list_dir`, `read_file`, `grep`, ...) when the LLM does
     /// NOT request a per-call `timeout_secs`. Genuinely long-running tools
-    /// (`shell`, `spawn`, `run_pipeline`, `browser`, deep research/crawl)
+    /// (`shell`, `spawn`, `bg_research`, `browser`, deep research/crawl)
     /// keep `tool_timeout_secs` / `MAX_TOOL_TIMEOUT_SECS` instead.
     ///
     /// Default 120s; env override `OCTOS_INTERACTIVE_TOOL_TIMEOUT_SECS`
@@ -132,14 +126,6 @@ pub struct AgentConfig {
     /// tool; the host projects the request to the channel and resumes via
     /// [`Agent::execute_approved_tool`]. `None` disables the flow.
     pub human_approval_rules: Option<crate::approval::HumanApprovalRules>,
-    /// Voice fail-fast overall deadline for a single foreground LLM call,
-    /// covering BOTH the stream-build (`chat_stream().await`) and consume
-    /// phases. `StreamTimeouts` only starts ticking inside `consume_stream`,
-    /// so a provider that hangs while returning response headers would
-    /// otherwise inherit the long production request timeout. Only applied
-    /// under [`octos_llm::LlmCallPolicy::FailFast`] (voice turns). Default 30s;
-    /// env override `OCTOS_VOICE_LLM_DEADLINE_SECS`.
-    pub voice_overall_deadline: std::time::Duration,
     /// Post-edit formatting (issue #1774): when true, a successful
     /// `edit_file` / `write_file` / `diff_edit` runs the file's language
     /// formatter (rustfmt / prettier / black / gofmt — see [`crate::format`])
@@ -155,14 +141,6 @@ pub const DEFAULT_LLM_FIRST_TOKEN_GRACE_SECS: u64 = 180;
 pub const DEFAULT_LLM_STREAM_IDLE_SECS: u64 = 90;
 /// Default overall wall-clock cap for a single streaming LLM call (1200s / 20m).
 pub const DEFAULT_LLM_CALL_MAX_SECS: u64 = 1200;
-/// Default voice fail-fast overall deadline (30s) covering build + consume.
-pub const DEFAULT_VOICE_LLM_DEADLINE_SECS: u64 = 30;
-/// Tightened time-to-first-token grace for voice fail-fast turns (10s). A
-/// spoken reply cannot wait minutes for the first token the way a reasoning
-/// chat turn can, so the voice path overrides the generous production grace.
-pub const VOICE_STREAM_TTFT_SECS: u64 = 10;
-/// Tightened inter-chunk idle timeout for voice fail-fast turns (10s).
-pub const VOICE_STREAM_IDLE_SECS: u64 = 10;
 
 /// Pure clamp behind the `env_secs_*` readers: apply `[min, 86_400]` to a
 /// parsed value, or fall back to `default_secs` when the var was absent or
@@ -209,7 +187,7 @@ fn env_secs_u64_or(var: &str, default_secs: u64) -> u64 {
 }
 
 /// Default tool execution timeout in seconds.
-/// Matches `MAX_TOOL_TIMEOUT_SECS` so long-running tools like `run_pipeline`
+/// Matches `MAX_TOOL_TIMEOUT_SECS` so long-running tools like `bg_research`
 /// (default 1800s) are not silently capped when the LLM omits `timeout_secs`
 /// in the tool call.
 pub const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 1800;
@@ -254,10 +232,6 @@ impl Default for AgentConfig {
                 DEFAULT_LLM_CALL_MAX_SECS,
             ),
             human_approval_rules: None,
-            voice_overall_deadline: env_secs_or(
-                "OCTOS_VOICE_LLM_DEADLINE_SECS",
-                DEFAULT_VOICE_LLM_DEADLINE_SECS,
-            ),
             format_after_edit: false,
         }
     }
@@ -299,7 +273,7 @@ pub struct ConversationResponse {
     pub assistant_segments: AssistantSegmentProvenance,
     /// Structured side-channel metadata surfaced by tools that ran during
     /// this conversation, keyed by `tool_call_id`. Used today for per-node
-    /// cost rows from `run_pipeline` (`{"node_costs": [...]}`); the session
+    /// cost rows from `bg_research` (`{"node_costs": [...]}`); the session
     /// actor pulls these into the SSE `done` event so the W1.G4 cost panel
     /// can render real per-node attribution. Empty when no tool opted in.
     pub tool_results: Vec<(String, serde_json::Value)>,
@@ -406,10 +380,6 @@ pub struct Agent {
     pub(super) session_limits: Option<SessionLimits>,
     /// Mutable usage tracked against `session_limits`.
     pub(super) session_usage: std::sync::Mutex<SessionUsage>,
-    /// Optional realtime controller (heartbeat + sensor context injector) for
-    /// robotics operators. Absent by default -- the agent loop behaves exactly
-    /// as before when this is `None`.
-    pub(super) realtime: Option<Arc<RealtimeController>>,
     /// Harness M6.3 compaction contract. When present, the loop performs
     /// preflight compaction before the first LLM call, swaps the summarizer
     /// flavour declared in policy, prunes old tool results to typed
@@ -466,15 +436,10 @@ pub struct Agent {
     /// it on terminal completion. `None` keeps pre-M8.7 behaviour.
     pub(super) subagent_summary_generator:
         Option<Arc<crate::subagent_summary::AgentSummaryGenerator>>,
-    /// M8 parity (W1.A4): optional shared cost accountant. When set,
-    /// the agent threads it onto every `ToolContext` so background
-    /// sub-agents (pipeline workers, spawn children) reserve and commit
-    /// against the same ledger as the parent session.
-    pub(super) cost_accountant: Option<Arc<crate::cost_ledger::CostAccountant>>,
     /// Session-cumulative usage base shared with the owning session
-    /// actor. The actor seeds it from the persistent usage ledger and
-    /// folds each completed run back in (priced at the model that ran
-    /// it); `emit_cost_update` READS it so the `session_*` figures on
+    /// actor. The actor folds each completed run back in (priced at the
+    /// model that ran it); `emit_cost_update` READS it so the `session_*`
+    /// figures on
     /// `ProgressEvent::CostUpdate` cover the whole session — surviving
     /// per-turn resets, provider failover, and the runtime-cache
     /// eviction a `profile/llm/select` model switch triggers. `None`
@@ -528,23 +493,6 @@ pub struct Agent {
     /// pipeline workers, plugins, and shell to derive their CWD and
     /// path validation from this scope.
     pub(super) session_scope: Option<Arc<SessionScope>>,
-    /// Goal ID this agent runs under (peer-agent-based goal). Populated by
-    /// the peer session boot when the staged peer dir carries a `goal` file
-    /// (`peers/<slug>/goal`, written by `stage_peer` when the master passed
-    /// `goal_id`/`task_id` to `peer_handoff`). `None` for goal-less peers
-    /// and non-peer sessions. Read by `goal_*` tools via `ToolContext.goal_id`.
-    pub(super) goal_id: Option<String>,
-    /// Task ID within the goal (peer-agent-based goal). Sourced from line 2
-    /// of the peer's `goal` file; may be `None` even when `goal_id` is set
-    /// (the master scoped the peer to a goal but no specific sub-task).
-    pub(super) task_id: Option<String>,
-    /// The session that staged this peer (peer-agent-based goal). Captured
-    /// once at peer boot from `peers/<slug>/originator` and threaded into
-    /// `ToolContext::originator_session` so goal-aware tools can enforce
-    /// the goal-binding check WITHOUT re-reading the (mutable, symlink-
-    /// vulnerable) originator file on every call. `None` for non-peer
-    /// sessions.
-    pub(super) originator_session: Option<String>,
     /// Build-cache pool slot held by this peer's CURRENT turn (outer-loop
     /// #4, docs/build-cache-pool.md §4). The slot lifecycle is ONE TURN, not
     /// the peer session: the serve boot adopts/acquires it and the turn
@@ -558,13 +506,6 @@ pub struct Agent {
     /// by default so legacy agent loops do not spend verifier calls or write
     /// verifier sidecars unless a caller opts in explicitly.
     pub(super) verifier_config: Option<AgentVerifierConfig>,
-    /// Voice-turn failure projection sink (Task 8). When the agent loop runs
-    /// under [`octos_llm::LlmCallPolicy::FailFast`] and a FOREGROUND LLM call
-    /// fails terminally, the loop emits a single [`crate::TurnFailure`] here so
-    /// the voice closeout (octos-cli) can render a spoken error/empty message.
-    /// `None` keeps pre-Task-8 behaviour byte-for-byte — the original
-    /// `eyre::Report` still flows out of the loop unchanged.
-    pub(super) voice_failure_sink: Option<tokio::sync::mpsc::UnboundedSender<crate::TurnFailure>>,
     /// Git-backed workspace snapshot store (#1768, opt-in). When present,
     /// `execute_tools` records a snapshot of the workspace before any
     /// batch containing a mutating tool so the user can restore
@@ -587,11 +528,6 @@ pub struct Agent {
     /// must not persist them itself (doing so at drain time gave the steer a
     /// lower durable sequence than the turn's own rows).
     pub(super) steer_drained_callback: Option<crate::steering::SteerDrainedCallback>,
-    /// Provider/model identities that failed to establish a streaming
-    /// response during this session. Once recorded, later turns use the
-    /// ordinary completion endpoint directly instead of paying another SSE
-    /// failure timeout.
-    pub(super) streaming_disabled_providers: std::sync::Mutex<HashSet<String>>,
 }
 
 impl Agent {
@@ -603,31 +539,7 @@ impl Agent {
         memory: Arc<EpisodeStore>,
     ) -> Self {
         let system_prompt = include_str!("../prompts/worker.txt").to_string();
-        // RFC-1 fixup (codex P1 + round-3 P2): refresh the `mofa_make`
-        // dispatcher pair before wrapping the registry in `Arc`, then
-        // wire the (fresh) dispatcher's `Weak<ToolRegistry>` back-reference.
-        //
-        // Why the refresh: callers that build per-node/per-turn
-        // registries from CACHED `Arc<dyn Tool>` instances (notably
-        // `octos-pipeline`, which caches plugin tool Arcs once and
-        // registers the SAME `Arc<MofaMakeTool>` into every node
-        // registry) would otherwise have the central wire below mutate
-        // the SHARED dispatcher object. Two overlapping pipeline nodes
-        // would then race on the dispatcher's `Mutex<Weak>` and one
-        // node's `mofa_make` call could resolve through the OTHER
-        // node's registry — or, once one node's registry drops, the
-        // shared dispatcher's Weak would point at a dropped registry
-        // and surface `[DISPATCHER_ERROR]`.
-        //
-        // Minting fresh instances seeded from the existing catalog
-        // gives each registry its own dispatcher object; the cached
-        // Arc kept by the caller is untouched. Mirrors the same
-        // share-mutate-hazard fix the per-turn WS path applies (see
-        // `ui_protocol.rs::process_chat_message_streaming`).
-        let mut tools = tools;
-        Self::refresh_mofa_make_dispatcher_in_place(&mut tools);
         let tools = Arc::new(tools);
-        crate::plugins::PluginLoader::wire_mofa_make_registry_back_ref(&tools);
 
         Self {
             id,
@@ -647,7 +559,6 @@ impl Agent {
             loop_detected_recently: Arc::new(AtomicBool::new(false)),
             session_limits: None,
             session_usage: std::sync::Mutex::new(SessionUsage::default()),
-            realtime: None,
             compaction_runner: None,
             compaction_workspace: None,
             persistent_retry_state: None,
@@ -658,7 +569,6 @@ impl Agent {
             append_only_audit: Default::default(),
             subagent_output_router: None,
             subagent_summary_generator: None,
-            cost_accountant: None,
             session_usage_base: None,
             parent_session_key: None,
             prompt_cache_epoch_id: None,
@@ -667,41 +577,18 @@ impl Agent {
             sandbox_config: None,
             prompt_context_manager: None,
             session_scope: None,
-            goal_id: None,
-            task_id: None,
-            originator_session: None,
             build_cache_slot: None,
             build_cache_usage: None,
             verifier_config: None,
-            voice_failure_sink: None,
             snapshot_manager: None,
             steer_buffer: None,
             steer_drained_callback: None,
-            streaming_disabled_providers: std::sync::Mutex::new(HashSet::new()),
         }
     }
 
     /// Create a new agent sharing pre-existing Arc-wrapped resources.
     /// Useful for per-request agents that share tools/memory with a base agent.
     ///
-    /// **Share-mutate hazard for `mofa_make`**: this method calls
-    /// [`Self::wire_mofa_make_dispatcher`] which mutates the dispatcher's
-    /// internal `Mutex<Weak<ToolRegistry>>`. If `tools` carries a
-    /// dispatcher Arc that is ALSO held by another `Arc<ToolRegistry>`
-    /// (typical for per-turn snapshots built from `snapshot_excluding`,
-    /// or per-node pipeline registries built from a shared plugin tool
-    /// cache), that other registry will silently lose its back-reference.
-    ///
-    /// Callers MUST mint fresh `MofaMakeTool` / `MofaDescribeContentTypeTool`
-    /// instances seeded from the existing dispatcher's catalog and
-    /// `register_arc` them on `tools` BEFORE calling `Agent::new_shared`
-    /// (the ui_protocol.rs per-turn path is the canonical example). The
-    /// constructor cannot do this itself because `Arc<ToolRegistry>` is
-    /// shared-immutable.
-    ///
-    /// `Agent::new` does the freshen internally (it owns the
-    /// `ToolRegistry` and can mutate it before the Arc wrap); use that
-    /// entry-point when the caller has an owned registry.
     pub fn new_shared(
         id: AgentId,
         llm: Arc<dyn LlmProvider>,
@@ -709,12 +596,6 @@ impl Agent {
         memory: Arc<EpisodeStore>,
     ) -> Self {
         let system_prompt = include_str!("../prompts/worker.txt").to_string();
-        // RFC-1 fixup (codex P1 + round-3 P2): wire the dispatcher's
-        // `Weak<ToolRegistry>` back-reference. The freshen step that
-        // `Agent::new` does in-place cannot happen here (the registry
-        // is shared-immutable behind `Arc`), so callers must freshen
-        // before construction. See the doc comment above for details.
-        crate::plugins::PluginLoader::wire_mofa_make_registry_back_ref(&tools);
 
         Self {
             id,
@@ -734,7 +615,6 @@ impl Agent {
             loop_detected_recently: Arc::new(AtomicBool::new(false)),
             session_limits: None,
             session_usage: std::sync::Mutex::new(SessionUsage::default()),
-            realtime: None,
             compaction_runner: None,
             compaction_workspace: None,
             persistent_retry_state: None,
@@ -745,7 +625,6 @@ impl Agent {
             append_only_audit: Default::default(),
             subagent_output_router: None,
             subagent_summary_generator: None,
-            cost_accountant: None,
             session_usage_base: None,
             parent_session_key: None,
             prompt_cache_epoch_id: None,
@@ -754,17 +633,12 @@ impl Agent {
             sandbox_config: None,
             prompt_context_manager: None,
             session_scope: None,
-            goal_id: None,
-            task_id: None,
-            originator_session: None,
             build_cache_slot: None,
             build_cache_usage: None,
             verifier_config: None,
-            voice_failure_sink: None,
             snapshot_manager: None,
             steer_buffer: None,
             steer_drained_callback: None,
-            streaming_disabled_providers: std::sync::Mutex::new(HashSet::new()),
         }
     }
 
@@ -808,65 +682,6 @@ impl Agent {
     /// the request agent from its session runtime.
     pub fn agent_definitions(&self) -> Arc<crate::agents::AgentDefinitions> {
         self.agent_definitions.clone()
-    }
-
-    /// RFC-1 (issue #1290): wire the `mofa_make` dispatcher + companion
-    /// `mofa_describe_content_type` to the shared tool registry. The
-    /// dispatcher needs a `Weak<ToolRegistry>` so its `execute` path
-    /// can look up the forwarding target by name.
-    ///
-    /// Idempotent and silent on agents whose registry has no mofa-*
-    /// skills (no dispatcher registered → no-op). Hosts should call
-    /// this after agent construction.
-    pub fn wire_mofa_make_dispatcher(&self) {
-        crate::plugins::PluginLoader::wire_mofa_make_registry_back_ref(&self.tools);
-    }
-
-    /// RFC-1 fixup (codex P2 round 3): mint a fresh `MofaMakeTool` +
-    /// `MofaDescribeContentTypeTool` pair seeded from the existing
-    /// dispatcher's catalog, then re-register them on `tools` so the
-    /// per-agent dispatcher is a SEPARATE Arc object from whatever
-    /// the caller cached / cloned in.
-    ///
-    /// Why: when `octos-pipeline` (and similar callers) build per-node
-    /// registries from a shared `Arc<MofaMakeTool>` cache, the central
-    /// wire in `Agent::new` would otherwise mutate the SHARED
-    /// dispatcher's `Mutex<Weak<ToolRegistry>>` and let one node's
-    /// `mofa_make` call resolve through another node's registry. After
-    /// the refresh, each node owns its own dispatcher instance whose
-    /// Weak can be wired safely.
-    ///
-    /// No-op when the registry has no mofa-* skills (no dispatcher to
-    /// freshen). Internal-hidden markers, spawn_only markers, and
-    /// every other registry side-state survive the refresh because
-    /// only the dispatcher tool instances are replaced.
-    fn refresh_mofa_make_dispatcher_in_place(tools: &mut ToolRegistry) {
-        use crate::tools::{MofaDescribeContentTypeTool, MofaMakeTool};
-
-        let entries = match tools.get("mofa_make") {
-            Some(arc) => match arc.as_any().downcast_ref::<MofaMakeTool>() {
-                Some(dispatcher) => dispatcher.entries(),
-                None => return,
-            },
-            None => return,
-        };
-        if entries.is_empty() {
-            return;
-        }
-
-        let fresh_dispatcher = MofaMakeTool::new();
-        for entry in &entries {
-            fresh_dispatcher.register_or_replace(entry.clone());
-        }
-        tools.register(fresh_dispatcher);
-
-        if tools.get("mofa_describe_content_type").is_some() {
-            let fresh_describe = MofaDescribeContentTypeTool::new();
-            for entry in &entries {
-                fresh_describe.register_or_replace(entry.clone());
-            }
-            tools.register(fresh_describe);
-        }
     }
 
     /// Set the agent configuration.
@@ -932,19 +747,6 @@ impl Agent {
     /// Cancellation handle for embedders using the canonical session agent.
     pub fn shutdown_signal(&self) -> Arc<AtomicBool> {
         self.shutdown.clone()
-    }
-
-    /// Attach the voice-turn failure projection sink (Task 8). When set and the
-    /// loop runs under [`octos_llm::LlmCallPolicy::FailFast`], a single
-    /// [`crate::TurnFailure`] is emitted on terminal foreground-LLM failure
-    /// (empty response or classified LLM error). Hook-deny LLM failures are
-    /// intentionally excluded so the existing permission behaviour is
-    /// preserved.
-    pub fn set_voice_failure_sink(
-        &mut self,
-        tx: tokio::sync::mpsc::UnboundedSender<crate::TurnFailure>,
-    ) {
-        self.voice_failure_sink = Some(tx);
     }
 
     /// Attach the per-turn pending-input buffer for mid-turn prompt
@@ -1026,25 +828,8 @@ impl Agent {
         self.subagent_summary_generator.as_ref()
     }
 
-    /// Wire a shared [`crate::cost_ledger::CostAccountant`] onto the
-    /// agent so background sub-agents (pipeline workers, spawn
-    /// children) inherit the same accountant via `TOOL_CTX` and commit
-    /// per-node spend to the same ledger. M8 parity (W1.A4).
-    pub fn with_cost_accountant(
-        mut self,
-        accountant: Arc<crate::cost_ledger::CostAccountant>,
-    ) -> Self {
-        self.cost_accountant = Some(accountant);
-        self
-    }
-
-    /// Access the configured cost accountant, if any.
-    pub fn cost_accountant(&self) -> Option<&Arc<crate::cost_ledger::CostAccountant>> {
-        self.cost_accountant.as_ref()
-    }
-
     /// Share a session-cumulative usage base with this agent. The owner
-    /// (session actor) seeds it from the usage ledger and folds completed
+    /// (session actor) folds completed
     /// runs; the agent only reads it when emitting cost updates, so the
     /// wire's `session_*` figures cover the whole session instead of
     /// resetting every turn. See [`crate::session_usage`].
@@ -1109,46 +894,6 @@ impl Agent {
     /// Access the configured session scope, if any.
     pub fn session_scope(&self) -> Option<&Arc<SessionScope>> {
         self.session_scope.as_ref()
-    }
-
-    /// Builder: set the goal id this agent runs under. Called by the peer
-    /// session boot when the staged peer dir carries a `goal` file. Read by
-    /// `goal_*` tools via `ToolContext.goal_id`.
-    pub fn with_goal_id(mut self, goal_id: String) -> Self {
-        self.goal_id = Some(goal_id);
-        self
-    }
-
-    /// Builder: set the task id this agent runs under (sub-task within the
-    /// goal). Called alongside [`Self::with_goal_id`] when the peer's `goal`
-    /// file carries a task id.
-    pub fn with_task_id(mut self, task_id: String) -> Self {
-        self.task_id = Some(task_id);
-        self
-    }
-
-    /// The goal id this agent runs under (peer-agent-based goal). `None`
-    /// for goal-less peers and non-peer sessions.
-    pub fn goal_id(&self) -> Option<&str> {
-        self.goal_id.as_deref()
-    }
-
-    /// The task id this agent runs under within its goal, if any.
-    pub fn task_id(&self) -> Option<&str> {
-        self.task_id.as_deref()
-    }
-
-    /// Builder: set the session that staged this peer. Called at peer boot
-    /// alongside [`Self::with_goal_id`] when the staged peer dir carries an
-    /// `originator` file.
-    pub fn with_originator_session(mut self, originator: String) -> Self {
-        self.originator_session = Some(originator);
-        self
-    }
-
-    /// The session that staged this peer, if any (peer sessions only).
-    pub fn originator_session(&self) -> Option<&str> {
-        self.originator_session.as_deref()
     }
 
     /// Builder: set the build-cache pool slot this peer's current turn holds
@@ -1252,20 +997,6 @@ impl Agent {
         self
     }
 
-    /// Attach a realtime controller so each loop iteration beats the
-    /// heartbeat, checks for stalls, and (if configured) injects a bounded
-    /// sensor summary into the system prompt.
-    pub fn with_realtime(mut self, controller: Arc<RealtimeController>) -> Self {
-        self.realtime = Some(controller);
-        self
-    }
-
-    /// Returns the attached realtime controller, if any. Tools and tests
-    /// reach through this to inspect heartbeat state.
-    pub fn realtime_controller(&self) -> Option<Arc<RealtimeController>> {
-        self.realtime.clone()
-    }
-
     /// Wire the declarative compaction runner (harness M6.3). Optional — when
     /// absent, the loop falls back to the legacy extractive trim path.
     pub fn with_compaction_runner(
@@ -1343,49 +1074,6 @@ impl Agent {
         &self,
     ) -> Option<Arc<crate::compaction_tiered::TieredCompactionRunner>> {
         self.tiered_compaction.clone()
-    }
-
-    /// Beat the heartbeat once (if a realtime controller is attached) and
-    /// return `Err(AgentError::HeartbeatStalled)` when the controller reports
-    /// a stall. Callers invoke this at the top of each loop iteration so that
-    /// a hung LLM or I/O call can surface a typed error instead of silently
-    /// freezing the robot.
-    pub(super) fn beat_heartbeat(&self, iteration: u32) -> eyre::Result<()> {
-        use realtime::{AgentError, HeartbeatState};
-
-        let Some(controller) = self.realtime.as_ref() else {
-            return Ok(());
-        };
-        if !controller.config().enabled {
-            return Ok(());
-        }
-        match controller.beat_and_check() {
-            HeartbeatState::Alive => Ok(()),
-            HeartbeatState::Stalled => {
-                let timeout_ms = controller.config().heartbeat_timeout_ms;
-                tracing::warn!(
-                    iteration,
-                    timeout_ms,
-                    "realtime heartbeat stalled, aborting iteration"
-                );
-                Err(eyre::Report::new(AgentError::HeartbeatStalled {
-                    iteration,
-                    timeout_ms,
-                }))
-            }
-        }
-    }
-
-    /// Render the sensor context summary (bounded by the configured token
-    /// budget) for the current system prompt, if the realtime controller is
-    /// enabled and has an injector. Returns `None` when realtime is off, the
-    /// injector has no data, or the source is empty.
-    pub(super) fn realtime_sensor_summary(&self) -> Option<String> {
-        let controller = self.realtime.as_ref()?;
-        if !controller.config().enabled {
-            return None;
-        }
-        controller.sensor_summary()
     }
 
     /// Update the session ID in the hook context (call before each message).
@@ -1643,15 +1331,6 @@ mod profile_integration_tests {
     use octos_memory::EpisodeStore;
 
     #[test]
-    fn clamp_env_secs_floor_one_keeps_guard_live() {
-        // env_secs_or semantics: 0 floors to 1 so the guard is always live.
-        assert_eq!(clamp_env_secs(Some(0), 90, 1), 1);
-        assert_eq!(clamp_env_secs(Some(45), 90, 1), 45);
-        assert_eq!(clamp_env_secs(Some(99_999), 90, 1), 86_400);
-        assert_eq!(clamp_env_secs(None, 90, 1), 90);
-    }
-
-    #[test]
     fn clamp_env_secs_floor_zero_allows_disable() {
         // env_secs_allow_zero_or semantics (#2228): 0 passes through so the
         // wall-clock cap can actually be disabled.
@@ -1766,35 +1445,6 @@ mod profile_integration_tests {
         let prof = profiled.profile().expect("profile handle present");
         assert_eq!(prof.name, "coding");
         assert_eq!(prof.version, 1);
-    }
-
-    #[tokio::test]
-    async fn coding_full_profile_matches_default_tool_set() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let base = agent_default(tmp.path()).await;
-        let profiled = agent_with_builtin_profile(tmp.path(), "coding-full").await;
-
-        // The byte-for-byte parity contract moved from `coding` to the
-        // `coding-full` escape hatch when the lean default landed.
-        assert_eq!(
-            tool_names(&base),
-            tool_names(&profiled),
-            "coding-full profile must preserve the default tool set byte-for-byte",
-        );
-
-        let prof = profiled.profile().expect("profile handle present");
-        assert_eq!(prof.name, "coding-full");
-        assert_eq!(prof.version, 1);
-    }
-
-    #[tokio::test]
-    async fn agent_without_profile_returns_none() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let agent = agent_default(tmp.path()).await;
-        assert!(
-            agent.profile().is_none(),
-            "agents built without a profile envelope return None",
-        );
     }
 
     #[tokio::test]

@@ -918,31 +918,6 @@ async fn update_plan_body(_: &dyn Tool, args: &Value, ctx: &ToolContext) -> Resu
     })
 }
 
-async fn request_user_input_body(
-    _: &dyn Tool,
-    args: &Value,
-    _: &ToolContext,
-) -> Result<ToolResult> {
-    Ok(ToolResult {
-        output: json!({
-            "ok": true,
-            "kind": "user_input_request",
-            "status": "requested",
-            "request": args,
-            "response": null,
-            "message": "User input request recorded in the transcript; no synchronous host response channel is attached to this runtime (non-interactive or unattended run). Do NOT wait or re-ask: proceed with your best judgment, state the assumption in one line, and continue the task so the user can redirect you later if needed."
-        })
-        .to_string(),
-        success: true,
-        structured_metadata: Some(json!({
-            "codex_tool": "request_user_input",
-            "request": args,
-            "host_response_channel": "not_attached",
-        })),
-        ..Default::default()
-    })
-}
-
 pub struct SpawnAgentTool {
     delegate: Option<Arc<dyn Tool>>,
 }
@@ -1828,12 +1803,6 @@ simple_codex_tool!(
     "update_plan",
     "Update the visible task plan for Codex-compatible coding workflows.",
     update_plan_body
-);
-simple_codex_tool!(
-    RequestUserInputTool,
-    "request_user_input",
-    "Request structured user input from the host UI.",
-    request_user_input_body
 );
 simple_codex_tool!(
     SendInputTool,
@@ -3321,162 +3290,6 @@ impl Tool for ToolSuggestTool {
                 "codex_tool": "tool_suggest",
                 "task": task,
                 "suggestions": results,
-            })),
-            ..Default::default()
-        })
-    }
-}
-
-// ---------------------------------------------------------------------------
-// #1149 / M14-B P2 tool: `image_generation`.
-//
-// Codex's optional image-generation surface. Octos doesn't ship a native
-// image-generation backend yet (no MoFA media skill is bundled and the
-// `octos-llm` providers — Anthropic / Gemini / OpenRouter — don't expose
-// an image-generation endpoint; OpenAI does via DALL-E but isn't wired
-// through `LlmProvider` either). Rather than leave the canonical Codex
-// name unregistered (which would surface to the model as "tool not
-// found"), we register a stub that returns a typed
-// `coding_tool_unsupported` envelope. This keeps the wire-level contract
-// complete: model-visible name advertised, structured error returned,
-// follow-up work tracked in #1149 for a real backend (OpenAI image API
-// or a bundled skill).
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Deserialize)]
-struct ImageGenerationInput {
-    #[serde(default)]
-    prompt: Option<String>,
-    #[serde(default)]
-    size: Option<String>,
-    #[serde(default)]
-    n: Option<u32>,
-}
-
-/// Codex-compatible `image_generation` tool.
-///
-/// Stub: always returns a structured `coding_tool_unsupported` envelope. The
-/// canonical Codex input shape (`prompt`, optional `size`, optional `n`) is
-/// accepted and validated so a future backend-bound implementation can
-/// upgrade in place without breaking the model-visible schema. See #1149
-/// for the follow-up wiring (OpenAI image API or bundled skill).
-pub struct ImageGenerationTool {
-    backend_bound: bool,
-}
-
-impl Default for ImageGenerationTool {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ImageGenerationTool {
-    /// Construct the stub variant. Always returns `coding_tool_unsupported`
-    /// because no native or skill backend is bound. The constructor is kept
-    /// `pub` so the `with_builtins` path and tests both reach it through one
-    /// entrypoint; a future #1149 follow-up will add `with_backend(...)` here
-    /// and flip `backend_bound`.
-    pub fn new() -> Self {
-        Self {
-            backend_bound: false,
-        }
-    }
-}
-
-#[async_trait]
-impl Tool for ImageGenerationTool {
-    fn name(&self) -> &str {
-        "image_generation"
-    }
-
-    fn description(&self) -> &str {
-        "Generate an image from a text prompt. STUB: no native or skill backend is bound yet (#1149 follow-up); calls return a typed `coding_tool_unsupported` error envelope."
-    }
-
-    fn tags(&self) -> &[&str] {
-        &["media", "code"]
-    }
-
-    fn input_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "prompt": {
-                    "type": "string",
-                    "description": "Free-form text prompt describing the image to generate"
-                },
-                "size": {
-                    "type": "string",
-                    "description": "Optional output size hint (e.g. `1024x1024`). Provider-specific; reserved for the backend-bound variant."
-                },
-                "n": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 4,
-                    "description": "Optional number of images to generate (1-4). Reserved for the backend-bound variant."
-                }
-            },
-            "required": ["prompt"]
-        })
-    }
-
-    async fn execute(&self, args: &Value) -> Result<ToolResult> {
-        let input: ImageGenerationInput =
-            serde_json::from_value(args.clone()).wrap_err("invalid image_generation input")?;
-        let prompt = input
-            .prompt
-            .as_deref()
-            .map(str::trim)
-            .filter(|p| !p.is_empty());
-        if prompt.is_none() {
-            return Ok(ToolResult {
-                output: "image_generation requires a non-empty `prompt`".to_string(),
-                success: false,
-                structured_metadata: Some(json!({
-                    "codex_tool": "image_generation",
-                    "error_kind": "coding_tool_denied",
-                    "reason": "missing_prompt",
-                })),
-                ..Default::default()
-            });
-        }
-        // `backend_bound` is reserved for the #1149 follow-up. Until a real
-        // backend is wired, every call returns the typed unsupported
-        // envelope; we keep the field on the struct so the future upgrade
-        // is a behaviour change, not an API break.
-        if self.backend_bound {
-            // Unreachable until #1149 follow-up; the stub constructor
-            // always sets `backend_bound = false`.
-            return Ok(ToolResult {
-                output: "image_generation: backend bound but no implementation available"
-                    .to_string(),
-                success: false,
-                structured_metadata: Some(json!({
-                    "codex_tool": "image_generation",
-                    "error_kind": "coding_tool_missing",
-                })),
-                ..Default::default()
-            });
-        }
-        let prompt = prompt.unwrap_or("");
-        Ok(ToolResult {
-            output: json!({
-                "error": "image_generation has no native or skill backend bound on this profile",
-                "follow_up": "https://github.com/octos-org/octos/issues/1149",
-                "prompt": prompt,
-            })
-            .to_string(),
-            success: false,
-            structured_metadata: Some(json!({
-                "codex_tool": "image_generation",
-                "error_kind": "coding_tool_unsupported",
-                "reason": "no_backend_bound",
-                "follow_up_issue": "https://github.com/octos-org/octos/issues/1149",
-                "accepted_input": {
-                    "prompt": prompt,
-                    "size": input.size,
-                    "n": input.n,
-                },
             })),
             ..Default::default()
         })

@@ -75,9 +75,7 @@ use crate::tools::{
     ToolApprovalRequest, ToolApprovalRequester, ToolContext, USER_QUESTION_CTX,
     UserQuestionRequester,
 };
-use crate::workspace_contract::{
-    SpawnTaskContractResult, enforce_spawn_task_contract_with_args_and_output,
-};
+use crate::workspace_contract::{SpawnTaskContractResult, enforce_spawn_task_contract};
 
 /// Per-tool-call result returned from the in-process dispatcher. Kept as a
 /// tuple so the aggregation path can reuse today's `futures::join_all` style
@@ -87,7 +85,7 @@ use crate::workspace_contract::{
 /// files the tool wants auto-delivered to the user, optional sub-agent
 /// token usage, a per-call `success` bit used by the serial scheduler to
 /// trigger the M8.8 error cascade, and the optional structured side-channel
-/// metadata the tool surfaced (today: per-node cost rows from `run_pipeline`).
+/// metadata the tool surfaced (today: per-node cost rows from `bg_research`).
 type ToolCallResult = (
     Message,
     Vec<std::path::PathBuf>,
@@ -121,16 +119,11 @@ fn should_auto_send_tool_files(
 /// unscoped home dir used to inherit the 1800s ceiling and hang the whole
 /// turn with no output. Fast read-only tools have no business waiting 30
 /// minutes; only genuinely long-running tools (shells, background spawns,
-/// pipelines, browser sessions, deep research/crawl) do.
+/// pipelines) do.
 ///
 /// Names verified against the registered `Tool::name()` impls:
 /// - `shell` (`tools/shell.rs`), `bash` alias
 /// - `spawn` (`tools/spawn.rs`), `spawn_agent` alias
-/// - `run_pipeline` (spawn_only pipeline tool registered via manifest)
-/// - `browser` (`tools/browser.rs`)
-/// - `delegate_task` (`tools/delegate.rs`)
-/// - `search` (`tools/deep_search.rs`), `deep_crawl` (`tools/site_crawl.rs`)
-/// - `synthesize_research` (`tools/synthesize_research.rs`)
 /// - `check` (`tools/check.rs`): a cold `cargo check` legitimately compiles
 ///   the dependency graph; the tool enforces its own 120s child timeout,
 ///   which must fire BEFORE the batch ceiling (the interactive default is
@@ -144,20 +137,7 @@ fn should_auto_send_tool_files(
 /// would detach the still-running tool task and leak the pending question
 /// (UPCR-2026-023). They remain fully timeout-exempt at the registry dispatch
 /// boundary too, via `Tool::blocks_on_human_input`.
-const LONG_RUNNING_TOOLS: &[&str] = &[
-    "shell",
-    "bash",
-    "spawn",
-    "spawn_agent",
-    "run_pipeline",
-    "browser",
-    "delegate_task",
-    "search",
-    "deep_crawl",
-    "site_crawl",
-    "synthesize_research",
-    "check",
-];
+const LONG_RUNNING_TOOLS: &[&str] = &["shell", "bash", "spawn", "spawn_agent", "check"];
 
 /// Headroom between a tool's registry-level execution budget and the agent
 /// batch deadline. This lets the inner registry timeout return its typed
@@ -318,7 +298,7 @@ fn relativize_workspace_path(path: &str, workspace_root: Option<&std::path::Path
 ///
 /// - When `output_files` is non-empty: emit empty content; the files
 ///   themselves carry the deliverable. This matches the legacy
-///   file-attached behaviour for `fm_tts` / `podcast_generate` / etc.
+///   file-attached behaviour for file-producing tools.
 /// - When `output_files` is empty: emit the tool's stdout `output` as
 ///   content. The contract verified the artifact-shaped portion of the
 ///   deliverable (e.g. the HttpProbe asserting deploy_url returned
@@ -332,14 +312,10 @@ pub(super) fn satisfied_completion_content(output_files: &[String], tool_output:
     }
 }
 
-/// Produce the composite system-prompt text (worker prompt + realtime sensor
-/// summary) used at the top of every agent turn. Centralizing this in
-/// `execution.rs` keeps the message-building policy in a single location so
-/// the conversation loop and task loop compose the same prompt.
-///
-/// Returns the prompt text the caller should paste into the first system
-/// `Message`. When no realtime controller is attached this is byte-identical
-/// to the stored system prompt.
+/// Produce the composite system-prompt text used at the top of every agent
+/// turn. Centralizing this in `execution.rs` keeps the message-building
+/// policy in a single location so the conversation loop and task loop
+/// compose the same prompt.
 /// Generic tool-use discipline appended to every agent's system prompt.
 ///
 /// Weaker models (kimi-k2.5, smaller open-source) exhibit "tool stickiness"
@@ -352,7 +328,7 @@ pub(super) fn satisfied_completion_content(output_files: &[String], tool_output:
 /// Empirical validation (llm-benchmark replay of mini3 session
 /// slides-1780013669236-8w2ime, the production failure that motivated
 /// this fix):
-/// - kimi-k2.5 + only `check_workspace_contract`:
+/// - kimi-k2.5 + only the contract-inspection tool:
 ///   loop rate 5/5 → 3/5 with this block (40% break out)
 /// - kimi-k2.5 + check + read_file + list_dir:
 ///   no consistent change (within noise)
@@ -377,13 +353,6 @@ what's missing.";
 pub(super) fn compose_system_prompt(agent: &Agent) -> String {
     let mut content = agent.system_prompt_snapshot();
     content.push_str(TOOL_USE_DISCIPLINE);
-    if let Some(summary) = agent.realtime_sensor_summary() {
-        if !content.ends_with('\n') {
-            content.push('\n');
-        }
-        content.push('\n');
-        content.push_str(&summary);
-    }
     content
 }
 
@@ -497,18 +466,9 @@ impl Agent {
             subagent_summary_generator: self.subagent_summary_generator.clone(),
             llm_provider: self.llm.clone(),
             task_supervisor: Some(self.tools.supervisor()),
-            cost_accountant: self.cost_accountant.clone(),
             parent_session_key: self.parent_session_key.clone(),
             spawn_depth: self.spawn_depth,
             session_scope: self.session_scope.clone(),
-            // Peer-agent-based goal: forward the agent's (optional) goal
-            // context so goal-aware tools can scope their reads/writes.
-            goal_id: self.goal_id.clone(),
-            task_id: self.task_id.clone(),
-            // Peer-agent-based goal: forward the originator captured at peer
-            // boot so goal-aware tools can enforce binding without re-reading
-            // the mutable originator file on every call.
-            originator_session: self.originator_session.clone(),
             // Outer-loop #4: forward the build-cache slot this peer's turn
             // holds so the shell tool injects CARGO_TARGET_DIR per call
             // (§7.4) — never a process env var (peers share the process).
@@ -608,14 +568,10 @@ impl Agent {
     ) -> JoinHandle<ToolCallResult> {
         // Clone Arc-wrapped fields so the spawned task is 'static
         let tools = self.tools.clone();
-        // Peer-goal soak fix: pre-clone the real LLM provider + this agent's
-        // goal/task/originator identity so the spawned foreground ToolContext
-        // can carry them (see the fields below). Cannot borrow `self` inside
-        // the 'static spawned task.
+        // Outer-loop #4: pre-clone this agent's build-cache identity so the
+        // spawned foreground ToolContext can carry it (see the fields below).
+        // Cannot borrow `self` inside the 'static spawned task.
         let llm = self.llm.clone();
-        let ctx_goal_id = self.goal_id.clone();
-        let ctx_task_id = self.task_id.clone();
-        let ctx_originator_session = self.originator_session.clone();
         let ctx_build_cache_slot = self.build_cache_slot.clone();
         let ctx_build_cache_usage = self.build_cache_usage.clone();
         let reporter = self.reporter();
@@ -652,10 +608,9 @@ impl Agent {
         // tasks (not only test fixtures).
         let subagent_output_router = self.subagent_output_router.clone();
         let subagent_summary_generator = self.subagent_summary_generator.clone();
-        // M8 parity (W1.A4): clone the agent's cost accountant and
-        // parent session key so they propagate to every sub-agent built
-        // off this turn's TOOL_CTX (pipeline workers, spawn children).
-        let cost_accountant = self.cost_accountant.clone();
+        // M8 parity (W1.A4): clone the agent's parent session key so it
+        // propagates to every sub-agent built off this turn's TOOL_CTX
+        // (pipeline workers, spawn children).
         let parent_session_key = self.parent_session_key.clone();
         // Guard C (issue #607): inherit the agent's spawn nesting depth
         // so the foreground and spawn_only `ToolContext` builders below
@@ -687,22 +642,20 @@ impl Agent {
         let captured_user_question_ctx: Option<std::sync::Arc<dyn UserQuestionRequester>> =
             USER_QUESTION_CTX.try_with(std::sync::Arc::clone).ok();
         // #1958: tokio task-locals are not inherited across `tokio::spawn`, so
-        // a tool that makes its OWN `provider.chat()` sub-call (notably
-        // `goal_update`'s completion verifier via `run_goal_completion_verifier`)
+        // a tool that makes its OWN `provider.chat()` sub-call
         // would otherwise run with the DEFAULT routing context — losing the
-        // turn's fail-fast policy and originating-session attribution (a
-        // verifier failover would then publish unattributed). Capture the call
-        // policy + router context here and re-establish them inside the spawned
-        // task around the tool future (below).
+        // turn's originating-session attribution (a verifier failover would
+        // then publish unattributed). Capture the router context here and
+        // re-establish it inside the spawned task around the tool future
+        // (below).
         //
         // Deliberately NOT the LANE context (codex #4): the wrap below applies
         // to EVERY foreground tool, and a synchronous `spawn` child or an
         // unresolved-model pipeline node that falls back to `self.llm` would
         // otherwise be pinned to the parent turn's lane (e.g. a research child
         // filtered to `CodeCapable`). The verifier is a simple completion check
-        // that routes fine on the default lane; attribution + policy are what
-        // matter, and neither regresses a lane-less child.
-        let captured_call_policy = octos_llm::current_llm_call_policy();
+        // that routes fine on the default lane; attribution is what matters,
+        // and it does not regress a lane-less child.
         let captured_router_ctx = octos_llm::current_router_context();
 
         tokio::spawn(async move {
@@ -839,7 +792,7 @@ impl Agent {
                 }
 
                 // Pre-flight validation: catch known-bad arguments (e.g.
-                // structurally invalid DOT for `run_pipeline`) synchronously
+                // structurally invalid DOT for `bg_research`) synchronously
                 // so the LLM gets the error as a tool_result in this
                 // iteration and can retry with corrected input. Without
                 // this, the foreground would return "started in background"
@@ -862,7 +815,7 @@ impl Agent {
                         // normal completion paths, so emit the matching
                         // ToolCompleted the ToolStarted (above) requires. Without
                         // it the TUI shows a phantom "Using <tool>" chip forever
-                        // (reproduced live on mini5: a bad run_pipeline name left
+                        // (reproduced live on mini5: a bad bg_research name left
                         // an "Orchestrating… (1 active)" chip stuck 15+ min).
                         reporter.report(ProgressEvent::ToolCompleted {
                             name: tc_name.clone(),
@@ -1011,13 +964,12 @@ impl Agent {
                 let bg_output_router = subagent_output_router.clone();
                 let bg_summary_generator = subagent_summary_generator.clone();
                 // M8 parity (W1.A1/A4): clone the optional router/generator/
-                // supervisor/cost-accountant so the make_ctx closure below
-                // can thread them onto every sub-agent that runs in the
-                // spawn_only branch (pipelines, recursive spawns).
+                // supervisor so the make_ctx closure below can thread them
+                // onto every sub-agent that runs in the spawn_only branch
+                // (pipelines, recursive spawns).
                 let bg_subagent_output_router = subagent_output_router.clone();
                 let bg_subagent_summary_generator = subagent_summary_generator.clone();
                 let bg_task_supervisor = Some(bg_supervisor.clone());
-                let bg_cost_accountant = cost_accountant.clone();
                 let bg_parent_session_key = parent_session_key.clone();
                 // Guard C (issue #607): clone the agent's spawn nesting
                 // depth into the spawn_only TOOL_CTX builder.
@@ -1062,7 +1014,7 @@ impl Agent {
                 // supervisor's per-task cancel token in the FOREGROUND (so it
                 // exists before any `supervisor.cancel(task_id)` race) and move
                 // it into the detached worker. Without this the spawn_only
-                // background task — a `run_pipeline` / `deep_research` fan-out —
+                // background task — a `bg_research` / `bg_research` fan-out —
                 // runs to completion regardless of a turn interrupt: aborting
                 // the foreground agent loop never touches this independent
                 // `tokio::spawn`, and the body never polled a cancel signal. We
@@ -1102,21 +1054,19 @@ impl Agent {
                         // foreground branch enforces.
                         permissions: bg_permissions.clone(),
                         // M8 parity (W1.A1): thread the shared router /
-                        // summary generator / supervisor / cost
-                        // accountant into the spawn_only TOOL_CTX so
-                        // sub-agents downstream (pipeline workers,
-                        // recursive spawns) inherit them via the
-                        // task-local read path.
+                        // summary generator / supervisor into the
+                        // spawn_only TOOL_CTX so sub-agents downstream
+                        // (pipeline workers, recursive spawns) inherit
+                        // them via the task-local read path.
                         subagent_output_router: bg_subagent_output_router.clone(),
                         subagent_summary_generator: bg_subagent_summary_generator.clone(),
                         task_supervisor: bg_task_supervisor.clone(),
-                        cost_accountant: bg_cost_accountant.clone(),
                         parent_session_key: bg_parent_session_key.clone(),
                         // Guard C (issue #607): inherit the parent
                         // agent's spawn nesting depth so spawn-only
                         // background tools that themselves dispatch
-                        // sub-agents (e.g. fm_tts → spawn) see the
-                        // higher value when their TOOL_CTX is read.
+                        // sub-agents see the higher value when their
+                        // TOOL_CTX is read.
                         spawn_depth: bg_spawn_depth,
                         // Phase 1 SessionScope migration: thread the
                         // shared scope onto the spawn_only TOOL_CTX so
@@ -1288,76 +1238,19 @@ impl Agent {
                                 success = true,
                                 "spawn_only background tool completed"
                             );
-                            // Forward the tool's `named_outputs` map (parsed
-                            // from its stdout envelope by the plugin
-                            // wrapper) so validators can resolve
-                            // `${output.<key>}` references against
-                            // tool-emitted values (e.g. `mofa_publish`
-                            // emitting `deploy_url`).
-                            let named_outputs_value = r.named_outputs.as_ref().map(|map| {
-                                serde_json::Value::Object(
-                                    map.iter()
-                                        .map(|(k, v)| {
-                                            (k.clone(), serde_json::Value::String(v.clone()))
-                                        })
-                                        .collect(),
-                                )
-                            });
-                            match enforce_spawn_task_contract_with_args_and_output(
+                            match enforce_spawn_task_contract(
                                 &bg_tools,
                                 &bg_name,
                                 &bg_tc_id,
                                 &r.files_to_send,
                                 bg_started_at,
                                 Some((&bg_supervisor, &task_id)),
-                                Some(&bg_args),
-                                named_outputs_value.as_ref(),
-                                // #1607: the Agent's own registry is built
-                                // sandboxed (session_actor
-                                // `create_registry_for_workspace` ->
-                                // `rebind_cwd(create_sandbox(&sandbox_config))`),
-                                // so its stored sandbox IS the session backend.
-                                bg_tools.sandbox(),
                             )
                             .await
                             {
                                 SpawnTaskContractResult::Satisfied { output_files } => {
-                                    // octos #997 (round-3 fix): the session-scope
-                                    // contract above runs validators at the SESSION
-                                    // root and writes
-                                    // `<session>/.octos/validator_outcomes.jsonl`,
-                                    // but `inspect_workspace_contract` reads
-                                    // `<session>/<kind>/<slug>/.octos/validator_outcomes.jsonl`.
-                                    // Without this call, a direct spawn_only
-                                    // invocation of `mofa_slides` (or any kind-
-                                    // managed tool) lands in the project workspace
-                                    // but never writes the project ledger — so a
-                                    // subsequent contract gate surfaces
-                                    // `ready = false` even when the hard-required
-                                    // validator (octos #997:
-                                    // `slides.mofa_slides.pptx_magic_bytes`)
-                                    // would have passed at the project root.
-                                    //
-                                    // Kind-agnostic: the helper iterates every
-                                    // slides/sites project beneath
-                                    // `workspace_root` and runs each project's
-                                    // own declared completion-phase validators.
-                                    // Non-slides/sites tools simply find no
-                                    // projects to validate and the helper
-                                    // returns an empty report.
-                                    if let Some(workspace_root) = bg_tools.workspace_root() {
-                                        let _project_root_report =
-                                            crate::workspace_contract::run_project_root_validators(
-                                                &bg_tools,
-                                                workspace_root,
-                                                None,
-                                                &r.files_to_send,
-                                                bg_tools.sandbox(),
-                                            )
-                                            .await;
-                                    }
                                     // When the tool emitted real text output
-                                    // (run_pipeline synthesize summary, plugin
+                                    // (bg_research synthesize summary, plugin
                                     // structured result), surface it in the
                                     // chat bubble alongside any file
                                     // attachments — otherwise the user sees an
@@ -1370,9 +1263,9 @@ impl Agent {
                                     // to `satisfied_completion_content`, which
                                     // preserves the Wave-3b mofa_publish path
                                     // (no files + URL text -> emit URL) and
-                                    // the legacy fm_tts / podcast_generate
-                                    // path (files + no text -> empty bubble,
-                                    // files carry the deliverable).
+                                    // the legacy file-carrying path (files +
+                                    // no text -> empty bubble, files carry
+                                    // the deliverable).
                                     let bubble_content = if r.output.trim().is_empty() {
                                         satisfied_completion_content(&output_files, &r.output)
                                     } else {
@@ -1429,7 +1322,7 @@ impl Agent {
                                         // text — otherwise the chat would
                                         // render TWO assistant bubbles in a
                                         // row (summary, then a redundant
-                                        // file-list notice). For run_pipeline
+                                        // file-list notice). For bg_research
                                         // the synthesize node already supplied
                                         // a user-readable executive summary
                                         // in `r.output`, so we suppress the
@@ -1588,10 +1481,9 @@ impl Agent {
                                         // The strict "no output files
                                         // produced" failure was too sharp
                                         // for skills with mixed sync/async
-                                        // tool families (e.g. mofa-fm marks
-                                        // its list/delete tools spawn_only
-                                        // for uniformity with the
-                                        // file-producing fm_tts/fm_voice_save).
+                                        // tool families, where some tools are
+                                        // marked spawn_only for uniformity
+                                        // with their file-producing siblings.
                                         let trimmed_output = r.output.trim();
                                         if !trimmed_output.is_empty() {
                                             tracing::info!(
@@ -1834,14 +1726,14 @@ impl Agent {
                                                 // `Satisfied`-branch fix
                                                 // above: when the tool has
                                                 // produced a real textual
-                                                // result (e.g. run_pipeline's
+                                                // result (e.g. bg_research's
                                                 // synthesize node returning a
                                                 // 5K-char executive summary
                                                 // in `r.output`), surface
                                                 // that as the chat bubble
                                                 // content. Without this, the
                                                 // user gets the bare ack
-                                                // `"✓ run_pipeline completed
+                                                // `"✓ bg_research completed
                                                 // (research.md)"` while the
                                                 // summary lives only inside
                                                 // the attached file. The
@@ -2112,14 +2004,13 @@ impl Agent {
                 // ctx.permissions.is_tool_allowed).
                 permissions: permissions.clone(),
                 // M8 parity (W1.A1/A3/A4): thread the shared router /
-                // summary generator / task supervisor / cost accountant
-                // through to foreground tool calls so run_pipeline (and
-                // the spawn tool) can pick them up via TOOL_CTX and
-                // hand them down to background workers.
+                // summary generator / task supervisor through to
+                // foreground tool calls so bg_research (and the spawn
+                // tool) can pick them up via TOOL_CTX and hand them
+                // down to background workers.
                 subagent_output_router: subagent_output_router.clone(),
                 subagent_summary_generator: subagent_summary_generator.clone(),
                 task_supervisor: Some(tools.supervisor()),
-                cost_accountant: cost_accountant.clone(),
                 parent_session_key: parent_session_key.clone(),
                 // Guard C (issue #607): stamp the agent's spawn
                 // nesting depth onto every foreground tool's
@@ -2136,26 +2027,10 @@ impl Agent {
                 // Peer-goal soak fix: the foreground tool ctx must carry the
                 // real LLM provider, not the NoopProvider from
                 // `ToolContext::zero()`. Tools that make their own LLM
-                // sub-calls (notably `goal_update`'s completion verifier via
-                // `run_goal_completion_verifier`) run through this ctx; without
-                // the real provider the verifier fails with "no real provider"
-                // and `goal_update(complete)` can never succeed. Mirror the
-                // approval path (`execute_approved_tool`), which already sets
-                // this.
+                // sub-calls run through this ctx; without the real provider
+                // they fail with "no real provider". Mirror the approval
+                // path (`execute_approved_tool`), which already sets this.
                 llm_provider: llm.clone(),
-                // Peer-goal soak fix (codex High #1): thread this agent's
-                // goal/task/originator identity through to the foreground tool
-                // ctx. Peer boot sets these on the Agent (`with_goal_id` etc.),
-                // but they were dropped here — so a peer's `goal_get` took the
-                // session path (its own goal-less session → `status: none`) and
-                // `goal_update` missed its peer-reject branch. These are `None`
-                // for every master agent (interactive AND autonomous — the only
-                // production `Agent::with_goal_id` is the peer-boot guard;
-                // masters carry the goal via `goal_context`), so the master
-                // still reaches the master-completion path.
-                goal_id: ctx_goal_id.clone(),
-                task_id: ctx_task_id.clone(),
-                originator_session: ctx_originator_session.clone(),
                 // Outer-loop #4: the foreground tool ctx carries the peer's
                 // held build-cache slot for per-call CARGO_TARGET_DIR
                 // injection in the shell tool (docs/build-cache-pool.md §7.4).
@@ -2184,17 +2059,14 @@ impl Agent {
                     .execute_with_context(&ctx, &tc_name, &effective_args)
                     .await
             });
-            // #1958: re-establish the turn's fail-fast policy + originating-
-            // session attribution (captured before the spawn) around the tool
-            // future, so a tool that makes its own provider.chat() call — the
-            // goal completion verifier — keeps them instead of the post-spawn
-            // defaults. Lane is intentionally NOT restored here (codex #4 — see
-            // the capture comment above). Independent of the approval/question
-            // bridges below; wrapped innermost so those still apply.
-            let exec_future = octos_llm::with_router_context(
-                captured_router_ctx,
-                octos_llm::with_llm_call_policy(captured_call_policy, exec_future),
-            );
+            // #1958: re-establish the turn's originating-session attribution
+            // (captured before the spawn) around the tool future, so a tool
+            // that makes its own provider.chat() call keeps it instead of the
+            // post-spawn defaults. Lane is intentionally NOT restored here
+            // (codex #4 — see the capture comment above). Independent of the
+            // approval/question bridges below; wrapped innermost so those
+            // still apply.
+            let exec_future = octos_llm::with_router_context(captured_router_ctx, exec_future);
             let result = match (&captured_approval_ctx, &captured_user_question_ctx) {
                 (Some(approval), Some(question)) => {
                     TOOL_APPROVAL_CTX
@@ -3097,8 +2969,8 @@ fn panic_result(tool_call: &octos_core::ToolCall, reason: &str) -> ToolCallResul
 #[cfg(test)]
 mod tests {
     use super::{
-        build_spawn_only_produced_files_message, relativize_workspace_path,
-        satisfied_completion_content, satisfied_delivery_is_failure, should_auto_send_tool_files,
+        build_spawn_only_produced_files_message, satisfied_completion_content,
+        satisfied_delivery_is_failure,
     };
 
     #[test]
@@ -3120,17 +2992,6 @@ mod tests {
             satisfied_delivery_is_failure(Some(false)),
             "a wired sender that failed to persist is a real failure"
         );
-    }
-
-    #[test]
-    fn explicit_send_file_turn_suppresses_plugin_auto_send_for_other_tools() {
-        assert!(!should_auto_send_tool_files(false, true, "mofa_slides"));
-        assert!(should_auto_send_tool_files(false, true, "send_file"));
-    }
-
-    #[test]
-    fn auto_send_respects_global_suppression_flag() {
-        assert!(!should_auto_send_tool_files(true, false, "mofa_slides"));
     }
 
     #[test]
@@ -3163,16 +3024,6 @@ mod tests {
         assert!(
             !msg.contains("/tmp/ws/"),
             "absolute workspace prefix must be stripped: {msg}"
-        );
-    }
-
-    #[test]
-    fn should_suppress_produced_files_block_when_no_files() {
-        // Token-budget invariant: never persist a stub message when the
-        // tool produced no files (e.g. failed run, text-only result).
-        assert!(
-            build_spawn_only_produced_files_message("search", &[], None).is_none(),
-            "empty files must return None so caller suppresses follow-up"
         );
     }
 
@@ -3210,30 +3061,6 @@ mod tests {
         assert!(!msg.contains("# Deep Research:"));
     }
 
-    #[test]
-    fn relativize_strips_workspace_prefix() {
-        let root = std::path::PathBuf::from("/u/me/ws");
-        assert_eq!(
-            relativize_workspace_path("/u/me/ws/skill-output/a.md", Some(&root)),
-            "skill-output/a.md"
-        );
-        // Path not under workspace stays verbatim.
-        assert_eq!(
-            relativize_workspace_path("/other/a.md", Some(&root)),
-            "/other/a.md"
-        );
-        // Already-relative input stays verbatim.
-        assert_eq!(
-            relativize_workspace_path("skill-output/a.md", Some(&root)),
-            "skill-output/a.md"
-        );
-        // None workspace → verbatim.
-        assert_eq!(
-            relativize_workspace_path("/u/me/ws/a.md", None),
-            "/u/me/ws/a.md"
-        );
-    }
-
     // -------------------------------------------------------------------
     // Wave-3b: `Satisfied { output_files: [] }` text-fallback regression.
     // -------------------------------------------------------------------
@@ -3249,143 +3076,11 @@ mod tests {
         assert_eq!(result, "https://deployed.example.com");
     }
 
-    #[test]
-    fn satisfied_completion_emits_empty_content_when_files_carry_deliverable() {
-        // Legacy artifact-carrying contracts (fm_tts, podcast_generate,
-        // mofa_slides, ...) still emit empty content because the files
-        // themselves are the deliverable.
-        let files = vec!["/tmp/a.mp3".to_string(), "/tmp/b.mp3".to_string()];
-        let result = satisfied_completion_content(&files, "skill text result");
-        assert_eq!(result, "");
-    }
-
-    #[test]
-    fn satisfied_completion_keeps_empty_text_when_no_files_and_no_text() {
-        // Defensive: empty tool output with empty output_files stays empty
-        // — the legacy "no output produced" branch downstream will surface
-        // a typed failure via the `r.success` check, not here.
-        let result = satisfied_completion_content(&[], "");
-        assert_eq!(result, "");
-    }
-
-    /// NEW-09 regression pin (paired with
-    /// `crates/octos-pipeline/src/tool.rs::tests::pipeline_timeout_returns_ok_failure_result_not_err`):
-    /// the spawn_only background execution arm at `Ok(r) if !r.success`
-    /// formats the failure bubble as `✗ <tool> failed: <r.output>`. The
-    /// pipeline-level timeout now returns
-    /// `Ok(ToolResult { success: false, output: "pipeline timed out
-    /// after Ns" })` so this contract test pins the bubble text the
-    /// WS client renders end-to-end. If either the pipeline-side
-    /// output text OR the execution.rs failure-arm format string
-    /// drift, this test catches the divergence at the same site.
-    ///
-    /// Mirroring the format string here (rather than refactoring the
-    /// failure arm to call a helper) keeps the unit test surface
-    /// dependency-free: the failure arm runs inside a tokio::spawn
-    /// closure that captures a dozen contextual variables (supervisor,
-    /// reporter, output router, …); extracting a helper would require
-    /// either threading every capture through a function signature or
-    /// boxing them into a struct, both of which would obscure the
-    /// in-place control flow that's load-bearing for the M8.7 cleanup
-    /// path that runs unconditionally after the `match result` block.
-    #[test]
-    fn spawn_only_failure_arm_bubble_format_pins_pipeline_timeout_text() {
-        let bg_name = "run_pipeline";
-        let pipeline_output = "pipeline timed out after 1200s";
-        let bubble = format!("✗ {bg_name} failed: {pipeline_output}");
-        assert_eq!(
-            bubble, "✗ run_pipeline failed: pipeline timed out after 1200s",
-            "the bubble surface text the WS client renders on a \
-             run_pipeline timeout must match the soak-evidence \
-             reference exactly — any wording drift breaks the harness's \
-             `isFinalArrived` heuristic plus any downstream regex \
-             matchers in dashboards / debugging tooling"
-        );
-    }
-
     // ------------------------------------------------------------------
     // FIX 1: fast read-only tools must not inherit the 1800s timeout.
     // ------------------------------------------------------------------
 
-    use super::{MAX_TOOL_TIMEOUT_SECS, compute_batch_timeout_secs, is_long_running_tool};
-
-    #[test]
-    fn long_running_tools_are_recognised() {
-        // The genuinely-long-running set keeps the 1800s ceiling.
-        for name in [
-            "shell",
-            "bash",
-            "spawn",
-            "spawn_agent",
-            "run_pipeline",
-            "browser",
-            "delegate_task",
-            "deep_crawl",
-            "search",
-            "synthesize_research",
-        ] {
-            assert!(
-                is_long_running_tool(name),
-                "{name} should be classified long-running"
-            );
-        }
-    }
-
-    #[test]
-    fn human_wait_tool_is_not_in_long_running_set() {
-        // UPCR-2026-023: `ask_user_question` is NOT classified long-running.
-        // A batch containing it gets NO batch timeout at all (the
-        // `any_human_wait` short-circuit), so the long-vs-short ceiling never
-        // applies — wrapping it in even the 1800s ceiling would detach the
-        // still-running tool task and leak the pending question.
-        assert!(
-            !is_long_running_tool("ask_user_question"),
-            "ask_user_question must be handled by the any_human_wait no-timeout \
-             path, not the long-running ceiling"
-        );
-    }
-
-    #[test]
-    fn batch_with_human_wait_tool_has_no_batch_timeout() {
-        // UPDATED for UPCR-2026-023 (was `batch_with_ask_user_question_keeps_
-        // the_long_ceiling`, which asserted 1800s). A batch containing a
-        // human-wait tool must run with NO finite batch timeout: the previous
-        // 1800s ceiling, while long, would still eventually FIRE and detach the
-        // still-running `ask_user_question` task (its `JoinHandle` dropped, not
-        // awaited), so its `PendingQuestionWaiterGuard` never drops → the
-        // pending question leaks and is later replayed as a stale prompt. The
-        // human may take arbitrarily long; cleanup comes from the user
-        // answering or a turn interrupt/abort, never from the batch timeout.
-        let secs = compute_batch_timeout_secs(
-            &["ask_user_question"],
-            /* any_human_wait */ true,
-            /* llm_requested */ 0,
-            /* declared_tool_timeout */ 0,
-            /* config_tool_timeout */ 1800,
-            /* interactive_default */ 120,
-        );
-        assert_eq!(
-            secs, None,
-            "a human-wait batch must yield None (no finite batch timeout)"
-        );
-    }
-
-    #[test]
-    fn human_wait_batch_has_no_timeout_even_with_llm_requested_secs() {
-        // The `any_human_wait` short-circuit wins over an explicit
-        // LLM-requested `timeout_secs`: a human-wait tool is unbounded at the
-        // batch layer regardless of what the LLM asked for, so a bogus tiny or
-        // huge `timeout_secs` cannot reintroduce the detach/leak.
-        let secs = compute_batch_timeout_secs(
-            &["ask_user_question"],
-            /* any_human_wait */ true,
-            /* llm_requested */ 30,
-            /* declared_tool_timeout */ 0,
-            /* config_tool_timeout */ 1800,
-            /* interactive_default */ 120,
-        );
-        assert_eq!(secs, None);
-    }
+    use super::compute_batch_timeout_secs;
 
     #[test]
     fn mixed_human_wait_batch_is_unbounded_normal_tool_keeps_per_tool_timeout() {
@@ -3412,41 +3107,6 @@ mod tests {
     }
 
     #[test]
-    fn fast_read_only_tools_are_not_long_running() {
-        for name in [
-            "glob",
-            "list_dir",
-            "read_file",
-            "grep",
-            "write_file",
-            "edit_file",
-            "web_search",
-            "web_fetch",
-        ] {
-            assert!(
-                !is_long_running_tool(name),
-                "{name} must NOT be classified long-running"
-            );
-        }
-    }
-
-    #[test]
-    fn batch_of_only_fast_tools_uses_short_interactive_default() {
-        // mini5 soak shape: `list_dir` + `glob` with NO LLM-requested
-        // timeout must default to the short interactive timeout, NOT the
-        // 1800s tool ceiling that hung the turn.
-        let secs = compute_batch_timeout_secs(
-            &["list_dir", "glob"],
-            /* any_human_wait */ false,
-            /* llm_requested */ 0,
-            /* declared_tool_timeout */ 0,
-            /* config_tool_timeout */ 1800,
-            /* interactive_default */ 120,
-        );
-        assert_eq!(secs, Some(120));
-    }
-
-    #[test]
     fn should_honor_registered_plugin_budget_over_interactive_default() {
         let secs = compute_batch_timeout_secs(
             &["lesson_generate"],
@@ -3457,91 +3117,6 @@ mod tests {
             /* interactive_default */ 120,
         );
         assert_eq!(secs, Some(310));
-    }
-
-    #[test]
-    fn should_clamp_registered_plugin_budget_to_dispatch_maximum() {
-        let secs = compute_batch_timeout_secs(
-            &["lesson_generate"],
-            /* any_human_wait */ false,
-            /* llm_requested */ 0,
-            /* declared_tool_timeout */ MAX_TOOL_TIMEOUT_SECS + 300,
-            /* config_tool_timeout */ 1800,
-            /* interactive_default */ 120,
-        );
-        assert_eq!(secs, Some(MAX_TOOL_TIMEOUT_SECS));
-    }
-
-    #[test]
-    fn batch_with_a_long_running_tool_keeps_the_long_ceiling() {
-        // A `shell` (or `run_pipeline`) in the batch keeps the long
-        // config-default timeout when the LLM omits `timeout_secs`.
-        let secs = compute_batch_timeout_secs(
-            &["glob", "shell"],
-            /* any_human_wait */ false,
-            /* llm_requested */ 0,
-            /* declared_tool_timeout */ 0,
-            /* config_tool_timeout */ 1800,
-            /* interactive_default */ 120,
-        );
-        assert_eq!(secs, Some(1800));
-    }
-
-    #[test]
-    fn llm_requested_timeout_still_honoured_for_fast_batch() {
-        // An explicit LLM `timeout_secs` is clamped to MAX and floored at
-        // the config default — unchanged from the pre-fix behaviour. For a
-        // fast-only batch the floor is the interactive default, not 1800.
-        let secs = compute_batch_timeout_secs(
-            &["glob"],
-            /* any_human_wait */ false,
-            /* llm_requested */ 300,
-            /* declared_tool_timeout */ 0,
-            /* config_tool_timeout */ 1800,
-            /* interactive_default */ 120,
-        );
-        assert_eq!(secs, Some(300));
-
-        // Over-the-cap request is clamped to MAX_TOOL_TIMEOUT_SECS.
-        let capped = compute_batch_timeout_secs(
-            &["glob"],
-            /* any_human_wait */ false,
-            /* llm_requested */ 99_999,
-            /* declared_tool_timeout */ 0,
-            1800,
-            120,
-        );
-        assert_eq!(capped, Some(MAX_TOOL_TIMEOUT_SECS));
-    }
-
-    #[test]
-    fn llm_requested_below_interactive_floor_is_raised_for_fast_batch() {
-        // A fast-only batch floors at the interactive default so a tiny
-        // LLM-requested value cannot make the batch flakier than baseline.
-        let secs = compute_batch_timeout_secs(
-            &["glob"],
-            /* any_human_wait */ false,
-            /* llm_requested */ 5,
-            /* declared_tool_timeout */ 0,
-            /* config_tool_timeout */ 1800,
-            /* interactive_default */ 120,
-        );
-        assert_eq!(secs, Some(120));
-    }
-
-    #[test]
-    fn long_batch_llm_request_floors_at_config_default() {
-        // A long batch floors at the config tool timeout (existing
-        // behaviour preserved).
-        let secs = compute_batch_timeout_secs(
-            &["shell"],
-            /* any_human_wait */ false,
-            /* llm_requested */ 10,
-            /* declared_tool_timeout */ 0,
-            /* config_tool_timeout */ 1800,
-            /* interactive_default */ 120,
-        );
-        assert_eq!(secs, Some(1800));
     }
 
     // ------------------------------------------------------------------
@@ -3635,40 +3210,6 @@ mod tests {
                 success: true,
                 ..Default::default()
             })
-        }
-    }
-
-    struct DropAwareExclusiveTool {
-        dropped: Arc<AtomicBool>,
-    }
-
-    #[async_trait]
-    impl Tool for DropAwareExclusiveTool {
-        fn name(&self) -> &str {
-            "drop_aware_exclusive_tool"
-        }
-
-        fn description(&self) -> &str {
-            "test tool that records cancellation"
-        }
-
-        fn input_schema(&self) -> serde_json::Value {
-            serde_json::json!({"type": "object"})
-        }
-
-        fn concurrency_class(&self) -> crate::tools::ConcurrencyClass {
-            crate::tools::ConcurrencyClass::Exclusive
-        }
-
-        async fn execute(&self, _args: &serde_json::Value) -> eyre::Result<ToolResult> {
-            struct DropSignal(Arc<AtomicBool>);
-            impl Drop for DropSignal {
-                fn drop(&mut self) {
-                    self.0.store(true, Ordering::SeqCst);
-                }
-            }
-            let _signal = DropSignal(self.dropped.clone());
-            std::future::pending::<eyre::Result<ToolResult>>().await
         }
     }
 
@@ -3814,186 +3355,6 @@ mod tests {
         messages
     }
 
-    /// #1774: probe recording the `format_after_edit` flag its ToolContext
-    /// carried, so the AgentConfig → ToolContext threading is testable
-    /// without any real formatter binary.
-    struct FormatFlagProbe(Arc<std::sync::atomic::AtomicBool>);
-
-    #[async_trait]
-    impl Tool for FormatFlagProbe {
-        fn name(&self) -> &str {
-            "format_flag_probe"
-        }
-        fn description(&self) -> &str {
-            "records ctx.format_after_edit"
-        }
-        fn input_schema(&self) -> serde_json::Value {
-            serde_json::json!({"type": "object"})
-        }
-        async fn execute(&self, _args: &serde_json::Value) -> eyre::Result<ToolResult> {
-            self.execute_with_context(&crate::tools::ToolContext::zero(), _args)
-                .await
-        }
-        async fn execute_with_context(
-            &self,
-            ctx: &crate::tools::ToolContext,
-            _args: &serde_json::Value,
-        ) -> eyre::Result<ToolResult> {
-            self.0
-                .store(ctx.format_after_edit, std::sync::atomic::Ordering::SeqCst);
-            Ok(ToolResult {
-                output: "probe".to_string(),
-                success: true,
-                ..Default::default()
-            })
-        }
-    }
-
-    #[tokio::test]
-    async fn should_thread_format_after_edit_from_agent_config_to_tool_context() {
-        // #1774: `AgentConfig::format_after_edit` must reach the foreground
-        // ToolContext handed to tools — that is the only way the config
-        // opt-in can turn on post-edit formatting in the file tools.
-        let seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let mut tools = ToolRegistry::new();
-        tools.register(FormatFlagProbe(seen.clone()));
-
-        let dir = tempfile::tempdir().unwrap();
-        let provider: Arc<dyn LlmProvider> = Arc::new(NoChatProvider);
-        let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
-        let agent = Agent::new(AgentId::new("fmt-flag"), provider, tools, memory).with_config(
-            AgentConfig {
-                save_episodes: false,
-                format_after_edit: true,
-                ..Default::default()
-            },
-        );
-        let response = ChatResponse {
-            content: None,
-            reasoning_content: None,
-            tool_calls: vec![tool_call("call_probe", "format_flag_probe")],
-            stop_reason: StopReason::ToolUse,
-            usage: LlmTokenUsage::default(),
-            provider_index: None,
-        };
-        agent
-            .execute_tools(&response)
-            .await
-            .expect("execute_tools must not error");
-        assert!(
-            seen.load(std::sync::atomic::Ordering::SeqCst),
-            "AgentConfig.format_after_edit=true must reach the ToolContext"
-        );
-    }
-
-    /// #1532: probe recording whether the approved-call ToolContext carries
-    /// the agent-level infrastructure (it used to be a bare `zero()` spread).
-    struct CtxInfraProbe {
-        supervisor_seen: Arc<std::sync::atomic::AtomicBool>,
-        cache_seen: Arc<std::sync::atomic::AtomicBool>,
-        format_seen: Arc<std::sync::atomic::AtomicBool>,
-    }
-
-    #[async_trait]
-    impl Tool for CtxInfraProbe {
-        fn name(&self) -> &str {
-            "ctx_infra_probe"
-        }
-        fn description(&self) -> &str {
-            "records which ToolContext infra fields are populated"
-        }
-        fn input_schema(&self) -> serde_json::Value {
-            serde_json::json!({"type": "object"})
-        }
-        async fn execute(&self, _args: &serde_json::Value) -> eyre::Result<ToolResult> {
-            self.execute_with_context(&crate::tools::ToolContext::zero(), _args)
-                .await
-        }
-        async fn execute_with_context(
-            &self,
-            ctx: &crate::tools::ToolContext,
-            _args: &serde_json::Value,
-        ) -> eyre::Result<ToolResult> {
-            use std::sync::atomic::Ordering;
-            self.supervisor_seen
-                .store(ctx.task_supervisor.is_some(), Ordering::SeqCst);
-            self.cache_seen
-                .store(ctx.file_state_cache.is_some(), Ordering::SeqCst);
-            self.format_seen
-                .store(ctx.format_after_edit, Ordering::SeqCst);
-            Ok(ToolResult {
-                output: "probe".to_string(),
-                success: true,
-                ..Default::default()
-            })
-        }
-    }
-
-    #[tokio::test]
-    async fn approved_tool_context_carries_agent_infrastructure() {
-        // #1532: `execute_approved_tool` must hand the tool the SAME
-        // agent-level infrastructure as the foreground path — a human
-        // approving a call must not silently strip the cache, supervisor,
-        // or config-driven behavior from it.
-        let supervisor_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let cache_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let format_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let mut tools = ToolRegistry::new();
-        tools.register(CtxInfraProbe {
-            supervisor_seen: supervisor_seen.clone(),
-            cache_seen: cache_seen.clone(),
-            format_seen: format_seen.clone(),
-        });
-
-        let dir = tempfile::tempdir().unwrap();
-        let provider: Arc<dyn LlmProvider> = Arc::new(NoChatProvider);
-        let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
-        let agent = Agent::new(AgentId::new("approved-ctx"), provider, tools, memory)
-            .with_file_state_cache(Arc::new(crate::file_state_cache::FileStateCache::new()))
-            .with_config(AgentConfig {
-                save_episodes: false,
-                format_after_edit: true,
-                ..Default::default()
-            });
-
-        let pending = crate::approval::PendingApproval {
-            request: crate::approval::ApprovalRequestEnvelope {
-                request_id: "req-1".into(),
-                tool_name: "ctx_infra_probe".into(),
-                tool_args_digest: "digest".into(),
-                title: "probe".into(),
-                summary: "probe".into(),
-                risk_level: crate::approval::ApprovalRiskLevel::Normal,
-                authorized_approvers: vec![],
-                expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
-                on_timeout: crate::approval::ApprovalTimeoutBehavior::Notify,
-            },
-            room_id: "room".into(),
-            requester: "user".into(),
-            tool_id: "call_probe".into(),
-            tool_args: serde_json::json!({}),
-        };
-
-        let result = agent
-            .execute_approved_tool(&pending)
-            .await
-            .expect("approved probe must execute");
-        assert!(result.success);
-        use std::sync::atomic::Ordering;
-        assert!(
-            supervisor_seen.load(Ordering::SeqCst),
-            "approved ctx must carry the task supervisor"
-        );
-        assert!(
-            cache_seen.load(Ordering::SeqCst),
-            "approved ctx must carry the file-state cache"
-        );
-        assert!(
-            format_seen.load(Ordering::SeqCst),
-            "approved ctx must carry config-driven flags (format_after_edit)"
-        );
-    }
-
     #[tokio::test]
     async fn input_error_does_not_cancel_well_formed_sibling() {
         // #1690: a malformed-arguments failure has no side effects, so the
@@ -4130,136 +3491,11 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn should_abort_timed_out_parallel_tool_task() {
-        struct DropSignal(Arc<AtomicBool>);
-        impl Drop for DropSignal {
-            fn drop(&mut self) {
-                self.0.store(true, Ordering::SeqCst);
-            }
-        }
-
-        let dropped = Arc::new(AtomicBool::new(false));
-        let task_signal = dropped.clone();
-        let handle = tokio::spawn(async move {
-            let _signal = DropSignal(task_signal);
-            std::future::pending::<super::ToolCallResult>().await
-        });
-        let call = tool_call("call_slow", "slow_tool");
-
-        let results = super::join_parallel_handles(
-            vec![handle],
-            &[&call],
-            Some(std::time::Duration::from_millis(10)),
-        )
-        .await;
-
-        assert_eq!(results.len(), 1);
-        assert!(
-            dropped.load(Ordering::SeqCst),
-            "timed-out task was detached instead of aborted"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn should_not_wait_forever_for_blocking_task_after_abort() {
-        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
-        let mut handle = tokio::spawn(async move {
-            entered_tx.send(()).unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(250));
-        });
-        entered_rx
-            .recv_timeout(std::time::Duration::from_secs(1))
-            .expect("task should enter blocking code");
-
-        let started = std::time::Instant::now();
-        let joined =
-            super::abort_and_join_with_grace(&mut handle, std::time::Duration::from_millis(10))
-                .await;
-
-        assert!(!joined, "blocking task cannot acknowledge abort in time");
-        assert!(
-            started.elapsed() < std::time::Duration::from_millis(100),
-            "dispatcher waited for blocking code after abort",
-        );
-    }
-
-    #[tokio::test]
-    async fn should_abort_timed_out_serial_tool_task() {
-        let dropped = Arc::new(AtomicBool::new(false));
-        let dir = tempfile::tempdir().unwrap();
-        let mut tools = ToolRegistry::new();
-        tools.register(DropAwareExclusiveTool {
-            dropped: dropped.clone(),
-        });
-        let provider: Arc<dyn LlmProvider> = Arc::new(NoChatProvider);
-        let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
-        let agent = Agent::new(AgentId::new("serial-timeout"), provider, tools, memory)
-            .with_config(AgentConfig {
-                default_interactive_tool_timeout_secs: 1,
-                save_episodes: false,
-                ..Default::default()
-            });
-        let response = ChatResponse {
-            content: None,
-            reasoning_content: None,
-            tool_calls: vec![tool_call("call_slow", "drop_aware_exclusive_tool")],
-            stop_reason: StopReason::ToolUse,
-            usage: LlmTokenUsage::default(),
-            provider_index: None,
-        };
-
-        let (messages, ..) = agent.execute_tools(&response).await.unwrap();
-
-        assert_eq!(
-            messages[0].content,
-            "Tool 'drop_aware_exclusive_tool' timed out after 1 seconds"
-        );
-        assert!(
-            dropped.load(Ordering::SeqCst),
-            "timed-out serial task was detached instead of aborted"
-        );
-    }
-
     // ------------------------------------------------------------------
     // #1766 — mixed-batch two-phase dispatch: Safe calls run in parallel
     // first (phase 1), Exclusive calls run serially in LLM order (phase 2),
     // and results are reassembled in the ORIGINAL LLM call order.
     // ------------------------------------------------------------------
-
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    /// Safe (default class) reader that reports whether the shared flag was
-    /// already flipped by the Exclusive `MutatingTool` when it ran — the
-    /// probe for the pinned #1766 visibility semantics.
-    struct SnapshotReadTool {
-        mutated: Arc<AtomicBool>,
-    }
-
-    #[async_trait]
-    impl Tool for SnapshotReadTool {
-        fn name(&self) -> &str {
-            "snapshot_read_tool"
-        }
-        fn description(&self) -> &str {
-            "reports whether the sibling mutation already happened"
-        }
-        fn input_schema(&self) -> serde_json::Value {
-            serde_json::json!({"type": "object"})
-        }
-        async fn execute(&self, _args: &serde_json::Value) -> eyre::Result<ToolResult> {
-            let saw = if self.mutated.load(Ordering::SeqCst) {
-                "SAW_POST_MUTATION"
-            } else {
-                "SAW_PRE_MUTATION"
-            };
-            Ok(ToolResult {
-                output: saw.to_string(),
-                success: true,
-                ..Default::default()
-            })
-        }
-    }
 
     // #1768: pre-mutation workspace snapshots
     // ------------------------------------------------------------------
@@ -4290,360 +3526,6 @@ mod tests {
                 ..Default::default()
             })
         }
-    }
-
-    /// Exclusive tool that flips the shared flag `SnapshotReadTool` observes.
-    struct MutatingTool {
-        mutated: Arc<AtomicBool>,
-    }
-
-    #[async_trait]
-    impl Tool for MutatingTool {
-        fn name(&self) -> &str {
-            "mutating_tool"
-        }
-        fn description(&self) -> &str {
-            "flips the shared mutation flag"
-        }
-        fn input_schema(&self) -> serde_json::Value {
-            serde_json::json!({"type": "object"})
-        }
-        fn concurrency_class(&self) -> crate::tools::ConcurrencyClass {
-            crate::tools::ConcurrencyClass::Exclusive
-        }
-        async fn execute(&self, _args: &serde_json::Value) -> eyre::Result<ToolResult> {
-            self.mutated.store(true, Ordering::SeqCst);
-            Ok(ToolResult {
-                output: "MUTATION_DONE".to_string(),
-                success: true,
-                ..Default::default()
-            })
-        }
-    }
-
-    /// Safe (default class) tool that hard-errors — a genuine execution
-    /// failure whose cascade bit must cancel the whole Exclusive phase.
-    struct SafeHardErrorTool;
-
-    #[async_trait]
-    impl Tool for SafeHardErrorTool {
-        fn name(&self) -> &str {
-            "safe_hard_error_tool"
-        }
-        fn description(&self) -> &str {
-            "safe reader that always errors mid-execution"
-        }
-        fn input_schema(&self) -> serde_json::Value {
-            serde_json::json!({"type": "object"})
-        }
-        async fn execute(&self, _args: &serde_json::Value) -> eyre::Result<ToolResult> {
-            Err(eyre::eyre!("safe boom: reader exploded"))
-        }
-    }
-
-    /// Safe (default class) tool that fails with a `ToolInputError` — a
-    /// no-side-effect malformed-arguments failure that must NOT cancel the
-    /// Exclusive phase (#1690 semantics carried into the mixed path).
-    struct SafeInputErrorTool;
-
-    #[async_trait]
-    impl Tool for SafeInputErrorTool {
-        fn name(&self) -> &str {
-            "safe_bad_input_tool"
-        }
-        fn description(&self) -> &str {
-            "safe reader that always fails input validation"
-        }
-        fn input_schema(&self) -> serde_json::Value {
-            serde_json::json!({"type": "object"})
-        }
-        async fn execute(&self, _args: &serde_json::Value) -> eyre::Result<ToolResult> {
-            Err(
-                crate::tools::ToolInputError::new("invalid safe_bad_input_tool input: missing `q`")
-                    .into(),
-            )
-        }
-    }
-
-    /// Safe pair-gate: each call waits on a shared 2-party barrier, so BOTH
-    /// calls must be in flight simultaneously to complete. Proves the
-    /// mixed-batch Safe phase actually runs in parallel — under serial
-    /// dispatch the first call would block alone until the per-call timeout
-    /// fired.
-    struct RendezvousTool {
-        barrier: Arc<tokio::sync::Barrier>,
-    }
-
-    #[async_trait]
-    impl Tool for RendezvousTool {
-        fn name(&self) -> &str {
-            "rendezvous_tool"
-        }
-        fn description(&self) -> &str {
-            "completes only when both sibling calls are in flight"
-        }
-        fn input_schema(&self) -> serde_json::Value {
-            serde_json::json!({"type": "object"})
-        }
-        async fn execute(&self, _args: &serde_json::Value) -> eyre::Result<ToolResult> {
-            self.barrier.wait().await;
-            Ok(ToolResult {
-                output: "RENDEZVOUS_OK".to_string(),
-                success: true,
-                ..Default::default()
-            })
-        }
-    }
-
-    fn result_for<'a>(messages: &'a [octos_core::Message], id: &str) -> &'a octos_core::Message {
-        messages
-            .iter()
-            .find(|m| m.tool_call_id.as_deref() == Some(id))
-            .unwrap_or_else(|| panic!("no result message for tool_call_id {id}"))
-    }
-
-    #[tokio::test]
-    async fn mixed_batch_reassembles_results_in_original_llm_call_order() {
-        // #1766: interleaved Safe/Exclusive calls execute in two phases but
-        // the aggregated results MUST come back in the original LLM call
-        // order with every call's REAL output (no synthetic messages).
-        let mutated = Arc::new(AtomicBool::new(false));
-        let mut tools = ToolRegistry::new();
-        tools.register(MutatingTool {
-            mutated: mutated.clone(),
-        });
-        tools.register(SnapshotReadTool {
-            mutated: mutated.clone(),
-        });
-        tools.register(GoodExclusiveTool);
-        let calls = vec![
-            tool_call("call_0_excl", "mutating_tool"),
-            tool_call("call_1_safe", "snapshot_read_tool"),
-            tool_call("call_2_excl", "good_tool"),
-            tool_call("call_3_safe", "snapshot_read_tool"),
-        ];
-        let (messages, success_by_id) = run_batch(calls, tools).await;
-
-        assert_eq!(messages.len(), 4, "one result message per tool call");
-        assert_eq!(messages[0].tool_call_id.as_deref(), Some("call_0_excl"));
-        assert_eq!(messages[1].tool_call_id.as_deref(), Some("call_1_safe"));
-        assert_eq!(messages[2].tool_call_id.as_deref(), Some("call_2_excl"));
-        assert_eq!(messages[3].tool_call_id.as_deref(), Some("call_3_safe"));
-
-        assert!(messages[0].content.contains("MUTATION_DONE"));
-        assert!(messages[2].content.contains("GOOD_REAL_OUTPUT"));
-        // Pinned visibility: BOTH Safe reads ran in phase 1, before any
-        // Exclusive mutation — even the read listed after the mutator.
-        assert!(
-            messages[1].content.contains("SAW_PRE_MUTATION"),
-            "Safe read listed after the mutator must still see pre-mutation state: {:?}",
-            messages[1].content
-        );
-        assert!(messages[3].content.contains("SAW_PRE_MUTATION"));
-        assert!(
-            success_by_id.iter().all(|(_, ok)| *ok),
-            "every call succeeded: {success_by_id:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn mixed_batch_safe_reads_see_pre_mutation_state() {
-        // Pinned #1766 visibility semantics: Safe calls observe the
-        // PRE-batch state. A Safe read the LLM listed AFTER an Exclusive
-        // mutation runs in phase 1 — BEFORE the mutation — and must not see
-        // the sibling's write. (Before M8.8 the two raced; under the M8.8
-        // serial fallback the read saw the write. The phased pipeline makes
-        // the pre-mutation snapshot deterministic.)
-        let mutated = Arc::new(AtomicBool::new(false));
-        let mut tools = ToolRegistry::new();
-        tools.register(MutatingTool {
-            mutated: mutated.clone(),
-        });
-        tools.register(SnapshotReadTool {
-            mutated: mutated.clone(),
-        });
-        let calls = vec![
-            tool_call("call_mutate", "mutating_tool"),
-            tool_call("call_read", "snapshot_read_tool"),
-        ];
-        let (messages, _success_by_id) = run_batch(calls, tools).await;
-
-        assert!(
-            result_for(&messages, "call_read")
-                .content
-                .contains("SAW_PRE_MUTATION"),
-            "Safe read must run in phase 1 and see pre-mutation state: {:?}",
-            result_for(&messages, "call_read").content
-        );
-        assert!(
-            result_for(&messages, "call_mutate")
-                .content
-                .contains("MUTATION_DONE")
-        );
-        assert!(
-            mutated.load(Ordering::SeqCst),
-            "the Exclusive mutation still ran (phase 2)"
-        );
-    }
-
-    #[tokio::test]
-    async fn mixed_batch_runs_safe_calls_in_parallel() {
-        // Two Safe calls gated on a 2-party rendezvous barrier: they can
-        // only complete if BOTH are in flight at once. Under the old serial
-        // fallback the first call would block alone until the per-call
-        // timeout fired and cascaded; under #1766 phase 1 they release each
-        // other immediately.
-        let barrier = Arc::new(tokio::sync::Barrier::new(2));
-        let mut tools = ToolRegistry::new();
-        tools.register(RendezvousTool { barrier });
-        tools.register(GoodExclusiveTool);
-        let calls = vec![
-            tool_call("call_r1", "rendezvous_tool"),
-            tool_call("call_r2", "rendezvous_tool"),
-            tool_call("call_excl", "good_tool"),
-        ];
-        let (messages, _success_by_id) = run_batch_with_config(
-            calls,
-            tools,
-            AgentConfig {
-                // Keep the failure mode (serial dispatch deadlocking on the
-                // barrier) a fast per-call timeout instead of a hung test.
-                default_interactive_tool_timeout_secs: 2,
-                tool_timeout_secs: 2,
-                save_episodes: false,
-                ..Default::default()
-            },
-        )
-        .await;
-
-        assert!(
-            result_for(&messages, "call_r1")
-                .content
-                .contains("RENDEZVOUS_OK"),
-            "first Safe call must run concurrently with its sibling: {:?}",
-            result_for(&messages, "call_r1").content
-        );
-        assert!(
-            result_for(&messages, "call_r2")
-                .content
-                .contains("RENDEZVOUS_OK")
-        );
-        assert!(
-            result_for(&messages, "call_excl")
-                .content
-                .contains("GOOD_REAL_OUTPUT"),
-            "Exclusive phase must still run after a parallel Safe phase: {:?}",
-            result_for(&messages, "call_excl").content
-        );
-    }
-
-    #[tokio::test]
-    async fn mixed_batch_safe_error_cancels_every_exclusive_call() {
-        // #1766 acceptance criterion: an error in any Safe call still
-        // triggers the "cancelled due to sibling error" synthetic result for
-        // the Exclusive calls — position-independently. The failing reader
-        // here sits AFTER the Exclusive call in LLM order, and the Exclusive
-        // call is still cancelled: no mutation runs once a sibling read
-        // failed in phase 1.
-        let mut tools = ToolRegistry::new();
-        tools.register(GoodExclusiveTool);
-        tools.register(SafeHardErrorTool);
-        let calls = vec![
-            tool_call("call_excl", "good_tool"),
-            tool_call("call_bad_read", "safe_hard_error_tool"),
-        ];
-        let (messages, success_by_id) = run_batch(calls, tools).await;
-
-        assert!(
-            result_for(&messages, "call_excl")
-                .content
-                .contains("cancelled due to earlier sibling error"),
-            "a failed Safe call must cancel the whole Exclusive phase: {:?}",
-            result_for(&messages, "call_excl").content
-        );
-        assert!(
-            result_for(&messages, "call_bad_read")
-                .content
-                .contains("safe boom"),
-            "the Safe failure detail must reach the model: {:?}",
-            result_for(&messages, "call_bad_read").content
-        );
-        assert!(success_by_id.contains(&("call_excl".to_string(), false)));
-        assert!(success_by_id.contains(&("call_bad_read".to_string(), false)));
-    }
-
-    #[tokio::test]
-    async fn mixed_batch_safe_input_error_does_not_cancel_exclusive() {
-        // #1690 carried into the mixed path: a malformed-arguments failure
-        // (`ToolInputError`) has no side effects and must NOT cancel the
-        // Exclusive phase.
-        let mut tools = ToolRegistry::new();
-        tools.register(SafeInputErrorTool);
-        tools.register(GoodExclusiveTool);
-        let calls = vec![
-            tool_call("call_bad_input", "safe_bad_input_tool"),
-            tool_call("call_excl", "good_tool"),
-        ];
-        let (messages, _success_by_id) = run_batch(calls, tools).await;
-
-        assert!(
-            result_for(&messages, "call_excl")
-                .content
-                .contains("GOOD_REAL_OUTPUT"),
-            "an input-error Safe call must not cancel the Exclusive phase: {:?}",
-            result_for(&messages, "call_excl").content
-        );
-        assert!(
-            result_for(&messages, "call_bad_input")
-                .content
-                .contains("missing `q`"),
-            "input-error detail must reach the model"
-        );
-    }
-
-    #[tokio::test]
-    async fn mixed_batch_exclusive_error_keeps_completed_safe_results() {
-        // Phase-2 cascade stays inside phase 2: when an Exclusive call
-        // fails, LATER Exclusive peers are cancelled, but phase-1 Safe
-        // results — already complete and side-effect-free — keep their real
-        // outputs even when the LLM listed them after the failing mutator
-        // (the old serial fallback would have cancelled them).
-        let mutated = Arc::new(AtomicBool::new(false));
-        let mut tools = ToolRegistry::new();
-        tools.register(HardErrorTool);
-        tools.register(SnapshotReadTool {
-            mutated: mutated.clone(),
-        });
-        tools.register(GoodExclusiveTool);
-        let calls = vec![
-            tool_call("call_bad_excl", "hard_error_tool"),
-            tool_call("call_safe", "snapshot_read_tool"),
-            tool_call("call_good_excl", "good_tool"),
-        ];
-        let (messages, success_by_id) = run_batch(calls, tools).await;
-
-        // Original LLM call order preserved.
-        assert_eq!(messages[0].tool_call_id.as_deref(), Some("call_bad_excl"));
-        assert_eq!(messages[1].tool_call_id.as_deref(), Some("call_safe"));
-        assert_eq!(messages[2].tool_call_id.as_deref(), Some("call_good_excl"));
-
-        // The Safe read completed in phase 1 — its real output survives the
-        // later Exclusive failure.
-        assert!(
-            messages[1].content.contains("SAW_PRE_MUTATION"),
-            "phase-1 Safe result must never be converted to cancelled: {:?}",
-            messages[1].content
-        );
-        assert!(success_by_id.contains(&("call_safe".to_string(), true)));
-
-        // The Exclusive peer AFTER the failing Exclusive call is cancelled.
-        assert!(
-            messages[2]
-                .content
-                .contains("cancelled due to earlier sibling error"),
-            "later Exclusive peer must be cancelled by the phase-2 cascade: {:?}",
-            messages[2].content
-        );
     }
 
     async fn snapshot_agent(
@@ -4713,30 +3595,6 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(ws.path().join("existing.txt")).unwrap(),
             "pre-mutation"
-        );
-    }
-
-    #[tokio::test]
-    async fn should_not_snapshot_when_batch_is_read_only() {
-        let data = tempfile::tempdir().unwrap();
-        let ws = tempfile::tempdir().unwrap();
-        let manager = Arc::new(
-            crate::snapshot::SnapshotManager::new(data.path().join("snapshots"), ws.path(), 20)
-                .expect("git must be installed to run snapshot tests"),
-        );
-
-        let mut tools = ToolRegistry::new();
-        tools.register(InstantTool);
-        let agent = snapshot_agent(tools, manager.clone(), data.path()).await;
-
-        agent
-            .execute_tools(&batch(vec![tool_call("call_fast", "fast_tool")]))
-            .await
-            .expect("execute_tools must not error");
-
-        assert!(
-            manager.list_snapshots().unwrap().is_empty(),
-            "read-only batches must not create snapshots"
         );
     }
 }

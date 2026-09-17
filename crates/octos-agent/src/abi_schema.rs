@@ -51,15 +51,6 @@ pub const HARNESS_PROGRESS_EVENT_SCHEMA_VERSION: u32 = 1;
 /// Current schema version for `TaskResult`.
 pub const TASK_RESULT_SCHEMA_VERSION: u32 = 1;
 
-/// Current schema version for the Matrix swarm supervisor config contract
-/// (M7.3). Older configs that omit the field default to v1.
-///
-/// This is the contract between the octos-cli profile loader and the
-/// octos-bus Matrix channel extension — the profile's
-/// `matrix.swarm_supervisor` section carries a matching numeric
-/// `schema_version`.
-pub const SWARM_SUPERVISOR_CONFIG_SCHEMA_VERSION: u32 = 1;
-
 /// Current schema version for the typed
 /// [`HarnessEventPayload::SubAgentDispatch`](crate::harness_events::HarnessEventPayload::SubAgentDispatch)
 /// event and its nested
@@ -68,34 +59,6 @@ pub const SWARM_SUPERVISOR_CONFIG_SCHEMA_VERSION: u32 = 1;
 /// sub-agent. Callers MUST validate the version on deserialization via
 /// [`check_supported`] before using any v1-specific fields.
 pub const SUB_AGENT_DISPATCH_SCHEMA_VERSION: u32 = 1;
-
-/// Current schema version for the typed
-/// [`HarnessEventPayload::SwarmDispatch`](crate::harness_events::HarnessEventPayload::SwarmDispatch)
-/// event and its nested
-/// [`HarnessSwarmDispatchEvent`](crate::harness_events::HarnessSwarmDispatchEvent)
-/// payload emitted when the `octos-swarm` primitive fans out a batch of
-/// contracts to sub-agents. Callers MUST validate the version on
-/// deserialization via [`check_supported`] before using any v1-specific
-/// fields.
-pub const SWARM_DISPATCH_SCHEMA_VERSION: u32 = 1;
-
-/// Current schema version for the typed
-/// [`HarnessEventPayload::CostAttribution`](crate::harness_events::HarnessEventPayload::CostAttribution)
-/// event and its nested
-/// [`HarnessCostAttributionEvent`](crate::harness_events::HarnessCostAttributionEvent)
-/// payload emitted when a sub-agent dispatch lands a cost/provenance entry
-/// in the ledger. Downstream tooling MUST validate the version on
-/// deserialization via [`check_supported`] before reading v1-specific
-/// fields so new additive fields stay backward compatible.
-pub const COST_ATTRIBUTION_SCHEMA_VERSION: u32 = 1;
-
-/// Current schema version for the typed
-/// [`HarnessEventPayload::SwarmReviewDecision`](crate::harness_events::HarnessEventPayload::SwarmReviewDecision)
-/// event emitted when a supervisor accepts or rejects a completed
-/// swarm dispatch via the M7.6 contract-authoring dashboard. The
-/// schema carries the `dispatch_id`, the `accepted` boolean, the
-/// reviewer identity, and optional free-form notes.
-pub const SWARM_REVIEW_DECISION_SCHEMA_VERSION: u32 = 1;
 
 /// Current schema version for `SessionSummary` (harness M6.4).
 ///
@@ -107,19 +70,6 @@ pub const SWARM_REVIEW_DECISION_SCHEMA_VERSION: u32 = 1;
 /// Re-exports [`octos_core::SESSION_SUMMARY_SCHEMA_VERSION`] so callers can
 /// take the value from either crate interchangeably.
 pub const SESSION_SUMMARY_SCHEMA_VERSION: u32 = octos_core::SESSION_SUMMARY_SCHEMA_VERSION;
-
-/// Current schema version for the `routing.decision` harness event payload
-/// introduced in M6.6 (content-classified smart model routing).
-///
-/// The `kind`, `tier`, and `reasons` fields are stable. `lane` and
-/// `input_chars` are additive experimental fields today; bumping this
-/// version is only required when renaming or removing a stable field.
-pub const ROUTING_DECISION_SCHEMA_VERSION: u32 = 1;
-
-/// Current schema version for `CredentialPoolConfig` persisted in profile
-/// files (M6.5). Bumped when the persisted state shape or the `Config`
-/// patch contract evolves in a non-backward-compatible way.
-pub const CREDENTIAL_POOL_CONFIG_SCHEMA_VERSION: u32 = 1;
 
 /// Current schema version for `HarnessError` events (M6.1, issue #488).
 /// Emitted as part of `octos.harness.event.v1` with `kind: "error"`.
@@ -183,12 +133,6 @@ pub(crate) fn default_hook_payload_schema_version() -> u32 {
     HOOK_PAYLOAD_SCHEMA_VERSION
 }
 
-/// Default schema version for `CredentialPoolConfig` deserialization (M6.5).
-/// Applied when an older profile file omits the field entirely.
-pub fn default_credential_pool_config_schema_version() -> u32 {
-    CREDENTIAL_POOL_CONFIG_SCHEMA_VERSION
-}
-
 /// Default schema version for `CompactionPolicy` deserialization. Applied when
 /// an older workspace-policy file omits the nested `schema_version` line.
 pub(crate) fn default_compaction_policy_schema_version() -> u32 {
@@ -239,40 +183,6 @@ mod tests {
             default_hook_payload_schema_version(),
             HOOK_PAYLOAD_SCHEMA_VERSION
         );
-        assert_eq!(
-            default_credential_pool_config_schema_version(),
-            CREDENTIAL_POOL_CONFIG_SCHEMA_VERSION
-        );
-    }
-
-    #[test]
-    fn credential_pool_config_schema_version_is_pinned() {
-        // Pin the version so later bumps are forced through a code review.
-        assert_eq!(CREDENTIAL_POOL_CONFIG_SCHEMA_VERSION, 1);
-    }
-
-    #[test]
-    fn credential_pool_check_supported_accepts_current_version() {
-        assert!(
-            check_supported(
-                "CredentialPoolConfig",
-                CREDENTIAL_POOL_CONFIG_SCHEMA_VERSION,
-                CREDENTIAL_POOL_CONFIG_SCHEMA_VERSION
-            )
-            .is_ok()
-        );
-    }
-
-    #[test]
-    fn credential_pool_check_supported_rejects_future_versions() {
-        let err = check_supported(
-            "CredentialPoolConfig",
-            99,
-            CREDENTIAL_POOL_CONFIG_SCHEMA_VERSION,
-        )
-        .expect_err("future version should be rejected");
-        assert_eq!(err.kind, "CredentialPoolConfig");
-        assert_eq!(err.found, 99);
     }
 
     #[test]
@@ -289,61 +199,6 @@ mod tests {
         let err = check_supported("SubAgentDispatch", 99, SUB_AGENT_DISPATCH_SCHEMA_VERSION)
             .expect_err("future version should be rejected");
         assert_eq!(err.kind, "SubAgentDispatch");
-        assert_eq!(err.found, 99);
-    }
-
-    #[test]
-    fn swarm_dispatch_schema_version_is_registered_at_v1() {
-        assert_eq!(SWARM_DISPATCH_SCHEMA_VERSION, 1);
-        assert!(
-            check_supported(
-                "SwarmDispatch",
-                SWARM_DISPATCH_SCHEMA_VERSION,
-                SWARM_DISPATCH_SCHEMA_VERSION
-            )
-            .is_ok()
-        );
-        let err = check_supported("SwarmDispatch", 99, SWARM_DISPATCH_SCHEMA_VERSION)
-            .expect_err("future version should be rejected");
-        assert_eq!(err.kind, "SwarmDispatch");
-        assert_eq!(err.found, 99);
-    }
-
-    #[test]
-    fn cost_attribution_schema_version_is_registered_at_v1() {
-        assert_eq!(COST_ATTRIBUTION_SCHEMA_VERSION, 1);
-        assert!(
-            check_supported(
-                "CostAttribution",
-                COST_ATTRIBUTION_SCHEMA_VERSION,
-                COST_ATTRIBUTION_SCHEMA_VERSION
-            )
-            .is_ok()
-        );
-        let err = check_supported("CostAttribution", 99, COST_ATTRIBUTION_SCHEMA_VERSION)
-            .expect_err("future version should be rejected");
-        assert_eq!(err.kind, "CostAttribution");
-        assert_eq!(err.found, 99);
-    }
-
-    #[test]
-    fn swarm_review_decision_schema_version_is_registered_at_v1() {
-        assert_eq!(SWARM_REVIEW_DECISION_SCHEMA_VERSION, 1);
-        assert!(
-            check_supported(
-                "SwarmReviewDecision",
-                SWARM_REVIEW_DECISION_SCHEMA_VERSION,
-                SWARM_REVIEW_DECISION_SCHEMA_VERSION
-            )
-            .is_ok()
-        );
-        let err = check_supported(
-            "SwarmReviewDecision",
-            99,
-            SWARM_REVIEW_DECISION_SCHEMA_VERSION,
-        )
-        .expect_err("future version should be rejected");
-        assert_eq!(err.kind, "SwarmReviewDecision");
         assert_eq!(err.found, 99);
     }
 }

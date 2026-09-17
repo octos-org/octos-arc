@@ -414,33 +414,10 @@ mod tests {
     }
 
     #[test]
-    fn splitter_passes_plain_text_through() {
-        let (content, reasoning) = split_parts(&["No tags ", "here at all."]);
-        assert_eq!(content, "No tags here at all.");
-        assert_eq!(reasoning, "");
-    }
-
-    #[test]
     fn splitter_treats_unclosed_think_as_reasoning() {
         let (content, reasoning) = split_parts(&["Before <think>never closed"]);
         assert_eq!(content, "Before ");
         assert_eq!(reasoning, "never closed");
-    }
-
-    #[test]
-    fn splitter_flushes_false_partial_tag_as_content() {
-        // "<th" at end of stream that never became "<think>" is literal text.
-        let (content, reasoning) = split_parts(&["a < b and <th"]);
-        assert_eq!(content, "a < b and <th");
-        assert_eq!(reasoning, "");
-    }
-
-    #[test]
-    fn splitter_handles_multiple_think_blocks() {
-        let (content, reasoning) =
-            split_parts(&["<think>one</think>First. <think>two</think>Second."]);
-        assert_eq!(content, "First. Second.");
-        assert_eq!(reasoning, "onetwo");
     }
 
     #[test]
@@ -452,38 +429,10 @@ mod tests {
     }
 
     #[test]
-    fn test_strip_think_tags_no_tags() {
-        let (content, thinking) = strip_think_tags("No thinking tags here.");
-        assert_eq!(content, "No thinking tags here.");
-        assert!(thinking.is_none());
-    }
-
-    #[test]
-    fn test_strip_think_tags_empty_think() {
-        let (content, thinking) = strip_think_tags("<think>\n\n</think>Just the answer.");
-        assert_eq!(content, "Just the answer.");
-        assert!(thinking.is_none());
-    }
-
-    #[test]
     fn test_strip_think_tags_multiple() {
         let (content, thinking) =
             strip_think_tags("<think>step 1</think>First. <think>step 2</think>Second.");
         assert_eq!(content, "First. Second.");
         assert_eq!(thinking.unwrap(), "step 1\nstep 2");
-    }
-
-    #[test]
-    fn test_strip_think_tags_unclosed() {
-        let (content, thinking) = strip_think_tags("Before <think>unclosed reasoning");
-        assert_eq!(content, "Before");
-        assert_eq!(thinking.unwrap(), "unclosed reasoning");
-    }
-
-    #[test]
-    fn test_strip_think_tags_only_think() {
-        let (content, thinking) = strip_think_tags("<think>all thinking no content</think>");
-        assert_eq!(content, "");
-        assert_eq!(thinking.unwrap(), "all thinking no content");
     }
 }

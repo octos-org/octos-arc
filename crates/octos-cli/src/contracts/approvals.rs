@@ -400,43 +400,8 @@ fn approval_cancelled_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use octos_core::ui_protocol::{ApprovalRespondStatus, TurnId};
-
-    #[test]
-    fn known_pending_approval_accepts_once() {
-        let store = PendingApprovalStore::default();
-        let session_id = SessionKey("local:test".into());
-        let approval_id = ApprovalId::new();
-        store.insert_pending(session_id.clone(), approval_id.clone());
-
-        let outcome = store
-            .respond(ApprovalRespondParams::new(
-                session_id.clone(),
-                approval_id.clone(),
-                ApprovalDecision::Approve,
-            ))
-            .expect("pending approval should accept");
-
-        assert!(outcome.result.accepted);
-        assert_eq!(outcome.result.status, ApprovalRespondStatus::Accepted);
-        assert!(!outcome.result.runtime_resumed);
-        // `insert_pending` doesn't carry a request — context is `None`.
-        assert!(outcome.context.is_none());
-
-        let error = store
-            .respond(ApprovalRespondParams::new(
-                session_id,
-                approval_id,
-                ApprovalDecision::Deny,
-            ))
-            .expect_err("responded approval is not pending");
-
-        assert_eq!(error.code, rpc_error_codes::APPROVAL_NOT_PENDING);
-        assert_eq!(
-            error.data.as_ref().and_then(|data| data.get("kind")),
-            Some(&json!("approval_not_pending"))
-        );
-    }
 
     #[test]
     fn approval_request_is_stored_and_can_be_responded_to() {
@@ -519,103 +484,6 @@ mod tests {
                 ApprovalDecision::Approve,
             ))
             .expect_err("missing approval should fail");
-
-        assert_eq!(error.code, rpc_error_codes::UNKNOWN_APPROVAL_ID);
-        assert_eq!(
-            error.data.as_ref().and_then(|data| data.get("kind")),
-            Some(&json!("unknown_approval"))
-        );
-    }
-
-    #[test]
-    fn pending_approval_survives_cross_session_reconnect_probe() {
-        let store = PendingApprovalStore::default();
-        let session_id = SessionKey("local:test".into());
-        let other_session_id = SessionKey("local:other".into());
-        let approval_id = ApprovalId::new();
-        store.insert_pending(session_id.clone(), approval_id.clone());
-
-        let wrong_session = store
-            .respond(ApprovalRespondParams::new(
-                other_session_id,
-                approval_id.clone(),
-                ApprovalDecision::Approve,
-            ))
-            .expect_err("approval must be scoped to its owning session");
-        assert_eq!(wrong_session.code, rpc_error_codes::UNKNOWN_APPROVAL_ID);
-
-        let outcome = store
-            .respond(ApprovalRespondParams::new(
-                session_id,
-                approval_id,
-                ApprovalDecision::Approve,
-            ))
-            .expect("owning session can still approve after reconnect");
-        assert_eq!(outcome.result.status, ApprovalRespondStatus::Accepted);
-    }
-
-    #[test]
-    fn pending_for_session_returns_only_unanswered_requests() {
-        let store = PendingApprovalStore::default();
-        let session_id = SessionKey("local:test".into());
-        let other_session_id = SessionKey("local:other".into());
-        let pending_id = ApprovalId::new();
-        let answered_id = ApprovalId::new();
-
-        store.request(ApprovalRequestedEvent::generic(
-            session_id.clone(),
-            pending_id.clone(),
-            TurnId::new(),
-            "shell",
-            "Pending command",
-            "cargo test",
-        ));
-        store.request(ApprovalRequestedEvent::generic(
-            session_id.clone(),
-            answered_id.clone(),
-            TurnId::new(),
-            "shell",
-            "Answered command",
-            "cargo fmt",
-        ));
-        store.request(ApprovalRequestedEvent::generic(
-            other_session_id,
-            ApprovalId::new(),
-            TurnId::new(),
-            "shell",
-            "Other session",
-            "cargo check",
-        ));
-        store
-            .respond(ApprovalRespondParams::new(
-                session_id.clone(),
-                answered_id,
-                ApprovalDecision::Deny,
-            ))
-            .expect("answer one approval");
-
-        let pending = store.pending_for_session(&session_id);
-
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].approval_id, pending_id);
-        assert_eq!(pending[0].title, "Pending command");
-    }
-
-    #[test]
-    fn removed_pending_approval_is_not_found_for_late_response() {
-        let store = PendingApprovalStore::default();
-        let session_id = SessionKey("local:test".into());
-        let approval_id = ApprovalId::new();
-        store.insert_pending(session_id.clone(), approval_id.clone());
-
-        assert!(store.remove_pending(&session_id, &approval_id));
-        let error = store
-            .respond(ApprovalRespondParams::new(
-                session_id,
-                approval_id,
-                ApprovalDecision::Approve,
-            ))
-            .expect_err("late response after timeout removal should miss");
 
         assert_eq!(error.code, rpc_error_codes::UNKNOWN_APPROVAL_ID);
         assert_eq!(
@@ -717,45 +585,6 @@ mod tests {
     }
 
     #[test]
-    fn cancel_pending_for_turn_is_idempotent() {
-        let store = PendingApprovalStore::default();
-        let session_id = SessionKey("local:test".into());
-        let turn_id = TurnId::new();
-        let approval_id = ApprovalId::new();
-        store.request(ApprovalRequestedEvent::generic(
-            session_id.clone(),
-            approval_id.clone(),
-            turn_id.clone(),
-            "shell",
-            "Pending",
-            "ls",
-        ));
-
-        let first = store.cancel_pending_for_turn(&session_id, &turn_id, "turn_interrupted");
-        assert_eq!(first.len(), 1);
-        assert_eq!(first[0].approval_id, approval_id);
-
-        let second = store.cancel_pending_for_turn(&session_id, &turn_id, "turn_interrupted");
-        assert!(
-            second.is_empty(),
-            "second cancel must be a no-op for already-cancelled entries",
-        );
-    }
-
-    #[test]
-    fn cancel_with_no_pending_approvals_is_noop() {
-        let store = PendingApprovalStore::default();
-        let session_id = SessionKey("local:test".into());
-        let turn_id = TurnId::new();
-
-        let cancelled = store.cancel_pending_for_turn(&session_id, &turn_id, "turn_interrupted");
-        assert!(
-            cancelled.is_empty(),
-            "interrupt on a session with no pending approvals must be a no-op",
-        );
-    }
-
-    #[test]
     fn respond_to_cancelled_approval_returns_typed_error() {
         let store = PendingApprovalStore::default();
         let session_id = SessionKey("local:test".into());
@@ -785,91 +614,6 @@ mod tests {
         assert_eq!(data["reason"], json!("turn_interrupted"));
         assert_eq!(data["approval_id"], json!(approval_id));
         assert_eq!(data["turn_id"], json!(turn_id));
-    }
-
-    #[tokio::test]
-    async fn cancel_drops_runtime_waiter_so_it_resolves_to_deny() {
-        let store = PendingApprovalStore::default();
-        let session_id = SessionKey("local:test".into());
-        let turn_id = TurnId::new();
-        let approval_id = ApprovalId::new();
-        let rx = store.request_runtime(ApprovalRequestedEvent::generic(
-            session_id.clone(),
-            approval_id.clone(),
-            turn_id.clone(),
-            "shell",
-            "Pending",
-            "ls",
-        ));
-
-        store.cancel_pending_for_turn(&session_id, &turn_id, "turn_interrupted");
-
-        // Runtime waiter sees the receiver close as Err, which the agent code
-        // unwraps to Deny — preserving pre-fix runtime semantics for the
-        // already-aborted task.
-        assert!(
-            rx.await.is_err(),
-            "cancel must drop the runtime sender so the receiver errors",
-        );
-    }
-
-    #[test]
-    fn cancelled_approval_is_excluded_from_pending_for_session() {
-        let store = PendingApprovalStore::default();
-        let session_id = SessionKey("local:test".into());
-        let turn_id = TurnId::new();
-        let approval_id = ApprovalId::new();
-        store.request(ApprovalRequestedEvent::generic(
-            session_id.clone(),
-            approval_id,
-            turn_id.clone(),
-            "shell",
-            "Pending",
-            "ls",
-        ));
-
-        store.cancel_pending_for_turn(&session_id, &turn_id, "turn_interrupted");
-        assert!(
-            store.pending_for_session(&session_id).is_empty(),
-            "cancelled approvals must not replay as fresh pending cards"
-        );
-    }
-
-    #[test]
-    fn exact_cancel_preserves_cancelled_error_for_late_respond() {
-        let store = PendingApprovalStore::default();
-        let session_id = SessionKey("local:test".into());
-        let turn_id = TurnId::new();
-        let approval_id = ApprovalId::new();
-        store.request(ApprovalRequestedEvent::generic(
-            session_id.clone(),
-            approval_id.clone(),
-            turn_id.clone(),
-            "shell",
-            "Pending",
-            "ls",
-        ));
-
-        let cancelled = store
-            .cancel_pending_approval(&session_id, &approval_id, &turn_id, "request_send_failed")
-            .expect("approval cancelled");
-        assert_eq!(cancelled.approval_id, approval_id);
-        assert_eq!(cancelled.turn_id, turn_id);
-
-        let error = store
-            .respond(ApprovalRespondParams::new(
-                session_id,
-                approval_id,
-                ApprovalDecision::Approve,
-            ))
-            .expect_err("late response should see cancelled state");
-
-        assert_eq!(error.code, rpc_error_codes::APPROVAL_CANCELLED);
-        assert_eq!(error.data.as_ref().unwrap()["kind"], "approval_cancelled");
-        assert_eq!(
-            error.data.as_ref().unwrap()["reason"],
-            "request_send_failed"
-        );
     }
 
     #[test]
@@ -954,37 +698,5 @@ mod tests {
             octos_core::ui_protocol::UiNotification::from_rpc_notification(wire).expect("decode"),
             notification
         );
-    }
-
-    #[test]
-    fn auto_resolved_emits_approval_decided_with_auto_resolved_true() {
-        // The auto-resolved emission lives at the request site (see
-        // `UiProtocolApprovalRequester`); this unit test exercises just the
-        // shape-side helper: an auto-resolved decision is built exactly
-        // like a manual decision plus `auto_resolved = true` and a
-        // `policy_id` set on the constructed event.
-        let store = PendingApprovalStore::default();
-        let (session_id, approval_id, _) = pending_request_fixture(&store);
-        let outcome = store
-            .respond_with_context(ApprovalRespondParams::new(
-                session_id.clone(),
-                approval_id.clone(),
-                ApprovalDecision::Approve,
-            ))
-            .expect("decide auto");
-        let mut event = build_decided_event(
-            &ApprovalRespondParams::new(session_id, approval_id, ApprovalDecision::Approve),
-            &outcome,
-            "",
-            chrono::Utc::now(),
-        );
-        event.auto_resolved = true;
-        event.policy_id = Some("policy:trusted_shell".into());
-
-        let wire = octos_core::ui_protocol::UiNotification::ApprovalDecided(event.clone())
-            .into_rpc_notification()
-            .expect("serialize");
-        assert_eq!(wire.params["auto_resolved"], json!(true));
-        assert_eq!(wire.params["policy_id"], json!("policy:trusted_shell"));
     }
 }

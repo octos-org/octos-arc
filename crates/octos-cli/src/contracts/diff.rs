@@ -62,13 +62,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use octos_core::SessionKey;
 use octos_core::ui_protocol::{
-    DiffPreview, DiffPreviewFile, DiffPreviewFileStatus, DiffPreviewGetParams,
-    DiffPreviewGetResult, DiffPreviewGetStatus, DiffPreviewHunk, DiffPreviewLine,
-    DiffPreviewLineKind, DiffPreviewSource, PreviewId, RpcError, TurnId, UiFileMutationNotice,
-    file_mutation_operations, methods, rpc_error_codes,
+    DiffPreview, DiffPreviewFile, DiffPreviewFileStatus, DiffPreviewHunk, DiffPreviewLine,
+    DiffPreviewLineKind, PreviewId, TurnId, UiFileMutationNotice, file_mutation_operations,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use tracing::{debug, info, warn};
 
 /// A pending diff-preview entry. Carries both the parsed `DiffPreview` that
@@ -95,11 +92,6 @@ impl PendingDiffEntry {
             preview,
             snapshot_at_proposal: snapshot,
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn snapshot(&self) -> Option<&str> {
-        self.snapshot_at_proposal.as_deref()
     }
 }
 
@@ -538,26 +530,6 @@ impl PendingDiffPreviewStore {
         inner.entries.insert(preview_id, entry);
     }
 
-    pub(crate) fn get(
-        &self,
-        params: DiffPreviewGetParams,
-    ) -> Result<DiffPreviewGetResult, RpcError> {
-        let inner = self.inner.lock().expect("diff preview store poisoned");
-        let Some(entry) = inner.entries.get(&params.preview_id) else {
-            return Err(diff_preview_not_found_error(&params));
-        };
-
-        if entry.preview.session_id != params.session_id {
-            return Err(diff_preview_not_found_error(&params));
-        }
-
-        Ok(DiffPreviewGetResult {
-            status: DiffPreviewGetStatus::Ready,
-            source: DiffPreviewSource::PendingStore,
-            preview: entry.preview.clone(),
-        })
-    }
-
     #[allow(dead_code)]
     pub(crate) fn insert(&self, preview: DiffPreview) {
         self.insert_with_snapshot(preview, None);
@@ -827,16 +799,6 @@ impl PendingDiffPreviewStore {
             diff_preview.bytes.on_disk = m.bytes_on_disk,
             "diff preview metrics tick"
         );
-    }
-
-    #[cfg(test)]
-    pub(crate) fn snapshot_for(&self, preview_id: &PreviewId) -> Option<String> {
-        self.inner
-            .lock()
-            .expect("diff preview store poisoned")
-            .entries
-            .get(preview_id)
-            .and_then(|entry| entry.snapshot().map(ToOwned::to_owned))
     }
 }
 
@@ -1141,28 +1103,9 @@ fn push_hunk(file: &mut Option<DiffPreviewFile>, hunk: &mut Option<DiffPreviewHu
     }
 }
 
-fn diff_preview_not_found_error(params: &DiffPreviewGetParams) -> RpcError {
-    RpcError::new(
-        rpc_error_codes::UNKNOWN_PREVIEW_ID,
-        "diff/preview/get target was not found for this session",
-    )
-    .with_data(json!({
-        "kind": "unknown_preview",
-        "method": methods::DIFF_PREVIEW_GET,
-        "session_id": params.session_id,
-        "preview_id": params.preview_id,
-        "legacy_kind": "diff_preview_not_found",
-    }))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use octos_core::ui_protocol::{
-        DiffPreviewFile, DiffPreviewFileStatus, DiffPreviewHunk, DiffPreviewLine,
-        DiffPreviewLineKind, TurnId, UiFileMutationNotice,
-    };
-    use std::sync::Arc;
 
     fn sample_preview(session: &SessionKey, preview_id: PreviewId) -> DiffPreview {
         DiffPreview {
@@ -1186,141 +1129,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn known_diff_preview_returns_stored_preview() {
-        let store = PendingDiffPreviewStore::default();
-        let session_id = SessionKey("local:test".into());
-        let preview_id = PreviewId::new();
-        store.insert(sample_preview(&session_id, preview_id.clone()));
-
-        let result = store
-            .get(DiffPreviewGetParams {
-                session_id,
-                preview_id,
-            })
-            .expect("preview should exist");
-
-        assert_eq!(result.status, DiffPreviewGetStatus::Ready);
-        assert_eq!(result.source, DiffPreviewSource::PendingStore);
-        assert_eq!(result.preview.files[0].path, "src/lib.rs");
-    }
-
-    #[test]
-    fn file_mutation_produces_deterministic_preview_from_diff() {
-        let store = PendingDiffPreviewStore::default();
-        let session_id = SessionKey("local:test".into());
-        let turn_id = TurnId::new();
-        let mut notice = UiFileMutationNotice::new("src/lib.rs", file_mutation_operations::MODIFY);
-        notice.tool_call_id = Some("tool-1".into());
-
-        let diff = "\
-diff --git a/src/lib.rs b/src/lib.rs
---- a/src/lib.rs
-+++ b/src/lib.rs
-@@ -1,2 +1,2 @@
- fn main() {
--    old();
-+    new();
- }
-";
-
-        let preview_id =
-            store.upsert_file_mutation(session_id.clone(), &turn_id, &mut notice, Some(diff));
-        let repeated = store.upsert_file_mutation(
-            session_id.clone(),
-            &turn_id,
-            &mut UiFileMutationNotice {
-                preview_id: None,
-                ..notice.clone()
-            },
-            Some(diff),
-        );
-
-        assert_eq!(repeated, preview_id);
-        assert_eq!(notice.preview_id, Some(preview_id.clone()));
-
-        let result = store
-            .get(DiffPreviewGetParams {
-                session_id,
-                preview_id,
-            })
-            .expect("preview should be produced from mutation");
-
-        assert_eq!(result.source, DiffPreviewSource::PendingStore);
-        assert_eq!(result.preview.files[0].path, "src/lib.rs");
-        assert_eq!(
-            result.preview.files[0].status,
-            DiffPreviewFileStatus::Modified
-        );
-        assert_eq!(
-            result.preview.files[0].hunks[0].lines[1].kind,
-            DiffPreviewLineKind::Removed
-        );
-        assert_eq!(
-            result.preview.files[0].hunks[0].lines[2].kind,
-            DiffPreviewLineKind::Added
-        );
-    }
-
-    #[test]
-    fn missing_diff_preview_is_typed_not_found() {
-        let store = PendingDiffPreviewStore::default();
-        let error = store
-            .get(DiffPreviewGetParams {
-                session_id: SessionKey("local:test".into()),
-                preview_id: PreviewId::new(),
-            })
-            .expect_err("missing preview should fail");
-
-        assert_eq!(error.code, rpc_error_codes::UNKNOWN_PREVIEW_ID);
-        assert_eq!(
-            error.data.as_ref().and_then(|data| data.get("kind")),
-            Some(&json!("unknown_preview"))
-        );
-    }
-
     // ---------- Durability tests ----------
-
-    #[test]
-    fn inserted_preview_survives_simulated_restart() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let session_id = SessionKey("local:restart".into());
-        let preview_id = PreviewId::new();
-
-        // Boot 1: insert and drop.
-        {
-            let store = PendingDiffPreviewStore::with_config(DiffPreviewConfig::durable(
-                temp.path().into(),
-            ));
-            store.insert_with_snapshot(
-                sample_preview(&session_id, preview_id.clone()),
-                Some("raw diff bytes".into()),
-            );
-            let m = store.metrics();
-            assert_eq!(m.entries_active, 1);
-            assert!(m.bytes_on_disk > 0);
-        }
-
-        // Boot 2: recover and verify the preview is hydrated.
-        let outcome =
-            PendingDiffPreviewStore::recover(DiffPreviewConfig::durable(temp.path().into()));
-        assert_eq!(outcome.sessions_recovered, 1);
-        assert_eq!(outcome.entries_recovered, 1);
-
-        let result = outcome
-            .store
-            .get(DiffPreviewGetParams {
-                session_id,
-                preview_id: preview_id.clone(),
-            })
-            .expect("preview should be recovered");
-        assert_eq!(result.preview.preview_id, preview_id);
-        assert_eq!(result.preview.files[0].path, "src/lib.rs");
-        assert_eq!(
-            outcome.store.snapshot_for(&preview_id).as_deref(),
-            Some("raw diff bytes")
-        );
-    }
 
     #[test]
     fn recover_handles_missing_data_dir_as_no_op() {
@@ -1333,53 +1142,6 @@ diff --git a/src/lib.rs b/src/lib.rs
         let m = outcome.store.metrics();
         assert_eq!(m.entries_active, 0);
         assert_eq!(m.sessions_active, 0);
-    }
-
-    #[test]
-    fn recover_handles_corrupted_log_entry_by_skipping() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let session_id = SessionKey("local:corrupt".into());
-        let valid_id = PreviewId::new();
-
-        // Boot 1: write one valid record.
-        {
-            let store = PendingDiffPreviewStore::with_config(DiffPreviewConfig::durable(
-                temp.path().into(),
-            ));
-            store.insert_with_snapshot(sample_preview(&session_id, valid_id.clone()), None);
-        }
-
-        // Append a malformed line + a truncated line to the log file.
-        let session_dir = temp
-            .path()
-            .join("ui-protocol")
-            .join(encode_session_dir_name(&session_id));
-        let log_files = list_log_files(&session_dir).expect("list logs");
-        let log_path = log_files.first().expect("log file").clone();
-        {
-            let mut f = OpenOptions::new()
-                .append(true)
-                .open(&log_path)
-                .expect("open log for append");
-            f.write_all(b"this is not json\n").expect("append junk");
-            f.write_all(b"{\"v\":1,\"ts\":0,\"preview\":{\"session_id\":")
-                .expect("append truncated"); // truncated mid-record, no newline
-        }
-
-        // Boot 2: recover — valid record should be loaded, malformed
-        // lines skipped without crashing.
-        let outcome =
-            PendingDiffPreviewStore::recover(DiffPreviewConfig::durable(temp.path().into()));
-        assert_eq!(outcome.sessions_recovered, 1);
-        assert_eq!(outcome.entries_recovered, 1);
-        let result = outcome
-            .store
-            .get(DiffPreviewGetParams {
-                session_id,
-                preview_id: valid_id,
-            })
-            .expect("valid preview survives corruption");
-        assert_eq!(result.status, DiffPreviewGetStatus::Ready);
     }
 
     #[test]
@@ -1424,153 +1186,6 @@ diff --git a/src/lib.rs b/src/lib.rs
         assert_eq!(
             m.recovery_records_skipped, 3,
             "all 3 malformed records counted (aggregated into one per-file warn)"
-        );
-    }
-
-    #[test]
-    fn concurrent_insert_then_get_does_not_race_with_disk_write() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let store = Arc::new(PendingDiffPreviewStore::with_config(
-            DiffPreviewConfig::durable(temp.path().into()),
-        ));
-        let session_id = SessionKey("local:race".into());
-
-        let handles: Vec<_> = (0..16)
-            .map(|i| {
-                let store = store.clone();
-                let session_id = session_id.clone();
-                std::thread::spawn(move || {
-                    let preview_id = PreviewId::new();
-                    let preview = sample_preview(&session_id, preview_id.clone());
-                    store.insert_with_snapshot(preview, Some(format!("snap-{i}")));
-                    let result = store
-                        .get(DiffPreviewGetParams {
-                            session_id,
-                            preview_id: preview_id.clone(),
-                        })
-                        .expect("immediately readable");
-                    assert_eq!(result.preview.preview_id, preview_id);
-                })
-            })
-            .collect();
-        for h in handles {
-            h.join().expect("thread join");
-        }
-        assert_eq!(store.metrics().entries_active, 16);
-    }
-
-    #[test]
-    fn same_preview_id_reinsert_overwrites_in_recovery() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let session_id = SessionKey("local:dup".into());
-        let preview_id = PreviewId::new();
-
-        {
-            let store = PendingDiffPreviewStore::with_config(DiffPreviewConfig::durable(
-                temp.path().into(),
-            ));
-            // First insert: title "first"
-            let mut p = sample_preview(&session_id, preview_id.clone());
-            p.title = Some("first".into());
-            store.insert_with_snapshot(p, Some("snap-1".into()));
-            // Second insert with same id: title "second"
-            let mut p2 = sample_preview(&session_id, preview_id.clone());
-            p2.title = Some("second".into());
-            store.insert_with_snapshot(p2, Some("snap-2".into()));
-        }
-
-        let outcome =
-            PendingDiffPreviewStore::recover(DiffPreviewConfig::durable(temp.path().into()));
-        assert_eq!(outcome.entries_recovered, 1);
-        let result = outcome
-            .store
-            .get(DiffPreviewGetParams {
-                session_id,
-                preview_id: preview_id.clone(),
-            })
-            .expect("recovered");
-        assert_eq!(result.preview.title.as_deref(), Some("second"));
-        assert_eq!(
-            outcome.store.snapshot_for(&preview_id).as_deref(),
-            Some("snap-2")
-        );
-    }
-
-    #[test]
-    fn eviction_drops_oldest_session_when_active_cap_exceeded() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let mut config = DiffPreviewConfig::durable(temp.path().into());
-        config.active_session_cap = 2;
-        let store = PendingDiffPreviewStore::with_config(config);
-
-        let s1 = SessionKey("local:s1".into());
-        let s2 = SessionKey("local:s2".into());
-        let s3 = SessionKey("local:s3".into());
-        let p1 = PreviewId::new();
-        let p2 = PreviewId::new();
-        let p3 = PreviewId::new();
-        store.insert_with_snapshot(sample_preview(&s1, p1.clone()), None);
-        store.insert_with_snapshot(sample_preview(&s2, p2.clone()), None);
-        // Inserting s3 should evict s1 (LRU).
-        store.insert_with_snapshot(sample_preview(&s3, p3.clone()), None);
-
-        let m = store.metrics();
-        assert_eq!(m.sessions_active, 2);
-        assert_eq!(m.sessions_evicted, 1);
-
-        // s1's preview is gone from RAM…
-        assert!(
-            store
-                .get(DiffPreviewGetParams {
-                    session_id: s1.clone(),
-                    preview_id: p1.clone(),
-                })
-                .is_err()
-        );
-        // …but its disk file is retained for replay-after-restart.
-        let s1_dir = temp
-            .path()
-            .join("ui-protocol")
-            .join(encode_session_dir_name(&s1));
-        assert!(s1_dir.exists(), "evicted session disk file must remain");
-        let log_files = list_log_files(&s1_dir).expect("list logs");
-        assert!(
-            !log_files.is_empty(),
-            "evicted session log files must survive eviction"
-        );
-
-        // s2 + s3 are still present.
-        assert!(
-            store
-                .get(DiffPreviewGetParams {
-                    session_id: s2,
-                    preview_id: p2,
-                })
-                .is_ok()
-        );
-        assert!(
-            store
-                .get(DiffPreviewGetParams {
-                    session_id: s3,
-                    preview_id: p3,
-                })
-                .is_ok()
-        );
-
-        // Restart-from-disk recovers s1 too (its log file is still
-        // there, even though it was evicted from RAM mid-run).
-        drop(store);
-        let outcome =
-            PendingDiffPreviewStore::recover(DiffPreviewConfig::durable(temp.path().into()));
-        assert_eq!(outcome.sessions_recovered, 3);
-        assert!(
-            outcome
-                .store
-                .get(DiffPreviewGetParams {
-                    session_id: s1,
-                    preview_id: p1,
-                })
-                .is_ok()
         );
     }
 }

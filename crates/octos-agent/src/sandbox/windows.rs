@@ -48,13 +48,13 @@ impl Sandbox for AppContainerSandbox {
     // (#2196 review MUST-FIX). This backend is only constructed after
     // `decide_sandbox` probed the helper, so construction-time confinement is
     // `true`; a sandbox created as confining must NEVER dynamically report
-    // no-op, because `is_noop() == true` is the transition consumers
-    // (validators.rs, tools/check.rs) use to run argv DIRECTLY on the host.
+    // no-op, because `is_noop() == true` is the transition sandbox consumers
+    // (spawn/exec/check) use to run argv DIRECTLY on the host.
     // The old dynamic `find_sandbox_helper().is_none()` re-check meant a
     // helper that vanished after selection converted those paths into raw
     // host execution, bypassing the wrap-time refusal below. With the
     // constant, a vanished helper now lands on the fail-closed paths
-    // instead: validators hit their Windows cannot-wrap error, `check`
+    // instead: contract gates hit their Windows cannot-wrap error, `check`
     // reports its sandbox-unsupported skip, and everything else reaches
     // [`Self::wrap_command`]'s refusal. (Matches `LinuxContainerSandbox`,
     // which never overrode `is_noop` and refuses at wrap time.)
@@ -245,7 +245,7 @@ mod tests {
         // #2196 review MUST-FIX regression: with the helper ABSENT (true on
         // CI runners — octos-sandbox.exe is not installed there), the old
         // dynamic `find_sandbox_helper().is_none()` override reported
-        // `is_noop() == true`, which validators.rs / tools/check.rs treat as
+        // `is_noop() == true`, which spawn/exec/check treat as
         // "no sandbox" and then spawn argv DIRECTLY on the host — raw
         // unconfined execution, bypassing the wrap-time refusal below.
         // Confinement is a construction-time property: this backend is only

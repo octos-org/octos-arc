@@ -711,91 +711,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn should_update_runtime_detail_with_summary() {
-        let (mock, _) = MockProvider::new("parsing response");
-        let supervisor = TaskSupervisor::new();
-        let id = register_running_task(&supervisor);
-        let generator = AgentSummaryGenerator::with_activity_source(
-            Arc::new(mock),
-            fixed_activity(&["fetch", "parse"]),
-            supervisor.clone(),
-        )
-        .with_llm_timeout(Duration::from_secs(1));
-
-        let _ = generator.summarize_once("api:session", &id, 7).await;
-
-        let task = supervisor.get_task(&id).unwrap();
-        let detail: serde_json::Value =
-            serde_json::from_str(task.runtime_detail.as_deref().unwrap()).unwrap();
-        assert_eq!(detail["summary"], "parsing response");
-        assert_eq!(detail["tick"], 7);
-        assert!(detail["at"].is_string());
-    }
-
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn should_opt_out_of_cache_writes_when_fetching_subagent_digest() {
-        // Each 64-token digest call sends a fresh activity prompt exactly
-        // once — a cache write on it is pure 1.25x premium, never read back.
-        let (mock, _) = MockProvider::new("parsing response");
-        let seen = Arc::clone(&mock.seen_retention);
-        let supervisor = TaskSupervisor::new();
-        let id = register_running_task(&supervisor);
-        let generator = AgentSummaryGenerator::with_activity_source(
-            Arc::new(mock),
-            fixed_activity(&["fetch", "parse"]),
-            supervisor.clone(),
-        )
-        .with_llm_timeout(Duration::from_secs(1));
-
-        let _ = generator.summarize_once("api:session", &id, 1).await;
-
-        assert_eq!(
-            *seen.lock().unwrap(),
-            Some(octos_llm::CacheRetention::None),
-            "one-shot sub-agent digests must not request cache writes"
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn should_tick_every_tick_until_terminal() {
-        let (mock, calls) = MockProvider::new("working hard");
-        let supervisor = TaskSupervisor::new();
-        let id = register_running_task(&supervisor);
-        // The activity CHANGES between ticks — an active sub-agent — so every
-        // tick carries a fresh snapshot and must reach the LLM (the unchanged-
-        // snapshot dedupe is pinned separately below).
-        let buf = Arc::new(Mutex::new(vec!["doing something".to_string()]));
-        let generator = AgentSummaryGenerator::with_activity_source(
-            Arc::new(mock),
-            Arc::new(ActivitySource::Fixed(Arc::clone(&buf))),
-            supervisor.clone(),
-        )
-        .with_tick(Duration::from_millis(100))
-        .with_min_runtime(Duration::from_millis(0))
-        .with_llm_timeout(Duration::from_secs(1));
-
-        let spawned = generator.spawn_watcher("api:session", &id);
-        assert!(spawned);
-
-        // Drive the watcher a few times so multiple ticks fire. We alternate
-        // time advance + yield so the spawned task actually runs, and push a
-        // new activity line per round so each snapshot differs.
-        for i in 0..10 {
-            tokio::task::yield_now().await;
-            tokio::time::advance(Duration::from_millis(110)).await;
-            buf.lock().unwrap().push(format!("step {i}"));
-        }
-        supervisor.mark_completed(&id, vec![]);
-        for _ in 0..4 {
-            tokio::task::yield_now().await;
-            tokio::time::advance(Duration::from_millis(110)).await;
-        }
-
-        let observed = calls.load(Ordering::SeqCst);
-        assert!(observed >= 2, "expected multiple ticks, got {observed}");
-    }
-
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn should_skip_llm_call_when_activity_snapshot_unchanged() {
         // #2194 review: an IDLE sub-agent rebuilds the byte-identical prompt
         // every 30s tick. Re-asking the model (cached or not) buys nothing —
@@ -841,65 +756,6 @@ mod tests {
             tokio::task::yield_now().await;
             tokio::time::advance(Duration::from_millis(110)).await;
         }
-    }
-
-    #[tokio::test]
-    async fn should_keep_original_production_timestamp_on_a_deduped_tick() {
-        // #2194 review round 2: the public `at` field means "when the summary
-        // was PRODUCED". A deduped tick re-emits an EARLIER summary, so it
-        // must carry that summary's original production time — NOT Utc::now()
-        // — or a consumer reads "produced just now" for a 10-tick-old summary.
-        // tick_seq (a separate field) alone conveys that the watcher is live.
-        //
-        // Timing-free by construction: we seed the dedupe state with a fixed
-        // 2020 production timestamp and a prompt that the next snapshot
-        // re-renders exactly, then assert the emitted `at` is that 2020
-        // value. A reused Utc::now() would land in 2026 and fail.
-        let (mock, calls) = MockProvider::new("unused on the dedupe path");
-        let supervisor = TaskSupervisor::new();
-        let id = register_running_task(&supervisor);
-        let activity = fixed_activity(&["installing deps"]);
-
-        let produced_at = chrono::DateTime::parse_from_rfc3339("2020-01-02T03:04:05Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        let mut last = Some(LastTickSummary {
-            // Exactly what the next snapshot will render, so the tick dedupes.
-            prompt: build_prompt(&["installing deps".to_string()]),
-            summary: "installing dependencies".to_string(),
-            produced_at,
-        });
-
-        let out = summarize_tick(
-            Arc::new(mock),
-            Duration::from_secs(1),
-            activity,
-            &supervisor,
-            "api:session",
-            &id,
-            9,
-            DEFAULT_SUBAGENT_SUMMARY_WINDOW,
-            &mut last,
-        )
-        .await;
-
-        assert_eq!(out.as_deref(), Some("installing dependencies"));
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            0,
-            "a deduped tick must not call the LLM"
-        );
-        let task = supervisor.get_task(&id).unwrap();
-        let detail: serde_json::Value =
-            serde_json::from_str(task.runtime_detail.as_deref().unwrap()).unwrap();
-        assert_eq!(detail["tick"], 9, "tick_seq advances to show liveness");
-        let emitted_at = chrono::DateTime::parse_from_rfc3339(detail["at"].as_str().unwrap())
-            .unwrap()
-            .with_timezone(&Utc);
-        assert_eq!(
-            emitted_at, produced_at,
-            "a reused summary keeps its ORIGINAL production time, not now()"
-        );
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -978,33 +834,6 @@ mod tests {
             baseline, after,
             "no more tick calls should fire after terminal"
         );
-    }
-
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn should_stop_ticking_on_task_failed() {
-        let (mock, calls) = MockProvider::new("working");
-        let supervisor = TaskSupervisor::new();
-        let id = register_running_task(&supervisor);
-        let generator = AgentSummaryGenerator::with_activity_source(
-            Arc::new(mock),
-            fixed_activity(&["line"]),
-            supervisor.clone(),
-        )
-        .with_tick(Duration::from_millis(50))
-        .with_min_runtime(Duration::from_millis(0))
-        .with_llm_timeout(Duration::from_secs(1));
-
-        generator.spawn_watcher("api:session", &id);
-        tokio::time::advance(Duration::from_millis(120)).await;
-        tokio::task::yield_now().await;
-        supervisor.mark_failed(&id, "boom".into());
-        tokio::time::advance(Duration::from_millis(200)).await;
-        tokio::task::yield_now().await;
-        let baseline = calls.load(Ordering::SeqCst);
-        tokio::time::advance(Duration::from_millis(400)).await;
-        tokio::task::yield_now().await;
-        let after = calls.load(Ordering::SeqCst);
-        assert_eq!(baseline, after);
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]

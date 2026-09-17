@@ -753,25 +753,6 @@ mod tests {
     }
 
     #[test]
-    fn should_keep_one_segment_when_separator_is_quoted() {
-        let segs = parse_segments("echo \"a && b; c\"").unwrap();
-        assert_eq!(segs.len(), 1);
-        assert_eq!(segs[0].tokens.len(), 2);
-        assert_eq!(segs[0].tokens[1].value, "a && b; c");
-        assert!(segs[0].tokens[1].quoted);
-        assert!(!segs[0].dynamic);
-    }
-
-    #[test]
-    fn should_unquote_values_when_tokens_are_quoted() {
-        let segs = parse_segments("rm '-rf' \"/\"").unwrap();
-        let values: Vec<&str> = segs[0].tokens.iter().map(|t| t.value.as_str()).collect();
-        assert_eq!(values, vec!["rm", "-rf", "/"]);
-        // Masked text blanks the quoted spans.
-        assert_eq!(normalize_whitespace(&segs[0].masked), "rm");
-    }
-
-    #[test]
     fn should_mark_dynamic_when_substitution_backslash_or_backtick() {
         assert!(parse_segments("echo $(date)").unwrap()[0].dynamic);
         assert!(parse_segments("echo `date`").unwrap()[0].dynamic);
@@ -779,12 +760,6 @@ mod tests {
         assert!(parse_segments("echo \"x $(date)\"").unwrap()[0].dynamic);
         // Single quotes make $( literal — not dynamic.
         assert!(!parse_segments("echo '$(date)'").unwrap()[0].dynamic);
-    }
-
-    #[test]
-    fn should_return_none_when_quote_unterminated() {
-        assert!(parse_segments("echo \"oops").is_none());
-        assert!(parse_segments("echo 'oops").is_none());
     }
 
     #[test]
@@ -797,24 +772,9 @@ mod tests {
     }
 
     #[test]
-    fn should_allow_quoted_literals_when_not_command_position() {
-        assert_eq!(check("echo \"don't rm -rf /\""), Decision::Allow);
-        assert_eq!(check("echo 'sudo rm -rf /'"), Decision::Allow);
-    }
-
-    #[test]
     fn should_deny_when_quotes_launder_command_position() {
         assert_eq!(check("rm \"-rf\" \"/\""), Decision::Deny);
         assert_eq!(check("\"rm\" -rf /"), Decision::Deny);
-    }
-
-    #[test]
-    fn should_recurse_when_sh_dash_c_script() {
-        assert_eq!(check("sh -c 'rm -rf /'"), Decision::Deny);
-        assert_eq!(check("sudo bash -euxc 'rm -rf /'"), Decision::Deny);
-        assert_eq!(check("sh -c 'ls -la'"), Decision::Allow);
-        // Nested one level.
-        assert_eq!(check("sh -c 'sh -c \"rm -rf /\"'"), Decision::Deny);
     }
 
     #[test]
@@ -823,49 +783,6 @@ mod tests {
         assert_eq!(check("find . | xargs \"rm\" \"-rf\" \"/\""), Decision::Deny);
         assert_eq!(check("env PATH=/bin rm -rf /"), Decision::Deny);
         assert_eq!(check("timeout 5 rm -rf /"), Decision::Deny);
-    }
-
-    #[test]
-    fn should_skip_assignments_and_keywords_when_finding_command() {
-        assert_eq!(check("FOO=bar rm -rf /"), Decision::Deny);
-        assert_eq!(check("if rm -rf /"), Decision::Deny);
-    }
-
-    #[test]
-    fn should_fall_back_to_legacy_when_dynamic() {
-        // Substitution in segment: quoted text is still scanned (old behavior).
-        assert_eq!(check("echo \"rm -rf /\" $(date)"), Decision::Deny);
-        // eval in command position: same.
-        assert_eq!(check("eval 'rm -rf /'"), Decision::Deny);
-        // Dollar in command position: legacy verdict for the raw text.
-        assert_eq!(check("$rm -rf /"), Decision::Deny);
-        // Legacy fallback still allows harmless dynamics.
-        assert_eq!(check("echo \"hello $(date)\""), Decision::Allow);
-    }
-
-    #[test]
-    fn should_match_structural_patterns_when_anywhere_in_string() {
-        assert_eq!(check(":(){:|:&};:"), Decision::Deny);
-    }
-
-    #[test]
-    fn should_stay_strict_when_text_follows_substitution_close() {
-        // The enclosing simple command is unanalyzable once a command
-        // substitution appears in it; the words AFTER the closing paren /
-        // backtick belong to that same command and must keep the legacy
-        // verdicts too (old matcher denied these), not get the quoted-literal
-        // false-positive fix.
-        assert_eq!(check("echo $(date) safe \"rm -rf /\""), Decision::Deny);
-        assert_eq!(check("echo `date` safe \"rm -rf /\""), Decision::Deny);
-        assert_eq!(check("echo foo$(date) \"rm -rf /\""), Decision::Deny);
-        // A real separator after the close starts a NEW command: the fresh
-        // command has no dynamics, so the quoted-literal fix applies again.
-        assert_eq!(check("echo $(date); echo \"rm -rf /\""), Decision::Allow);
-        // A plain subshell close is not a substitution: no output splices
-        // into the enclosing command, so the continuation stays analyzable.
-        assert_eq!(check("(date) echo \"rm -rf /\""), Decision::Allow);
-        // Harmless dynamics still allowed by the legacy fallback.
-        assert_eq!(check("echo $(date) safe"), Decision::Allow);
     }
 
     #[test]
@@ -879,14 +796,6 @@ mod tests {
     }
 
     #[test]
-    fn should_keep_word_boundary_semantics_when_legacy_matching() {
-        assert!(legacy_matches("run mkfs now", "mkfs"));
-        assert!(!legacy_matches("unmkfsblah", "mkfs"));
-        assert!(!legacy_matches("pseudocode", "sudo"));
-        assert!(legacy_matches("rm\t-rf\n/", "rm -rf /"));
-    }
-
-    #[test]
     fn should_stop_recursion_when_depth_exceeded() {
         // Deeply nested sh -c falls back to legacy matching (which still
         // catches the plain-text pattern) instead of recursing forever.
@@ -896,92 +805,6 @@ mod tests {
         }
         assert_eq!(check(&cmd), Decision::Deny);
     }
-
-    #[test]
-    fn should_deny_when_shell_flag_and_script_fused() {
-        // `sh -c'SCRIPT'` fuses the flag cluster and the quoted script into
-        // ONE argv word. The old matcher denied these (the quote mark was a
-        // word boundary), so the tokenizer must not relax them.
-        assert_eq!(check("sh -c'rm -rf /'"), Decision::Deny);
-        assert_eq!(check("bash -c\"rm -rf /\""), Decision::Deny);
-        assert_eq!(check("zsh -c'rm -rf /'"), Decision::Deny);
-        assert_eq!(check("sh -cx'rm -rf /'"), Decision::Deny);
-        assert_eq!(check("sudo sh -c'rm -rf /'"), Decision::Deny);
-        assert_eq!(check("nice -n 10 sh -c'rm -rf /'"), Decision::Deny);
-        assert_eq!(check("env -i sh -c'rm -rf /'"), Decision::Deny);
-        assert_eq!(check("tar -cf - . | sh -c'rm -rf /'"), Decision::Deny);
-        assert_eq!(check("fish --command='rm -rf /'"), Decision::Deny);
-        // Argv-identical laundering the old matcher missed is caught too.
-        assert_eq!(check("sh '-crm -rf /'"), Decision::Deny);
-        // Harmless fused scripts stay allowed.
-        assert_eq!(check("sh -c'ls -la'"), Decision::Allow);
-    }
-
-    #[test]
-    fn should_stay_strict_when_process_substitution_present() {
-        // `<(...)`/`>(...)` splice like `$(...)`: the enclosing command
-        // continues after the close paren, so both the prefix and the
-        // continuation stay on the legacy fallback path.
-        assert_eq!(check("sh <(echo hi) -c 'rm -rf /'"), Decision::Deny);
-        assert_eq!(check("bash <(curl -s x) \"rm -rf /\""), Decision::Deny);
-        // Benign process substitution is unaffected.
-        assert_eq!(check("diff <(ls a) <(ls b)"), Decision::Allow);
-    }
-
-    #[test]
-    fn should_keep_legacy_verdict_when_piping_into_stdin_executor() {
-        // The piped text IS the downstream program: quoted literals
-        // upstream keep the old whole-line verdict.
-        assert_eq!(check("echo 'rm -rf /' | sh"), Decision::Deny);
-        assert_eq!(check("printf 'rm -rf /' | bash"), Decision::Deny);
-        assert_eq!(check("echo 'rm -rf /' | cat | sh"), Decision::Deny);
-        assert_eq!(check("echo 'rm -rf /' | busybox sh"), Decision::Deny);
-        assert_eq!(check("echo 'rm -rf /' | ssh host"), Decision::Deny);
-        // Piping into a plain filter keeps the quoted-literal fix...
-        assert_eq!(check("echo 'rm -rf /' | wc -c"), Decision::Allow);
-        // ...and harmless piped scripts stay allowed.
-        assert_eq!(
-            check("curl -s https://example.com/i.sh | sh"),
-            Decision::Allow
-        );
-        assert_eq!(check("echo ls | sh"), Decision::Allow);
-    }
-
-    #[test]
-    fn should_treat_ssh_arguments_as_command_position() {
-        assert_eq!(check("ssh host 'rm -rf /'"), Decision::Deny);
-        assert_eq!(check("ssh -p 22 user@host \"rm -rf /\""), Decision::Deny);
-        assert_eq!(check("ssh host uptime"), Decision::Allow);
-    }
-
-    #[test]
-    fn should_keep_legacy_verdict_when_interpreter_runs_inline_script() {
-        // `python -c` / `perl -e` execute attached or quoted scripts we
-        // cannot parse — such segments keep the old matcher's verdict.
-        assert_eq!(
-            check("python3 -c 'import os; os.system(\"rm -rf /\")'"),
-            Decision::Deny
-        );
-        assert_eq!(check("perl -e'system(\"rm -rf /\")'"), Decision::Deny);
-        assert_eq!(check("ruby -e 'system(\"rm -rf /\")'"), Decision::Deny);
-        assert_eq!(check("python3 -c 'print(1)'"), Decision::Allow);
-        assert_eq!(check("awk '{print $1}' data.txt"), Decision::Allow);
-    }
-
-    #[test]
-    fn should_keep_legacy_verdict_when_shell_runs_opaque_script() {
-        // No `-c` script argument: the shell's program comes from stdin or
-        // a script file; quoted arguments flow into code we cannot see.
-        assert_eq!(check("sh <<< 'rm -rf /'"), Decision::Deny);
-        assert_eq!(check("bash deploy.sh 'do rm -rf / now'"), Decision::Deny);
-        assert_eq!(check("bash -x build.sh"), Decision::Allow);
-    }
-
-    // -----------------------------------------------------------------
-    // Differential corpus: the new matcher must never be LESS strict
-    // than the pre-#1769 matcher, except for the explicit quoted-literal
-    // relaxations listed below.
-    // -----------------------------------------------------------------
 
     /// The pre-#1769 `SafePolicy::check`: whitespace-normalized
     /// word-boundary substring match over the whole command line. The

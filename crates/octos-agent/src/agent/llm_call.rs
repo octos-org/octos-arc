@@ -6,7 +6,7 @@ use eyre::Result;
 use octos_core::Message;
 use octos_core::TokenUsage;
 use octos_llm::{
-    ChatConfig, ChatResponse, LlmCallPolicy, StopReason, ToolSpec, record_prompt_cache_usage,
+    ChatConfig, ChatResponse, StopReason, ToolSpec, record_prompt_cache_usage,
     with_prompt_cache_observation_context,
 };
 use tracing::{debug, info, trace, warn};
@@ -166,9 +166,9 @@ impl Agent {
             .as_ref()
             .and_then(|manager| manager.prompt_cache_epoch_id())
             .or_else(|| self.prompt_cache_epoch_id.clone());
-        // Session identity only: `self.llm` may be an AdaptiveRouter whose
-        // `provider_name()`/`model_id()` re-run selection per call, and cache
-        // affinity must not flap with it (route is logged above instead).
+        // Session identity only: `self.llm` may be a failover chain whose
+        // `provider_name()`/`model_id()` re-run slot selection per call, and
+        // cache affinity must not flap with it (route is logged above instead).
         provider_config.prompt_cache_context = Some(build_prompt_cache_context(
             &prompt_fingerprint,
             messages,
@@ -185,8 +185,7 @@ impl Agent {
         // provider slot that produced it (see the return-value doc above).
         let mut retry_spend: Option<f64> = None;
 
-        let fail_fast = octos_llm::current_llm_call_policy() == LlmCallPolicy::FailFast;
-        let retry_max = if fail_fast { 0 } else { Self::LLM_RETRY_MAX };
+        let retry_max = Self::LLM_RETRY_MAX;
 
         // #1712: after a truncated tool call (the turn hit the output cap
         // mid-call), the NEXT attempt requests with the model's full output
@@ -194,9 +193,6 @@ impl Agent {
         // request would just re-truncate. Only populated on a truncation retry;
         // the happy path never clones the config.
         let mut bumped_config: Option<ChatConfig> = None;
-        let mut reasoning_recovery_attempted = false;
-        let streaming_provider_key =
-            super::detection::streaming_provider_key(self.llm.provider_name(), self.llm.model_id());
 
         // All unsuccessful exits settle the rejected responses exactly once.
         // Keep success settlement with the caller: successful responses below
@@ -211,21 +207,11 @@ impl Agent {
             let input_estimate = (input_bytes / 3) as u32;
 
             let attempt_config: &ChatConfig = bumped_config.as_ref().unwrap_or(&provider_config);
-            let streaming_disabled = super::detection::streaming_disabled_by_env()
-                || self
-                    .streaming_disabled_providers
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .contains(&streaming_provider_key);
             let build_and_consume = with_prompt_cache_observation_context(
                 attempt_config.prompt_cache_context.as_ref(),
                 iteration,
                 attempt,
                 async {
-                    if streaming_disabled {
-                        let response = self.llm.chat(messages, tools_spec, attempt_config).await?;
-                        return Ok((response, false));
-                    }
                     let stream = self
                         .llm
                         .chat_stream(messages, tools_spec, attempt_config)
@@ -244,25 +230,7 @@ impl Agent {
                     }
                 },
             );
-            // Voice fail-fast: bound the WHOLE {build + consume} future with the
-            // voice overall deadline. The per-chunk `StreamTimeouts` only start
-            // inside `consume_stream`, so a provider that hangs while returning
-            // response headers would otherwise inherit the long production
-            // request timeout. Normal turns keep that long backstop unchanged.
-            let call_result = if fail_fast {
-                match tokio::time::timeout(self.config.voice_overall_deadline, build_and_consume)
-                    .await
-                {
-                    Ok(r) => r,
-                    Err(_elapsed) => Err(octos_llm::LlmError::timeout(format!(
-                        "voice overall deadline exceeded after {}s",
-                        self.config.voice_overall_deadline.as_secs()
-                    ))
-                    .into()),
-                }
-            } else {
-                build_and_consume.await
-            };
+            let call_result = build_and_consume.await;
 
             match call_result {
                 Ok((response, streamed)) => {
@@ -330,7 +298,7 @@ impl Agent {
                     }
 
                     // Every rejected response consumed usage, including the
-                    // last streaming attempt and FailFast's single attempt.
+                    // last streaming attempt.
                     if let Some(cost) = self.response_usage_cost(
                         response.usage.input_tokens,
                         response.usage.output_tokens,
@@ -346,33 +314,6 @@ impl Agent {
                     retry_usage.cache_read_tokens += response.usage.cache_read_tokens;
                     retry_usage.cache_write_tokens += response.usage.cache_write_tokens;
 
-                    // DeepSeek V4 can spend the whole completion allowance on
-                    // hidden reasoning and return finish_reason=length with
-                    // no usable content or tool call. Give it exactly one
-                    // provider-aware recovery request; repeated empty rounds
-                    // are an explicit error, never a successful no-op turn.
-                    if super::detection::is_empty_max_tokens_response(&response) {
-                        if reasoning_recovery_attempted {
-                            return Err(eyre::eyre!(
-                                "reasoning model exhausted its output budget twice without content or tool calls; reduce reasoning_effort or increase max_tokens"
-                            ));
-                        }
-                        if let Some(retry_config) =
-                            super::detection::empty_max_tokens_recovery_config(
-                                &provider_config,
-                                self.llm.max_output_tokens(),
-                            )
-                        {
-                            reasoning_recovery_attempted = true;
-                            bumped_config = Some(retry_config);
-                            warn!(
-                                iteration,
-                                "empty finish_reason=length response; retrying with provider-aware reasoning/output recovery"
-                            );
-                            continue;
-                        }
-                    }
-
                     if attempt == retry_max {
                         // All streaming retries exhausted.
                         let reason = if response.stop_reason == StopReason::ContentFiltered {
@@ -385,24 +326,15 @@ impl Agent {
                         });
                         self.llm.report_late_failure();
 
-                        if fail_fast {
-                            // FailFast: skip the non-streaming fallback, return error directly.
-                            return Err(eyre::eyre!(
-                                "LLM returned empty response after {} retries: {}",
-                                retry_max + 1,
-                                reason
-                            ));
-                        }
-
                         // Try one final non-streaming call — this goes through
-                        // FallbackProvider.chat() which tries all fallback providers,
+                        // the failover chain (RetryProvider → ProviderChain),
                         // not just the primary.
                         warn!(
                             attempts = Self::LLM_RETRY_MAX + 1,
                             reason, "streaming retries exhausted, trying non-streaming fallback"
                         );
 
-                        // Non-streaming call triggers FallbackProvider's full fallback chain
+                        // Non-streaming call traverses the full failover chain
                         match with_prompt_cache_observation_context(
                             provider_config.prompt_cache_context.as_ref(),
                             iteration,
@@ -521,18 +453,6 @@ impl Agent {
                 }
                 Err(e) => {
                     if attempt < retry_max && Self::is_retryable_stream_error(&e) {
-                        if Self::is_streaming_unsupported_error(&e) {
-                            let mut disabled = self
-                                .streaming_disabled_providers
-                                .lock()
-                                .unwrap_or_else(|poisoned| poisoned.into_inner());
-                            if disabled.insert(streaming_provider_key.clone()) {
-                                info!(
-                                    provider = %streaming_provider_key,
-                                    "provider rejected SSE; retrying with non-streaming completions for this session"
-                                );
-                            }
-                        }
                         let delay = Duration::from_secs(1 << attempt);
                         // #1712: a truncated tool call means the model needed
                         // more output room than the per-turn cap allowed. Retry
@@ -587,11 +507,6 @@ impl Agent {
                             reason: "stream retries exhausted".to_string(),
                         });
                         self.llm.report_late_failure();
-
-                        if !Self::should_fallback_after_stream_error(fail_fast, &e) {
-                            // FailFast: skip the non-streaming fallback, return error directly.
-                            return Err(e);
-                        }
 
                         // Try non-streaming with full fallback chain
                         warn!(
@@ -758,17 +673,14 @@ impl Agent {
 mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::{Arc, Mutex};
-    use std::time::{Duration, Instant};
-
-    use super::super::AgentConfig;
+    use std::time::Instant;
 
     use async_trait::async_trait;
     use futures::stream;
     use octos_core::{AgentId, Message};
     use octos_llm::{
-        ChatConfig, ChatResponse, ChatStream, LlmCallPolicy, LlmError, LlmErrorKind, LlmProvider,
-        PromptCacheContext, ProviderChain, SemanticCheckpointReport, StopReason, StreamEvent,
-        TokenUsage as LlmTokenUsage, ToolSpec, with_llm_call_policy,
+        ChatConfig, ChatResponse, ChatStream, LlmError, LlmErrorKind, LlmProvider, ProviderChain,
+        StopReason, StreamEvent, TokenUsage as LlmTokenUsage, ToolSpec,
     };
     use octos_memory::EpisodeStore;
 
@@ -785,126 +697,6 @@ mod tests {
         chat: AtomicU32,
     }
 
-    // ── Provider that always errors on chat_stream (retryable 503) ───────────
-
-    struct AlwaysErrStreamProvider {
-        counters: Arc<CallCounters>,
-    }
-
-    #[async_trait]
-    impl LlmProvider for AlwaysErrStreamProvider {
-        async fn chat(
-            &self,
-            _messages: &[Message],
-            _tools: &[ToolSpec],
-            _config: &ChatConfig,
-        ) -> eyre::Result<ChatResponse> {
-            self.counters.chat.fetch_add(1, Ordering::SeqCst);
-            eyre::bail!("non-streaming fallback should not be called under FailFast")
-        }
-
-        async fn chat_stream(
-            &self,
-            _messages: &[Message],
-            _tools: &[ToolSpec],
-            _config: &ChatConfig,
-        ) -> eyre::Result<ChatStream> {
-            self.counters.chat_stream.fetch_add(1, Ordering::SeqCst);
-            // Return a stream that immediately yields a retryable 503 error.
-            let events: Vec<StreamEvent> = vec![StreamEvent::Done(StopReason::EndTurn)];
-            let _ = events; // unused — we error at stream creation level
-            Err(eyre::eyre!("503 server error: stream unavailable"))
-        }
-
-        fn model_id(&self) -> &str {
-            "mock-always-err"
-        }
-
-        fn provider_name(&self) -> &str {
-            "mock"
-        }
-    }
-
-    // ── Provider that returns empty response (no content, no tool_calls) ──────
-
-    struct AlwaysEmptyProvider {
-        counters: Arc<CallCounters>,
-    }
-
-    #[async_trait]
-    impl LlmProvider for AlwaysEmptyProvider {
-        async fn chat(
-            &self,
-            _messages: &[Message],
-            _tools: &[ToolSpec],
-            _config: &ChatConfig,
-        ) -> eyre::Result<ChatResponse> {
-            self.counters.chat.fetch_add(1, Ordering::SeqCst);
-            eyre::bail!("non-streaming fallback should not be called under FailFast")
-        }
-
-        async fn chat_stream(
-            &self,
-            _messages: &[Message],
-            _tools: &[ToolSpec],
-            _config: &ChatConfig,
-        ) -> eyre::Result<ChatStream> {
-            self.counters.chat_stream.fetch_add(1, Ordering::SeqCst);
-            // Return a stream that yields an empty (retriable) response.
-            let events = vec![
-                StreamEvent::Usage(LlmTokenUsage::default()),
-                StreamEvent::Done(StopReason::EndTurn),
-            ];
-            Ok(Box::pin(stream::iter(events)))
-        }
-
-        fn model_id(&self) -> &str {
-            "mock-always-empty"
-        }
-
-        fn provider_name(&self) -> &str {
-            "mock"
-        }
-    }
-
-    // ── Provider that hangs forever at stream creation (build phase) ──────────
-
-    struct HangingBuildProvider;
-
-    #[async_trait]
-    impl LlmProvider for HangingBuildProvider {
-        async fn chat(
-            &self,
-            _messages: &[Message],
-            _tools: &[ToolSpec],
-            _config: &ChatConfig,
-        ) -> eyre::Result<ChatResponse> {
-            eyre::bail!("non-streaming fallback should not be called under FailFast")
-        }
-
-        async fn chat_stream(
-            &self,
-            _messages: &[Message],
-            _tools: &[ToolSpec],
-            _config: &ChatConfig,
-        ) -> eyre::Result<ChatStream> {
-            // Never resolves: simulates a provider that accepts the POST but
-            // never returns response headers (build phase hangs). The voice
-            // overall deadline must bound this, since `StreamTimeouts` only
-            // starts ticking once `consume_stream` runs.
-            std::future::pending::<()>().await;
-            unreachable!()
-        }
-
-        fn model_id(&self) -> &str {
-            "mock-hang"
-        }
-
-        fn provider_name(&self) -> &str {
-            "mock"
-        }
-    }
-
     // ── Provider that truncates a tool call on attempt 1, succeeds on 2 ───────
     // #1712: models the real failure — a native streaming tool call cut off by
     // the output cap (Done(MaxTokens) + unterminated args) on the first attempt,
@@ -914,13 +706,6 @@ mod tests {
     struct TruncateThenSucceedProvider {
         counters: Arc<CallCounters>,
         seen_max_tokens: Arc<std::sync::Mutex<Vec<Option<u32>>>>,
-    }
-
-    /// Models a local runtime which accepts semantic boundary hints and
-    /// reports the deepest checkpoint it actually restored.
-    struct SemanticCheckpointProvider {
-        seen_contexts: Arc<Mutex<Vec<PromptCacheContext>>>,
-        previous_context: Mutex<Option<PromptCacheContext>>,
     }
 
     struct NamedRouteProvider {
@@ -982,67 +767,6 @@ mod tests {
 
         fn provider_name(&self) -> &str {
             self.provider
-        }
-    }
-
-    #[async_trait]
-    impl LlmProvider for SemanticCheckpointProvider {
-        async fn chat(
-            &self,
-            _messages: &[Message],
-            _tools: &[ToolSpec],
-            _config: &ChatConfig,
-        ) -> eyre::Result<ChatResponse> {
-            eyre::bail!("streaming path should succeed in this test")
-        }
-
-        async fn chat_stream(
-            &self,
-            _messages: &[Message],
-            _tools: &[ToolSpec],
-            config: &ChatConfig,
-        ) -> eyre::Result<ChatStream> {
-            let context = config
-                .prompt_cache_context
-                .clone()
-                .expect("agent must attach provider-neutral cache context");
-            let restored = {
-                let mut previous = self.previous_context.lock().unwrap();
-                let restored = previous
-                    .as_ref()
-                    .and_then(|old| old.deepest_shared_checkpoint(&context))
-                    .cloned()
-                    .or_else(|| context.semantic_boundaries.last().cloned())
-                    .expect("local provider must receive safe semantic boundaries");
-                *previous = Some(context.clone());
-                restored
-            };
-            self.seen_contexts.lock().unwrap().push(context);
-            let events = vec![
-                StreamEvent::TextDelta("restored".to_string()),
-                StreamEvent::Usage(LlmTokenUsage {
-                    semantic_checkpoint: Some(SemanticCheckpointReport {
-                        restored_boundary_id: Some(restored.boundary_id),
-                        restored_prefix_tokens: restored.prefix_token_estimate as u32,
-                        re_prefill_tokens: restored.estimated_recompute_tokens as u32,
-                    }),
-                    ..Default::default()
-                }),
-                StreamEvent::Done(StopReason::EndTurn),
-            ];
-            Ok(Box::pin(stream::iter(events)))
-        }
-
-        fn model_id(&self) -> &str {
-            "local-semantic-test"
-        }
-
-        fn provider_name(&self) -> &str {
-            "local-test"
-        }
-
-        fn supports_semantic_checkpoint_hints(&self) -> bool {
-            true
         }
     }
 
@@ -1291,156 +1015,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn local_provider_receives_safe_boundaries_and_reports_exact_restore() {
-        let seen_contexts = Arc::new(Mutex::new(Vec::new()));
-        let provider = Arc::new(SemanticCheckpointProvider {
-            seen_contexts: seen_contexts.clone(),
-            previous_context: Mutex::new(None),
-        });
-        let (agent, _dir) = build_agent(provider).await;
-        let agent = agent
-            .with_parent_session_key("semantic-session")
-            .with_prompt_cache_epoch_id("epoch-after-compaction");
-        let mut tool_request = Message::assistant("");
-        tool_request.tool_calls = Some(vec![octos_core::ToolCall {
-            id: "call-read".to_string(),
-            name: "read".to_string(),
-            arguments: serde_json::json!({"path": "README.md"}),
-            metadata: None,
-        }]);
-        let messages_before_edit = vec![
-            Message::user("inspect the repository"),
-            tool_request.clone(),
-            Message::tool_with_thread(
-                "old README contents",
-                "call-read",
-                octos_core::ThreadId::new("thread-semantic"),
-            ),
-            Message::assistant("inspection complete"),
-        ];
-
-        let (_first_response, first_streamed, _cost) = agent
-            .call_llm_with_hooks(
-                &messages_before_edit,
-                &[],
-                &ChatConfig::default(),
-                1,
-                &octos_core::TokenUsage::default(),
-                &mut turn(),
-            )
-            .await
-            .expect("semantic-aware local provider call should succeed");
-        assert!(first_streamed);
-
-        // Editing a completed tool output invalidates that interaction and
-        // every later checkpoint, while preserving the preceding user-turn
-        // checkpoint. The local runtime must report that surviving boundary,
-        // not blindly restore the deepest checkpoint from the old request.
-        let messages_after_edit = vec![
-            Message::user("inspect the repository"),
-            tool_request,
-            Message::tool_with_thread(
-                "new README contents",
-                "call-read",
-                octos_core::ThreadId::new("thread-semantic"),
-            ),
-            Message::assistant("inspection complete"),
-        ];
-        let (response, streamed, _cost) = agent
-            .call_llm_with_hooks(
-                &messages_after_edit,
-                &[],
-                &ChatConfig::default(),
-                2,
-                &octos_core::TokenUsage::default(),
-                &mut turn(),
-            )
-            .await
-            .expect("edited suffix should fall back to its deepest surviving checkpoint");
-
-        assert!(streamed);
-        assert_eq!(response.content.as_deref(), Some("restored"));
-        let contexts = seen_contexts.lock().unwrap();
-        assert_eq!(contexts.len(), 2);
-        let before = &contexts[0];
-        let after = &contexts[1];
-        assert_eq!(before.epoch_id, "epoch-after-compaction");
-        assert_eq!(after.epoch_id, "epoch-after-compaction");
-        assert_eq!(
-            before
-                .semantic_boundaries
-                .iter()
-                .map(|boundary| boundary.boundary_kind.as_str())
-                .collect::<Vec<_>>(),
-            vec!["user_turn", "tool_interaction", "assistant_final"]
-        );
-        assert_eq!(
-            before.semantic_boundaries[0].prefix_hash, after.semantic_boundaries[0].prefix_hash,
-            "the pre-edit user boundary survives"
-        );
-        assert_ne!(
-            before.semantic_boundaries[1].prefix_hash, after.semantic_boundaries[1].prefix_hash,
-            "the edited tool interaction must invalidate its checkpoint"
-        );
-        let deepest = &before.semantic_boundaries[0];
-        let report = response
-            .usage
-            .semantic_checkpoint
-            .as_ref()
-            .expect("provider restore report must survive stream accumulation");
-        assert_eq!(
-            report.restored_boundary_id.as_deref(),
-            Some(deepest.boundary_id.as_str())
-        );
-        assert_eq!(
-            report.restored_prefix_tokens,
-            deepest.prefix_token_estimate as u32
-        );
-        assert_eq!(
-            report.re_prefill_tokens,
-            deepest.estimated_recompute_tokens as u32
-        );
-    }
-
-    /// Under FailFast, a provider whose stream always errors (retryable 503):
-    ///   - chat_stream called exactly once (no retries)
-    ///   - chat (non-streaming fallback) never called
-    #[tokio::test]
-    async fn should_call_once_and_skip_fallback_when_failfast_stream_error() {
-        let counters = Arc::new(CallCounters::default());
-        let provider = Arc::new(AlwaysErrStreamProvider {
-            counters: counters.clone(),
-        });
-        let (agent, _dir) = build_agent(provider).await;
-
-        let result = with_llm_call_policy(LlmCallPolicy::FailFast, async {
-            agent
-                .call_llm_with_hooks(
-                    &msgs(),
-                    &[],
-                    &ChatConfig::default(),
-                    1,
-                    &octos_core::TokenUsage::default(),
-                    &mut turn(),
-                )
-                .await
-        })
-        .await;
-
-        assert!(result.is_err(), "should propagate the stream error");
-        assert_eq!(
-            counters.chat_stream.load(Ordering::SeqCst),
-            1,
-            "chat_stream must be called exactly once under FailFast"
-        );
-        assert_eq!(
-            counters.chat.load(Ordering::SeqCst),
-            0,
-            "non-streaming fallback must NOT be called under FailFast"
-        );
-    }
-
     /// #1712: a truncated tool call (Done(MaxTokens) + unterminated args) is
     /// RETRYABLE — the loop retries (not instant death) AND raises the output
     /// budget for the retry so it can complete. Asserts: two stream attempts,
@@ -1492,114 +1066,6 @@ mod tests {
             seen[1].unwrap() > small_cap,
             "attempt 2 must raise the output budget (was {:?})",
             seen[1]
-        );
-    }
-
-    /// Under FailFast, a provider whose stream always returns an empty response:
-    ///   - chat_stream called exactly once (no retries)
-    ///   - chat (non-streaming fallback) never called
-    #[tokio::test]
-    async fn should_call_once_and_skip_fallback_when_failfast_empty_response() {
-        let counters = Arc::new(CallCounters::default());
-        let provider = Arc::new(AlwaysEmptyProvider {
-            counters: counters.clone(),
-        });
-        let (agent, _dir) = build_agent(provider).await;
-
-        let result = with_llm_call_policy(LlmCallPolicy::FailFast, async {
-            agent
-                .call_llm_with_hooks(
-                    &msgs(),
-                    &[],
-                    &ChatConfig::default(),
-                    1,
-                    &octos_core::TokenUsage::default(),
-                    &mut turn(),
-                )
-                .await
-        })
-        .await;
-
-        assert!(result.is_err(), "should propagate the empty response error");
-        assert_eq!(
-            counters.chat_stream.load(Ordering::SeqCst),
-            1,
-            "chat_stream must be called exactly once under FailFast (empty response)"
-        );
-        assert_eq!(
-            counters.chat.load(Ordering::SeqCst),
-            0,
-            "non-streaming fallback must NOT be called under FailFast (empty response)"
-        );
-    }
-
-    /// Under FailFast, a provider that hangs forever at stream *build* must be
-    /// bounded by the voice overall deadline (the `StreamTimeouts` guards only
-    /// start once `consume_stream` runs, so they cannot catch a build-phase
-    /// hang). The call returns `Err` well within the deadline + slack.
-    #[tokio::test]
-    async fn should_timeout_build_stream_when_failfast() {
-        let (agent, _dir) = build_agent(Arc::new(HangingBuildProvider)).await;
-        let agent = agent.with_config(AgentConfig {
-            voice_overall_deadline: Duration::from_millis(50),
-            ..AgentConfig::default()
-        });
-
-        let start = Instant::now();
-        let result = with_llm_call_policy(LlmCallPolicy::FailFast, async {
-            agent
-                .call_llm_with_hooks(
-                    &msgs(),
-                    &[],
-                    &ChatConfig::default(),
-                    1,
-                    &octos_core::TokenUsage::default(),
-                    &mut turn(),
-                )
-                .await
-        })
-        .await;
-
-        assert!(
-            result.is_err(),
-            "build-stream hang must surface as an error"
-        );
-        assert!(
-            start.elapsed() < Duration::from_secs(2),
-            "build-stream hang must be bounded by the voice overall deadline, took {:?}",
-            start.elapsed()
-        );
-    }
-
-    /// Normal policy keeps the long production backstop — the voice deadline is
-    /// not applied — so the same hang is NOT bounded by 50ms. (We only assert
-    /// it does not return quickly; we never actually wait out the real cap.)
-    #[tokio::test]
-    async fn should_not_apply_voice_deadline_when_normal_policy() {
-        let (agent, _dir) = build_agent(Arc::new(HangingBuildProvider)).await;
-        let agent = agent.with_config(AgentConfig {
-            voice_overall_deadline: Duration::from_millis(50),
-            ..AgentConfig::default()
-        });
-
-        // Under Normal policy the 50ms voice deadline must be ignored, so the
-        // call is still pending after comfortably more than 50ms.
-        let pending = tokio::time::timeout(Duration::from_millis(300), async {
-            agent
-                .call_llm_with_hooks(
-                    &msgs(),
-                    &[],
-                    &ChatConfig::default(),
-                    1,
-                    &octos_core::TokenUsage::default(),
-                    &mut turn(),
-                )
-                .await
-        })
-        .await;
-        assert!(
-            pending.is_err(),
-            "Normal policy must NOT apply the 50ms voice deadline"
         );
     }
 }

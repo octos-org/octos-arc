@@ -1,14 +1,14 @@
 //! Pre-dispatch policy gate shared by every MCP-agent dispatch site —
-//! [`crate::tools::SpawnTool`]'s `agent_mcp` branch (#714) and the
-//! [`octos_swarm::Swarm`] dispatcher (#710 / #713).
+//! [`crate::tools::SpawnTool`]'s `agent_mcp` branch (#714) being the one
+//! remaining call site (the retired `octos_swarm::Swarm` dispatcher was its
+//! original co-consumer, #710 / #713).
 //!
 //! Pre-#714, [`crate::tools::SpawnTool`] dispatched to its configured
 //! MCP backend via [`crate::tools::mcp_agent::dispatch_with_metrics`]
-//! with no policy gate at all — even when `octos serve` had wired one
-//! into the swarm side, the direct spawn path was a bypass. Lifting
-//! the gate out of `octos-swarm` and into this crate lets both call
-//! sites enforce the same shape of gates against the same shared
-//! types ([`crate::ToolPolicy`], [`crate::ToolApprovalRequester`],
+//! with no policy gate at all. Lifting the gate into this crate lets
+//! the spawn path enforce the same shape of gates as the native path
+//! against the same shared types ([`crate::ToolPolicy`],
+//! [`crate::ToolApprovalRequester`],
 //! [`crate::tools::mcp_agent::McpAgentBackend`]).
 //!
 //! [`DispatchPolicy`] **exposes** the same shape of gates the native
@@ -22,10 +22,9 @@
 //! constructor's rustdoc for the full boundary).
 //!
 //! The gate is **opt-in**: callers wire it via
-//! [`crate::tools::SpawnTool::with_dispatch_policy`] or
-//! [`octos_swarm::SwarmBuilder::with_dispatch_policy`]. Without a
+//! [`crate::tools::SpawnTool::with_dispatch_policy`]. Without a
 //! configured policy the dispatcher's behaviour is unchanged so
-//! existing M7.1 callers and tests do not regress.
+//! existing callers and tests do not regress.
 //!
 //! ## Failure surfacing
 //!

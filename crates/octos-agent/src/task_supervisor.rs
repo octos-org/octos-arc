@@ -2,8 +2,9 @@
 //!
 //! The `TaskSupervisor` is a status store that tracks background tasks from
 //! spawn to completion. It does NOT enforce workspace contracts — that
-//! responsibility belongs to `workspace_contract::enforce()`, which runs
-//! inline in `execution.rs` BEFORE the supervisor status is updated.
+//! responsibility belongs to `workspace_contract::enforce_spawn_task_contract`,
+//! which runs inline in `execution.rs` BEFORE the supervisor status is
+//! updated.
 //!
 //! The supervisor only sees truth-checked states: `Completed` means the
 //! workspace contract was satisfied, `Failed` means it was not.
@@ -96,17 +97,6 @@ pub enum RegisterTaskError {
         count: usize,
         cap: usize,
     },
-    /// NEW-18b: the parent task identified by `parent_tool_call_id` is
-    /// already in a terminal state (`Failed`, `Completed`, or
-    /// `Cancelled`). Refusing the child registration prevents the
-    /// "phantom child task" pattern where a pipeline's tokio workers
-    /// survive a serve restart, observe the orphan-swept parent as
-    /// `failed`, and keep registering NEW node tasks against the live
-    /// supervisor — wasting CPU/tokens and confusing the UI.
-    ParentTerminal {
-        parent_tool_call_id: String,
-        parent_status: TaskStatus,
-    },
     /// #21 (round-4, codex #17 B3) — the registration's FIRST durable
     /// task-ledger write failed, so the task row (which must already carry
     /// the workspace stamp: the crash window between a `workspace_root=None`
@@ -130,14 +120,6 @@ impl std::fmt::Display for RegisterTaskError {
             } => write!(
                 f,
                 "child fanout exceeded ({count} of {cap}) for parent session '{parent_session_key}'"
-            ),
-            Self::ParentTerminal {
-                parent_tool_call_id,
-                parent_status,
-            } => write!(
-                f,
-                "parent task (tool_call_id='{parent_tool_call_id}') is already {} — refusing child registration",
-                parent_status.as_str(),
             ),
             Self::WorkspacePersistFailed {
                 tool_call_id,
@@ -854,7 +836,7 @@ fn is_terminal_runtime_state(state: &TaskRuntimeState) -> bool {
 /// [`TaskSupervisor::enable_persistence`] every turn over the SHARED per-session
 /// ledger. The orphan-sweep inside `enable_persistence` *assumes* "non-terminal
 /// ⇒ no live worker" (true only at true cross-process startup). But a detached
-/// `spawn_only` task (e.g. `run_pipeline deep_research`, up to ~3600s) outlives
+/// `spawn_only` task (e.g. a long-running background generation, up to ~3600s) outlives
 /// the turn that launched it: when turn N+1 opens, its fresh supervisor restores
 /// turn N's still-`Running` row and falsely reaps it as "orphaned across
 /// restart" — even though the worker is alive on turn N's supervisor and will
@@ -1581,23 +1563,11 @@ impl TaskSupervisor {
         // no new work has been scheduled yet). Mark them Failed via the
         // standard mark_failed path so the JSONL ledger gets a proper
         // terminal entry and re-loading is idempotent.
-        //
-        // NEW-18b — capture the `(id, tool_call_id, tool_name)` triple
-        // for every orphan so that after the parent transition fires we
-        // can cascade-fail any LIVE descendants (children that already
-        // registered against this supervisor under the same
-        // tool_call_id but haven't transitioned to a terminal state
-        // themselves). This is Option-C in the bug brief: a backstop
-        // for the race where a pipeline child registers before the
-        // sweep runs, or where a straggler pipeline tokio worker
-        // survives the restart and re-registers a node task between
-        // load and sweep.
         let orphans: Vec<(String, String, String)> = {
             let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
 
             // fix/orphan-sweep-liveness-gate (codex round-2): a live detached
-            // parent (e.g. `run_pipeline deep_research`) registers
-            // `pipeline:<node>` CHILD rows that SHARE its `tool_call_id` but
+            // parent registers CHILD rows that SHARE its `tool_call_id` but
             // carry their OWN task ids — and only the PARENT worker arms a
             // `TaskTerminalGuard`, so the children are never inserted into the
             // live-set. Gating solely on `is_task_live(&task.id)` therefore
@@ -1609,27 +1579,6 @@ impl TaskSupervisor {
             // `mark_descendants_failed`), so none of them is an orphan. Empty
             // tcids are skipped so an id-less row cannot blanket-exempt every
             // other empty-tcid row.
-            let live_tool_call_ids: HashSet<&str> = tasks
-                .values()
-                .filter(|task| !task.tool_call_id.is_empty() && is_task_live(&task.id))
-                .map(|task| task.tool_call_id.as_str())
-                .collect();
-
-            // True for a row that is live-by-proxy: a `pipeline:<node>` child
-            // whose live parent shares its `tool_call_id`. Synthesized
-            // `tool_call_id`s are process-unique (codex round-3/4 made Gemini +
-            // inline-invoke so), and native provider ids are unique, so the
-            // only rows sharing a live tcid are that parent and its pipeline
-            // children. The `pipeline:` guard is defense-in-depth: it bounds
-            // the proxy-exemption to genuine pipeline nodes, so even a FUTURE
-            // non-unique producer could at worst spare a stray `pipeline:` row,
-            // never an arbitrary dead task. The live parent itself is exempted
-            // by its own unique id below, not by this proxy.
-            let is_live_pipeline_child = |task: &BackgroundTask| {
-                task.tool_name.starts_with("pipeline:")
-                    && live_tool_call_ids.contains(task.tool_call_id.as_str())
-            };
-
             tasks
                 .values()
                 // CHECK the sweep's "non-terminal ⇒ no live worker"
@@ -1637,15 +1586,11 @@ impl TaskSupervisor {
                 // spawn_only worker (alive on a prior per-turn supervisor in
                 // THIS process) is in the process-global live-set, so it is
                 // NEVER swept — its own worker will drive it terminal. A
-                // pipeline child of such a worker is live-by-proxy and is
-                // likewise exempt. A genuinely dead task from a true
-                // cross-process restart is absent from the live-set (new
-                // process ⇒ empty set) and shares no live tcid ⇒ still
-                // correctly reaped below.
+                // genuinely dead task from a true cross-process restart is
+                // absent from the live-set (new process ⇒ empty set) and is
+                // still correctly reaped below.
                 .filter(|task| {
-                    !is_terminal_runtime_state(&task.runtime_state)
-                        && !is_task_live(&task.id)
-                        && !is_live_pipeline_child(task)
+                    !is_terminal_runtime_state(&task.runtime_state) && !is_task_live(&task.id)
                 })
                 .map(|task| {
                     (
@@ -1656,57 +1601,14 @@ impl TaskSupervisor {
                 })
                 .collect()
         };
-        // #27c — park cross-restart TOP-LEVEL orphans for CLIENT
-        // REATTACHMENT instead of failing them: the durable work (a staged
-        // peer's brief + worktree) survives the restart, so a returning
-        // client can adopt the task (`mark_running` revives Parked →
-        // Running). Live evidence: the 2026-08-26/27 f182/a9c4 streams
-        // recorded 24+28 "orphaned across restart" FAILED children whose
-        // work was fully recoverable.
-        //
-        // RED LINE ① — parking is scoped to `peer_handoff` tasks ONLY: a
-        // staged peer has durable state (brief + worktree on disk) that a
-        // returning client can adopt. Every OTHER orphan (pipeline
-        // children, run_pipeline parents, generic spawned work) has no
-        // independent re-attach path, so it keeps the legacy genuine
-        // `Failed` verdict — a real failure must never masquerade as
+        // Cross-restart TOP-LEVEL orphans fail (the peer re-attach path this
+        // used to park for is gone). A real failure must never masquerade as
         // recoverable.
-        for (task_id, _, tool_name) in &orphans {
-            if tool_name == "peer_handoff" {
-                self.mark_parked(task_id, "orphaned across restart".to_string());
-            } else {
-                self.mark_failed(task_id, "orphaned across restart".to_string());
-            }
+        for (task_id, _, _) in &orphans {
+            self.mark_failed(task_id, "orphaned across restart".to_string());
         }
         if !orphans.is_empty() {
             counter!("octos_orphaned_tasks_reaped_total").increment(orphans.len() as u64);
-        }
-
-        // Option C — cascade orphaned-parent transitions onto any
-        // active `pipeline:<node>` children sharing the parent's
-        // tool_call_id. `mark_descendants_failed` is the same helper
-        // the `RunPipelineTool` timeout arm uses, and is a no-op on
-        // already-terminal children and on parents whose tool_name
-        // starts with `pipeline:` (so cascade siblings don't recurse).
-        // The reason string is intentionally distinct from the parent
-        // sweep ("parent task orphaned across restart") so operators
-        // can tell which transition wrote the failure record.
-        let mut cascade_seen: HashSet<String> = HashSet::new();
-        for (_, parent_tcid, parent_tool_name) in &orphans {
-            if parent_tcid.is_empty() {
-                continue;
-            }
-            // Skip pipeline node siblings — they are children, not
-            // parents. Only `run_pipeline` (and any future non-pipeline
-            // parents that supervise pipeline children) should trigger
-            // the cascade.
-            if parent_tool_name.starts_with("pipeline:") {
-                continue;
-            }
-            if !cascade_seen.insert(parent_tcid.clone()) {
-                continue;
-            }
-            self.mark_descendants_failed(parent_tcid, "parent task orphaned across restart");
         }
 
         // #2056 — hand the FINAL rebuilt table to the restore observer. Fired
@@ -1769,16 +1671,6 @@ impl TaskSupervisor {
         if let Some(hook) = hook {
             hook();
         }
-    }
-
-    /// Install a missed-restore hook for tests. See
-    /// [`Self::run_restore_notify_hook`].
-    #[cfg(test)]
-    pub(crate) fn set_restore_notify_hook_for_test(&self, hook: impl Fn() + Send + Sync + 'static) {
-        *self
-            .restore_notify_hook
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(hook));
     }
 
     /// #2056 round 3 — THE install path for the restore observer, shared by
@@ -2159,7 +2051,6 @@ impl TaskSupervisor {
             task_ledger_path,
             None,
             None,
-            None,
         ) {
             Ok(id) => id,
             Err(error) => {
@@ -2187,15 +2078,7 @@ impl TaskSupervisor {
         session_key: Option<&str>,
         tool_input: Option<Value>,
     ) -> String {
-        match self.register_full(
-            tool_name,
-            tool_call_id,
-            session_key,
-            None,
-            tool_input,
-            None,
-            None,
-        ) {
+        match self.register_full(tool_name, tool_call_id, session_key, None, tool_input, None) {
             Ok(id) => id,
             Err(error) => {
                 tracing::error!(
@@ -2230,7 +2113,6 @@ impl TaskSupervisor {
             None,
             tool_input,
             originating_client_message_id,
-            None,
         ) {
             Ok(id) => id,
             Err(error) => {
@@ -2248,15 +2130,10 @@ impl TaskSupervisor {
 
     /// NEW-18b — return the [`TaskStatus`] of the parent task identified
     /// by `parent_tool_call_id`, with the relaunch-safe selection rule:
-    /// prefer an **active** non-pipeline record if one exists, otherwise
+    /// prefer an **active** record if one exists, otherwise
     /// fall back to the most-recently-updated terminal record.
     ///
     /// Filtering rules:
-    /// * Records whose `tool_name` starts with `pipeline:` are excluded —
-    ///   every pipeline node child reuses the parent's `tool_call_id`
-    ///   (see `executor.rs::register_node_task`), so without the filter
-    ///   this lookup would return the status of a sibling node instead
-    ///   of the `run_pipeline` parent.
     /// * When `relaunch` re-registers a new parent task with the same
     ///   `tool_call_id` as a failed predecessor, the new record is
     ///   active and the old one is terminal. Preferring the active
@@ -2264,8 +2141,7 @@ impl TaskSupervisor {
     ///   relaunch just because the stale failed record has a more
     ///   recent (idempotent) update.
     ///
-    /// Returns `None` when no parent record matches (e.g. ephemeral
-    /// test harnesses that never register a `run_pipeline` task).
+    /// Returns `None` when no parent record matches.
     pub fn parent_status_for_tool_call_id(&self, parent_tool_call_id: &str) -> Option<TaskStatus> {
         if parent_tool_call_id.is_empty() {
             return None;
@@ -2282,67 +2158,23 @@ impl TaskSupervisor {
         tasks: &HashMap<String, BackgroundTask>,
         parent_tool_call_id: &str,
     ) -> Option<TaskStatus> {
-        // Codex P2: prefer an active non-pipeline record (live parent)
-        // over a stale terminal record sharing the same tool_call_id.
+        // Codex P2: prefer an active record (live parent) over a stale
+        // terminal record sharing the same tool_call_id.
         // This makes the lookup relaunch-safe — `TaskSupervisor::relaunch`
         // re-registers the new parent with the original tool_call_id,
         // so the active record is the true current parent.
         if let Some(active) = tasks
             .values()
-            .filter(|task| {
-                task.tool_call_id == parent_tool_call_id
-                    && !task.tool_name.starts_with("pipeline:")
-                    && task.status.is_active()
-            })
+            .filter(|task| task.tool_call_id == parent_tool_call_id && task.status.is_active())
             .max_by_key(|task| task.updated_at)
         {
             return Some(active.status.clone());
         }
         tasks
             .values()
-            .filter(|task| {
-                task.tool_call_id == parent_tool_call_id && !task.tool_name.starts_with("pipeline:")
-            })
+            .filter(|task| task.tool_call_id == parent_tool_call_id)
             .max_by_key(|task| task.updated_at)
             .map(|task| task.status.clone())
-    }
-
-    /// NEW-18b — strict registration for a pipeline node child task.
-    ///
-    /// Wraps [`Self::register_full`] with an Option-A preventive guard:
-    /// the parent-terminal check and the child insertion happen UNDER
-    /// THE SAME `tasks` lock acquisition (see
-    /// `parent_terminal_check_tool_call_id` parameter), so concurrent
-    /// transitions on the parent cannot slip past the guard between
-    /// lookup and insert (codex P2 atomicity concern).
-    ///
-    /// Refuses with [`RegisterTaskError::ParentTerminal`] when the
-    /// parent (looked up via [`Self::pick_parent_status`]) is in a
-    /// terminal state. This closes the "phantom child task" race where
-    /// the orphan-sweep in [`Self::enable_persistence`] marks the parent
-    /// failed but a straggler pipeline tokio worker that survived the
-    /// restart keeps registering fresh node children against the live
-    /// supervisor.
-    ///
-    /// On a non-terminal (or unknown) parent the call falls through to
-    /// the regular registration path (cap checks still apply). Callers
-    /// should treat the returned error as a signal to abort the local
-    /// node future — there's no successor task to drive forward.
-    pub fn try_register_node_task(
-        &self,
-        node_tool_name: &str,
-        parent_tool_call_id: &str,
-        session_key: Option<&str>,
-    ) -> Result<String, RegisterTaskError> {
-        self.register_full(
-            node_tool_name,
-            parent_tool_call_id,
-            session_key,
-            None,
-            None,
-            None,
-            Some(parent_tool_call_id),
-        )
     }
 
     /// Strict variant of [`Self::register_with_input`]: returns the typed
@@ -2356,57 +2188,7 @@ impl TaskSupervisor {
         session_key: Option<&str>,
         tool_input: Option<Value>,
     ) -> Result<String, RegisterTaskError> {
-        self.register_full(
-            tool_name,
-            tool_call_id,
-            session_key,
-            None,
-            tool_input,
-            None,
-            None,
-        )
-    }
-
-    /// #21 (round-4, codex #17 B3) — STRICT peer-task registration whose
-    /// FIRST durable ledger row already carries the workspace stamp.
-    ///
-    /// The pre-#21 shape (`register` + `set_workspace_root`) persisted the
-    /// task row with `workspace_root: None` first and stamped the workspace
-    /// in a SECOND snapshot append; a crash between the two (or a failed
-    /// second write — which was only warned) left the restored task
-    /// unstamped, and the `/stop` purge / continuation workspace scoping
-    /// fell back to the never-matching `output_files` derivation.
-    ///
-    /// This entry point closes the window structurally: the task is built
-    /// WITH the workspace stamp, and the registration only completes if the
-    /// first `persist_snapshot` write SUCCEEDS. On failure the task is never
-    /// inserted or published to registration observers, and
-    /// [`RegisterTaskError::WorkspacePersistFailed`] is returned. When the
-    /// supervisor has NO persistence path configured the write is trivially
-    /// "successful" (in-memory supervision only) and the registration
-    /// proceeds — the same no-store contract as every other register path.
-    ///
-    /// The stamp accepts a lossless-encoded workspace scope (see
-    /// `peers::workspace_scope_encode`); an empty string is normalized to
-    /// `None` (unstamped, legacy shape).
-    pub fn try_register_peer_with_workspace(
-        &self,
-        tool_name: &str,
-        tool_call_id: &str,
-        session_key: Option<&str>,
-        workspace_scope: Option<&str>,
-    ) -> Result<String, RegisterTaskError> {
-        self.register_full_with_workspace(
-            tool_name,
-            tool_call_id,
-            session_key,
-            None,
-            None,
-            None,
-            None,
-            workspace_scope,
-            true,
-        )
+        self.register_full(tool_name, tool_call_id, session_key, None, tool_input, None)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2418,7 +2200,6 @@ impl TaskSupervisor {
         task_ledger_path: Option<&str>,
         tool_input: Option<Value>,
         originating_client_message_id: Option<String>,
-        parent_terminal_check_tool_call_id: Option<&str>,
     ) -> Result<String, RegisterTaskError> {
         self.register_full_with_workspace(
             tool_name,
@@ -2427,7 +2208,6 @@ impl TaskSupervisor {
             task_ledger_path,
             tool_input,
             originating_client_message_id,
-            parent_terminal_check_tool_call_id,
             None,
             false,
         )
@@ -2442,51 +2222,9 @@ impl TaskSupervisor {
         task_ledger_path: Option<&str>,
         tool_input: Option<Value>,
         originating_client_message_id: Option<String>,
-        parent_terminal_check_tool_call_id: Option<&str>,
         workspace_scope: Option<&str>,
         require_persistence: bool,
     ) -> Result<String, RegisterTaskError> {
-        // Codex P2 follow-up: early terminal-parent check, BEFORE the
-        // fan-out cap path. The cap path has side effects (poisoning
-        // the parent session, mark_failed-ing every active sibling
-        // under the same `parent_session_key`). Running those when
-        // the parent is already terminal would incorrectly cascade-
-        // fail unrelated active children whose parent is still alive
-        // but happens to share the session key. By returning
-        // `ParentTerminal` here we restore the pre-codex-P2 semantics
-        // where a terminal parent short-circuits without touching the
-        // cap state. The in-lock recheck at the insertion point still
-        // serves as the atomic safety net for the race where a parent
-        // becomes terminal between this check and the insert.
-        if let Some(parent_tcid) = parent_terminal_check_tool_call_id
-            && !parent_tcid.is_empty()
-        {
-            let status_opt = {
-                let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
-                Self::pick_parent_status(&tasks, parent_tcid)
-            };
-            if let Some(status) = status_opt
-                && status.is_terminal()
-            {
-                tracing::warn!(
-                    tool_name,
-                    parent_tool_call_id = parent_tcid,
-                    parent_status = status.as_str(),
-                    "refusing pipeline node child registration: parent task is terminal (pre-cap)"
-                );
-                counter!(
-                    "octos_task_supervisor_register_node_rejected_total",
-                    "reason" => "parent_terminal".to_string(),
-                    "parent_status" => status.as_str().to_string(),
-                )
-                .increment(1);
-                return Err(RegisterTaskError::ParentTerminal {
-                    parent_tool_call_id: parent_tcid.to_string(),
-                    parent_status: status,
-                });
-            }
-        }
-
         // Per-parent fan-out cap. Detached registrations (`session_key ==
         // None`) skip the gate because they do not have a parent to
         // attribute the count to — those are MCP/test bookkeeping calls
@@ -2531,16 +2269,10 @@ impl TaskSupervisor {
                 return Err(error);
             }
 
-            // Codex P2 follow-up #2: combine the per-session cap query
-            // AND the parent-terminal recheck under the SAME `tasks`
-            // lock acquisition. If the parent has flipped to terminal
-            // since the pre-cap check, return `ParentTerminal` instead
-            // of triggering the cap path's side effects (poisoning the
-            // session, force-failing every active sibling). The
-            // recheck is gated on `parent_terminal_check_tool_call_id`
-            // so non-pipeline callers (e.g. spawn_only register paths)
-            // continue to hit the cap path as before.
-            let (current_count, parent_terminal_status) = {
+            // Run the per-session cap query under a SINGLE `tasks`
+            // lock acquisition so the count and any subsequent side
+            // effects observe a consistent snapshot.
+            let current_count = {
                 let tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
                 // Count LIVE children only. `tasks` is never pruned, so an
                 // unfiltered count is the session's lifetime total — a
@@ -2564,31 +2296,8 @@ impl TaskSupervisor {
                             && (task.status.is_active() || is_task_live(&task.id))
                     })
                     .count();
-                let terminal = parent_terminal_check_tool_call_id
-                    .filter(|tcid| !tcid.is_empty())
-                    .and_then(|tcid| Self::pick_parent_status(&tasks, tcid))
-                    .filter(|status| status.is_terminal());
-                (count, terminal)
+                count
             };
-            if let Some(status) = parent_terminal_status {
-                let parent_tcid = parent_terminal_check_tool_call_id.unwrap_or_default();
-                tracing::warn!(
-                    tool_name,
-                    parent_tool_call_id = parent_tcid,
-                    parent_status = status.as_str(),
-                    "refusing pipeline node child registration: parent task terminal at cap-recheck (atomic)"
-                );
-                counter!(
-                    "octos_task_supervisor_register_node_rejected_total",
-                    "reason" => "parent_terminal".to_string(),
-                    "parent_status" => status.as_str().to_string(),
-                )
-                .increment(1);
-                return Err(RegisterTaskError::ParentTerminal {
-                    parent_tool_call_id: parent_tcid.to_string(),
-                    parent_status: status,
-                });
-            }
             if current_count >= cap {
                 // Mark the parent session as poisoned so subsequent
                 // attempts fail fast without re-counting.
@@ -2695,38 +2404,6 @@ impl TaskSupervisor {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
-        // Codex P2 atomicity: when this is a child-task registration
-        // that requested the parent-terminal guard, recheck parent
-        // status UNDER the same lock that performs the insertion. This
-        // closes the race where a concurrent transition could mark the
-        // parent terminal between an outside-lock lookup and the
-        // insert — without it, a worker could observe the parent as
-        // Running, get descheduled while `mark_failed` +
-        // `mark_descendants_failed` run, and then insert a fresh
-        // `pipeline:<node>` after the cascade.
-        if let Some(parent_tcid) = parent_terminal_check_tool_call_id
-            && !parent_tcid.is_empty()
-            && let Some(status) = Self::pick_parent_status(&tasks, parent_tcid)
-            && status.is_terminal()
-        {
-            drop(tasks);
-            tracing::warn!(
-                tool_name,
-                parent_tool_call_id = parent_tcid,
-                parent_status = status.as_str(),
-                "refusing pipeline node child registration: parent task is terminal (atomic recheck)"
-            );
-            counter!(
-                "octos_task_supervisor_register_node_rejected_total",
-                "reason" => "parent_terminal".to_string(),
-                "parent_status" => status.as_str().to_string(),
-            )
-            .increment(1);
-            return Err(RegisterTaskError::ParentTerminal {
-                parent_tool_call_id: parent_tcid.to_string(),
-                parent_status: status,
-            });
-        }
         // Publish the task only after its first, already-stamped row has
         // been accepted. Holding the task lock also prevents readers from
         // observing an uncommitted registration.
@@ -3243,62 +2920,6 @@ impl TaskSupervisor {
         }
     }
 
-    /// Cascade-fail every still-active child of `parent_tool_call_id`.
-    ///
-    /// Used by the `run_pipeline` timeout arm to flush orphan
-    /// `pipeline:<node>` child tasks when the parent future is dropped
-    /// before per-node `mark_completed` / `mark_failed` can fire. Without
-    /// this cascade the children stay forever as `state: "running"` in
-    /// the supervisor, and the SessionTaskIndicator on the dashboard
-    /// shows e.g. `pipeline:analyze running` indefinitely.
-    ///
-    /// IMPORTANT: filters to NODE children only via the `pipeline:`
-    /// `tool_name` prefix. The parent `run_pipeline` task is itself
-    /// registered with the same `tool_call_id` (see
-    /// `execution.rs::register_task_with_input_and_cmid`), and pipeline
-    /// node tasks reuse that id via `executor.rs::register_node_task`.
-    /// Without the prefix filter the cascade would also mark the parent
-    /// failed, racing with the parent runner's own `mark_failed` path.
-    /// `pipeline:` is the only prefix `register_node_task` ever emits,
-    /// so this is a precise filter for "node tasks under this run".
-    ///
-    /// Snapshots the matching active task ids under the `tasks` mutex
-    /// first, then drops the lock and calls `mark_failed` per id so the
-    /// per-task lock acquisition inside `mark_failed` does not deadlock
-    /// on the snapshot. Returns the number of children that were
-    /// transitioned to `Failed`. Already-terminal tasks are skipped by
-    /// `is_active()` and the deadlock-safe `mark_failed` guard.
-    pub fn mark_descendants_failed(&self, parent_tool_call_id: &str, reason: &str) -> usize {
-        if parent_tool_call_id.is_empty() {
-            return 0;
-        }
-        let active_children: Vec<String> = self
-            .tasks
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .values()
-            .filter(|task| {
-                task.tool_call_id == parent_tool_call_id
-                    && task.status.is_active()
-                    && task.tool_name.starts_with("pipeline:")
-            })
-            .map(|task| task.id.clone())
-            .collect();
-        let count = active_children.len();
-        for child_id in active_children {
-            self.mark_failed(&child_id, reason.to_string());
-        }
-        if count > 0 {
-            tracing::info!(
-                parent_tool_call_id = %parent_tool_call_id,
-                cascaded = count,
-                reason = %reason,
-                "cascade-failed child tasks under parent tool_call_id"
-            );
-        }
-        count
-    }
-
     /// Emit a `SpawnOnlyFailureSignal` for a freshly-failed task, if a
     /// failure callback has been registered. The error_message is taken
     /// from the task's `error` field (set immediately before this call).
@@ -3537,26 +3158,6 @@ impl TaskSupervisor {
                     Some(runtime_detail.to_string()),
                 );
             }
-            HarnessEventPayload::Artifact { .. } => {
-                self.mark_runtime_state(
-                    task_id,
-                    TaskRuntimeState::DeliveringOutputs,
-                    Some(runtime_detail.to_string()),
-                );
-            }
-            HarnessEventPayload::ValidatorResult { data } => {
-                self.mark_runtime_state(
-                    task_id,
-                    TaskRuntimeState::VerifyingOutputs,
-                    Some(runtime_detail.to_string()),
-                );
-                if !data.passed {
-                    let message = data.message.clone().unwrap_or_else(|| {
-                        "validator rejected structured harness event".to_string()
-                    });
-                    self.mark_failed(task_id, message);
-                }
-            }
             HarnessEventPayload::Failure { data } => {
                 self.mark_runtime_state(
                     task_id,
@@ -3564,11 +3165,6 @@ impl TaskSupervisor {
                     Some(runtime_detail.to_string()),
                 );
                 self.mark_failed(task_id, data.message.clone());
-            }
-            HarnessEventPayload::McpServerCall { .. } => {
-                // MCP-server dispatch events are audit records — they describe
-                // a call that already mapped onto the supervisor via
-                // run-to-completion. Nothing to reapply to lifecycle state.
             }
             HarnessEventPayload::SubAgentDispatch { .. } => {
                 // Dispatch events are observational — they record the fact
@@ -3580,75 +3176,6 @@ impl TaskSupervisor {
                 self.mark_runtime_state(
                     task_id,
                     TaskRuntimeState::ExecutingTool,
-                    Some(runtime_detail.to_string()),
-                );
-            }
-            HarnessEventPayload::SwarmDispatch { .. } => {
-                // Swarm dispatch events are observational from the
-                // supervisor's perspective — the `octos-swarm` primitive
-                // owns its own redb-backed session state and drives the
-                // retry loop. We just surface the aggregate detail so
-                // operators can see fan-out progress.
-                self.mark_runtime_state(
-                    task_id,
-                    TaskRuntimeState::ExecutingTool,
-                    Some(runtime_detail.to_string()),
-                );
-            }
-            HarnessEventPayload::SwarmReviewDecision { .. } => {
-                // Review decisions are supervisor-authored audit records.
-                // They do not move the task lifecycle — the originating
-                // dispatch already reached a terminal state when the
-                // review panel was shown. Surface the detail so operators
-                // can see accept/reject transitions on the timeline.
-                self.mark_runtime_state(
-                    task_id,
-                    snapshot.runtime_state,
-                    Some(runtime_detail.to_string()),
-                );
-            }
-            HarnessEventPayload::CostAttribution { .. } => {
-                // Cost attributions are purely observational — they are
-                // committed after a sub-agent dispatch succeeds and do
-                // not move the task's lifecycle. Attach the structured
-                // detail so operators see the spend breakdown on the
-                // same task row as the dispatch.
-                self.mark_runtime_state(
-                    task_id,
-                    TaskRuntimeState::ExecutingTool,
-                    Some(runtime_detail.to_string()),
-                );
-            }
-            HarnessEventPayload::RoutingDecision { .. } => {
-                // Routing decisions are observational — they do not change the
-                // task's lifecycle state. We still attach the detail so the
-                // operator dashboard can surface the tier/reasons for this
-                // turn without inventing a dedicated sidecar channel.
-                self.mark_runtime_state(
-                    task_id,
-                    TaskRuntimeState::ExecutingTool,
-                    Some(runtime_detail.to_string()),
-                );
-            }
-            HarnessEventPayload::CredentialRotation { .. } => {
-                // Credential rotations are observability-only — they do not
-                // change the task lifecycle. We still update runtime_detail
-                // so operators can see which key is now active.
-                self.mark_runtime_state(
-                    task_id,
-                    snapshot.runtime_state,
-                    Some(runtime_detail.to_string()),
-                );
-            }
-            HarnessEventPayload::SessionSanitized { .. } => {
-                // Session-sanitize events are observability-only (M8.6).
-                // They fire once per resume and describe what the resume
-                // policy dropped — the task lifecycle is not affected; the
-                // session actor will subsequently drive normal
-                // Queued → Executing transitions as usual.
-                self.mark_runtime_state(
-                    task_id,
-                    snapshot.runtime_state,
                     Some(runtime_detail.to_string()),
                 );
             }
@@ -4090,7 +3617,7 @@ impl TaskSupervisor {
     /// projection-field updater, `mark_completed` / `mark_failed` /
     /// `cancel` (terminal transitions), `record_final_output`, and
     /// `mark_child_session_outcome`. A long-but-progressing task (e.g. a
-    /// `deep_research` pipeline streaming phase events) therefore keeps
+    /// `bg_research` pipeline streaming phase events) therefore keeps
     /// its heartbeat fresh and is NEVER reaped; only genuinely silent
     /// workers are. The default 30-min timeout additionally matches the
     /// agent loop's per-tool wall-clock backstop (1800s), so the reaper

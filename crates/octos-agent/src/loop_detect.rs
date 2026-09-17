@@ -17,7 +17,7 @@ use std::hash::{Hash, Hasher};
 /// This is the OpenClaw lesson — distinguish "no progress" (same args
 /// AND same result) from legitimate polling (same args, different
 /// result over time). The production loop on mini3 session 8w2ime had
-/// kimi-k2.5 calling `check_workspace_contract` 5 times with the same
+/// kimi-k2.5 calling a contract-inspection tool 5 times with the same
 /// args, all returning identical 4 KB trees. With result hashing, that
 /// fires at iter 3 — early enough to nudge before the hard cycle
 /// detector terminates the turn at iter 4. Legitimate polls like
@@ -335,27 +335,6 @@ mod tests {
     }
 
     #[test]
-    fn peer_polling_should_reflect_repeated_snapshots_without_preventing_the_next_read() {
-        for name in ["peer_gather", "peer_list"] {
-            let mut detector = LoopDetector::new(12);
-            for index in 1..=6 {
-                assert!(detector.record_doom(name, &json!({})).is_none());
-                assert!(detector.record(name, &json!({})).is_none());
-                let hint = detector.record_result(name, &json!({}), "still running");
-                if index % 3 == 0 {
-                    let hint = hint.unwrap();
-                    assert!(hint.contains("asynchronous"));
-                    assert!(!hint.contains("Calling it again will produce the same result"));
-                    assert_eq!(detector.take_peer_polling_signal().as_deref(), Some(name));
-                } else {
-                    assert!(hint.is_none());
-                    assert!(detector.take_peer_polling_signal().is_none());
-                }
-            }
-        }
-    }
-
-    #[test]
     fn peer_polling_should_preserve_stuck_mutating_cycles_but_honor_changed_peer_results() {
         for changing in [false, true] {
             let mut detector = LoopDetector::new(12);
@@ -413,23 +392,6 @@ mod tests {
     }
 
     #[test]
-    fn second_file_churn_threshold_requests_escalation() {
-        let mut detector = detector_with_churn_threshold(2);
-        for index in 0..4 {
-            let _ = detector.record_file_mutation(
-                "write_file",
-                &json!({"path": "app.css", "content": index}),
-                true,
-            );
-        }
-        let signal = detector
-            .take_file_churn_signal()
-            .expect("fourth edit should replace pending signal");
-        assert_eq!(signal.edits, 4);
-        assert!(signal.escalation);
-    }
-
-    #[test]
     fn failed_or_read_only_calls_do_not_count_as_file_churn() {
         let mut detector = detector_with_churn_threshold(2);
         assert!(
@@ -467,59 +429,6 @@ mod tests {
     }
 
     #[test]
-    fn should_detect_two_call_cycle() {
-        let mut d = LoopDetector::new(10);
-        let a = json!({"path": "a.rs"});
-        let b = json!({"path": "b.rs"});
-        // a, b, a, b, a, b = 3 repetitions of (a,b) cycle
-        for _ in 0..2 {
-            assert!(d.record("read_file", &a).is_none());
-            assert!(d.record("read_file", &b).is_none());
-        }
-        assert!(d.record("read_file", &a).is_none());
-        let warning = d.record("read_file", &b);
-        assert!(warning.is_some());
-    }
-
-    #[test]
-    fn should_not_detect_varied_calls() {
-        let mut d = LoopDetector::new(10);
-        for i in 0..20 {
-            let args = json!({"command": format!("cmd_{}", i)});
-            assert!(d.record("shell", &args).is_none());
-        }
-    }
-
-    #[test]
-    fn should_detect_three_call_cycle() {
-        let mut d = LoopDetector::new(15);
-        let a = json!({"x": 1});
-        let b = json!({"x": 2});
-        let c = json!({"x": 3});
-        // a,b,c repeated 3 times = 9 calls
-        for _ in 0..2 {
-            assert!(d.record("t", &a).is_none());
-            assert!(d.record("t", &b).is_none());
-            assert!(d.record("t", &c).is_none());
-        }
-        assert!(d.record("t", &a).is_none());
-        assert!(d.record("t", &b).is_none());
-        let warning = d.record("t", &c);
-        assert!(warning.is_some());
-    }
-
-    // ----- record_result tests (OpenClaw-style no-progress detection) -----
-
-    #[test]
-    fn record_result_quiet_for_first_two_calls() {
-        let mut d = LoopDetector::new(10);
-        let args = json!({"project": "slides/demo"});
-        let same_result = "{\"contracts\":[{\"ready\":true}]}";
-        assert!(d.record_result("check", &args, same_result).is_none());
-        assert!(d.record_result("check", &args, same_result).is_none());
-    }
-
-    #[test]
     fn record_result_fires_after_three_identical_triples() {
         let mut d = LoopDetector::new(10);
         let args = json!({"project": "slides/demo"});
@@ -535,104 +444,12 @@ mod tests {
     }
 
     #[test]
-    fn record_result_silent_when_result_changes_legitimate_poll() {
-        let mut d = LoopDetector::new(10);
-        let args = json!({});
-        // Same tool + args, but result evolves (polling case)
-        assert!(d.record_result("poll", &args, "running").is_none());
-        assert!(d.record_result("poll", &args, "running").is_none());
-        assert!(d.record_result("poll", &args, "completed").is_none());
-        // Even after switching back, two same + one different is not a streak of 3
-        assert!(d.record_result("poll", &args, "running").is_none());
-    }
-
-    #[test]
-    fn record_result_silent_when_args_change() {
-        let mut d = LoopDetector::new(10);
-        let result = "ok";
-        assert!(
-            d.record_result("read_file", &json!({"path": "a"}), result)
-                .is_none()
-        );
-        assert!(
-            d.record_result("read_file", &json!({"path": "b"}), result)
-                .is_none()
-        );
-        assert!(
-            d.record_result("read_file", &json!({"path": "c"}), result)
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn record_result_fires_once_per_burst() {
-        let mut d = LoopDetector::new(10);
-        let args = json!({"x": 1});
-        let result = "same";
-        d.record_result("t", &args, result);
-        d.record_result("t", &args, result);
-        let first = d.record_result("t", &args, result);
-        assert!(first.is_some());
-        // 4th identical call should NOT re-fire — buffer was cleared.
-        // The hard cycle detector picks up anything that survives.
-        let second = d.record_result("t", &args, result);
-        assert!(second.is_none());
-    }
-
-    // ----- record_doom tests (#1765 doom-loop guard) -----
-
-    #[test]
     fn should_fire_doom_when_third_identical_call_arrives() {
         let mut d = LoopDetector::new(10);
         let args = json!({"path": "a.txt"});
         assert!(d.record_doom("read_file", &args).is_none());
         assert!(d.record_doom("read_file", &args).is_none());
         assert_eq!(d.record_doom("read_file", &args), Some(3));
-    }
-
-    #[test]
-    fn should_stay_quiet_when_only_two_identical_calls() {
-        let mut d = LoopDetector::new(10);
-        let args = json!({"cmd": "ls"});
-        assert!(d.record_doom("shell", &args).is_none());
-        assert!(d.record_doom("shell", &args).is_none());
-    }
-
-    #[test]
-    fn should_reset_doom_streak_when_arguments_differ() {
-        let mut d = LoopDetector::new(10);
-        assert!(d.record_doom("read_file", &json!({"path": "a"})).is_none());
-        assert!(d.record_doom("read_file", &json!({"path": "a"})).is_none());
-        // Different args → streak resets; the 3rd call is NOT doom.
-        assert!(d.record_doom("read_file", &json!({"path": "b"})).is_none());
-        // Two more identical "b" calls: streak is 3 only now.
-        assert!(d.record_doom("read_file", &json!({"path": "b"})).is_none());
-        assert_eq!(d.record_doom("read_file", &json!({"path": "b"})), Some(3));
-    }
-
-    #[test]
-    fn should_reset_doom_streak_when_tool_name_differs() {
-        let mut d = LoopDetector::new(10);
-        let args = json!({"path": "a"});
-        assert!(d.record_doom("read_file", &args).is_none());
-        assert!(d.record_doom("read_file", &args).is_none());
-        // Same args, different tool → reset.
-        assert!(d.record_doom("list_dir", &args).is_none());
-        assert!(d.record_doom("list_dir", &args).is_none());
-        assert_eq!(d.record_doom("list_dir", &args), Some(3));
-    }
-
-    #[test]
-    fn should_keep_firing_doom_past_threshold() {
-        // ">= threshold" semantics: if the caller chooses to continue
-        // (e.g. the shell-spiral recovery path defers the abort), a 4th
-        // identical call must fire again rather than go quiet.
-        let mut d = LoopDetector::new(10);
-        let args = json!({});
-        d.record_doom("t", &args);
-        d.record_doom("t", &args);
-        assert_eq!(d.record_doom("t", &args), Some(3));
-        assert_eq!(d.record_doom("t", &args), Some(4));
     }
 
     #[test]

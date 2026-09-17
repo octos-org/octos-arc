@@ -3,8 +3,6 @@
 use metrics::counter;
 use serde::{Deserialize, Serialize};
 
-use super::robot_groups;
-
 /// Outcome of `ToolPolicy::evaluate`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyDecision {
@@ -78,11 +76,7 @@ impl ToolPolicy {
         // Deny-wins: explicit deny entries take precedence.
         for entry in &self.deny {
             if entry_matches(entry, tool_name) {
-                let reason = if entry_is_robot_group(entry) {
-                    ROBOT_TIER_GATE_REASON
-                } else {
-                    GENERIC_DENY_REASON
-                };
+                let reason = GENERIC_DENY_REASON;
                 counter!(POLICY_DENIAL_COUNTER, "reason" => reason).increment(1);
                 return PolicyDecision::Deny { reason };
             }
@@ -99,17 +93,7 @@ impl ToolPolicy {
             }
         }
 
-        // Tool wasn't matched by any allow entry. If the allow list contains
-        // robot-tier groups AND the tool is registered in a robot tier, the
-        // gate is a robot-tier gate — that's the case robotic integrators
-        // care about observing.
-        let reason = if self.allow.iter().any(|entry| entry_is_robot_group(entry))
-            && robot_groups::tool_has_tier(tool_name)
-        {
-            ROBOT_TIER_GATE_REASON
-        } else {
-            GENERIC_DENY_REASON
-        };
+        let reason = GENERIC_DENY_REASON;
         counter!(POLICY_DENIAL_COUNTER, "reason" => reason).increment(1);
         PolicyDecision::Deny { reason }
     }
@@ -153,11 +137,6 @@ impl ToolPolicy {
 
 /// Check if a policy entry (group, wildcard, or exact name) matches a tool name.
 pub(crate) fn entry_matches(entry: &str, tool_name: &str) -> bool {
-    // Robot-tier groups resolve through the dynamic registry so integrators
-    // register tool-to-tier mappings at runtime.
-    if entry_is_robot_group(entry) {
-        return robot_groups::group_covers_tool(entry, tool_name);
-    }
     // Static named groups (group:fs, group:runtime, ...)
     if let Some(tools) = expand_group(entry) {
         return tools.contains(&tool_name);
@@ -170,11 +149,7 @@ pub(crate) fn entry_matches(entry: &str, tool_name: &str) -> bool {
     entry == tool_name
 }
 
-fn entry_is_robot_group(entry: &str) -> bool {
-    robot_groups::parse_group_name(entry).is_some()
-}
-
-/// Metadata about a named tool group (`group:web`, `group:runtime`, …) used
+/// Metadata about a named tool group (`group:fs`, `group:runtime`, …) used
 /// by [`ToolPolicy`] matching and profile/role tool declarations.
 #[derive(Debug, Clone)]
 pub struct ToolGroupInfo {
@@ -204,11 +179,6 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
         // would still be reachable via `bash(cmd=…)`.
         description: "Shell command execution",
         tools: &["shell", "exec_command", "write_stdin", "bash"],
-    },
-    ToolGroupInfo {
-        name: "group:web",
-        description: "Web search, page fetching, and headless browser",
-        tools: &["web_search", "web_fetch", "browser"],
     },
     ToolGroupInfo {
         name: "group:search",
@@ -245,90 +215,6 @@ pub const TOOL_GROUPS: &[ToolGroupInfo] = &[
             "record_memory_use",
         ],
     },
-    ToolGroupInfo {
-        name: "group:research",
-        description: "Deep multi-round web research and synthesis",
-        tools: &["search", "synthesize_research", "deep_crawl"],
-    },
-    ToolGroupInfo {
-        name: "group:admin",
-        description: "Skill management, tool configuration, and model switching",
-        tools: &["manage_skills", "configure_tool", "model_check"],
-    },
-    ToolGroupInfo {
-        name: "group:media",
-        description: "Media generation: comics, slides, infographics, cards, and text-to-speech",
-        tools: &[
-            // RFC-1 fixup (codex round 3 P2): include the dispatcher
-            // pair so profile/policy allow-lists that grant only
-            // `group:media` still have a LLM-visible entry-point. Pre-
-            // fixup, an `allow: [group:media]` policy would retain
-            // only the (now internal-hidden) concrete targets and
-            // drop `mofa_make` / `mofa_describe_content_type`,
-            // leaving the LLM with no callable generation tool.
-            "mofa_make",
-            "mofa_describe_content_type",
-            "mofa_comic",
-            "mofa_slides",
-            "mofa_infographic",
-            "mofa_cards",
-            "fm_tts",
-            "fm_voice_list",
-        ],
-    },
-    // M6.7 — the canonical deny list applied to every DelegateTool child.
-    // It bounds re-delegation, spawning, user messaging, and memory writes.
-    // Policy evaluation is deny-wins, so adding `group:delegated` to a
-    // child's deny list gates those surfaces regardless of allow list.
-    //
-    // THIS IS NOT A CONFINEMENT BOUNDARY. Command execution is
-    // INTENTIONALLY not restricted here: a delegated child keeps `shell` /
-    // `exec_command` / `write_stdin` / `bash`. Delegated and peer agents are
-    // deliberately universal replicas of the master, as capable as it is —
-    // a child told "fix this test" must be able to run the build and the
-    // test. Security cannot be guaranteed at the tool-policy layer, so it is
-    // not attempted here; the real boundary is the OUTER SANDBOX (isolated
-    // machine, SELinux-confined account, or container — see
-    // [`crate::sandbox`]). A deny list that blocked shell would buy illusory
-    // security at the cost of real capability.
-    //
-    // What this list DOES enforce is RECURSION AND RESOURCE control — a job
-    // a tool policy can actually do: it stops unbounded
-    // delegate -> delegate -> delegate chains and spawn storms. The
-    // spawn/delegation family must therefore stay a SUPERSET of
-    // `group:sessions`. The group machinery has no group-in-group
-    // expansion, so that superset is maintained by hand and locked by
-    // `group_delegated_supersets_session_spawn_family`. It had already
-    // drifted: `spawn_agent`, `send_input`, `resume_agent`, `wait_agent`,
-    // `close_agent` and the codex-compat `delegate` wrapper were all
-    // reachable, so a child could spawn and drive its own sub-agents right
-    // past the recursion guard.
-    ToolGroupInfo {
-        name: "group:delegated",
-        description: "Delegated child deny list: re-delegation, spawning, user messaging, and memory writes. Command execution is intentionally NOT restricted — confinement is the sandbox's job.",
-        tools: &[
-            // Recursion + resource control: every delegation and spawn
-            // entry point, including the codex-compat one-call `delegate`
-            // wrapper — per the group:sessions #1172 note it keeps its own
-            // Arc handle to the bound `spawn_agent` and can spawn a child
-            // even when `spawn` / `spawn_agent` are gone from the registry.
-            // The `*_agent` lifecycle tools ride along: they only operate on
-            // children this child may not create.
-            "delegate_task",
-            "delegate",
-            "spawn",
-            "spawn_agent",
-            "send_input",
-            "resume_agent",
-            "wait_agent",
-            "close_agent",
-            // User messaging — children report through the parent.
-            "message",
-            // Memory writes.
-            "save_memory",
-            "memory_note",
-        ],
-    },
 ];
 
 /// Look up group info by name.
@@ -339,34 +225,6 @@ pub fn tool_group_info(name: &str) -> Option<&'static ToolGroupInfo> {
 /// Expand a group name to its tool names. Returns None if not a group.
 fn expand_group(name: &str) -> Option<&'static [&'static str]> {
     tool_group_info(name).map(|g| g.tools)
-}
-
-/// Predicate that hides every `mofa_*` skill except `mofa_slides` for a
-/// slides session. Designed to be passed to [`crate::ToolRegistry::retain`]
-/// in `session_actor.rs` after `tools.activate("group:media")` so that:
-///
-/// 1. The slides system prompt's "ALWAYS use mofa_slides" rule is enforced
-///    structurally — weaker LLMs (kimi-k2.6 fallback on mini1's dspfac
-///    profile, 2026-05-24) cannot misroute the slides workflow to
-///    `mofa_site` / `mofa_youtube` even when the prompt rule is buried
-///    mid-text.
-/// 2. Non-mofa skills (fm_tts, plugin tools that don't share the prefix)
-///    pass through untouched.
-/// 3. `mofa_slides` itself is preserved.
-///
-/// Returns `true` if the tool should be kept, `false` if it should be
-/// evicted from the registry.
-pub fn keep_tool_in_slides_session(tool_name: &str) -> bool {
-    // RFC-1 fixup (codex P1 round 2): retain the dispatcher pair too.
-    // After the RFC-1 switch from `defer` → `mark_internal_hidden`,
-    // `mofa_slides` is registered but invisible to `specs()` — the
-    // LLM only sees `mofa_make` + `mofa_describe_content_type`. If
-    // `retain` evicts those (they share the `mofa_` prefix), slides
-    // sessions end up with NO visible slides-generation tool.
-    matches!(
-        tool_name,
-        "mofa_slides" | "mofa_make" | "mofa_describe_content_type"
-    ) || !tool_name.starts_with("mofa_")
 }
 
 #[cfg(test)]
@@ -512,230 +370,5 @@ mod tests {
         );
         // No gate at all (empty require_tags) still passes untagged tools.
         assert!(ToolPolicy::default().is_allowed_with_tags("unaudited_plugin_tool", &[]));
-    }
-
-    #[test]
-    fn should_expand_group_delegated_to_restricted_child_toolset() {
-        let info = tool_group_info("group:delegated").expect("group:delegated must be registered");
-        // Membership floor. The superset-of-group:sessions invariant is
-        // locked separately by
-        // `group_delegated_supersets_session_spawn_family`; don't SHRINK
-        // this set without coordinating with DelegateTool documentation.
-        assert!(info.tools.contains(&"delegate_task"));
-        assert!(info.tools.contains(&"delegate"));
-        assert!(info.tools.contains(&"spawn"));
-        assert!(info.tools.contains(&"spawn_agent"));
-        assert!(info.tools.contains(&"send_input"));
-        assert!(info.tools.contains(&"message"));
-        assert!(info.tools.contains(&"save_memory"));
-        // Command execution is intentionally absent — see the table
-        // comment. Delegated children keep shell; confinement is the
-        // sandbox's job.
-        assert!(!info.tools.contains(&"shell"));
-        assert!(!info.tools.contains(&"bash"));
-    }
-
-    #[test]
-    fn should_deny_child_tool_when_group_delegated_is_in_deny_list() {
-        let policy = ToolPolicy {
-            deny: vec!["group:delegated".into()],
-            ..Default::default()
-        };
-        // Tools in group:delegated must be denied under a delegated child.
-        assert!(!policy.is_allowed("delegate_task"));
-        assert!(!policy.is_allowed("spawn"));
-        assert!(!policy.is_allowed("message"));
-        assert!(!policy.is_allowed("save_memory"));
-        // Tools not in the group remain allowed by default. `shell` staying
-        // allowed is DELIBERATE, not an oversight: delegated children are
-        // universal replicas of the master and must be able to run the
-        // build and the test they were asked to fix. The deny list is
-        // RECURSION AND RESOURCE control (no unbounded delegate chains, no
-        // spawn storms), not a confinement boundary — confinement is
-        // enforced by the outer sandbox (isolated machine / SELinux account
-        // / container, see `crate::sandbox`), where it can actually be
-        // guaranteed. Do not "harden" this into a deny.
-        assert!(policy.is_allowed("read_file"));
-        assert!(policy.is_allowed("shell"));
-    }
-
-    /// RECURSION GUARD (peer-review finding: spawn-family drift): the
-    /// spawn/delegation family cannot silently grow past the recursion
-    /// guard. If `group:sessions` ever holds a tool that `group:delegated`
-    /// does not deny, a delegated child can spawn and drive its own
-    /// sub-agents — unbounded delegate -> delegate chains and spawn storms.
-    ///
-    /// The group machinery has no group-in-group expansion (`expand_group`
-    /// returns a flat static slice), so the superset must be maintained by
-    /// hand — this test iterates the static tables and fails the moment
-    /// `group:sessions` gains a member `group:delegated` lacks. That exact
-    /// drift already happened: `spawn_agent`, `send_input`, the `*_agent`
-    /// lifecycle tools and the codex-compat `delegate` wrapper were all
-    /// reachable while the list denied only `spawn`.
-    ///
-    /// Deliberately NOT asserted against `group:runtime`: command execution
-    /// is intentionally available to delegated children (see the
-    /// `group:delegated` table comment) because confinement is the
-    /// sandbox's job, not the tool policy's.
-    #[test]
-    fn group_delegated_supersets_session_spawn_family() {
-        let delegated =
-            tool_group_info("group:delegated").expect("group:delegated must be registered");
-        let sessions =
-            tool_group_info("group:sessions").expect("group:sessions must be registered");
-        for tool in sessions.tools {
-            assert!(
-                delegated.tools.contains(tool),
-                "group:delegated must deny {tool:?} (member of group:sessions); \
-                 a delegated child that can reach it spawns past the recursion guard"
-            );
-        }
-    }
-
-    /// RECURSION GUARD (peer-review finding: spawn-family drift): denying
-    /// `group:delegated` must gate EVERY delegation and spawn entry point.
-    /// Pre-fix a delegated child could call `spawn_agent` / `send_input` /
-    /// `delegate` and spawn and drive its own sub-agents, because the group
-    /// listed only `spawn` and `delegate_task`.
-    #[test]
-    fn should_deny_every_spawn_entry_point_when_group_delegated_is_denied() {
-        let policy = ToolPolicy {
-            deny: vec!["group:delegated".into()],
-            ..Default::default()
-        };
-        for entry_point in [
-            "spawn",
-            "spawn_agent",
-            "send_input",
-            "resume_agent",
-            "wait_agent",
-            "close_agent",
-            "delegate",
-            "delegate_task",
-        ] {
-            assert!(
-                !policy.is_allowed(entry_point),
-                "{entry_point} must be denied when group:delegated is in the deny list"
-            );
-        }
-    }
-
-    #[test]
-    fn should_keep_mofa_slides_in_slides_session() {
-        // The canonical slides skill must survive the per-session filter
-        // — that's the one tool the system prompt instructs the LLM to
-        // call. Evicting it would break the slides workflow entirely.
-        assert!(keep_tool_in_slides_session("mofa_slides"));
-    }
-
-    /// RFC-1 fixup (codex round 2 P1): when the make_type-based
-    /// `mofa-slides` skill is installed, `mofa_slides` is hidden via
-    /// `mark_internal_hidden` and the LLM only sees `mofa_make` +
-    /// `mofa_describe_content_type`. The slides-session retain MUST
-    /// preserve those two so the LLM still has a slides-generation
-    /// entry-point. Pre-fixup, retain evicted both (they share the
-    /// `mofa_` prefix) and slides sessions ended up with no visible
-    /// slides tool whatsoever.
-    #[test]
-    fn should_keep_mofa_make_dispatcher_pair_in_slides_session() {
-        assert!(
-            keep_tool_in_slides_session("mofa_make"),
-            "mofa_make dispatcher MUST survive slides-session retain — \
-             it is the only LLM-facing entry-point after RFC-1 hides \
-             the individual mofa_slides target tool"
-        );
-        assert!(
-            keep_tool_in_slides_session("mofa_describe_content_type"),
-            "mofa_describe_content_type must survive slides-session \
-             retain so the LLM can fetch the slides args schema"
-        );
-    }
-
-    /// RFC-1 fixup (codex round 3 P2): the `group:media` definition
-    /// must include the `mofa_make` dispatcher pair so any policy that
-    /// allow-lists `group:media` retains an LLM-callable generation
-    /// entry-point. Pre-fixup the group held only the concrete
-    /// targets (`mofa_slides`, `mofa_cards`, ...), so a profile with
-    /// `allow: [group:media]` would keep only internal-hidden tools
-    /// and drop the dispatcher, leaving no callable surface.
-    #[test]
-    fn group_media_includes_mofa_make_dispatcher_pair() {
-        let info = tool_group_info("group:media").expect("group:media defined");
-        assert!(
-            info.tools.contains(&"mofa_make"),
-            "group:media must include mofa_make so allow-list policies \
-             retain the dispatcher; got {:?}",
-            info.tools
-        );
-        assert!(
-            info.tools.contains(&"mofa_describe_content_type"),
-            "group:media must include mofa_describe_content_type so \
-             allow-list policies retain the catalog query tool"
-        );
-        // And a policy that allows only group:media must accept these
-        // names — guards against future regression that removes the
-        // dispatcher from the group while keeping the targets.
-        let policy = ToolPolicy {
-            allow: vec!["group:media".into()],
-            ..Default::default()
-        };
-        assert!(policy.is_allowed("mofa_make"));
-        assert!(policy.is_allowed("mofa_describe_content_type"));
-    }
-
-    #[test]
-    fn should_drop_sibling_mofa_skills_in_slides_session() {
-        // The bug originally reported (kimi-k2.6 fallback on mini1
-        // dspfac, 2026-05-24): the LLM saw `mofa_site` /
-        // `mofa_youtube` next to `mofa_slides` and misrouted to them
-        // with empty `audio_path` / `content_dir`. The filter must
-        // hide every non-slides mofa_ skill so the LLM literally
-        // cannot call them in a slides session.
-        for unwanted in [
-            "mofa_site",
-            "mofa_youtube",
-            "mofa_publish",
-            "mofa_research",
-            "mofa_pdf",
-            "mofa_xlsx",
-            "mofa_cli",
-            "mofa_fm",
-            "mofa_frame",
-            "mofa_podcast",
-            "mofa_infographic",
-            "mofa_cards",
-            "mofa_comic",
-        ] {
-            assert!(
-                !keep_tool_in_slides_session(unwanted),
-                "{unwanted} should be hidden in a slides session"
-            );
-        }
-    }
-
-    #[test]
-    fn should_preserve_non_mofa_tools_in_slides_session() {
-        // Slides sessions still need general tools: research,
-        // file ops, shell (gated by the prompt to git + PNG-cache
-        // delete), task-status checks, the auto-delivery surface.
-        // The filter only targets the `mofa_*` skill prefix.
-        for kept in [
-            "read_file",
-            "write_file",
-            "glob",
-            "shell",
-            "send_file",
-            "check_background_tasks",
-            "check_workspace_contract",
-            "web_search",
-            "web_fetch",
-            "fm_tts",
-            "fm_voice_list",
-        ] {
-            assert!(
-                keep_tool_in_slides_session(kept),
-                "{kept} must remain available in a slides session"
-            );
-        }
     }
 }

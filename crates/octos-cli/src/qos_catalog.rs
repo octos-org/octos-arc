@@ -2,8 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use octos_llm::{
-    AdaptiveConfig, AdaptiveMode, AdaptiveRouter, BaselineEntry, ContextWindowOverride,
-    LlmProvider, ModelCatalogEntry, ProviderChain, QosCatalog, RetryProvider,
+    ContextWindowOverride, LlmProvider, ModelCatalogEntry, ProviderChain, QosCatalog, RetryProvider,
 };
 use tracing::{info, warn};
 
@@ -14,12 +13,11 @@ use crate::config::Config;
 /// `context_window` override when the config sets one.
 ///
 /// The override sits just OUTSIDE the local-context probe (#2135) and INSIDE
-/// `RetryProvider` / `ProviderChain` / `AdaptiveRouter` — all of which delegate
+/// `RetryProvider` / `ProviderChain` — both of which delegate
 /// `context_window()` as of #2135 — so the operator's value resolves through
 /// the entire runtime stack and beats BOTH the static catalog and the runtime
 /// probe. Applied per provider (primary and each fallback independently) so a
-/// primary pin never leaks onto a fallback's own window; the router then
-/// aggregates the per-slot values as it already does. `None` leaves the
+/// primary pin never leaks onto a fallback's own window. `None` leaves the
 /// provider untouched.
 pub(crate) fn apply_context_window_override(
     provider: Arc<dyn LlmProvider>,
@@ -44,8 +42,8 @@ pub(crate) fn apply_context_window_override(
 /// context-window / pricing floor. It ships next to the binary at release time
 /// (see `scripts/build-local-bundle.sh`), but is also embedded so a fresh
 /// install — one with no per-profile data-dir catalog and no `~/.octos`
-/// catalog yet — still seeds the adaptive router, the context-window table, and
-/// the pricing table with researched values instead of cold-start zeros.
+/// catalog yet — still seeds the context-window table and the pricing table
+/// with researched values instead of cold-start zeros.
 ///
 /// `crates/octos-cli/src/api/ui_protocol.rs` (onboarding) and
 /// `crates/octos-cli/src/commands/init.rs` reference this same const so there is
@@ -67,23 +65,18 @@ pub(crate) fn embedded_qos_catalog() -> Option<QosCatalog> {
 /// **static** metadata (cost, context window, max output, model type,
 /// deep-search quality `ds_output`) from the base and takes only the
 /// **dynamic** live QoS (score, stability, latency) from the overlay. This is
-/// deliberate: the router export's static fields are whatever was seeded from
-/// the previous on-disk catalog, so a plain overlay-wins merge would let a stale
-/// cost/context value written before an upgrade win over the corrected canonical
-/// value and re-persist itself forever — the on-disk catalog would never
-/// converge to the SSOT. `ds_output` (deep-search quality) is also static/
-/// seed-only, but with one twist: the canonical catalog uses `0` as a "not
-/// evaluated" sentinel, so it wins only when it carries a positive evaluated
-/// value; when canonical `ds_output` is 0 the overlay's value is preserved so an
-/// older on-disk benchmark is not erased. (Contrast `cost`, where 0 is a real
-/// free-tier price and canonical 0 must win.) Overlay-only providers (e.g. a
-/// configured custom-`base_url` model absent from the canonical catalog) are
-/// kept verbatim; base-only providers are preserved.
+/// deliberate: a stale cost/context value written before an upgrade must not
+/// win over the corrected canonical value and re-persist itself forever — the
+/// on-disk catalog would never converge to the SSOT. `ds_output` (deep-search
+/// quality) is also static/seed-only, but with one twist: the canonical catalog
+/// uses `0` as a "not evaluated" sentinel, so it wins only when it carries a
+/// positive evaluated value; when canonical `ds_output` is 0 the overlay's
+/// value is preserved so an older on-disk benchmark is not erased. (Contrast
+/// `cost`, where 0 is a real free-tier price and canonical 0 must win.)
+/// Overlay-only providers (e.g. a configured custom-`base_url` model absent
+/// from the canonical catalog) are kept verbatim; base-only providers are
+/// preserved. Output is sorted by provider for deterministic diffs.
 ///
-/// The exporter persists `merge(embedded_base, router_export)` so the on-disk
-/// `model_catalog.json` stays a full superset (all researched entries + live
-/// scores for configured lanes) and never shrinks to just the configured lanes.
-/// Output is sorted by provider for deterministic diffs.
 /// Strip an OpenAI-compatible `@host` tag from the family segment of a provider
 /// key (`moonshot@api/kimi-k2.5` -> `moonshot/kimi-k2.5`). Returns `None` when
 /// there is no tag, so callers only do the extra lookup when it can differ.
@@ -188,80 +181,38 @@ pub(crate) fn merge_qos_catalog(base: &QosCatalog, overlay: &QosCatalog) -> QosC
     }
 }
 
-/// Result of wiring up the LLM provider chain together with full
-/// QoS-aware adaptive routing.
+/// Result of wiring up the LLM provider chain.
 ///
 /// `llm` is the top-level provider that callers should pass to
-/// `Agent`/`SessionManager`. `adaptive_router` is `Some` only when more
-/// than one provider was successfully built — gateway uses this typed
-/// handle later (for `ActorFactory::adaptive_router` and the periodic
-/// metrics exporter). `runtime_qos_catalog` is the catalog that was
-/// (a) materialized from the live router export when available, or
-/// (b) derived from the cold-start seed otherwise; it has already been
-/// pushed into `octos_llm::context` and `octos_llm::pricing` and
-/// persisted to `model_catalog.json` before this struct is returned.
-pub(crate) struct AdaptiveProviderBundle {
+/// `Agent`/`SessionManager`. `runtime_qos_catalog` is the catalog that was
+/// derived from the seed (embedded canonical / on-disk catalog); it has
+/// already been pushed into `octos_llm::context` and `octos_llm::pricing`
+/// and persisted to `model_catalog.json` before this struct is returned.
+pub(crate) struct ProviderBundle {
     pub llm: Arc<dyn LlmProvider>,
-    pub adaptive_router: Option<Arc<AdaptiveRouter>>,
     pub runtime_qos_catalog: Option<QosCatalog>,
 }
 
-/// Whether [`build_adaptive_provider_chain`] should spawn the periodic
-/// `model_catalog.json` exporter. Production callers want `Spawn`; tests
-/// want `Disabled` to avoid leaking tokio tasks past the test scope.
-///
-/// Typed so production call sites can't accidentally pass `false` — the
-/// 30s exporter is what keeps the persisted catalog in lockstep with
-/// the running router's lane scores.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ExporterMode {
-    Spawn,
-    /// Test-only — keeps the helper from leaking a tokio task past
-    /// the test scope. Allow dead_code in production builds where
-    /// only `Spawn` is ever constructed.
-    #[allow(dead_code)]
-    Disabled,
-}
-
-/// Build the LLM provider chain with full QoS adaptive wiring.
-///
-/// Mirrors what `gateway_runtime.rs` used to do inline so that
-/// `octos serve` can stay in lockstep with `octos gateway`:
+/// Build the LLM provider chain with retry + sequential failover.
 ///
 /// 1. Wraps the primary `base_provider` in `RetryProvider` (unless
 ///    `no_retry`), layers in each `config.fallback_models` entry on
 ///    top, propagating each fallback's `cost_per_m` into the cost
 ///    vector and its `api_key_env` into the per-fallback config clone.
-/// 2. When more than one provider exists, builds an `AdaptiveRouter`
-///    with `.with_adaptive_config(mode, qos)` derived from
-///    `config.adaptive_routing`. Otherwise falls back to
-///    `ProviderChain` (or the bare `RetryProvider` when no fallbacks).
-/// 3. Loads `provider_baseline.json` from `data_dir` first, then
-///    `~/.octos/`. Seeds the router with the parsed entries. Logs an
-///    info line either way.
-/// 4. Seeds the router with the model catalog from
-///    `load_seed_qos_catalog`.
-/// 5. Materializes the runtime QoS catalog (preferring the live
-///    router export over the cold-start seed) and seeds
+/// 2. When more than one provider exists, assembles a static
+///    `ProviderChain` (bare `RetryProvider` when no fallbacks).
+/// 3. Materializes the runtime QoS catalog from the seed and seeds
 ///    `octos_llm::context::seed_from_catalog` +
 ///    `octos_llm::pricing::seed_pricing_catalog`.
-/// 6. Persists `model_catalog.json` next to `data_dir`.
-/// 7. When `exporter == ExporterMode::Spawn` and an `AdaptiveRouter`
-///    exists, spawns a tokio task that re-writes `model_catalog.json`
-///    every 30s from the router's live export. Tests should pass
-///    `ExporterMode::Disabled` to keep the test free of leaked tokio
-///    tasks.
-pub(crate) fn build_adaptive_provider_chain(
+/// 4. Persists `model_catalog.json` next to `data_dir`.
+pub(crate) fn build_provider_chain(
     base_provider: Arc<dyn LlmProvider>,
     config: &Config,
     data_dir: &Path,
     no_retry: bool,
-    exporter: ExporterMode,
-) -> AdaptiveProviderBundle {
-    let mut adaptive_router_ref: Option<Arc<AdaptiveRouter>> = None;
-
+) -> ProviderBundle {
     // #2142: operator override of the primary's effective context window,
-    // applied before RetryProvider/router wrap it so it propagates through
+    // applied before RetryProvider wraps it so it propagates through
     // the delegating stack and beats the probe/catalog.
     let base_provider =
         apply_context_window_override(base_provider, config.context_window, "primary");
@@ -273,13 +224,12 @@ pub(crate) fn build_adaptive_provider_chain(
     } else {
         let mut providers: Vec<Arc<dyn LlmProvider>> =
             vec![Arc::new(RetryProvider::new(base_provider))];
-        let mut costs: Vec<f64> = vec![0.0]; // primary cost unknown
         for fb in &config.fallback_models {
             // Always swap in this fallback's own `api_key_env`. When the
             // fallback omits it (None), we clear the primary's value so
             // `Config::get_api_key` falls back to the provider registry
             // default for the fallback's family — otherwise a
-            // cross-provider fallback (e.g. deepseek behind moonshot)
+            // cross-provider fallback (e.g. deepseek behind moonshot-coding)
             // would inherit the primary's AUTODL_API_KEY instead of
             // using DEEPSEEK_API_KEY.
             let mut fb_config = config.clone();
@@ -295,147 +245,39 @@ pub(crate) fn build_adaptive_provider_chain(
                     // #2142: per-fallback context-window override.
                     let p = apply_context_window_override(p, fb.context_window, "fallback");
                     providers.push(Arc::new(RetryProvider::new(p)));
-                    costs.push(fb.cost_per_m.unwrap_or(0.0));
                 }
                 Err(e) => {
                     warn!(provider = %fb.provider, error = %e, "skipping fallback provider");
                 }
             }
         }
-        // Adaptive routing must be *opt-in*: when `adaptive_routing` is
-        // absent or `enabled = false`, fall back to the plain static
-        // `ProviderChain`. This kills the silent default-ON behavior the
-        // previous implementation had (router wrapping always when
-        // `providers.len() > 1`).
-        let adaptive_enabled = config
-            .adaptive_routing
-            .as_ref()
-            .map(|c| c.enabled)
-            .unwrap_or(false);
-        if providers.len() > 1 && adaptive_enabled {
-            let ar_config = config
-                .adaptive_routing
-                .as_ref()
-                .expect("adaptive_enabled implies adaptive_routing.is_some()");
-            let adaptive_config = AdaptiveConfig::from(ar_config);
-            info!(
-                "adaptive routing enabled ({} providers, mode={:?}, qos={})",
-                providers.len(),
-                ar_config.mode,
-                ar_config.qos_ranking
-            );
-            let mode: AdaptiveMode = ar_config.mode.into();
-            let qos = ar_config.qos_ranking;
-            let router = Arc::new(
-                AdaptiveRouter::new(providers, &costs, adaptive_config)
-                    .with_adaptive_config(mode, qos),
-            );
-            // Wave-4c: surface AutoEscalationConfig from config.json so
-            // operators can disable the latency feedback loop (e.g. CI,
-            // benchmarks). The router defaults to enabled; this only
-            // overrides when an `adaptive_routing.auto_escalation` block
-            // exists. (Merge note: ar_config is already &AdaptiveRoutingConfig
-            // here — the outer `if adaptive_enabled` ensures Some.)
-            router.set_auto_escalation_config(octos_llm::AutoEscalationConfig::from(
-                &ar_config.auto_escalation,
-            ));
-            adaptive_router_ref = Some(router.clone());
-            router
-        } else {
-            if providers.len() > 1 {
-                info!(
-                    "adaptive routing disabled (enabled=false or omitted) — \
-                     falling back to static ProviderChain ({} providers)",
-                    providers.len()
-                );
-            }
-            Arc::new(ProviderChain::new(providers))
-        }
+        Arc::new(ProviderChain::new(providers))
     };
 
     let catalog_path = data_dir.join("model_catalog.json");
-    let qos_scoring_config = config
-        .adaptive_routing
-        .as_ref()
-        .map(AdaptiveConfig::from)
-        .unwrap_or_default();
-    let qos_ranking_enabled = config
-        .adaptive_routing
-        .as_ref()
-        .map(|cfg| cfg.qos_ranking)
-        .unwrap_or(true);
     // Merge the canonical STATIC metadata onto the on-disk seed BEFORE it seeds
-    // the router and the runtime context/pricing tables. Otherwise a stale static
-    // value in an on-disk `model_catalog.json` written by a pre-upgrade build (or
-    // hand-edited) would drive THIS process's routing scores, cost estimates, and
-    // context windows until the next restart: the persisted file is corrected
-    // below via the same merge, but the already-seeded runtime tables would keep
-    // the stale values. `embedded_base` is computed once and reused as the
-    // persist base further down.
+    // the runtime context/pricing tables. Otherwise a stale static value in an
+    // on-disk `model_catalog.json` written by a pre-upgrade build (or
+    // hand-edited) would drive THIS process's cost estimates and context
+    // windows until the next restart: the persisted file is corrected below via
+    // the same merge, but the already-seeded runtime tables would keep the
+    // stale values. `embedded_base` is computed once and reused as the persist
+    // base further down.
     let embedded_base = embedded_qos_catalog();
     let seed_catalog = load_seed_qos_catalog(data_dir).map(|on_disk| match &embedded_base {
         Some(base) => merge_qos_catalog(base, &on_disk),
         None => on_disk,
     });
 
-    let runtime_qos_catalog: Option<QosCatalog> = if let Some(ref router) = adaptive_router_ref {
-        // Look in data_dir first, then fall back to ~/.octos/ (shared across profiles)
-        let baseline_candidates = [
-            data_dir.join("provider_baseline.json"),
-            dirs::home_dir()
-                .unwrap_or_default()
-                .join(".octos/provider_baseline.json"),
-        ];
-        let mut baseline_loaded = false;
-        for baseline_path in &baseline_candidates {
-            if let Ok(json) = std::fs::read_to_string(baseline_path) {
-                match serde_json::from_str::<Vec<BaselineEntry>>(&json) {
-                    Ok(entries) => {
-                        router.seed_baseline(&entries);
-                        info!(
-                            path = %baseline_path.display(),
-                            entries = entries.len(),
-                            "loaded provider baseline"
-                        );
-                        baseline_loaded = true;
-                        break;
-                    }
-                    Err(e) => {
-                        warn!(error = %e, path = %baseline_path.display(), "failed to parse provider_baseline.json")
-                    }
-                }
-            }
-        }
-        if !baseline_loaded {
-            info!("no provider_baseline.json found, using cold-start scoring");
-        }
+    let runtime_qos_catalog: Option<QosCatalog> =
+        materialize_runtime_qos_catalog(seed_catalog.as_ref());
 
-        if let Some(ref catalog) = seed_catalog {
-            router.seed_catalog(&catalog.models);
-            info!(models = catalog.models.len(), "loaded model catalog");
-        }
-
-        materialize_runtime_qos_catalog(
-            seed_catalog.as_ref(),
-            Some(router.export_model_catalog()),
-            &qos_scoring_config,
-            qos_ranking_enabled,
-        )
-    } else {
-        materialize_runtime_qos_catalog(
-            seed_catalog.as_ref(),
-            None,
-            &qos_scoring_config,
-            qos_ranking_enabled,
-        )
-    };
-
-    // The persisted `model_catalog.json` merges the sparse live export ON TOP of
+    // The persisted `model_catalog.json` merges the runtime catalog ON TOP of
     // the full compiled-in canonical catalog, so it stays a complete superset
-    // (all researched entries + live scores for configured lanes) rather than
-    // shrinking to just the configured lanes. This also "seeds the data-dir on
-    // first run": a fresh install writes the full catalog here immediately. Reuse
-    // the base already loaded above for the seed merge (single embed parse).
+    // rather than shrinking to just the configured lanes. This also "seeds the
+    // data-dir on first run": a fresh install writes the full catalog here
+    // immediately. Reuse the base already loaded above for the seed merge
+    // (single embed parse).
     let persist_base = embedded_base;
 
     if let Some(ref catalog) = runtime_qos_catalog {
@@ -458,45 +300,73 @@ pub(crate) fn build_adaptive_provider_chain(
         persist_qos_catalog(&catalog_path, &to_persist);
     }
 
-    if exporter == ExporterMode::Spawn {
-        if let Some(ref router) = adaptive_router_ref {
-            let metrics_router = router.clone();
-            let exporter_path = catalog_path.clone();
-            // The periodic exporter merges each fresh export onto the same full
-            // base, so the 30s rewrite never shrinks the on-disk catalog.
-            let exporter_base = persist_base.clone();
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
-                loop {
-                    interval.tick().await;
-                    let export = metrics_router.export_model_catalog();
-                    let to_write = match &exporter_base {
-                        Some(base) => merge_qos_catalog(base, &export),
-                        None => export,
-                    };
-                    if let Ok(json) = serde_json::to_string_pretty(&to_write) {
-                        let _ = tokio::fs::write(&exporter_path, &json).await;
-                    }
-                }
-            });
-        }
-    }
-
-    AdaptiveProviderBundle {
+    ProviderBundle {
         llm,
-        adaptive_router: adaptive_router_ref,
         runtime_qos_catalog,
     }
 }
 
-/// Derive a runtime QoS catalog from static model metadata when no adaptive
-/// router is active.
-pub(crate) fn derive_cold_start_qos_catalog(
-    entries: &[ModelCatalogEntry],
-    config: &AdaptiveConfig,
-    qos_ranking: bool,
-) -> QosCatalog {
-    octos_llm::derive_cold_start_catalog(entries, config, qos_ranking)
+/// Derive a cold-start runtime catalog from static model metadata.
+///
+/// The heuristic model catalog is seed data, not a live score file. This
+/// materializes an initial runtime catalog so downstream consumers can use
+/// the same score semantics before any live traffic has been observed.
+/// (Inlined from the retired adaptive-router cold-start path,
+/// with its default scoring weights: latency 0.3, error rate 0.3,
+/// priority 0.2, cost 0.2.)
+pub(crate) fn derive_cold_start_qos_catalog(entries: &[ModelCatalogEntry]) -> QosCatalog {
+    let weight_latency = 0.3;
+    let weight_error_rate = 0.3;
+    let weight_priority = 0.2;
+    let weight_cost = 0.2;
+
+    let max_quality = entries
+        .iter()
+        .map(|entry| entry.ds_output as f64 * entry.stability.clamp(0.0, 1.0))
+        .fold(0.0_f64, f64::max);
+    let max_cost = entries
+        .iter()
+        .map(|entry| entry.cost_out)
+        .fold(0.0_f64, f64::max);
+    let max_priority = entries.len().max(1) as f64;
+
+    let models = entries
+        .iter()
+        .enumerate()
+        .map(|(idx, entry)| {
+            let baseline_stab = entry.stability.clamp(0.0, 1.0);
+            let blended_err = 1.0 - baseline_stab;
+
+            let quality = entry.ds_output as f64 * baseline_stab;
+            let norm_quality = if max_quality > 0.0 {
+                1.0 - (quality / max_quality)
+            } else {
+                0.5
+            };
+
+            // No live throughput at cold start, so keep the throughput term neutral.
+            let norm_throughput = 0.5;
+            let norm_priority = idx as f64 / max_priority;
+            let norm_cost = if max_cost > 0.0 && entry.cost_out > 0.0 {
+                entry.cost_out / max_cost
+            } else {
+                0.0
+            };
+            let ranking_component = 0.6 * norm_quality + 0.4 * norm_throughput;
+
+            let mut model = entry.clone();
+            model.score = weight_error_rate * blended_err
+                + weight_latency * ranking_component
+                + weight_priority * norm_priority
+                + weight_cost * norm_cost;
+            model
+        })
+        .collect();
+
+    QosCatalog {
+        updated_at: chrono::Utc::now().to_rfc3339(),
+        models,
+    }
 }
 
 pub(crate) fn load_seed_qos_catalog(data_dir: &Path) -> Option<QosCatalog> {
@@ -514,7 +384,7 @@ pub(crate) fn load_seed_qos_catalog(data_dir: &Path) -> Option<QosCatalog> {
         }
     }
     // Fresh install: no runtime catalog on disk yet. Fall back to the compiled-in
-    // canonical catalog so the router / context-window table / pricing table are
+    // canonical catalog so the context-window table / pricing table are
     // seeded with researched values instead of cold-start zeros. (On any machine
     // that already has a runtime catalog this branch is never reached.)
     embedded_qos_catalog()
@@ -541,20 +411,16 @@ pub(crate) fn persist_qos_catalog(path: &Path, catalog: &QosCatalog) {
 
 pub(crate) fn materialize_runtime_qos_catalog(
     seed_catalog: Option<&QosCatalog>,
-    adaptive_export: Option<QosCatalog>,
-    config: &AdaptiveConfig,
-    qos_ranking: bool,
 ) -> Option<QosCatalog> {
-    adaptive_export.or_else(|| {
-        seed_catalog
-            .map(|catalog| derive_cold_start_qos_catalog(&catalog.models, config, qos_ranking))
-    })
+    seed_catalog.map(|catalog| derive_cold_start_qos_catalog(&catalog.models))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use octos_llm::ModelType;
+
     use tempfile::tempdir;
 
     fn sample_catalog(scores: [f64; 2]) -> QosCatalog {
@@ -576,7 +442,7 @@ mod tests {
                     max_output: 8_192,
                 },
                 ModelCatalogEntry {
-                    provider: "dashscope/qwen3.5-plus".to_string(),
+                    provider: "deepseek/deepseek-v4-pro".to_string(),
                     model_type: ModelType::Strong,
                     is_family_default: false,
                     stability: 0.92,
@@ -605,7 +471,7 @@ mod tests {
         let loaded = load_seed_qos_catalog(&data_dir).expect("catalog should load");
         assert_eq!(loaded.models.len(), 2);
         assert_eq!(loaded.models[0].provider, "zai/glm-5-turbo");
-        assert_eq!(loaded.models[1].provider, "dashscope/qwen3.5-plus");
+        assert_eq!(loaded.models[1].provider, "deepseek/deepseek-v4-pro");
     }
 
     fn scored_entry(provider: &str, score: f64, ctx: u64) -> ModelCatalogEntry {
@@ -731,40 +597,6 @@ mod tests {
         assert_eq!(providers, sorted);
     }
 
-    /// The compiled-in canonical catalog (the seed floor for fresh installs) is
-    /// well-formed and reflects curation: glm-5.3 + kimi-k2.6 + kimi-k3
-    /// present, deepseek-chat removed.
-    #[test]
-    fn embedded_qos_catalog_is_curated_ssot() {
-        let catalog = embedded_qos_catalog().expect("embedded canonical catalog must parse");
-        let has = |p: &str| catalog.models.iter().any(|m| m.provider == p);
-        assert!(has("zai/glm-5.3"), "glm-5.3 present");
-        assert!(has("moonshot/kimi-k2.6"), "kimi-k2.6 present");
-        assert!(has("moonshot/kimi-k3"), "kimi-k3 present");
-        assert!(
-            !has("deepseek/deepseek-chat"),
-            "deepseek-chat curated out of the embedded catalog"
-        );
-        // Researched context window survives the round-trip through the embed.
-        let glm52 = catalog
-            .models
-            .iter()
-            .find(|m| m.provider == "zai/glm-5.3")
-            .unwrap();
-        assert_eq!(glm52.context_window, 1_000_000);
-        // kimi-k3 researched values: 1M window, 131072 (default max
-        // completion), official pricing $3.00/M in (cache miss) / $15.00/M out.
-        let k3 = catalog
-            .models
-            .iter()
-            .find(|m| m.provider == "moonshot/kimi-k3")
-            .unwrap();
-        assert_eq!(k3.context_window, 1_048_576);
-        assert_eq!(k3.max_output, 131_072);
-        assert!((k3.cost_in - 3.0).abs() < f64::EPSILON);
-        assert!((k3.cost_out - 15.0).abs() < f64::EPSILON);
-    }
-
     #[test]
     fn persist_qos_catalog_round_trips_runtime_scores() {
         let temp = tempdir().unwrap();
@@ -781,542 +613,13 @@ mod tests {
     }
 
     #[test]
-    fn materialize_runtime_qos_catalog_prefers_adaptive_export() {
-        let seed = sample_catalog([0.0, 0.0]);
-        let live = sample_catalog([0.21, 0.41]);
-
-        let materialized = materialize_runtime_qos_catalog(
-            Some(&seed),
-            Some(live.clone()),
-            &AdaptiveConfig::default(),
-            true,
-        )
-        .expect("catalog should materialize");
-
-        assert_eq!(materialized.models[0].score, live.models[0].score);
-        assert_eq!(materialized.models[1].score, live.models[1].score);
-    }
-
-    #[test]
     fn materialize_runtime_qos_catalog_derives_non_zero_scores_from_seed() {
         let seed = sample_catalog([0.0, 0.0]);
 
         let materialized =
-            materialize_runtime_qos_catalog(Some(&seed), None, &AdaptiveConfig::default(), true)
-                .expect("catalog should materialize");
+            materialize_runtime_qos_catalog(Some(&seed)).expect("catalog should materialize");
 
         assert_eq!(materialized.models.len(), seed.models.len());
         assert!(materialized.models.iter().all(|entry| entry.score > 0.0));
-    }
-
-    /// End-to-end exercise of `build_adaptive_provider_chain` that
-    /// covers the QoS plumbing surface, not just smoke survival:
-    ///   (a) `AdaptiveRouter` is built when >1 provider survives;
-    ///   (b) the seed catalog is actually consumed — we use entries
-    ///       keyed by `ollama/llama3.2` so they line up with the
-    ///       router lane the helper just built, then assert the
-    ///       persisted catalog carries those seeded fields (cost_in,
-    ///       context_window, model_type) instead of bare defaults;
-    ///   (c) `provider_baseline.json` is loaded from `data_dir` when
-    ///       present (non-cold-start path), and the latency/stability
-    ///       values it carries show up in `octos_llm::context` /
-    ///       `octos_llm::pricing` seeding through the exported
-    ///       catalog;
-    ///   (d) a deliberately-broken third fallback gets skipped via
-    ///       `warn!` without taking the helper down;
-    ///   (e) `model_catalog.json` on disk after the helper runs is
-    ///       different from the cold seed — i.e. persistence wrote
-    ///       new state, not just left the seed file untouched.
-    #[test]
-    fn build_adaptive_provider_chain_seeds_qos_plumbing_end_to_end() {
-        use crate::config::{AdaptiveRoutingConfig, Config, FallbackModel};
-        use octos_core::Message;
-        use octos_llm::{ChatConfig, ChatResponse, LlmProvider, ToolSpec};
-        use std::sync::Arc;
-
-        struct StubProvider;
-        #[async_trait::async_trait]
-        impl LlmProvider for StubProvider {
-            async fn chat(
-                &self,
-                _messages: &[Message],
-                _tools: &[ToolSpec],
-                _config: &ChatConfig,
-            ) -> eyre::Result<ChatResponse> {
-                Err(eyre::eyre!("stub not callable in tests"))
-            }
-            fn model_id(&self) -> &str {
-                "stub-model"
-            }
-            fn provider_name(&self) -> &str {
-                "stub"
-            }
-        }
-
-        let temp = tempdir().unwrap();
-        let data_dir = temp.path().to_path_buf();
-
-        // We don't know the exact AdaptiveRouter lane labels up front
-        // (the OpenAI-flavored providers tag their label with the
-        // host suffix when a non-default base_url is set, e.g.
-        // `ollama@localhost:11434/llama3.2`). Do a discovery pass
-        // first to learn the real lane keys, then rebuild the seed
-        // catalog + baseline so the helper's seed_catalog/seed_baseline
-        // attaches them to the right slots when we re-run.
-
-        let config = Config {
-            provider: Some("stub".into()),
-            fallback_models: vec![
-                FallbackModel {
-                    provider: "ollama".into(),
-                    model: Some("llama3.2".into()),
-                    base_url: None,
-                    api_key_env: None,
-                    model_hints: None,
-                    api_type: None,
-                    cost_per_m: Some(0.5),
-                    strong: true,
-                    context_window: None,
-                },
-                // Deliberately-broken third fallback — must be skipped
-                // via `warn!` without taking the helper down.
-                FallbackModel {
-                    provider: "nope-not-a-real-provider".into(),
-                    model: None,
-                    base_url: None,
-                    api_key_env: None,
-                    model_hints: None,
-                    api_type: None,
-                    cost_per_m: None,
-                    strong: true,
-                    context_window: None,
-                },
-            ],
-            // A1: AdaptiveRoutingConfig::default() now has `enabled = false`
-            // and is a *no-op*. Tests that exercise the adaptive code path
-            // must opt in explicitly.
-            adaptive_routing: Some(AdaptiveRoutingConfig {
-                enabled: true,
-                ..AdaptiveRoutingConfig::default()
-            }),
-            ..Default::default()
-        };
-
-        // ─── Discovery pass: learn the real lane keys ───
-        let base: Arc<dyn LlmProvider> = Arc::new(StubProvider);
-        let discovery = build_adaptive_provider_chain(
-            base.clone(),
-            &config,
-            &data_dir,
-            false,
-            ExporterMode::Disabled,
-        );
-        let discovery_runtime = discovery
-            .runtime_qos_catalog
-            .as_ref()
-            .expect("discovery pass should produce a runtime catalog");
-        let lane_keys: Vec<String> = discovery_runtime
-            .models
-            .iter()
-            .map(|m| m.provider.clone())
-            .collect();
-        // (d) The broken third fallback was skipped via `warn!` — only
-        // 2 lanes should survive.
-        assert_eq!(
-            lane_keys.len(),
-            2,
-            "broken fallback should be skipped via warn!, leaving 2 lanes; got {lane_keys:?}"
-        );
-        let stub_key = lane_keys
-            .iter()
-            .find(|k| k.starts_with("stub/"))
-            .expect("primary stub lane must exist")
-            .clone();
-        let ollama_key = lane_keys
-            .iter()
-            .find(|k| k.starts_with("ollama") && k.ends_with("/llama3.2"))
-            .expect("ollama fallback lane must exist")
-            .clone();
-
-        // ─── Real pass: seed catalog + baseline with the discovered
-        // lane keys, then re-run the helper and assert the seed values
-        // propagate into the persisted catalog. ───
-        let matched_seed = QosCatalog {
-            updated_at: "2026-04-11T00:00:00Z".to_string(),
-            models: vec![
-                ModelCatalogEntry {
-                    provider: stub_key.clone(),
-                    model_type: ModelType::Fast,
-                    is_family_default: false,
-                    stability: 0.95,
-                    tool_avg_ms: 700,
-                    p95_ms: 1100,
-                    score: 0.0,
-                    cost_in: 0.4,
-                    cost_out: 1.6,
-                    ds_output: 1000,
-                    context_window: 64_000,
-                    max_output: 4_096,
-                },
-                ModelCatalogEntry {
-                    provider: ollama_key.clone(),
-                    model_type: ModelType::Strong,
-                    is_family_default: false,
-                    stability: 0.88,
-                    tool_avg_ms: 1800,
-                    p95_ms: 3200,
-                    score: 0.0,
-                    cost_in: 0.0,
-                    cost_out: 0.0,
-                    ds_output: 600,
-                    context_window: 128_000,
-                    max_output: 8_192,
-                },
-            ],
-        };
-        std::fs::write(
-            data_dir.join("model_catalog.json"),
-            serde_json::to_string_pretty(&matched_seed).unwrap(),
-        )
-        .unwrap();
-        // Use the exact field names BaselineEntry deserializes
-        // (`avg_latency_ms` / `p95_latency_ms`) — and use a stability
-        // value that DIFFERS from the seed catalog's, so we can tell
-        // whether `seed_baseline` actually ran from the EMA-blended
-        // result.
-        let baseline = serde_json::json!([
-            {
-                "provider": stub_key,
-                "avg_latency_ms": 700,
-                "p95_latency_ms": 1100,
-                "stability": 0.6
-            },
-            {
-                "provider": ollama_key,
-                "avg_latency_ms": 1800,
-                "p95_latency_ms": 3200,
-                "stability": 0.6
-            }
-        ]);
-        std::fs::write(
-            data_dir.join("provider_baseline.json"),
-            serde_json::to_string_pretty(&baseline).unwrap(),
-        )
-        .unwrap();
-
-        let bundle =
-            build_adaptive_provider_chain(base, &config, &data_dir, false, ExporterMode::Disabled);
-
-        // (a) AdaptiveRouter built.
-        assert!(
-            bundle.adaptive_router.is_some(),
-            "AdaptiveRouter should be present when fallback build succeeds"
-        );
-
-        // (b) The RUNNING process's runtime catalog converges to the canonical
-        //     SSOT for STATIC fields, exactly like the persisted file in (e) —
-        //     not only the on-disk file. The seed is merged with the embedded
-        //     canonical base BEFORE it seeds the router, so the host-tagged
-        //     `ollama@…/llama3.2` lane carries the canonical context window
-        //     (131072) and max output (131072), NOT the stale on-disk seed's
-        //     128000 / 8192. Without that pre-seed merge the live process would
-        //     route/cost/size with the stale values until the next restart.
-        let runtime = bundle
-            .runtime_qos_catalog
-            .as_ref()
-            .expect("seed catalog should produce a runtime catalog");
-        let ollama_entry = runtime
-            .models
-            .iter()
-            .find(|m| m.provider == ollama_key)
-            .expect("ollama lane should be present in runtime catalog");
-        assert_eq!(
-            ollama_entry.context_window, 131_072,
-            "runtime lane uses the canonical static context window, not the stale on-disk seed"
-        );
-        assert_eq!(
-            ollama_entry.max_output, 131_072,
-            "runtime lane uses the canonical static max output, not the stale on-disk seed"
-        );
-        assert_eq!(
-            ollama_entry.model_type,
-            ModelType::Strong,
-            "model_type carries through (canonical and seed agree here)"
-        );
-
-        // The overlay-only `stub/stub-model` lane has no canonical entry, so the
-        // running process keeps its seed static verbatim — proving the pre-seed
-        // merge is field-level (canonical for known lanes, verbatim otherwise),
-        // not a blanket replacement.
-        let stub_entry = runtime
-            .models
-            .iter()
-            .find(|m| m.provider == stub_key)
-            .expect("stub lane should be present in runtime catalog");
-        assert_eq!(
-            stub_entry.context_window, 64_000,
-            "overlay-only lane keeps its seed static context window"
-        );
-        assert_eq!(
-            stub_entry.max_output, 4_096,
-            "overlay-only lane keeps its seed static max output"
-        );
-
-        // (c) `seed_baseline` actually ran. We know because:
-        //     - seed_catalog set baseline_stability = 0.88;
-        //     - seed_baseline set success/failure counts that imply
-        //       live_stab ≈ 0.6 (the value in the baseline fixture)
-        //       and pushed total_requests to 10, giving the EMA
-        //       blender weight = min(0.5, 10/20) = 0.5;
-        //     - exported stability = 0.88 * 0.5 + ~0.6 * 0.5 ≈ 0.74.
-        //     If seed_baseline had silently failed to load (e.g.
-        //     wrong JSON field names took the warn path), total
-        //     would be 0, weight 0, and the exported stability
-        //     would round-trip 0.88 unchanged. Asserting strict
-        //     inequality with both extremes catches that regression.
-        assert!(
-            ollama_entry.stability < 0.85 && ollama_entry.stability > 0.65,
-            "blended stability must be strictly between baseline (0.6) and \
-             seed-catalog (0.88), proving seed_baseline ran — got {}",
-            ollama_entry.stability
-        );
-
-        // (e) persisted file reflects runtime DYNAMIC state while converging to
-        //     the canonical SSOT for STATIC fields. The ollama lane's provider
-        //     key carries the OpenAI-flavored host suffix (`ollama@…/llama3.2`);
-        //     the merge strips that tag to reconcile it with the embedded
-        //     canonical `ollama/llama3.2`, so the persisted lane gets the
-        //     canonical static context window (131072, NOT the seed's 128000)
-        //     with the blended runtime stability layered on.
-        let persisted_json = std::fs::read_to_string(data_dir.join("model_catalog.json"))
-            .expect("persisted catalog readable");
-        let persisted: QosCatalog = serde_json::from_str(&persisted_json).unwrap();
-        let persisted_ollama = persisted
-            .models
-            .iter()
-            .find(|m| m.provider == ollama_key)
-            .expect("ollama lane should be in persisted catalog");
-        // Dynamic runtime state persisted (blended stability, not the raw 0.88).
-        assert!(
-            persisted_ollama.stability < 0.85 && persisted_ollama.stability > 0.65,
-            "persisted stability is the blended runtime value: {}",
-            persisted_ollama.stability
-        );
-        // Static converged to the canonical catalog despite the host-tagged key.
-        assert_eq!(persisted_ollama.context_window, 131_072);
-        assert_eq!(persisted_ollama.max_output, 131_072);
-    }
-
-    /// A1 regression: `adaptive_routing.enabled = false` MUST NOT
-    /// instantiate an `AdaptiveRouter`. Before this fix, the helper
-    /// silently defaulted to `mode=Lane, qos=true` whenever
-    /// `providers.len() > 1`, ignoring `enabled` entirely — which the
-    /// investigation report called out as a config-correctness bug.
-    #[test]
-    fn build_adaptive_provider_chain_respects_disabled_flag() {
-        use crate::config::{AdaptiveRoutingConfig, Config, FallbackModel};
-        use octos_core::Message;
-        use octos_llm::{ChatConfig, ChatResponse, LlmProvider, ToolSpec};
-        use std::sync::Arc;
-
-        struct StubProvider;
-        #[async_trait::async_trait]
-        impl LlmProvider for StubProvider {
-            async fn chat(
-                &self,
-                _messages: &[Message],
-                _tools: &[ToolSpec],
-                _config: &ChatConfig,
-            ) -> eyre::Result<ChatResponse> {
-                Err(eyre::eyre!("stub not callable in tests"))
-            }
-            fn model_id(&self) -> &str {
-                "stub-model"
-            }
-            fn provider_name(&self) -> &str {
-                "stub"
-            }
-        }
-
-        let temp = tempdir().unwrap();
-        let data_dir = temp.path().to_path_buf();
-
-        // Two providers AND adaptive_routing.enabled = false →
-        // no AdaptiveRouter must be built. Previously this would have
-        // wrapped silently because providers.len() > 1.
-        let config = Config {
-            provider: Some("stub".into()),
-            fallback_models: vec![FallbackModel {
-                provider: "ollama".into(),
-                model: Some("llama3.2".into()),
-                base_url: None,
-                api_key_env: None,
-                model_hints: None,
-                api_type: None,
-                cost_per_m: Some(0.5),
-                strong: true,
-                context_window: None,
-            }],
-            adaptive_routing: Some(AdaptiveRoutingConfig {
-                enabled: false,
-                ..AdaptiveRoutingConfig::default()
-            }),
-            ..Default::default()
-        };
-
-        let base: Arc<dyn LlmProvider> = Arc::new(StubProvider);
-        let bundle =
-            build_adaptive_provider_chain(base, &config, &data_dir, false, ExporterMode::Disabled);
-
-        assert!(
-            bundle.adaptive_router.is_none(),
-            "enabled = false MUST NOT instantiate an AdaptiveRouter"
-        );
-    }
-
-    /// A1 regression: when `adaptive_routing` is entirely absent from
-    /// the config (`None`), the helper must NOT silently default-ON.
-    /// Previously the unwrap_or path quietly picked `Lane + qos=true`.
-    #[test]
-    fn build_adaptive_provider_chain_defaults_off_when_config_absent() {
-        use crate::config::{Config, FallbackModel};
-        use octos_core::Message;
-        use octos_llm::{ChatConfig, ChatResponse, LlmProvider, ToolSpec};
-        use std::sync::Arc;
-
-        struct StubProvider;
-        #[async_trait::async_trait]
-        impl LlmProvider for StubProvider {
-            async fn chat(
-                &self,
-                _messages: &[Message],
-                _tools: &[ToolSpec],
-                _config: &ChatConfig,
-            ) -> eyre::Result<ChatResponse> {
-                Err(eyre::eyre!("stub not callable in tests"))
-            }
-            fn model_id(&self) -> &str {
-                "stub-model"
-            }
-            fn provider_name(&self) -> &str {
-                "stub"
-            }
-        }
-
-        let temp = tempdir().unwrap();
-        let data_dir = temp.path().to_path_buf();
-
-        let config = Config {
-            provider: Some("stub".into()),
-            fallback_models: vec![FallbackModel {
-                provider: "ollama".into(),
-                model: Some("llama3.2".into()),
-                base_url: None,
-                api_key_env: None,
-                model_hints: None,
-                api_type: None,
-                cost_per_m: Some(0.5),
-                strong: true,
-                context_window: None,
-            }],
-            adaptive_routing: None,
-            ..Default::default()
-        };
-
-        let base: Arc<dyn LlmProvider> = Arc::new(StubProvider);
-        let bundle =
-            build_adaptive_provider_chain(base, &config, &data_dir, false, ExporterMode::Disabled);
-
-        assert!(
-            bundle.adaptive_router.is_none(),
-            "missing adaptive_routing block MUST default to OFF (no router)"
-        );
-    }
-
-    /// #2142: an operator `context_window` override must resolve through the
-    /// WHOLE assembled stack (RetryProvider here), beating what the underlying
-    /// provider reports — the acceptance criterion "a profile pinning
-    /// context_window: 16384 on a 262K server reports 16384 through the full
-    /// runtime stack".
-    #[test]
-    fn context_window_override_wins_through_the_assembled_stack() {
-        use crate::config::Config;
-        use octos_core::Message;
-        use octos_llm::{ChatConfig, ChatResponse, LlmProvider, ToolSpec};
-        use std::sync::Arc;
-
-        // A backend that advertises a large window (stands in for the probed
-        // 262K llama-server).
-        struct WideProvider;
-        #[async_trait::async_trait]
-        impl LlmProvider for WideProvider {
-            async fn chat(
-                &self,
-                _messages: &[Message],
-                _tools: &[ToolSpec],
-                _config: &ChatConfig,
-            ) -> eyre::Result<ChatResponse> {
-                Err(eyre::eyre!("stub not callable in tests"))
-            }
-            fn model_id(&self) -> &str {
-                "wide-model"
-            }
-            fn provider_name(&self) -> &str {
-                "wide"
-            }
-            fn context_window(&self) -> u32 {
-                262_144
-            }
-        }
-
-        let temp = tempdir().unwrap();
-        let data_dir = temp.path().to_path_buf();
-
-        // Control: no override → the backend's own window survives the
-        // RetryProvider wrap (delegation, per #2135).
-        let control = build_adaptive_provider_chain(
-            Arc::new(WideProvider),
-            &Config::default(),
-            &data_dir,
-            false,
-            ExporterMode::Disabled,
-        );
-        assert_eq!(
-            control.llm.context_window(),
-            262_144,
-            "without an override the probed/backend window must pass through the stack"
-        );
-
-        // Override: 16384 must win through RetryProvider all the way out.
-        let config = Config {
-            context_window: Some(16_384),
-            ..Default::default()
-        };
-        let overridden = build_adaptive_provider_chain(
-            Arc::new(WideProvider),
-            &config,
-            &data_dir,
-            false,
-            ExporterMode::Disabled,
-        );
-        assert_eq!(
-            overridden.llm.context_window(),
-            16_384,
-            "config.context_window must override the 262K backend through the full stack"
-        );
-
-        // And in the no_retry path (bare provider) the override still holds.
-        let bare = build_adaptive_provider_chain(
-            Arc::new(WideProvider),
-            &config,
-            &data_dir,
-            true,
-            ExporterMode::Disabled,
-        );
-        assert_eq!(
-            bare.llm.context_window(),
-            16_384,
-            "override must hold even on the no_retry (unwrapped) path"
-        );
     }
 }

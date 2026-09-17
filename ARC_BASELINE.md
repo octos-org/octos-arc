@@ -18,14 +18,14 @@ their Git history; it is not a GitHub fork-network repository.
 The upstream README describes upstream capabilities, not completed ARC modifications.
 The initial source checkpoint contained no behavior changes. The second phase
 adds the native `octos arc` workflow in `crates/octos-arc`, reusing the existing
-Octos coding runtime. A verified Linux x86_64 downstream Release now exists;
-there are still no new ARC submissions or new evaluation scores.
+Octos coding runtime. There are still no compiled downstream releases,
+new ARC submissions, or new evaluation scores.
 
 ## Release and submission policy
 
-`arc-runtime-lock.json` records the fixed source baseline and the verified Linux
-x86_64 runtime Release. Model and submission fields remain null; the release URL
-is immutable and both archive and binary SHA-256 values are required.
+`arc-runtime-lock.json` records the fixed source baseline. It is not yet a runnable
+release manifest: build, model, and submission fields are deliberately null.
+Do not submit this source-only checkpoint as a finished agent.
 
 Before submitting a future modified runtime:
 
@@ -43,9 +43,9 @@ Changing a pin requires an explicit new version; do not silently replace an exis
 
 ## Repository isolation
 
-GitHub Actions is enabled only for the standalone `.github/workflows/arc-linux-release.yml`
-`workflow_dispatch` publisher. The inherited upstream workflows were removed from `main`
-and are not enabled; this workflow builds and publishes only the ARC Linux bundle.
+GitHub Actions is disabled on this new repository. Inherited upstream workflows remain
+in the source history but must not run upstream deployments or publish upstream packages.
+Add and review a dedicated downstream build workflow before selectively enabling automation.
 
 The `legacy` branch is historical reference only. Its old downloader and execution
 behavior have intentionally not been modernized; it is not the new competition runtime.
@@ -54,12 +54,9 @@ behavior have intentionally not been modernized; it is not the new competition r
 
 The Rust workflow now supports explicit create/evolve modes, requirement deltas,
 fixed binary verification and honest local execution evidence. See
-`crates/octos-arc/README.md` for limitations and validation commands. The B5
-container smoke was executed on an Ubuntu Actions runner; official ARC scoring
-and cloud submissions remain separate from these checks.
+`crates/octos-arc/README.md` for limitations and validation commands.
 
-The Linux x86_64 bundle has been built and published with verified checksums;
-the platform launcher now points at that immutable Release URL. Next, run the
-official ARC Counter and Evolution tasks with the prior generated project as
-input. No benchmark score is implied by the crate's unit tests. Do not fabricate
-test results.
+Next, verify the full CLI build, publish a fixed downstream artifact and finish
+the platform launcher/traceability contract. Then run official ARC Counter and
+its Evolution task with the prior generated project as input. No benchmark score
+is implied by the crate's unit tests. Do not fabricate test results.

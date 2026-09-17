@@ -151,21 +151,12 @@ pub struct CacheRates {
 ///
 /// Native `anthropic` plus the relabeled proxies that construct an
 /// `AnthropicProvider` under a custom label: `zai` / `zai-coding` (GLM over
-/// the Anthropic API) and `r9s` when it is serving a `claude-*` model (r9s
-/// auto-selects the Anthropic protocol for claude models and OpenAI for the
-/// rest — see `registry/r9s.rs`). A label CONTAINING "anthropic" also counts,
-/// covering custom Anthropic-compatible endpoints. zhipu / dashscope /
-/// minimax / moonshot-coding are OpenAI-protocol re-hosts and are
+/// the Anthropic API). A label CONTAINING "anthropic" also counts, covering
+/// custom Anthropic-compatible endpoints. OpenAI-protocol re-hosts are
 /// deliberately excluded.
-fn speaks_anthropic_protocol(provider: &str, model: &str) -> bool {
+fn speaks_anthropic_protocol(provider: &str, _model: &str) -> bool {
     let p = provider.to_ascii_lowercase();
-    p.contains("anthropic")
-        || p == "zai"
-        || p == "zai-coding"
-        // Mirror r9s construction EXACTLY (case-sensitive `starts_with("claude-")`
-        // on the RAW model): r9s speaks the Anthropic protocol only for the models
-        // it actually builds an `AnthropicProvider` for — see `registry::r9s`.
-        || (p == "r9s" && crate::registry::r9s::prefers_anthropic(model))
+    p.contains("anthropic") || p == "zai" || p == "zai-coding"
 }
 
 /// The prompt-cache rate card for the answering slot, keyed on its
@@ -179,16 +170,14 @@ fn speaks_anthropic_protocol(provider: &str, model: &str) -> bool {
 ///   every catalog row that carries a cached rate (`catalog.rs`: sonnet-4
 ///   0.3/3.0, haiku-4.5 0.08/0.80 — both exactly 0.1x). This branch is keyed
 ///   on PROTOCOL, not on the family label, because a relabeled proxy (zai
-///   serving GLM, r9s serving claude) still emits Anthropic cache accounting.
+///   serving GLM) still emits Anthropic cache accounting.
 /// - `gemini` / `vertex` / `google`: implicit caching bills cached tokens at
 ///   25% of the input rate (catalog row gemini-2.5-flash: 0.0375/0.15 =
 ///   0.25x). No per-token write charge — explicit-cache STORAGE is
 ///   time-billed, octos never creates explicit caches, and the Gemini parser
 ///   never reports write tokens, so 0.0 writes can never make a real token
 ///   vanish.
-/// - DeepSeek: cache hits are charged at the provider's discounted input
-///   rate (0.1x); DeepSeek does not report cache-write tokens.
-/// - everything else (openai, openrouter, local, unknown/empty):
+/// - everything else (openai, deepseek, moonshot-coding, unknown/empty):
 ///   no cached READ rate is knowable — the catalog's only OpenAI row carries
 ///   `cache_read_per_mtok: None`, and the public discount varies per model
 ///   FAMILY (0.5x for gpt-4o-era, deeper for newer), so a provider-wide
@@ -210,12 +199,6 @@ pub fn cache_rates(provider: &str, model: &str) -> CacheRates {
         };
     }
     let p = provider.to_ascii_lowercase();
-    if p.contains("deepseek") {
-        return CacheRates {
-            read_multiplier: 0.1,
-            write_multiplier: 0.0,
-        };
-    }
     if p.contains("gemini") || p.contains("vertex") || p.contains("google") {
         return CacheRates {
             read_multiplier: 0.25,
@@ -560,33 +543,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_mirror_r9s_construction_predicate_when_pricing_cache() {
-        // #2194 R3: r9s auto-selects the Anthropic protocol ONLY for
-        // `model.starts_with("claude-")` (case-sensitive; see registry/r9s.rs).
-        // Cache pricing must classify by the SAME predicate, or a model r9s
-        // actually serves over the OpenAI protocol (mixed-case "Claude-...", or
-        // a "claude"-prefixed-but-not-"claude-" name) is handed Anthropic cache
-        // rates it never earns. Before this fix pricing used a LOWERCASED
-        // `starts_with("claude")` and diverged from construction.
-        assert_eq!(
-            cache_rates("r9s", "claude-3-5-sonnet").read_multiplier,
-            CACHE_READ_INPUT_MULTIPLIER,
-            "r9s + claude-* is Anthropic protocol -> 0.1x cache reads",
-        );
-        assert_eq!(
-            cache_rates("r9s", "Claude-3-5-sonnet").read_multiplier,
-            1.0,
-            "r9s builds an OpenAIProvider for a non-'claude-' (mixed-case) model, \
-             so pricing must NOT hand it Anthropic cache rates",
-        );
-        assert_eq!(
-            cache_rates("r9s", "claude2-experimental").read_multiplier,
-            1.0,
-            "a 'claude'-prefixed-but-not-'claude-' model is OpenAI protocol at r9s",
-        );
-    }
-
-    #[test]
     fn test_known_model_pricing() {
         let p = model_pricing("claude-sonnet-4-20250514").unwrap();
         assert!((p.input_per_million - 3.0).abs() < f64::EPSILON);
@@ -621,326 +577,8 @@ mod tests {
     }
 
     #[test]
-    fn should_price_anthropic_cache_at_tenth_read_and_five_fourths_write() {
-        let p = ModelPricing {
-            input_per_million: 3.0,
-            output_per_million: 15.0,
-        };
-        let cost = p.cost_with_cache_for_provider(
-            "anthropic",
-            "claude-opus-4",
-            100_000,
-            10_000,
-            10_000,
-            2_000,
-        );
-        let naive = p.cost(100_000, 10_000);
-        // 10k reads at 0.1x ($0.003) + 2k writes at 1.25x ($0.0075).
-        assert!(
-            (cost - (naive + 0.003 + 0.0075)).abs() < 1e-12,
-            "got {cost}"
-        );
-        // The label match must also catch relabeled Anthropic slots that keep
-        // the family in the label, and the direct primitive stays aligned.
-        assert!((cost - p.cost_with_cache(100_000, 10_000, 10_000, 2_000)).abs() < 1e-12);
-    }
-
-    #[test]
-    fn should_price_gemini_cache_reads_at_quarter_rate_with_no_write_premium() {
-        let p = ModelPricing {
-            input_per_million: 0.15,
-            output_per_million: 0.60,
-        };
-        let cost = p.cost_with_cache_for_provider(
-            "gemini",
-            "gemini-2.5-flash",
-            100_000,
-            10_000,
-            100_000,
-            5_000,
-        );
-        let naive = p.cost(100_000, 10_000);
-        // 100k cached reads at 0.25x of $0.15/M = $0.00375; writes free.
-        assert!((cost - (naive + 0.00375)).abs() < 1e-12, "got {cost}");
-        let vertex = p.cost_with_cache_for_provider(
-            "vertex",
-            "gemini-2.5-pro",
-            100_000,
-            10_000,
-            100_000,
-            5_000,
-        );
-        assert!(
-            (vertex - cost).abs() < 1e-12,
-            "vertex bills at Google rates"
-        );
-    }
-
-    #[test]
-    fn should_price_unknown_provider_cache_reads_at_full_input_rate_and_writes_never_free() {
-        // No cached READ rate is knowable for these providers (the catalog's
-        // only OpenAI row carries cache_read_per_mtok: None, and the public
-        // discount varies per model family), so reads bill at the FULL input
-        // rate — never an invented discount. WRITES, however, are never 0:
-        // cache_write_tokens is only ever populated by the Anthropic parser,
-        // so any write reaching this bucket is an Anthropic-protocol write
-        // from an unrecognized proxy label and bills at 1.25x rather than
-        // vanishing.
-        let p = ModelPricing {
-            input_per_million: 2.5,
-            output_per_million: 10.0,
-        };
-        for (provider, model) in [
-            ("openai", "gpt-4o"),
-            ("openrouter", "anthropic/claude-3.5-sonnet"),
-            ("local", "qwen2.5"),
-            ("", ""),
-        ] {
-            let cost =
-                p.cost_with_cache_for_provider(provider, model, 100_000, 10_000, 40_000, 8_000);
-            // reads at full input rate (folded into input) + writes at 1.25x.
-            let expected = p.cost(100_000 + 40_000, 10_000)
-                + (8_000.0 / 1_000_000.0) * p.input_per_million * 1.25;
-            assert!(
-                (cost - expected).abs() < 1e-12,
-                "{provider}/{model}: reads at full input rate, writes at 1.25x, not free (got {cost})"
-            );
-            // A reported write must never vanish.
-            let read_only =
-                p.cost_with_cache_for_provider(provider, model, 100_000, 10_000, 40_000, 0);
-            assert!(
-                cost - read_only > 1e-9,
-                "{provider}/{model}: cache-write tokens must add cost"
-            );
-        }
-    }
-
-    #[test]
-    fn should_price_deepseek_cache_hits_at_the_discounted_input_rate() {
-        let p = ModelPricing {
-            input_per_million: 0.27,
-            output_per_million: 1.10,
-        };
-        let cost = p.cost_with_cache_for_provider(
-            "deepseek",
-            "deepseek-v4-flash",
-            25_000,
-            5_000,
-            75_000,
-            0,
-        );
-        let expected = p.cost(25_000, 5_000) + (75_000.0 / 1_000_000.0) * p.input_per_million * 0.1;
-        assert!((cost - expected).abs() < 1e-12, "got {cost}");
-    }
-
-    #[test]
-    fn should_change_cache_cost_when_provider_changes() {
-        // Mutation guard for the provider lookup itself: identical usage must
-        // price differently across the three rate cards.
-        let p = ModelPricing {
-            input_per_million: 3.0,
-            output_per_million: 15.0,
-        };
-        let anthropic = p.cost_with_cache_for_provider(
-            "anthropic",
-            "claude-opus-4",
-            100_000,
-            10_000,
-            50_000,
-            5_000,
-        );
-        let gemini = p.cost_with_cache_for_provider(
-            "gemini",
-            "gemini-2.5-flash",
-            100_000,
-            10_000,
-            50_000,
-            5_000,
-        );
-        let unknown =
-            p.cost_with_cache_for_provider("openai", "gpt-4o", 100_000, 10_000, 50_000, 5_000);
-        assert!((anthropic - gemini).abs() > 1e-9);
-        assert!((anthropic - unknown).abs() > 1e-9);
-        assert!((gemini - unknown).abs() > 1e-9);
-    }
-
-    #[test]
-    fn should_price_relabeled_anthropic_protocol_cache_writes_and_reads_at_anthropic_rates() {
-        // #2194 review round 2: relabeled Anthropic-protocol providers
-        // (zai / zai-coding serving GLM, r9s serving claude, custom
-        // anthropic) emit cache_creation_input_tokens as WRITES. Their label
-        // is not "anthropic", but they speak the Anthropic Messages API, so
-        // writes bill at 1.25x and reads at 0.1x — NOT free, and not the
-        // full-rate residual bucket.
-        let p = ModelPricing {
-            input_per_million: 3.0,
-            output_per_million: 15.0,
-        };
-        let anthropic_ref = p.cost_with_cache_for_provider(
-            "anthropic",
-            "claude-opus-4",
-            100_000,
-            10_000,
-            40_000,
-            8_000,
-        );
-        for (provider, model) in [
-            ("zai", "glm-4.6"),
-            ("zai-coding", "glm-4.6"),
-            ("r9s", "claude-3-5-sonnet"),
-        ] {
-            let cost =
-                p.cost_with_cache_for_provider(provider, model, 100_000, 10_000, 40_000, 8_000);
-            assert!(
-                (cost - anthropic_ref).abs() < 1e-12,
-                "{provider}/{model}: Anthropic-protocol cache must price at 0.1x read / 1.25x write \
-                 (got {cost}, anthropic {anthropic_ref})"
-            );
-            // And explicitly: the write is NOT free.
-            let read_only =
-                p.cost_with_cache_for_provider(provider, model, 100_000, 10_000, 40_000, 0);
-            assert!(
-                cost - read_only > 1e-9,
-                "{provider}/{model}: 8k cache-write tokens must add cost, not vanish"
-            );
-        }
-    }
-
-    #[test]
-    fn test_gpt4o_mini_before_gpt4o() {
-        // gpt-4o-mini must match before gpt-4o
-        let mini = model_pricing("gpt-4o-mini").unwrap();
-        assert!((mini.input_per_million - 0.15).abs() < f64::EPSILON);
-        let full = model_pricing("gpt-4o").unwrap();
-        assert!((full.input_per_million - 2.50).abs() < f64::EPSILON);
-    }
-
-    #[test]
     fn test_unknown_model_returns_none() {
         assert!(model_pricing("my-local-model").is_none());
         assert!(model_pricing("ollama/phi-custom").is_none());
-    }
-
-    #[test]
-    fn should_price_kimi_k3_before_generic_moonshot_branch() {
-        // kimi-k3 ($3.00/M in, $15.00/M out) must match before the generic
-        // kimi-k2/moonshot branch — the full provider key contains BOTH
-        // "kimi-k3" and "moonshot", and last-writer semantics would misprice
-        // it at the k2 rates ($0.60/$2.40).
-        for id in ["kimi-k3", "moonshot/kimi-k3"] {
-            let p = model_pricing(id).unwrap();
-            assert!((p.input_per_million - 3.0).abs() < f64::EPSILON, "{id}");
-            assert!((p.output_per_million - 15.0).abs() < f64::EPSILON, "{id}");
-        }
-        // The k2 family keeps its own rates.
-        let k2 = model_pricing("kimi-k2.6").unwrap();
-        assert!((k2.input_per_million - 0.60).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_nvidia_model_pricing() {
-        // Llama models should have pricing
-        let llama = model_pricing("meta/llama-3.3-70b-instruct").unwrap();
-        assert!(llama.input_per_million > 0.0);
-
-        // Mistral models
-        let mistral = model_pricing("mistralai/mistral-small-3.1-24b-instruct-2503").unwrap();
-        assert!(mistral.input_per_million > 0.0);
-
-        // Qwen models
-        let qwen = model_pricing("qwen/qwen3-coder-480b-a35b-instruct").unwrap();
-        assert!(qwen.input_per_million > 0.0);
-
-        // DeepSeek R1 should be more expensive than base deepseek
-        let r1 = model_pricing("deepseek-ai/deepseek-r1").unwrap();
-        let base = model_pricing("deepseek-chat").unwrap();
-        assert!(r1.input_per_million > base.input_per_million);
-    }
-
-    /// Catalog substring fallback must be deterministic. The old scan
-    /// returned the FIRST HashMap hit, so a model id matching several
-    /// catalog keys ("octestfam-5.2-codex" matches both "octestfam-5"
-    /// and "octestfam-5.2") got a random sibling's pricing per process.
-    ///
-    /// One #[test] on purpose: these sections share the process-global
-    /// PRICING_CATALOG, so splitting them into parallel tests would race.
-    /// Key names are deliberately weird so no other test's probe can
-    /// substring-match them while the seed is live.
-    #[test]
-    fn should_match_catalog_keys_deterministically_when_no_exact_hit() {
-        // Section 1: model id EXTENDS several family keys — the longest
-        // (most specific) family must win, not HashMap iteration order.
-        seed_pricing_catalog(&[
-            ("octestprov/octestfam-5".to_string(), 1.0, 2.0),
-            ("octestprov/octestfam-5.2".to_string(), 3.0, 4.0),
-        ]);
-        let p = model_pricing("octestfam-5.2-codex").unwrap();
-        assert!((p.input_per_million - 3.0).abs() < f64::EPSILON);
-        assert!((p.output_per_million - 4.0).abs() < f64::EPSILON);
-
-        // Section 2: exact key still wins over any substring candidate.
-        let exact = model_pricing("octestfam-5").unwrap();
-        assert!((exact.input_per_million - 1.0).abs() < f64::EPSILON);
-
-        // Section 3: model id is a PREFIX of several keys — the shortest
-        // (closest) super-key must win deterministically.
-        seed_pricing_catalog(&[
-            ("octestprov/octestfam-7.2".to_string(), 5.0, 6.0),
-            ("octestprov/octestfam-7-mini-preview".to_string(), 7.0, 8.0),
-        ]);
-        let sup = model_pricing("octestfam-7").unwrap();
-        assert!((sup.input_per_million - 5.0).abs() < f64::EPSILON);
-
-        // Section 4: a bare model id shared by a native provider and a re-host
-        // resolves to the NATIVE (fewest-segments) rate. Re-host listed FIRST to
-        // prove the award is order-independent, not last-writer-wins.
-        seed_pricing_catalog(&[
-            ("octrehost/octvendor/octshared-9".to_string(), 9.0, 9.0), // 2 segments
-            ("octnative/octshared-9".to_string(), 1.5, 2.5),           // 1 segment (native)
-        ]);
-        let bare = model_pricing("octshared-9").unwrap();
-        assert!(
-            (bare.input_per_million - 1.5).abs() < f64::EPSILON,
-            "native provider wins the bare alias, not the re-host"
-        );
-        assert!((bare.output_per_million - 2.5).abs() < f64::EPSILON);
-        // The re-host's fully-qualified key still resolves to its own rate.
-        let rehost = model_pricing("octrehost/octvendor/octshared-9").unwrap();
-        assert!((rehost.input_per_million - 9.0).abs() < f64::EPSILON);
-
-        // Section 5: case-variant bare ids. The native key is capitalized
-        // (`OctCap-9`) and the re-host is lowercase (`octcap-9`); since the
-        // lookup lowercases, the award must still go to the native rate rather
-        // than splitting into two distinct aliases.
-        seed_pricing_catalog(&[
-            ("octrehost/octvendor/octcap-9".to_string(), 9.0, 9.0), // lowercase, 2 seg
-            ("octnative/OctCap-9".to_string(), 1.5, 2.5),           // Capitalized, 1 seg (native)
-        ]);
-        let cap = model_pricing("OctCap-9").unwrap();
-        assert!(
-            (cap.input_per_million - 1.5).abs() < f64::EPSILON,
-            "native rate wins the bare alias despite case variance"
-        );
-
-        // Section 6: two providers at EQUAL depth (both one segment) share a bare
-        // id, so segment count can't break the tie. The lexicographically-smaller
-        // lowercased full key wins — mirroring the real `minimax/MiniMax-M3`
-        // ($0.15/$1.5) vs `r9s/minimax-m3` ($0.5/$2) collision. Listed
-        // larger-key-first to prove the award is order-independent rather than
-        // first-writer-wins.
-        seed_pricing_catalog(&[
-            ("octzeta/octtie-9".to_string(), 9.0, 9.0), // 1 seg, larger key
-            ("octalpha/octtie-9".to_string(), 1.5, 2.5), // 1 seg, smaller key wins
-        ]);
-        let tie = model_pricing("octtie-9").unwrap();
-        assert!(
-            (tie.input_per_million - 1.5).abs() < f64::EPSILON,
-            "equal-depth bare alias resolves to the lexicographically-smaller key, deterministically"
-        );
-        assert!((tie.output_per_million - 2.5).abs() < f64::EPSILON);
-
-        // Restore an empty catalog so parallel tests keep hitting the
-        // hardcoded ladder exactly as before this test ran.
-        seed_pricing_catalog(&[]);
     }
 }

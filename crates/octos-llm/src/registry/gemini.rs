@@ -17,8 +17,6 @@ pub const ENTRY: ProviderEntry = ProviderEntry {
     requires_base_url: false,
     requires_model: false,
     detect_patterns: &["gemini"],
-    model_discovery: crate::discovery::GEMINI_MODELS,
-    model_discovery_for_model: None,
     create,
 };
 

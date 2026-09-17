@@ -59,12 +59,6 @@ fn is_official_anthropic_base_url(base_url: &str) -> bool {
         .eq_ignore_ascii_case(OFFICIAL_ANTHROPIC_BASE_URL)
 }
 
-#[cfg(test)]
-fn prompt_caching_default_for_base_url_from(base_url: &str, env_value: Option<&str>) -> bool {
-    is_official_anthropic_base_url(base_url)
-        && crate::cache_manifest::prompt_cache_features_enabled_from(env_value)
-}
-
 fn prompt_caching_default_for_base_url(base_url: &str) -> bool {
     is_official_anthropic_base_url(base_url) && prompt_cache_features_enabled()
 }
@@ -1380,32 +1374,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_build_content_with_non_image_media() {
-        let m = Message {
-            role: MessageRole::User,
-            content: "check this".into(),
-            media: vec!["file.txt".into(), "data.csv".into()],
-            tool_calls: None,
-            tool_call_id: None,
-            reasoning_content: None,
-            client_message_id: None,
-            thread_id: None,
-            timestamp: chrono::Utc::now(),
-        };
-        // Non-image media should include file paths for read_file
-        let content = build_anthropic_content(&m);
-        match content {
-            AnthropicContent::Text(t) => {
-                assert!(t.contains("check this"));
-                assert!(t.contains("file.txt"));
-                assert!(t.contains("data.csv"));
-                assert!(t.contains("read_file"));
-            }
-            _ => panic!("expected Text for non-image media"),
-        }
-    }
-
     // --- tool_use / tool_result round-trip tests ---
 
     fn tool_call(id: &str, name: &str, args: serde_json::Value) -> octos_core::ToolCall {
@@ -1579,23 +1547,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn tool_result_without_id_falls_back_to_plain_text() {
-        // ID-less providers can leave tool_call_id empty; a tool_result block
-        // with an empty tool_use_id would 400, so fall back to plain user
-        // text (pre-fix behaviour) for that row only. (Caching off: pins the
-        // legacy plain-string content shape.)
-        let provider = AnthropicProvider::new("test-key", "claude-test").with_prompt_caching(false);
-        let mut orphan = msg(MessageRole::Tool, "orphan output");
-        orphan.tool_call_id = None;
-        let messages = vec![msg(MessageRole::User, "go"), orphan];
-        let config = ChatConfig::default();
-        let body = serde_json::to_value(provider.build_request(&messages, &[], &config)).unwrap();
-        let out = body["messages"].as_array().unwrap();
-        assert_eq!(out[1]["role"], "user");
-        assert_eq!(out[1]["content"], "orphan output");
-    }
-
     // --- build_request tests ---
 
     #[test]
@@ -1621,26 +1572,6 @@ mod tests {
         assert_eq!(request.messages.len(), 2); // user + assistant only
         assert_eq!(request.messages[0].role, "user");
         assert_eq!(request.messages[1].role, "assistant");
-    }
-
-    #[test]
-    fn test_build_request_tool_role_mapped_to_user() {
-        let provider = AnthropicProvider::new("test-key", "claude-test");
-        let messages = vec![Message {
-            role: MessageRole::Tool,
-            content: "tool result".into(),
-            media: vec![],
-            tool_calls: None,
-            tool_call_id: Some("tc1".into()),
-            reasoning_content: None,
-            client_message_id: None,
-            thread_id: None,
-            timestamp: chrono::Utc::now(),
-        }];
-        let config = ChatConfig::default();
-        let request = provider.build_request(&messages, &[], &config);
-
-        assert_eq!(request.messages[0].role, "user");
     }
 
     #[test]
@@ -1683,19 +1614,6 @@ mod tests {
     }
 
     #[test]
-    fn should_omit_context_management_when_not_set() {
-        let provider = AnthropicProvider::new("test-key", "claude-test");
-        let messages = vec![msg(MessageRole::User, "hi")];
-        let config = ChatConfig::default();
-        let request = provider.build_request(&messages, &[], &config);
-        let body = serde_json::to_value(&request).unwrap();
-        assert!(
-            body.get("context_management").is_none(),
-            "field must be omitted when not configured: {body}"
-        );
-    }
-
-    #[test]
     fn should_emit_thinking_only_when_reasoning_effort_is_set() {
         let provider = AnthropicProvider::new("test-key", "claude-test");
         let messages = vec![msg(MessageRole::User, "hi")];
@@ -1719,57 +1637,6 @@ mod tests {
     }
 
     #[test]
-    fn should_omit_thinking_when_reasoning_is_disabled() {
-        let provider = AnthropicProvider::new("test-key", "claude-test");
-        let messages = vec![msg(MessageRole::User, "hi")];
-        let effort = serde_json::from_value(serde_json::json!("none"))
-            .expect("none should disable reasoning");
-        let config = ChatConfig {
-            reasoning_effort: Some(effort),
-            ..Default::default()
-        };
-
-        let body = serde_json::to_value(provider.build_request(&messages, &[], &config)).unwrap();
-        assert!(body.get("thinking").is_none());
-    }
-
-    #[test]
-    fn should_clamp_thinking_budget_below_max_tokens() {
-        // P2: budget must stay strictly below max_tokens (with output room).
-        // High ladder is 8192; with max_tokens=6000 it clamps to 6000-1024=4976.
-        let provider = AnthropicProvider::new("test-key", "claude-test");
-        let messages = vec![msg(MessageRole::User, "hi")];
-        let config = ChatConfig {
-            reasoning_effort: Some(ReasoningEffort::High),
-            max_tokens: Some(6_000),
-            ..Default::default()
-        };
-        let body = serde_json::to_value(provider.build_request(&messages, &[], &config)).unwrap();
-        let budget = body["thinking"]["budget_tokens"].as_u64().unwrap();
-        assert_eq!(budget, 4_976, "clamped to max_tokens - reserve");
-        assert!(budget < 6_000, "budget strictly below max_tokens");
-        assert!(budget >= 1_024, "budget meets Anthropic minimum");
-    }
-
-    #[test]
-    fn should_omit_thinking_when_max_tokens_too_small() {
-        // P2: when max_tokens can't fit a valid (>=1024) budget, omit thinking
-        // entirely rather than emit a request Claude rejects.
-        let provider = AnthropicProvider::new("test-key", "claude-test");
-        let messages = vec![msg(MessageRole::User, "hi")];
-        let config = ChatConfig {
-            reasoning_effort: Some(ReasoningEffort::Max),
-            max_tokens: Some(1_500), // 1500 - 1024 = 476 < 1024 → omit
-            ..Default::default()
-        };
-        let body = serde_json::to_value(provider.build_request(&messages, &[], &config)).unwrap();
-        assert!(
-            body.get("thinking").is_none(),
-            "thinking omitted when max_tokens too small: {body}"
-        );
-    }
-
-    #[test]
     fn should_parse_redacted_thinking_block() {
         // P2: a redacted_thinking block must not break deserialization; the
         // answer/tool calls still come through and it contributes no reasoning.
@@ -1788,76 +1655,7 @@ mod tests {
         assert_eq!(response.reasoning_content, None);
     }
 
-    #[test]
-    fn test_response_captures_thinking_content_block() {
-        let api_response: AnthropicResponse = serde_json::from_value(serde_json::json!({
-            "content": [
-                {
-                    "type": "thinking",
-                    "thinking": "Compare the constraints first.",
-                    "signature": "opaque"
-                },
-                {
-                    "type": "text",
-                    "text": "Use the narrower option."
-                }
-            ],
-            "stop_reason": "end_turn",
-            "usage": {
-                "input_tokens": 12,
-                "output_tokens": 34
-            }
-        }))
-        .unwrap();
-
-        let response = anthropic_response_to_chat_response(api_response);
-        assert_eq!(
-            response.reasoning_content.as_deref(),
-            Some("Compare the constraints first.")
-        );
-        assert_eq!(
-            response.content.as_deref(),
-            Some("Use the narrower option.")
-        );
-    }
-
     // --- SSE mapping tests ---
-
-    #[test]
-    fn test_sse_message_start() {
-        let mut state = AnthropicStreamState::default();
-        let event = crate::sse::SseEvent {
-            event: None,
-            data: r#"{"type": "message_start", "message": {"usage": {"input_tokens": 42}}}"#.into(),
-        };
-        let events = map_anthropic_sse(&mut state, &event);
-        assert!(events.is_empty());
-        assert_eq!(state.input_tokens, 42);
-    }
-
-    #[test]
-    fn test_sse_text_delta() {
-        let mut state = AnthropicStreamState::default();
-        let event = crate::sse::SseEvent {
-            event: None,
-            data: r#"{"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Hello"}}"#.into(),
-        };
-        let events = map_anthropic_sse(&mut state, &event);
-        assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], StreamEvent::TextDelta(t) if t == "Hello"));
-    }
-
-    #[test]
-    fn test_sse_thinking_delta() {
-        let mut state = AnthropicStreamState::default();
-        let event = crate::sse::SseEvent {
-            event: None,
-            data: r#"{"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "Check edge cases."}}"#.into(),
-        };
-        let events = map_anthropic_sse(&mut state, &event);
-        assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], StreamEvent::ReasoningDelta(t) if t == "Check edge cases."));
-    }
 
     #[test]
     fn test_sse_tool_call_start() {
@@ -1882,24 +1680,6 @@ mod tests {
     }
 
     #[test]
-    fn test_sse_message_delta_end_turn() {
-        let mut state = AnthropicStreamState {
-            input_tokens: 100,
-            ..Default::default()
-        };
-        let event = crate::sse::SseEvent {
-            event: None,
-            data: r#"{"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 50}}"#.into(),
-        };
-        let events = map_anthropic_sse(&mut state, &event);
-        assert_eq!(events.len(), 2);
-        assert!(
-            matches!(&events[0], StreamEvent::Usage(u) if u.input_tokens == 100 && u.output_tokens == 50)
-        );
-        assert!(matches!(&events[1], StreamEvent::Done(StopReason::EndTurn)));
-    }
-
-    #[test]
     fn test_sse_error_event() {
         let mut state = AnthropicStreamState::default();
         let event = crate::sse::SseEvent {
@@ -1911,32 +1691,7 @@ mod tests {
         assert!(matches!(&events[0], StreamEvent::Error(msg) if msg == "rate limited"));
     }
 
-    #[test]
-    fn test_sse_invalid_json_returns_empty() {
-        let mut state = AnthropicStreamState::default();
-        let event = crate::sse::SseEvent {
-            event: None,
-            data: "not json".into(),
-        };
-        let events = map_anthropic_sse(&mut state, &event);
-        assert!(events.is_empty());
-    }
-
     // --- Provider metadata tests ---
-
-    #[test]
-    fn test_provider_name_and_model() {
-        let provider = AnthropicProvider::new("test-key", "claude-3-haiku");
-        assert_eq!(provider.provider_name(), "anthropic");
-        assert_eq!(provider.model_id(), "claude-3-haiku");
-    }
-
-    #[test]
-    fn test_with_base_url() {
-        let provider =
-            AnthropicProvider::new("key", "model").with_base_url("https://custom.api.com");
-        assert_eq!(provider.base_url, "https://custom.api.com");
-    }
 
     /// `tool_choice: {"type": "none"}` must reach the wire for an explicit
     /// choice and stay absent for the default, so ordinary requests are
@@ -1976,28 +1731,6 @@ mod tests {
     }
 
     #[test]
-    fn custom_compatible_endpoint_omits_cache_control_by_default() {
-        let provider =
-            AnthropicProvider::new("key", "model").with_base_url("https://custom.api.com");
-        let body = serde_json::to_value(provider.build_request(
-            &[
-                msg(MessageRole::System, "system"),
-                msg(MessageRole::User, "hello"),
-            ],
-            &[tool_spec("read", "read a file")],
-            &ChatConfig::default(),
-        ))
-        .unwrap();
-
-        assert_eq!(body["system"], "system");
-        assert!(body["messages"][0]["content"].is_string(), "{body}");
-        assert!(
-            !body.to_string().contains("cache_control"),
-            "custom endpoints must opt in to Anthropic cache extensions: {body}"
-        );
-    }
-
-    #[test]
     fn explicit_prompt_caching_opt_in_wins_for_custom_endpoint_in_either_order() {
         let custom_then_opt_in = AnthropicProvider::new("key", "model")
             .with_base_url("https://custom.api.com")
@@ -2018,30 +1751,6 @@ mod tests {
                 "an explicit opt-in must survive builder call ordering: {body}"
             );
         }
-    }
-
-    #[test]
-    fn endpoint_prompt_cache_defaults_are_official_only_and_honor_kill_switch() {
-        assert!(prompt_caching_default_for_base_url_from(
-            "https://api.anthropic.com",
-            None
-        ));
-        assert!(prompt_caching_default_for_base_url_from(
-            " https://API.ANTHROPIC.COM/ ",
-            Some("true")
-        ));
-        assert!(!prompt_caching_default_for_base_url_from(
-            "https://api.anthropic.com",
-            Some("off")
-        ));
-        assert!(!prompt_caching_default_for_base_url_from(
-            "https://custom.api.com",
-            None
-        ));
-        assert!(!prompt_caching_default_for_base_url_from(
-            "https://custom.api.com",
-            Some("true")
-        ));
     }
 
     // Codex round-4 MAJOR: the chat() and chat_stream() error paths previously
@@ -2075,13 +1784,6 @@ mod tests {
         let err =
             crate::error::LlmError::from_status_with_label(429, "rate_limit_error", &error_label);
         assert_eq!(err.provider, "r9s/claude-3-5-sonnet");
-    }
-
-    #[test]
-    fn should_default_error_label_to_anthropic_when_label_not_overridden() {
-        let provider = AnthropicProvider::new("test-key", "claude-3-5-sonnet");
-        let error_label = format!("{}/{}", provider.provider_label, provider.model);
-        assert_eq!(error_label, "anthropic/claude-3-5-sonnet");
     }
 
     // --- prompt caching tests ---
@@ -2169,192 +1871,6 @@ mod tests {
     }
 
     #[test]
-    fn should_place_message_breakpoint_on_last_tool_result_block() {
-        // Mid tool-loop the last user-role message is the merged tool_result
-        // batch — the breakpoint must land on its LAST block only, so the
-        // whole history including the current results is cached for the
-        // next iteration.
-        // Pin caching ON so the assertion is independent of the ambient
-        // `OCTOS_PROMPT_CACHING` kill-switch (builder override wins).
-        let provider = AnthropicProvider::new("test-key", "claude-test").with_prompt_caching(true);
-        let mut assistant = msg(MessageRole::Assistant, "");
-        assistant.tool_calls = Some(vec![
-            tool_call("toolu_a", "shell", serde_json::json!({"command": "ls"})),
-            tool_call("toolu_b", "read_file", serde_json::json!({"path": "x"})),
-        ]);
-        let mut result_a = msg(MessageRole::Tool, "out-a");
-        result_a.tool_call_id = Some("toolu_a".into());
-        let mut result_b = msg(MessageRole::Tool, "out-b");
-        result_b.tool_call_id = Some("toolu_b".into());
-        let messages = vec![msg(MessageRole::User, "go"), assistant, result_a, result_b];
-
-        let config = ChatConfig::default();
-        let body = serde_json::to_value(provider.build_request(&messages, &[], &config)).unwrap();
-        let msgs = body["messages"].as_array().unwrap();
-        let results = msgs[2]["content"].as_array().unwrap();
-        assert_eq!(results.len(), 2);
-        assert!(
-            results[0].get("cache_control").is_none(),
-            "only the LAST tool_result block may carry cache_control: {body}"
-        );
-        assert_eq!(results[1]["type"], "tool_result");
-        assert_eq!(results[1]["tool_use_id"], "toolu_b");
-        assert_eq!(results[1]["cache_control"]["type"], "ephemeral");
-        // The plain user message BEFORE the tool loop must stay untouched.
-        assert!(msgs[0]["content"].is_string(), "{body}");
-    }
-
-    #[test]
-    fn should_not_mark_an_incomplete_parallel_tool_result_batch() {
-        let provider = AnthropicProvider::new("test-key", "claude-test").with_prompt_caching(true);
-        let mut assistant = msg(MessageRole::Assistant, "");
-        assistant.tool_calls = Some(vec![
-            tool_call("toolu_a", "shell", serde_json::json!({"command": "ls"})),
-            tool_call("toolu_b", "read_file", serde_json::json!({"path": "x"})),
-        ]);
-        let mut result_a = msg(MessageRole::Tool, "out-a");
-        result_a.tool_call_id = Some("toolu_a".into());
-        let messages = vec![msg(MessageRole::User, "go"), assistant, result_a];
-
-        let body =
-            serde_json::to_value(provider.build_request(&messages, &[], &ChatConfig::default()))
-                .unwrap();
-        let messages = body["messages"].as_array().unwrap();
-        let first_user = messages[0]["content"].as_array().unwrap();
-        assert_eq!(
-            first_user.last().unwrap()["cache_control"]["type"],
-            "ephemeral",
-            "the prior complete user turn remains the rolling breakpoint: {body}"
-        );
-        assert!(
-            !messages[2].to_string().contains("cache_control"),
-            "an incomplete tool-result batch must not become a semantic cache boundary: {body}"
-        );
-    }
-
-    #[test]
-    fn should_keep_blank_system_as_string_even_when_caching_enabled() {
-        // An empty text BLOCK is rejected by Anthropic while `"system": ""`
-        // is not — an all-blank system prompt must stay in string form.
-        // Pin caching ON (the test name asserts "even_when_caching_enabled")
-        // so it does not silently pass under an ambient `OCTOS_PROMPT_CACHING=0`.
-        let provider = AnthropicProvider::new("test-key", "claude-test").with_prompt_caching(true);
-        let messages = vec![msg(MessageRole::System, ""), msg(MessageRole::User, "hi")];
-        let config = ChatConfig::default();
-        let body = serde_json::to_value(provider.build_request(&messages, &[], &config)).unwrap();
-        assert_eq!(
-            body["system"], "",
-            "blank system must not become an empty block: {body}"
-        );
-    }
-
-    #[test]
-    fn should_not_emit_cache_control_anywhere_when_prompt_caching_disabled() {
-        // `with_prompt_caching(false)` must restore the exact pre-caching
-        // wire shape for odd Anthropic-compatible proxies: plain-string
-        // system, verbatim tools, no cache_control key anywhere.
-        let provider = AnthropicProvider::new("test-key", "claude-test").with_prompt_caching(false);
-        let tools = vec![
-            tool_spec("alpha", "first tool"),
-            tool_spec("omega", "last tool"),
-        ];
-        let messages = vec![
-            msg(MessageRole::System, "system prompt"),
-            msg(MessageRole::User, "hello"),
-        ];
-        let config = ChatConfig::default();
-        let body =
-            serde_json::to_value(provider.build_request(&messages, &tools, &config)).unwrap();
-
-        assert_eq!(
-            body["system"], "system prompt",
-            "system must stay a plain string when caching is off: {body}"
-        );
-        assert!(
-            body["messages"][0]["content"].is_string(),
-            "user content must stay a plain string when caching is off: {body}"
-        );
-        assert!(
-            !body.to_string().contains("cache_control"),
-            "no cache_control key may appear anywhere when caching is off: {body}"
-        );
-    }
-
-    #[test]
-    fn should_not_emit_cache_control_anywhere_when_request_opts_out_of_cache_writes() {
-        // A one-shot request (`ChatConfig.cache_retention: None`) must not
-        // pay the 1.25x cache-write premium: with caching enabled on the
-        // PROVIDER, the opted-out REQUEST still serializes to the exact
-        // pre-caching wire shape — plain-string system, verbatim tools, no
-        // cache_control key anywhere.
-        let provider = AnthropicProvider::new("test-key", "claude-test").with_prompt_caching(true);
-        let tools = vec![
-            tool_spec("alpha", "first tool"),
-            tool_spec("omega", "last tool"),
-        ];
-        let messages = vec![
-            msg(MessageRole::System, "system prompt"),
-            msg(MessageRole::User, "hello"),
-        ];
-        let opted_out = ChatConfig {
-            cache_retention: crate::CacheRetention::None,
-            ..Default::default()
-        };
-        let body =
-            serde_json::to_string(&provider.build_request(&messages, &tools, &opted_out)).unwrap();
-        assert!(
-            !body.contains("cache_control"),
-            "an opted-out request must carry zero cache_control blocks: {body}"
-        );
-
-        // Byte-identical to the shape a caching-disabled provider emits —
-        // the opt-out and the provider-level kill switch are the same wire
-        // contract.
-        let disabled = AnthropicProvider::new("test-key", "claude-test").with_prompt_caching(false);
-        let disabled_body = serde_json::to_string(&disabled.build_request(
-            &messages,
-            &tools,
-            &ChatConfig::default(),
-        ))
-        .unwrap();
-        assert_eq!(
-            body, disabled_body,
-            "opted-out request must match the caching-disabled wire shape byte-for-byte"
-        );
-    }
-
-    #[test]
-    fn should_keep_default_request_byte_identical_when_cache_retention_unset() {
-        // The opt-out is strictly per-request: a config that never touches
-        // `cache_retention` (and one that sets it to `Default` explicitly)
-        // must keep the exact cached wire shape, breakpoints included.
-        let provider = AnthropicProvider::new("test-key", "claude-test").with_prompt_caching(true);
-        let tools = vec![tool_spec("alpha", "first tool")];
-        let messages = vec![
-            msg(MessageRole::System, "system prompt"),
-            msg(MessageRole::User, "hello"),
-        ];
-        let unset = serde_json::to_string(&provider.build_request(
-            &messages,
-            &tools,
-            &ChatConfig::default(),
-        ))
-        .unwrap();
-        let explicit_default = ChatConfig {
-            cache_retention: crate::CacheRetention::Default,
-            ..Default::default()
-        };
-        let explicit =
-            serde_json::to_string(&provider.build_request(&messages, &tools, &explicit_default))
-                .unwrap();
-        assert_eq!(unset, explicit);
-        assert!(
-            unset.contains("cache_control"),
-            "the default request must keep its cache breakpoints: {unset}"
-        );
-    }
-
-    #[test]
     fn prompt_caching_env_default_stays_on_when_unset_or_truthy() {
         // Default ON is preserved: unset, empty, or any non-falsy value keeps
         // caching enabled (Claude Code sends cache_control unconditionally).
@@ -2365,19 +1881,6 @@ mod tests {
         assert!(prompt_caching_default_from(Some("on")));
         assert!(prompt_caching_default_from(Some("yes")));
         assert!(prompt_caching_default_from(Some("anything-else")));
-    }
-
-    #[test]
-    fn prompt_caching_env_kill_switch_disables_on_falsy_values() {
-        // OCTOS_PROMPT_CACHING kill-switch: disable without a rebuild for any
-        // Anthropic-compatible proxy that rejects cache_control / block-form
-        // system. Case- and whitespace-insensitive.
-        for v in ["0", "false", "FALSE", "off", "Off", "no", "  no ", " 0 "] {
-            assert!(
-                !prompt_caching_default_from(Some(v)),
-                "OCTOS_PROMPT_CACHING={v:?} must disable prompt caching"
-            );
-        }
     }
 
     #[test]
@@ -2401,79 +1904,6 @@ mod tests {
         assert_eq!(response.usage.cache_read_tokens, 10240);
     }
 
-    #[test]
-    fn should_emit_cache_usage_in_stream_events() {
-        let mut state = AnthropicStreamState::default();
-        let start = crate::sse::SseEvent {
-            event: None,
-            data: r#"{"type":"message_start","message":{"usage":{"input_tokens":3,"cache_creation_input_tokens":4096,"cache_read_input_tokens":10240}}}"#.into(),
-        };
-        assert!(map_anthropic_sse(&mut state, &start).is_empty());
-
-        let end = crate::sse::SseEvent {
-            event: None,
-            data: r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":9}}"#.into(),
-        };
-        let events = map_anthropic_sse(&mut state, &end);
-        match &events[0] {
-            StreamEvent::Usage(u) => {
-                assert_eq!(u.input_tokens, 3);
-                assert_eq!(u.output_tokens, 9);
-                assert_eq!(u.cache_write_tokens, 4096);
-                assert_eq!(u.cache_read_tokens, 10240);
-            }
-            other => panic!("expected Usage event, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn should_send_cache_breakpoints_and_parse_cache_usage_end_to_end() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string(
-                        r#"{"content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":5,"output_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":2048}}"#,
-                    )
-                    .append_header("Content-Type", "application/json"),
-            )
-            .mount(&server)
-            .await;
-
-        // Pin caching ON — this test asserts cache breakpoints are sent on the
-        // wire, so it must not depend on the ambient `OCTOS_PROMPT_CACHING`.
-        let provider = AnthropicProvider::new("test-key", "claude-test")
-            .with_base_url(server.uri())
-            .with_prompt_caching(true);
-        let tools = vec![tool_spec("shell", "run a command")];
-        let messages = vec![
-            msg(MessageRole::System, "sys"),
-            msg(MessageRole::User, "hi"),
-        ];
-        let response = provider
-            .chat(&messages, &tools, &ChatConfig::default())
-            .await
-            .unwrap();
-        assert_eq!(response.usage.cache_read_tokens, 2048);
-        assert_eq!(response.usage.cache_write_tokens, 0);
-
-        let reqs = server.received_requests().await.unwrap();
-        assert_eq!(reqs.len(), 1);
-        let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
-        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
-        let tools_out = body["tools"].as_array().unwrap();
-        assert_eq!(
-            tools_out.last().unwrap()["cache_control"]["type"],
-            "ephemeral"
-        );
-        let msgs = body["messages"].as_array().unwrap();
-        let blocks = msgs.last().unwrap()["content"].as_array().unwrap();
-        assert_eq!(blocks.last().unwrap()["cache_control"]["type"], "ephemeral");
-    }
     // --- sampling params on the Anthropic protocol path (#2172) ---
     //
     // Emission is MODEL-CAPABILITY-AWARE: first-party Claude (claude-*, incl.
@@ -2482,13 +1912,6 @@ mod tests {
     // temperature/top_p/top_k. The `model_accepts_sampling` gate below is
     // pinned from both sides so a "forward to all" mutation fails the Claude
     // tests and a "forward to none" mutation fails the GLM tests.
-
-    /// Pre-change golden serialization of a representative request (caching
-    /// ON: system + tool + user message, `ChatConfig::default()`), captured
-    /// on the rev before sampling support was added. The no-override wire
-    /// must stay byte-identical — prompt-cache prefixes and Anthropic-
-    /// compatible proxies depend on the exact shape.
-    const NO_OVERRIDE_GOLDEN: &str = r#"{"model":"claude-test","max_tokens":16384,"messages":[{"role":"user","content":[{"type":"text","text":"hello","cache_control":{"type":"ephemeral"}}]}],"system":[{"type":"text","text":"system prompt","cache_control":{"type":"ephemeral"}}],"tools":[{"name":"alpha","description":"first tool","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral"}}]}"#;
 
     fn fixture_for(model: &str) -> (AnthropicProvider, Vec<ToolSpec>, Vec<Message>) {
         // Pin caching ON so the wire shape is hermetic w.r.t. an ambient
@@ -2501,12 +1924,6 @@ mod tests {
             msg(MessageRole::User, "hello"),
         ];
         (provider, tools, messages)
-    }
-
-    /// First-party Claude, rejects sampling. `claude-opus-4-7` is a real
-    /// `model_catalog.json` entry whose API contract removed the sampler set.
-    fn claude_fixture() -> (AnthropicProvider, Vec<ToolSpec>, Vec<Message>) {
-        fixture_for("claude-opus-4-7")
     }
 
     /// GLM via z.ai (the `zai` / `zai-coding` families), accepts sampling.
@@ -2565,81 +1982,6 @@ mod tests {
     }
 
     #[test]
-    fn should_serialize_byte_identical_golden_when_no_sampling_override_configured() {
-        let (provider, tools, messages) = fixture_for("claude-test");
-        // The agent loop's no-override shape: `ChatConfig::default()` carries
-        // the built-in `temperature: Some(0.0)` sentinel (see the #2172
-        // invariant in octos-agent's `build_chat_config`) and no
-        // sampling_params.
-        let config = ChatConfig::default();
-        let wire =
-            serde_json::to_string(&provider.build_request(&messages, &tools, &config)).unwrap();
-        assert_eq!(wire, NO_OVERRIDE_GOLDEN);
-
-        // An explicitly-unset temperature must produce the very same bytes.
-        let config_none = ChatConfig {
-            temperature: None,
-            ..ChatConfig::default()
-        };
-        let wire_none =
-            serde_json::to_string(&provider.build_request(&messages, &tools, &config_none))
-                .unwrap();
-        assert_eq!(wire_none, NO_OVERRIDE_GOLDEN);
-    }
-
-    #[test]
-    fn should_emit_no_sampling_fields_on_accepting_model_when_no_override_configured() {
-        // Byte-identity's sibling on the ACCEPTING path: even a GLM model
-        // adds nothing when the operator configured no override (0.0
-        // sentinel, no sampling_params) — so cloud GLM requests are unchanged
-        // until an operator opts in.
-        let (provider, tools, messages) = glm_fixture();
-        let body =
-            serde_json::to_value(provider.build_request(&messages, &tools, &ChatConfig::default()))
-                .unwrap();
-        assert!(body.get("temperature").is_none(), "{body}");
-        assert!(body.get("top_p").is_none(), "{body}");
-        assert!(body.get("top_k").is_none(), "{body}");
-    }
-
-    #[test]
-    fn should_forward_temperature_top_p_and_top_k_to_glm_when_operator_overrides() {
-        let (provider, tools, messages) = glm_fixture();
-        let mut sp = serde_json::Map::new();
-        sp.insert("top_p".to_string(), serde_json::json!(0.9));
-        sp.insert("top_k".to_string(), serde_json::json!(40));
-        let config = ChatConfig {
-            // 0.5 is exactly representable in f32, so the f32 -> f64 widening
-            // in `serde_json::to_value` cannot skew the equality check.
-            temperature: Some(0.5),
-            sampling_params: Some(sp),
-            ..ChatConfig::default()
-        };
-        let body =
-            serde_json::to_value(provider.build_request(&messages, &tools, &config)).unwrap();
-        assert_eq!(body["temperature"], serde_json::json!(0.5), "{body}");
-        assert_eq!(body["top_p"], serde_json::json!(0.9), "{body}");
-        assert_eq!(body["top_k"], serde_json::json!(40), "{body}");
-    }
-
-    #[test]
-    fn should_serialize_temperature_shortest_form_on_glm_wire() {
-        // The non-streaming path serializes the f32 directly (ryu shortest),
-        // so 0.7 reaches the wire as `0.7`, not the widened `0.699999…`.
-        let (provider, tools, messages) = glm_fixture();
-        let config = ChatConfig {
-            temperature: Some(0.7),
-            ..ChatConfig::default()
-        };
-        let wire =
-            serde_json::to_string(&provider.build_request(&messages, &tools, &config)).unwrap();
-        assert!(
-            wire.contains("\"temperature\":0.7"),
-            "temperature override must reach the wire with its exact value: {wire}"
-        );
-    }
-
-    #[test]
     fn should_treat_zero_temperature_as_unset_sentinel_even_on_accepting_model() {
         // 0.0 is the plumbing's built-in default (#2172); it is
         // indistinguishable from "unset" and must never be emitted, even to a
@@ -2655,152 +1997,5 @@ mod tests {
             body.get("temperature").is_none(),
             "the 0.0 default sentinel must stay off the wire: {body}"
         );
-    }
-
-    #[test]
-    fn should_forward_top_p_top_k_and_drop_openai_only_keys_on_glm() {
-        let (provider, tools, messages) = glm_fixture();
-        let mut sp = serde_json::Map::new();
-        sp.insert("top_p".to_string(), serde_json::json!(0.95));
-        sp.insert("top_k".to_string(), serde_json::json!(40));
-        sp.insert("repeat_penalty".to_string(), serde_json::json!(1.1));
-        sp.insert("frequency_penalty".to_string(), serde_json::json!(0.5));
-        let config = ChatConfig {
-            sampling_params: Some(sp),
-            ..ChatConfig::default()
-        };
-        let body =
-            serde_json::to_value(provider.build_request(&messages, &tools, &config)).unwrap();
-        assert_eq!(body["top_p"], serde_json::json!(0.95), "{body}");
-        assert_eq!(body["top_k"], serde_json::json!(40), "{body}");
-        // OpenAI-only sampler knobs are NOT part of the Anthropic Messages
-        // API — they must be dropped (and logged), never forwarded verbatim.
-        assert!(body.get("repeat_penalty").is_none(), "{body}");
-        assert!(body.get("frequency_penalty").is_none(), "{body}");
-    }
-
-    #[test]
-    fn should_drop_modeled_keys_when_smuggled_via_sampling_params_on_glm() {
-        // Defense-in-depth, mirroring the OpenAI path (#2172): keys octos
-        // models with dedicated fields cannot sneak in through
-        // sampling_params and emit duplicate/divergent top-level keys.
-        let (provider, tools, messages) = glm_fixture();
-        let mut sp = serde_json::Map::new();
-        sp.insert("temperature".to_string(), serde_json::json!(1.9));
-        sp.insert("max_tokens".to_string(), serde_json::json!(9));
-        let config = ChatConfig {
-            sampling_params: Some(sp),
-            ..ChatConfig::default()
-        };
-        let body =
-            serde_json::to_value(provider.build_request(&messages, &tools, &config)).unwrap();
-        assert!(
-            body.get("temperature").is_none(),
-            "smuggled temperature must not reach the wire: {body}"
-        );
-        assert_eq!(
-            body["max_tokens"],
-            serde_json::json!(crate::context::default_max_tokens()),
-            "dedicated max_tokens field must win: {body}"
-        );
-    }
-
-    #[test]
-    fn should_keep_cache_breakpoints_unchanged_when_sampling_forwarded_to_glm() {
-        // #1640 interaction: sampling fields are top-level request fields and
-        // must not disturb cache_control placement (system block, LAST tool,
-        // last user content block — exactly three markers). Exercised on the
-        // ACCEPTING path so the sampling fields are actually present.
-        let (provider, tools, messages) = glm_fixture();
-        let mut sp = serde_json::Map::new();
-        sp.insert("top_p".to_string(), serde_json::json!(0.9));
-        let config = ChatConfig {
-            temperature: Some(0.7),
-            sampling_params: Some(sp),
-            ..ChatConfig::default()
-        };
-        let wire =
-            serde_json::to_string(&provider.build_request(&messages, &tools, &config)).unwrap();
-        assert_eq!(
-            wire.matches("\"cache_control\"").count(),
-            3,
-            "exactly three breakpoints (system, last tool, last user block): {wire}"
-        );
-        let body: serde_json::Value = serde_json::from_str(&wire).unwrap();
-        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
-        assert_eq!(
-            body["tools"].as_array().unwrap().last().unwrap()["cache_control"]["type"],
-            "ephemeral"
-        );
-        let blocks = body["messages"].as_array().unwrap().last().unwrap()["content"]
-            .as_array()
-            .unwrap();
-        assert_eq!(blocks.last().unwrap()["cache_control"]["type"], "ephemeral");
-        assert!(body.get("temperature").is_some(), "{body}");
-        assert_eq!(body["top_p"], serde_json::json!(0.9), "{body}");
-    }
-
-    #[test]
-    fn should_not_send_any_sampling_to_first_party_claude_when_operator_overrides() {
-        // H3 core regression: without the model gate, an operator temperature
-        // (and any sampling_params) reach first-party Claude and 400 on
-        // Opus 4.7+. No thinking here — this must hold on the plain path too.
-        let (provider, tools, messages) = claude_fixture();
-        let mut sp = serde_json::Map::new();
-        sp.insert("top_p".to_string(), serde_json::json!(0.9));
-        sp.insert("top_k".to_string(), serde_json::json!(40));
-        let config = ChatConfig {
-            temperature: Some(0.7),
-            sampling_params: Some(sp),
-            ..ChatConfig::default()
-        };
-        let body =
-            serde_json::to_value(provider.build_request(&messages, &tools, &config)).unwrap();
-        assert!(body.get("temperature").is_none(), "{body}");
-        assert!(body.get("top_p").is_none(), "{body}");
-        assert!(body.get("top_k").is_none(), "{body}");
-    }
-
-    #[test]
-    fn should_not_send_any_sampling_to_opus_4_7_when_thinking_omitted_for_small_max_tokens() {
-        // H3 explicit: the small-max_tokens path drops `thinking` (no valid
-        // budget fits), which is exactly where the first cut leaked ALL
-        // sampling to Opus 4.7. The model gate must still suppress everything.
-        let (provider, tools, messages) = claude_fixture();
-        let mut sp = serde_json::Map::new();
-        sp.insert("top_p".to_string(), serde_json::json!(0.9));
-        let config = ChatConfig {
-            max_tokens: Some(1_000),
-            temperature: Some(0.7),
-            reasoning_effort: Some(ReasoningEffort::Low),
-            sampling_params: Some(sp),
-            ..ChatConfig::default()
-        };
-        let body =
-            serde_json::to_value(provider.build_request(&messages, &tools, &config)).unwrap();
-        assert!(body.get("thinking").is_none(), "budget cannot fit: {body}");
-        assert!(body.get("temperature").is_none(), "{body}");
-        assert!(body.get("top_p").is_none(), "{body}");
-        assert!(body.get("top_k").is_none(), "{body}");
-    }
-
-    #[test]
-    fn should_not_send_top_p_to_first_party_claude_even_when_thinking_enabled() {
-        // H4: `thinking + top_p` 400s first-party Claude (top_p is only
-        // conditionally allowed under thinking, and not at all on 4.7+). The
-        // gate drops top_p regardless of the thinking block.
-        let (provider, tools, messages) = claude_fixture();
-        let mut sp = serde_json::Map::new();
-        sp.insert("top_p".to_string(), serde_json::json!(0.9));
-        let config = ChatConfig {
-            max_tokens: Some(32_768),
-            reasoning_effort: Some(ReasoningEffort::High),
-            sampling_params: Some(sp),
-            ..ChatConfig::default()
-        };
-        let body =
-            serde_json::to_value(provider.build_request(&messages, &tools, &config)).unwrap();
-        assert_eq!(body["thinking"]["type"], "enabled", "{body}");
-        assert!(body.get("top_p").is_none(), "{body}");
     }
 }

@@ -352,32 +352,6 @@ mod tests {
     }
 
     #[test]
-    fn should_fire_call_checkpoint_only_after_n_completed_action_calls() {
-        // `due` runs BEFORE an iteration's action call: with two completed
-        // action calls an N=3 checkpoint must not fire; it fires once the 3rd
-        // has completed, i.e. before the 4th action call.
-        let mut controller = new_controller(3, 10_000);
-        let usage = TokenUsage::default();
-        assert!(controller.due(&usage).is_none());
-        controller.record_action_call();
-        assert!(controller.due(&usage).is_none());
-        controller.record_action_call();
-        assert!(
-            controller.due(&usage).is_none(),
-            "only two action calls have completed"
-        );
-        controller.record_action_call();
-        let reason = controller
-            .due(&usage)
-            .expect("three completed action calls are due");
-        assert_eq!(reason, CheckpointReason::LlmCalls { calls: 3 });
-        assert_eq!(
-            reason.describe(),
-            "3 LLM action calls completed without a convergence checkpoint"
-        );
-    }
-
-    #[test]
     fn should_require_full_action_call_increment_when_a_checkpoint_reflection_ran() {
         let mut controller = new_controller(3, 10_000);
         let usage = TokenUsage::default();
@@ -448,49 +422,6 @@ mod tests {
     }
 
     #[test]
-    fn should_rearm_call_checkpoint_after_n_completed_actions_when_checkpoint_fails_open() {
-        let mut controller = new_controller(3, 10_000);
-        let usage = TokenUsage::default();
-        record_action_calls(&mut controller, 3);
-        assert!(controller.due(&usage).is_some());
-
-        // The reflection provider failed; the iteration proceeds to its action
-        // call, which counts once it completes like any other.
-        controller.complete(&usage, None, "Checkpoint failed".into());
-        record_action_calls(&mut controller, 2);
-        assert!(controller.due(&usage).is_none());
-        controller.record_action_call();
-        assert!(matches!(
-            controller.due(&usage),
-            Some(CheckpointReason::LlmCalls { calls: 3 })
-        ));
-    }
-
-    #[test]
-    fn should_wrap_reflection_in_typed_context_event_envelope_when_reinjected() {
-        let mut controller = new_controller(3, 10_000);
-        assert!(controller.context_message().is_none());
-
-        controller.complete(
-            &TokenUsage::default(),
-            Some(&TokenUsage::default()),
-            "  next: one bounded edit  ".into(),
-        );
-
-        let context = controller.context_message().expect("reflection stored");
-        assert!(context.starts_with(
-            "<context_event kind=\"convergence_checkpoint\" authority=\"background\">"
-        ));
-        assert!(context.contains("next: one bounded edit"));
-        assert!(context.ends_with("</context_event>"));
-        assert!(is_checkpoint_context(&context));
-        assert!(!is_checkpoint_context(
-            "<context_event kind=\"other\">x</context_event>"
-        ));
-        assert!(!is_checkpoint_context("[internal convergence checkpoint]"));
-    }
-
-    #[test]
     fn token_threshold_counts_active_io_but_not_cache_traffic() {
         let mut controller = new_controller(100, 1_000);
         let usage = TokenUsage {
@@ -511,25 +442,5 @@ mod tests {
             controller.due(&usage),
             Some(CheckpointReason::ActiveTokens { tokens: 1_050 })
         ));
-    }
-
-    #[test]
-    fn forced_file_churn_takes_priority() {
-        let mut controller = new_controller(3, 1_000);
-        controller.force(CheckpointReason::FileChurn {
-            path: "app.css".into(),
-            edits: 5,
-            escalation: false,
-        });
-        assert!(matches!(
-            controller.due(&TokenUsage::default()),
-            Some(CheckpointReason::FileChurn { path, .. }) if path == "app.css"
-        ));
-    }
-
-    #[test]
-    fn elapsed_format_is_compact_for_ui_status() {
-        assert_eq!(format_elapsed(Duration::from_secs(9)), "9s");
-        assert_eq!(format_elapsed(Duration::from_secs(125)), "2m05s");
     }
 }

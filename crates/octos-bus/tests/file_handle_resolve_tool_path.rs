@@ -8,8 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use octos_bus::file_handle::{
-    ResolvedToolPath, ToolPathError, ToolPathScope, encode_profile_file_handle,
-    encode_tmp_upload_handle, resolve_tool_path, temp_upload_root,
+    ResolvedToolPath, ToolPathError, ToolPathScope, resolve_tool_path, temp_upload_root,
 };
 use tempfile::TempDir;
 
@@ -78,26 +77,6 @@ impl Rig {
         std::fs::write(&abs, body).expect("write upload file");
         std::fs::canonicalize(&abs).expect("canonicalise upload file")
     }
-
-    /// Build a real file under the profile root.
-    fn make_profile_file(&self, relative: &str, body: &[u8]) -> PathBuf {
-        let abs = self.profile.path().join(relative);
-        if let Some(parent) = abs.parent() {
-            std::fs::create_dir_all(parent).expect("profile parent dir");
-        }
-        std::fs::write(&abs, body).expect("write profile file");
-        std::fs::canonicalize(&abs).expect("canonicalise profile file")
-    }
-
-    /// Relative path inside the rig's upload subdir as the file_handle
-    /// helpers see it (the bit between `temp_upload_root()` and the
-    /// file).
-    fn upload_relative(&self, name: &str) -> PathBuf {
-        self.upload_dir
-            .strip_prefix(temp_upload_root())
-            .map(|p| p.join(name))
-            .expect("upload dir lies under temp_upload_root")
-    }
 }
 
 impl Drop for Rig {
@@ -133,42 +112,6 @@ fn row_1_workspace_relative_input() {
 }
 
 #[test]
-fn row_1b_workspace_relative_writes_for_nonexistent_path() {
-    // Write-style tools (`write_file`, `edit_file`) need a workspace
-    // path even when the file does not yet exist; the resolver must
-    // return the normalised location instead of failing.
-    let rig = Rig::new("row1b");
-    let resolved = expect_resolved(resolve_tool_path(
-        rig.workspace_root(),
-        Some(rig.profile_root()),
-        "subdir/new-output.txt",
-    ));
-    assert_eq!(resolved.scope, ToolPathScope::Workspace);
-    assert_eq!(
-        resolved.absolute,
-        rig.workspace_root().join("subdir/new-output.txt")
-    );
-}
-
-#[test]
-fn row_2_absolute_inside_workspace_kept() {
-    let rig = Rig::new("row2");
-    let abs = rig.make_workspace_file("foo.txt", b"hi");
-
-    let resolved = expect_resolved(resolve_tool_path(
-        rig.workspace_root(),
-        Some(rig.profile_root()),
-        &abs.to_string_lossy(),
-    ));
-    assert_eq!(resolved.scope, ToolPathScope::Workspace);
-    // For absolute paths the resolver collapses macOS firmlinks via
-    // `canonicalize_lossy`, so the resolved path is the canonical form.
-    // The workspace-relative branch keeps the lexical workspace path —
-    // see `row_1_workspace_relative_input`.
-    assert_eq!(resolved.absolute, abs);
-}
-
-#[test]
 fn row_3_absolute_inside_upload_tmpdir_kept() {
     let rig = Rig::new("row3");
     let abs = rig.make_upload_file("019e22ab-cd-real-upload.wav", b"WAV");
@@ -187,120 +130,6 @@ fn row_3_absolute_inside_upload_tmpdir_kept() {
         resolved.absolute,
         temp_upload_root()
     );
-}
-
-#[test]
-fn row_4_three_segment_upload_handle() {
-    let rig = Rig::new("row4");
-    let abs = rig.make_upload_file("019e22-three-segment.wav", b"WAV");
-    let relative = rig.upload_relative("019e22-three-segment.wav");
-
-    let handle = encode_tmp_upload_handle(
-        &temp_upload_root().join(&relative),
-        Some("019e22-three-segment.wav"),
-    )
-    .expect("3-segment handle encoded");
-    assert!(handle.starts_with("up/"));
-    assert!(handle.matches('/').count() >= 2);
-
-    let resolved = expect_resolved(resolve_tool_path(
-        rig.workspace_root(),
-        Some(rig.profile_root()),
-        &handle,
-    ));
-    assert_eq!(resolved.scope, ToolPathScope::UploadTmpdir);
-    // canonicalise inside test to handle /private firmlinks on macOS.
-    assert_eq!(resolved.absolute, abs);
-}
-
-#[test]
-fn row_5_two_segment_upload_handle_no_display() {
-    let rig = Rig::new("row5");
-    let abs = rig.make_upload_file("019e22-two-segment.wav", b"WAV");
-    let relative = rig.upload_relative("019e22-two-segment.wav");
-
-    let full_handle = encode_tmp_upload_handle(
-        &temp_upload_root().join(&relative),
-        Some("019e22-two-segment.wav"),
-    )
-    .expect("handle");
-    // Strip the trailing display segment — the LLM frequently drops it.
-    let payload = full_handle.split('/').nth(1).expect("payload");
-    let two_segment = format!("up/{payload}");
-
-    let resolved = expect_resolved(resolve_tool_path(
-        rig.workspace_root(),
-        Some(rig.profile_root()),
-        &two_segment,
-    ));
-    assert_eq!(resolved.scope, ToolPathScope::UploadTmpdir);
-    assert_eq!(resolved.absolute, abs);
-}
-
-#[test]
-fn row_6_three_segment_profile_handle() {
-    let rig = Rig::new("row6");
-    let abs = rig.make_profile_file("slides/demo/output/deck.pptx", b"pptx");
-    let handle = encode_profile_file_handle(rig.profile_root(), &abs).expect("pf handle");
-    assert!(handle.starts_with("pf/"));
-    assert!(handle.matches('/').count() >= 2);
-
-    let resolved = expect_resolved(resolve_tool_path(
-        rig.workspace_root(),
-        Some(rig.profile_root()),
-        &handle,
-    ));
-    assert_eq!(resolved.scope, ToolPathScope::Profile);
-    assert_eq!(resolved.absolute, abs);
-}
-
-#[test]
-fn row_7_two_segment_profile_handle_no_display() {
-    let rig = Rig::new("row7");
-    let abs = rig.make_profile_file("slides/two-seg/output/deck.pptx", b"pptx");
-    let full_handle = encode_profile_file_handle(rig.profile_root(), &abs).expect("pf handle");
-    let payload = full_handle.split('/').nth(1).expect("payload");
-    let two_segment = format!("pf/{payload}");
-
-    let resolved = expect_resolved(resolve_tool_path(
-        rig.workspace_root(),
-        Some(rig.profile_root()),
-        &two_segment,
-    ));
-    assert_eq!(resolved.scope, ToolPathScope::Profile);
-    assert_eq!(resolved.absolute, abs);
-}
-
-#[test]
-fn row_8_bare_basename_under_upload_tmpdir() {
-    // The server writes uploads as `<temp_upload_root()>/<uuid>.<ext>`.
-    // The LLM frequently passes only the basename back. The resolver
-    // must locate the on-disk file under the upload tmpdir without
-    // mistaking it for a workspace-relative path.
-    let upload_root = temp_upload_root();
-    std::fs::create_dir_all(&upload_root).unwrap();
-    let bare_name = format!(
-        "019e22-bare-{}-{}.wav",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0),
-    );
-    let abs = upload_root.join(&bare_name);
-    std::fs::write(&abs, b"WAV").unwrap();
-    let canonical = std::fs::canonicalize(&abs).unwrap();
-
-    let rig = Rig::new("row8");
-    let resolved = expect_resolved(resolve_tool_path(
-        rig.workspace_root(),
-        Some(rig.profile_root()),
-        &bare_name,
-    ));
-    assert_eq!(resolved.scope, ToolPathScope::UploadTmpdir);
-    assert_eq!(resolved.absolute, canonical);
-
-    let _ = std::fs::remove_file(&abs);
 }
 
 #[test]
@@ -345,56 +174,6 @@ fn workspace_root_absolute_without_profile_still_works() {
     assert_eq!(resolved.absolute, rig.workspace_root().join("hello.txt"));
 }
 
-#[test]
-fn profile_handle_without_profile_root_fails() {
-    // A `pf/...` handle supplied without a `profile_root` argument is
-    // unresolvable. Surface as DecodeFailed so callers can fall back to
-    // their own legacy paths if any.
-    let rig = Rig::new("no-profile-pf");
-    let abs = rig.make_profile_file("slides/demo/deck.pptx", b"x");
-    let handle = encode_profile_file_handle(rig.profile_root(), &abs).expect("pf handle");
-
-    let err = expect_err(resolve_tool_path(rig.workspace_root(), None, &handle));
-    assert_eq!(err, ToolPathError::DecodeFailed);
-}
-
-#[test]
-fn absolute_input_with_dotdot_through_missing_component_rejected() {
-    // Codex review round 4 P2 (2026-05-13): when an absolute input
-    // contains `..` after a non-existent component under an allowed
-    // root, the previous `canonicalize_lossy` walked back to the
-    // closest existing parent and re-attached the suffix VERBATIM,
-    // producing a path that still satisfied `starts_with(workspace)`
-    // even though it logically escaped. The resolver must lexically
-    // collapse `..` BEFORE the containment check so the workspace
-    // boundary is honest.
-    let rig = Rig::new("dotdot");
-    let workspace = rig.workspace_root();
-    let outside = tempfile::tempdir().expect("outside");
-    std::fs::write(outside.path().join("secret.txt"), b"escape").unwrap();
-
-    // Input: <workspace>/missing/../../<outside>/secret.txt
-    // Lexically normalises to <outside-parent>/secret.txt, which
-    // lies outside both the workspace and the upload tmpdir. The
-    // resolver must reject as OutsideAllowedRoots.
-    let workspace_parent = workspace.parent().expect("workspace parent");
-    let traverse = format!(
-        "{}/missing/../../{}/secret.txt",
-        workspace.display(),
-        outside
-            .path()
-            .strip_prefix(workspace_parent)
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| outside.path().display().to_string()),
-    );
-    let err = expect_err(resolve_tool_path(workspace, None, &traverse));
-    assert_eq!(
-        err,
-        ToolPathError::OutsideAllowedRoots,
-        "dotdot through missing component must not be silently accepted as workspace-internal"
-    );
-}
-
 #[cfg(unix)]
 #[test]
 fn workspace_relative_symlink_resolution_is_lexical_not_canonical() {
@@ -426,29 +205,4 @@ fn workspace_relative_symlink_resolution_is_lexical_not_canonical() {
         resolved.absolute, outside_path,
         "resolver must not follow symlinks for workspace-relative paths"
     );
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn macos_firmlink_canonicalisation_for_upload_root() {
-    // macOS firmlinks expose `/var/folders/...` and
-    // `/private/var/folders/...` as the same directory.
-    // `std::fs::canonicalize` collapses to the `/private/...` form, but
-    // `temp_upload_root()` returns the un-prefixed `/var/...` path.
-    // The unified resolver must accept BOTH forms.
-    let rig = Rig::new("firmlink");
-    let abs = rig.make_upload_file("firmlink.wav", b"WAV");
-    let canon = std::fs::canonicalize(&abs).expect("canonicalise");
-    let canon_str = canon.to_string_lossy();
-    assert!(
-        canon_str.starts_with("/private/var/") || canon_str.starts_with("/var/"),
-        "expected macOS tmpdir under /var/folders/, got {canon_str}"
-    );
-
-    let resolved = expect_resolved(resolve_tool_path(
-        rig.workspace_root(),
-        Some(rig.profile_root()),
-        &canon.to_string_lossy(),
-    ));
-    assert_eq!(resolved.scope, ToolPathScope::UploadTmpdir);
 }

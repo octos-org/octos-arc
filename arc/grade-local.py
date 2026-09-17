@@ -20,10 +20,6 @@ for step, cwd in (("npm install --no-audit --no-fund && npm run build", out/"fro
     rc, log = sh(step, cwd)
     print(f"[grade] {cwd.name}: {step!r} -> {rc}"); 
     if rc: print(log); sys.exit(2)
-# The specs mutate the app's persisted store; snapshot the (git-managed) output
-# dir and restore it afterwards so grading never changes what gets shipped.
-def git(*args): subprocess.run(["git", "-C", str(out), *args], capture_output=True)
-git("add", "-A")
 benv = dict(env, PORT=str(port))
 srv = subprocess.Popen("npm run start", cwd=out/"backend", env=benv, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, preexec_fn=os.setsid)
 for _ in range(60):
@@ -32,17 +28,16 @@ for _ in range(60):
     time.sleep(0.5)
 else:
     print("[grade] backend never bound", port); os.killpg(srv.pid, signal.SIGTERM); sys.exit(3)
-work = grader / "run" / f"{req}-{out.name}"
+work = grader / "run" / req
 if work.exists(): shutil.rmtree(work)
 shutil.copytree(specs, work / "tests")
 (work / "playwright.config.ts").write_text(
     "import { defineConfig } from '@playwright/test';\n"
-    "export default defineConfig({ testDir: './tests', timeout: 60000, retries: 0, workers: 4, reporter: [['json', { outputFile: 'report.json' }], ['line']], use: { headless: true, baseURL: process.env.E2E_BASE_URL } });\n")
+    "export default defineConfig({ testDir: './tests', timeout: 60000, retries: 0, workers: 4, reporter: [['json', { outputFile: 'report.json' }], ['line']], use: { headless: true } });\n")
 tenv = dict(env, E2E_BASE_URL=f"http://127.0.0.1:{port}")
 t0 = time.time()
 r = subprocess.run(["npx", "playwright", "test", "-c", str(work/"playwright.config.ts")], cwd=grader, env=tenv, capture_output=True, text=True)
 os.killpg(srv.pid, signal.SIGTERM)
-git("checkout", "--", "."); git("clean", "-fdq", "-e", "node_modules", "-e", "dist", "--", "frontend", "backend")
 rep = json.loads((work/"report.json").read_text()) if (work/"report.json").exists() else {}
 def walk(suites):
     for s in suites:
@@ -53,8 +48,5 @@ res = list(walk(rep.get("suites", [])))
 passed = sum(1 for _, ok in res if ok)
 for title, ok in res: print(f"  {'PASS' if ok else 'FAIL'}  {title}")
 print(f"[grade] {req}: {passed}/{len(res)} passed in {time.time()-t0:.0f}s  score={100*passed/len(res) if res else 0:.0f}")
-(out / ".arc").mkdir(exist_ok=True)
-(out / ".arc" / "local-grade.json").write_text(json.dumps({"requirement": req, "passed": passed, "total": len(res),
-    "tests": [{"title": t, "ok": ok} for t, ok in res]}, ensure_ascii=False, indent=1))
 if passed < len(res):
     print(r.stdout[-3000:])

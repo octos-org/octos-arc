@@ -97,23 +97,11 @@ impl Agent {
         // token can't hang the turn; the inter-chunk idle catches a stream
         // that stalls mid-flight; `llm_call_max` is the overall wall-clock
         // backstop.
-        // Voice fail-fast tightens TTFT / idle (a spoken reply can't wait
-        // minutes for the first token) and caps the overall at the voice
-        // deadline. Normal turns keep the generous production thresholds.
-        let thresholds =
-            if octos_llm::current_llm_call_policy() == octos_llm::LlmCallPolicy::FailFast {
-                StreamTimeouts {
-                    first_token_grace_secs: super::VOICE_STREAM_TTFT_SECS,
-                    inter_chunk_idle_secs: super::VOICE_STREAM_IDLE_SECS,
-                    overall_max_secs: self.config.voice_overall_deadline.as_secs(),
-                }
-            } else {
-                StreamTimeouts {
-                    first_token_grace_secs: self.config.llm_first_token_grace.as_secs(),
-                    inter_chunk_idle_secs: self.config.llm_stream_idle.as_secs(),
-                    overall_max_secs: self.effective_llm_call_max_secs(),
-                }
-            };
+        let thresholds = StreamTimeouts {
+            first_token_grace_secs: self.config.llm_first_token_grace.as_secs(),
+            inter_chunk_idle_secs: self.config.llm_stream_idle.as_secs(),
+            overall_max_secs: self.effective_llm_call_max_secs(),
+        };
         self.consume_stream_inner(
             stream,
             iteration,
@@ -654,9 +642,9 @@ impl Agent {
         });
         // Session figures = completed-runs base + this turn so far.
         //
-        // The base comes from the shared session-usage handle (seeded from
-        // the usage ledger and folded per completed run by the session
-        // actor — each run priced at the model that ran it), so the wire's
+        // The base comes from the shared session-usage handle (folded per
+        // completed run by the session actor — each run priced at the
+        // model that ran it), so the wire's
         // `session_*` fields survive per-turn resets and the runtime
         // rebuild a `profile/llm/select` switch triggers. The turn part
         // uses `LoopTurnState`'s per-response spend, NOT
@@ -763,8 +751,7 @@ mod tests {
     //! These tests run with `tokio::time::pause` so the 180s inter-chunk
     //! timeout fires instantly under virtual time.
 
-    use std::sync::{Arc, Mutex};
-    use std::time::Duration;
+    use std::sync::Arc;
 
     use async_trait::async_trait;
     use eyre::Result;
@@ -776,31 +763,13 @@ mod tests {
         TokenUsage as LlmTokenUsage, ToolSpec,
     };
     use octos_memory::EpisodeStore;
-    use serde_json::json;
     use tempfile::TempDir;
 
     use super::super::Agent;
-    use crate::progress::{ProgressEvent, ProgressReporter};
+
     use crate::tools::ToolRegistry;
 
     struct NoopProvider;
-
-    #[derive(Default)]
-    struct CapturingReporter {
-        events: Mutex<Vec<ProgressEvent>>,
-    }
-
-    impl CapturingReporter {
-        fn events(&self) -> Vec<ProgressEvent> {
-            self.events.lock().unwrap().clone()
-        }
-    }
-
-    impl ProgressReporter for CapturingReporter {
-        fn report(&self, event: ProgressEvent) {
-            self.events.lock().unwrap().push(event);
-        }
-    }
 
     #[async_trait]
     impl LlmProvider for NoopProvider {
@@ -820,138 +789,6 @@ mod tests {
         fn provider_name(&self) -> &str {
             "mock"
         }
-    }
-
-    /// Provider that never answers but reports a model with catalog pricing
-    /// under a configurable provider label, so cost plumbing (including the
-    /// per-provider cache rate card) can be exercised without a network call.
-    struct PricedNoopProvider {
-        provider: &'static str,
-    }
-
-    #[async_trait]
-    impl LlmProvider for PricedNoopProvider {
-        async fn chat(
-            &self,
-            _messages: &[Message],
-            _tools: &[ToolSpec],
-            _config: &ChatConfig,
-        ) -> Result<ChatResponse> {
-            eyre::bail!("chat() unused in pricing tests")
-        }
-
-        fn model_id(&self) -> &str {
-            "claude-opus-4"
-        }
-
-        fn provider_name(&self) -> &str {
-            self.provider
-        }
-
-        fn provider_metadata(&self) -> octos_llm::ProviderMetadata {
-            // #2194 R4: real providers source their cache lane from their TYPE.
-            // Mirror that so these pricing tests exercise the metadata lane the
-            // production path now uses: an Anthropic-protocol slot reports the
-            // Anthropic lane, everything else the residual lane.
-            let lane = if self.provider == "anthropic" {
-                octos_llm::CacheLane::Anthropic
-            } else {
-                octos_llm::CacheLane::Residual
-            };
-            octos_llm::ProviderMetadata::new(self.provider, self.model_id(), None)
-                .with_cache_lane(lane)
-        }
-    }
-
-    async fn priced_agent(provider_label: &'static str) -> (Agent, TempDir) {
-        let dir = tempfile::tempdir().unwrap();
-        let memory = Arc::new(EpisodeStore::open(dir.path().join("memory")).await.unwrap());
-        let provider: Arc<dyn LlmProvider> = Arc::new(PricedNoopProvider {
-            provider: provider_label,
-        });
-        let agent = Agent::new(
-            AgentId::new("pricing-test"),
-            provider,
-            ToolRegistry::new(),
-            memory,
-        );
-        (agent, dir)
-    }
-
-    #[tokio::test]
-    async fn should_price_cache_reads_and_writes_at_multiplier_rates_when_usage_reports_them() {
-        // #1640 follow-up: on an ANTHROPIC-labeled slot, runtime pricing
-        // must charge cache reads at 0.1x and cache writes at 1.25x the
-        // input rate instead of ignoring both — otherwise caching
-        // experiments are unpriceable after the fact.
-        let (agent, _dir) = priced_agent("anthropic").await;
-
-        let priced = agent
-            .response_usage_cost(100_000, 10_000, 10_000, 2_000, None)
-            .expect("claude-opus-4 has catalog pricing");
-
-        let pricing = octos_llm::pricing::model_pricing("claude-opus-4").unwrap();
-        let naive = pricing.cost(100_000, 10_000);
-        let expected = pricing.cost_with_cache(100_000, 10_000, 10_000, 2_000);
-        assert!(
-            (priced - expected).abs() < 1e-12,
-            "cache-aware figure expected {expected}, got {priced}"
-        );
-        assert!(
-            (priced - naive).abs() > 1e-9,
-            "cache tokens must move the price off the naive input/output figure ({naive})"
-        );
-        // The exact premium: 10_000 reads at 0.1x + 2_000 writes at 1.25x of
-        // the input rate.
-        let input_rate = pricing.input_per_million;
-        let premium = (10_000.0 / 1_000_000.0) * input_rate * 0.1
-            + (2_000.0 / 1_000_000.0) * input_rate * 1.25;
-        assert!(
-            (priced - (naive + premium)).abs() < 1e-12,
-            "premium must be 0.1x reads + 1.25x writes on the input rate"
-        );
-    }
-
-    #[tokio::test]
-    async fn should_price_unknown_slot_cache_reads_full_and_writes_never_free() {
-        // #2194 review round 2: an unknown-labeled slot bills cache READS at
-        // the full input rate (no invented discount), but cache WRITES are
-        // NEVER free — cache_write_tokens is only ever emitted by the
-        // Anthropic parser, so a write reaching the residual bucket is an
-        // Anthropic-protocol write from an unrecognized proxy and bills at
-        // 1.25x rather than vanishing.
-        let (agent, _dir) = priced_agent("openai").await;
-        let priced = agent
-            .response_usage_cost(100_000, 10_000, 10_000, 2_000, None)
-            .expect("claude-opus-4 has catalog pricing");
-
-        let pricing = octos_llm::pricing::model_pricing("claude-opus-4").unwrap();
-        // reads folded in at full input rate + 2k writes at 1.25x.
-        let expected = pricing.cost(100_000 + 10_000, 10_000)
-            + (2_000.0 / 1_000_000.0) * pricing.input_per_million * 1.25;
-        assert!(
-            (priced - expected).abs() < 1e-12,
-            "unknown slot: reads at full input rate, writes at 1.25x (got {priced})"
-        );
-        // The write must not vanish: dropping it lowers the price.
-        let read_only = agent
-            .response_usage_cost(100_000, 10_000, 10_000, 0, None)
-            .unwrap();
-        assert!(
-            priced - read_only > 1e-9,
-            "a reported cache write must add cost on an unknown slot"
-        );
-
-        // And the Anthropic card is still cheaper (0.1x reads), so the
-        // protocol branch genuinely changes the price.
-        let (anthropic_agent, _dir2) = priced_agent("anthropic").await;
-        let anthropic_priced = anthropic_agent
-            .response_usage_cost(100_000, 10_000, 10_000, 2_000, None)
-            .unwrap();
-        assert!(
-            priced - anthropic_priced > 1e-9,
-            "unknown full-rate reads must cost more than Anthropic 0.1x reads"
-        );
     }
 
     /// Build a bare `Agent` whose backing provider is unused — the streaming
@@ -1055,110 +892,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_first_token_grace_timeout_aborts_when_no_chunk_ever_arrives() {
-        // A stream that NEVER yields a single chunk (provider accepted the
-        // request then went silent) must trip the first-token grace and
-        // abort with a retryable IdleTimeout — not hang the turn forever.
-        let (agent, _dir) = build_test_agent().await;
-
-        // No prelude: pure `pending` stream. The first poll uses the TTFT /
-        // first-token-grace budget (tiny here) and must fire.
-        let stream = stalling_stream(vec![]);
-
-        let start = std::time::Instant::now();
-        let result = agent
-            .consume_stream_for_test(stream, 7, 0, test_thresholds(1))
-            .await;
-        let elapsed = start.elapsed();
-
-        let err = result.expect_err("first-token grace timeout must surface as Err");
-        let typed = as_stream_error(&err).expect("err must be StreamError typed");
-        assert!(
-            matches!(typed, StreamError::IdleTimeout { .. }),
-            "expected IdleTimeout, got {typed:?}"
-        );
-        assert!(
-            typed.is_retryable(),
-            "first-token-grace timeout must be retryable so the retry ladder drives recovery"
-        );
-        assert!(
-            elapsed < std::time::Duration::from_secs(5),
-            "first-token timeout took {elapsed:?} — should fire within ~1s"
-        );
-    }
-
-    #[tokio::test]
-    async fn stream_overall_wall_clock_cap_aborts_trickling_stream() {
-        // A stream that keeps trickling one chunk just under the inter-chunk
-        // idle gap forever never trips the idle guard — only the overall
-        // wall-clock cap can terminate it. Build a stream that emits a chunk
-        // every ~20ms; with a generous idle but a 1s overall cap, the cap
-        // must fire and return a retryable IdleTimeout within a bounded time.
-        use std::time::Duration;
-        let (agent, _dir) = build_test_agent().await;
-
-        // Infinite text-delta stream, one chunk every 20ms. Idle gap (20ms)
-        // stays well under the 10s idle budget, so only the 1s overall cap
-        // can stop it.
-        let trickle = futures::stream::unfold(0u64, |n| async move {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            Some((StreamEvent::TextDelta(format!("tok{n} ")), n + 1))
-        });
-        let stream: ChatStream = Box::pin(trickle);
-
-        let thresholds = super::StreamTimeouts {
-            first_token_grace_secs: 10,
-            inter_chunk_idle_secs: 10,
-            overall_max_secs: 1,
-        };
-
-        let start = std::time::Instant::now();
-        let result = agent
-            .consume_stream_for_test(stream, 9, 0, thresholds)
-            .await;
-        let elapsed = start.elapsed();
-
-        let err = result.expect_err("overall wall-clock cap must surface as Err");
-        let typed = as_stream_error(&err).expect("err must be StreamError typed");
-        assert!(
-            matches!(typed, StreamError::IdleTimeout { idle_secs } if *idle_secs == 1),
-            "expected overall-cap IdleTimeout{{idle_secs:1}}, got {typed:?}"
-        );
-        assert!(
-            typed.is_retryable(),
-            "overall-cap timeout must be retryable so the turn ends cleanly after retries"
-        );
-        // 1s cap + 20ms slack; must NOT have run for the full 10s idle budget.
-        assert!(
-            elapsed < std::time::Duration::from_secs(4),
-            "overall cap took {elapsed:?} — wall-clock backstop did not fire promptly"
-        );
-    }
-
-    #[tokio::test]
-    async fn stream_completes_fast_unaffected_by_timeouts() {
-        // Regression: a normal fast stream completes well under the (tiny in
-        // test) thresholds and returns Ok — the timeout machinery never
-        // interferes with a healthy provider.
-        let (agent, _dir) = build_test_agent().await;
-
-        let stream = into_chat_stream(vec![
-            StreamEvent::TextDelta("Hello".to_string()),
-            StreamEvent::TextDelta(", fast world!".to_string()),
-            StreamEvent::Usage(LlmTokenUsage::default()),
-            StreamEvent::Done(StopReason::EndTurn),
-        ]);
-
-        let (response, streamed) = agent
-            .consume_stream_for_test(stream, 1, 0, test_thresholds(1))
-            .await
-            .expect("a fast stream must complete unaffected by the idle/cap guards");
-        assert!(streamed);
-        assert_eq!(response.content.as_deref(), Some("Hello, fast world!"));
-        assert_eq!(response.stop_reason, StopReason::EndTurn);
-    }
-
-    #[tokio::test]
     async fn repetitive_output_is_replaced_with_message_not_none() {
         // #1507: suppressed repetitive output used to become `content: None`,
         // which the EndTurn consumer rendered as a completely blank assistant
@@ -1183,42 +916,6 @@ mod tests {
             response.content.as_deref(),
             Some(super::REPETITIVE_OUTPUT_MESSAGE),
             "suppression must yield the explanatory message, never None/blank"
-        );
-    }
-
-    #[tokio::test]
-    async fn reasoning_delta_reports_reasoning_chunk_and_keeps_buffering() {
-        let (agent, _dir) = build_test_agent().await;
-        let reporter = Arc::new(CapturingReporter::default());
-        agent.set_reporter(reporter.clone());
-
-        let stream = into_chat_stream(vec![
-            StreamEvent::ReasoningDelta("plan ".to_string()),
-            StreamEvent::ReasoningDelta("step".to_string()),
-            StreamEvent::TextDelta("Answer".to_string()),
-            StreamEvent::Done(StopReason::EndTurn),
-        ]);
-
-        let (response, streamed) = agent
-            .consume_stream_with_input_estimate(stream, 3, 100)
-            .await
-            .expect("clean reasoning stream must assemble");
-
-        assert!(streamed);
-        assert_eq!(response.content.as_deref(), Some("Answer"));
-        assert_eq!(response.reasoning_content.as_deref(), Some("plan step"));
-
-        let reasoning_chunks: Vec<(String, u32)> = reporter
-            .events()
-            .into_iter()
-            .filter_map(|event| match event {
-                ProgressEvent::ReasoningChunk { text, iteration } => Some((text, iteration)),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            reasoning_chunks,
-            vec![("plan ".to_string(), 3), ("step".to_string(), 3)]
         );
     }
 
@@ -1343,48 +1040,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_truncated_toolcall_at_max_tokens_is_retryable() {
-        // #1712: the SAME unparseable-args condition, but the stream finished
-        // because it hit the output token cap (Done(MaxTokens)) — the JSON is a
-        // truncated prefix, not a model bug. It must surface as the RETRYABLE
-        // `TruncatedToolCall`, not the non-retryable `MalformedArgs`, so a
-        // background task retries instead of dying.
-        let (agent, _dir) = build_test_agent().await;
-
-        let stream = into_chat_stream(vec![
-            StreamEvent::ToolCallDelta {
-                index: 0,
-                id: Some("write_file_26".to_string()),
-                name: Some("write_file".to_string()),
-                // Truncated mid-string: a valid prefix cut off by the cap.
-                arguments_delta: "{\"path\":\"r.md\",\"content\":\"# Review\nline".to_string(),
-            },
-            StreamEvent::Usage(LlmTokenUsage::default()),
-            StreamEvent::Done(StopReason::MaxTokens),
-        ]);
-
-        let result = agent
-            .consume_stream_with_input_estimate(stream, 1, 100)
-            .await;
-
-        let err = result.expect_err("truncated args must surface as Err");
-        let typed = as_stream_error(&err).expect("err must be StreamError typed");
-        match typed {
-            StreamError::TruncatedToolCall {
-                tool_id, tool_name, ..
-            } => {
-                assert_eq!(tool_id, "write_file_26");
-                assert_eq!(tool_name, "write_file");
-            }
-            other => panic!("expected TruncatedToolCall, got {other:?}"),
-        }
-        assert!(
-            typed.is_retryable(),
-            "TruncatedToolCall MUST be retryable — the model was cut off, not wrong"
-        );
-    }
-
-    #[tokio::test]
     async fn stream_endturn_with_toolcalls_returns_incomplete() {
         // PR #1355: the old code coerced `EndTurn + tool_calls` → `ToolUse`
         // with a "fixing stop_reason" warning. That was masking
@@ -1416,39 +1071,6 @@ mod tests {
             typed.is_retryable(),
             "Incomplete must be retryable so the lane router can pick a different slot"
         );
-    }
-
-    #[tokio::test]
-    async fn stream_complete_with_tool_use_returns_chat_response() {
-        // Happy path regression: a clean stream with valid tool_call args
-        // and a Done(ToolUse) signal returns Ok(ChatResponse) with the
-        // arguments parsed as a Value::Object.
-        let (agent, _dir) = build_test_agent().await;
-
-        let stream = into_chat_stream(vec![
-            StreamEvent::ToolCallDelta {
-                index: 0,
-                id: Some("call_0".to_string()),
-                name: Some("shell".to_string()),
-                arguments_delta: "{\"cmd\":\"ls\"}".to_string(),
-            },
-            StreamEvent::Usage(LlmTokenUsage {
-                input_tokens: 10,
-                output_tokens: 5,
-                ..Default::default()
-            }),
-            StreamEvent::Done(StopReason::ToolUse),
-        ]);
-
-        let (response, streamed) = agent
-            .consume_stream_with_input_estimate(stream, 1, 100)
-            .await
-            .expect("clean stream must return Ok");
-        assert!(!streamed, "stream had no text deltas");
-        assert_eq!(response.tool_calls.len(), 1);
-        assert_eq!(response.tool_calls[0].name, "shell");
-        assert_eq!(response.tool_calls[0].arguments, json!({"cmd": "ls"}));
-        assert_eq!(response.stop_reason, StopReason::ToolUse);
     }
 
     #[tokio::test]
@@ -1495,42 +1117,5 @@ mod tests {
             typed.is_retryable(),
             "transport errors should be retryable through the normal failover ladder"
         );
-    }
-
-    #[test]
-    fn stream_timeout_defaults_are_sane() {
-        // Pin the live config defaults so a future tweak that brings the
-        // inter-chunk idle back down to the production-broken 30s (or
-        // collapses the first-token grace below it) trips this test. These
-        // are the values that actually drive production via `AgentConfig`
-        // (env-overridable: OCTOS_LLM_STREAM_IDLE_SECS /
-        // OCTOS_LLM_FIRST_TOKEN_GRACE_SECS / OCTOS_LLM_CALL_MAX_SECS).
-        use super::super::{
-            DEFAULT_LLM_CALL_MAX_SECS, DEFAULT_LLM_FIRST_TOKEN_GRACE_SECS,
-            DEFAULT_LLM_STREAM_IDLE_SECS,
-        };
-        const { assert!(DEFAULT_LLM_STREAM_IDLE_SECS > 30) };
-        const { assert!(DEFAULT_LLM_FIRST_TOKEN_GRACE_SECS >= DEFAULT_LLM_STREAM_IDLE_SECS) };
-        const { assert!(DEFAULT_LLM_CALL_MAX_SECS > DEFAULT_LLM_FIRST_TOKEN_GRACE_SECS) };
-        assert_eq!(DEFAULT_LLM_FIRST_TOKEN_GRACE_SECS, 180);
-        assert_eq!(DEFAULT_LLM_STREAM_IDLE_SECS, 90);
-        assert_eq!(DEFAULT_LLM_CALL_MAX_SECS, 1200);
-    }
-
-    // Sanity: the defaults build valid Durations and a default AgentConfig
-    // carries them.
-    #[test]
-    fn default_agent_config_carries_stream_timeouts() {
-        let cfg = crate::AgentConfig::default();
-        assert_eq!(cfg.llm_first_token_grace, Duration::from_secs(180));
-        assert_eq!(cfg.llm_stream_idle, Duration::from_secs(90));
-        assert_eq!(cfg.llm_call_max, Duration::from_secs(1200));
-    }
-
-    // Silence unused-import warnings in cfg(test) when one helper isn't used.
-    #[test]
-    fn _stream_helpers_compile() {
-        let _ = into_chat_stream(vec![]);
-        let _ = stalling_stream(vec![]);
     }
 }

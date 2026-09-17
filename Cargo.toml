@@ -2,44 +2,12 @@
 resolver = "2"
 members = [
     "crates/octos-core",
-    "crates/octos-diagnostics",
     "crates/octos-memory",
     "crates/octos-llm",
     "crates/octos-agent",
     "crates/octos-bus",
-    "crates/octos-workflows",
-    "crates/octos-server",
-    "crates/octos-store",
-    "crates/octos-services",
     "crates/octos-cli",
     "crates/octos-arc",
-    "crates/app-skills/news",
-    "crates/app-skills/deep-search",
-    "crates/app-skills/deep-crawl",
-    "crates/app-skills/send-email",
-    "crates/app-skills/account-manager",
-    "crates/app-skills/time",
-    "crates/app-skills/weather",
-    "crates/app-skills/smart-home",
-    "crates/app-skills/wechat-bridge",
-    "crates/app-skills/skill-evolve",
-    "crates/app-skills/harness-starter-generic",
-    "crates/app-skills/harness-starter-report",
-    "crates/app-skills/harness-starter-audio",
-    "crates/app-skills/harness-starter-coding",
-    "crates/platform-skills/voice",
-    "crates/octos-dora-mcp",
-    "crates/octos-pipeline",
-    "crates/octos-plugin",
-    "crates/octos-sandbox",
-    "crates/octos-swarm",
-    "crates/octos-fleet",
-    "crates/octos-fleet-worker",
-    "crates/octos-embed-llama",
-    "crates/octos-ffi",
-    "crates/octos-uniffi",
-    "crates/octos-wasm",
-    "crates/octos-pyo3",
 ]
 [workspace.package]
 version = "2.0.3-rc.11"
@@ -55,33 +23,20 @@ unsafe_code = "deny"
 rpassword = "7"
 # Internal crates
 octos-core = { path = "crates/octos-core" }
-octos-diagnostics = { path = "crates/octos-diagnostics" }
 octos-memory = { path = "crates/octos-memory" }
 octos-llm = { path = "crates/octos-llm" }
 octos-agent = { path = "crates/octos-agent" }
 octos-arc = { path = "crates/octos-arc" }
 octos-bus = { path = "crates/octos-bus" }
-octos-workflows = { path = "crates/octos-workflows" }
-octos-server = { path = "crates/octos-server" }
-octos-store = { path = "crates/octos-store" }
-octos-services = { path = "crates/octos-services" }
-octos-pipeline = { path = "crates/octos-pipeline" }
-octos-plugin = { path = "crates/octos-plugin" }
-octos-swarm = { path = "crates/octos-swarm" }
-octos-fleet = { path = "crates/octos-fleet" }
-octos-fleet-worker = { path = "crates/octos-fleet-worker" }
-octos-embed-llama = { path = "crates/octos-embed-llama" }
-# codex-rs crates (reused)
-codex-execpolicy = { git = "https://github.com/openai/codex", path = "codex-rs/execpolicy" }
-codex-state = { git = "https://github.com/openai/codex", path = "codex-rs/state" }
-codex-file-search = { git = "https://github.com/openai/codex", path = "codex-rs/file-search" }
-codex-linux-sandbox = { git = "https://github.com/openai/codex", path = "codex-rs/linux-sandbox" }
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
 # Serialization
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# preserve_order: serde_json::Map keeps insertion order. This was previously
+# unified in via the `agent-client-protocol` dep (removed with `octos acp`);
+# the UI-protocol envelopes and several tests rely on stable key order.
+serde_json = { version = "1", features = ["preserve_order"] }
 serde_yml = "0.0.12"
 toml = "0.8"
 base64 = "0.22"
@@ -114,7 +69,6 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 htmd = "0.5"
 # Database (pure Rust)
 redb = "2"
-rusqlite = { version = "0.32", features = ["bundled"] }
 bincode = "1"
 # Vector search
 hnsw_rs = "0.3"
@@ -131,17 +85,8 @@ similar = "2"
 # Office file manipulation (DOCX/PPTX/XLSX are ZIP+XML)
 zip = "2"
 quick-xml = "0.37"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 # PDF text extraction (pure Rust; read_file auto-detects %PDF- magic)
 pdf-extract = "0.9"
-# Audio decoding (pure Rust)
-# WAV: always-on (small dep, used by AudioNonSilent validator on .wav files).
-# MP3: gated behind the `audio_mp3` feature on octos-agent so non-audio
-# workspaces don't pay the symphonia dep cost. Without the feature, MP3
-# AudioNonSilent validators return an explicit "feature not enabled" error
-# rather than silently passing.
-hound = "3"
-symphonia = { version = "0.5", default-features = false, features = ["mp3"] }
 # Unix-specific (O_NOFOLLOW for symlink-safe file I/O)
 libc = "0.2"
 # Safe openat/mkdirat for the #1976 write-grant component-wise confined walk
@@ -165,38 +110,15 @@ iana-time-zone = "0.1"
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
 # Async utilities
 futures = "0.3"
-# Browser automation
-chromiumoxide = "0.9"
 which = "7"
-# Channel integrations (optional, pulled in via feature flags)
-teloxide = { version = "0.17", default-features = false, features = ["rustls"] }
-serenity = { version = "0.12", default-features = false, features = ["rustls_backend", "gateway", "client", "http", "model"] }
-tokio-tungstenite = { version = "0.26", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
-# Email channel (optional)
-async-imap = { version = "0.11", default-features = false, features = ["runtime-tokio"] }
-tokio-rustls = { version = "0.26", default-features = false }
-rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
-rustls-native-certs = "0.8"
-webpki-roots = "0.26"
-lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder"] }
-mailparse = "0.16"
-# Web API (optional)
-axum = { version = "0.8", features = ["multipart", "ws"] }
-tower-http = { version = "0.6", features = ["cors", "trace"] }
-rust-embed = "8"
 metrics = "0.24"
-metrics-exporter-prometheus = "0.16"
 # Tracing
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-appender = "0.2"
 # Archive extraction
 flate2 = "1"
-qrcode = { version = "0.14", default-features = false }
-chacha20poly1305 = "0.10"
-argon2 = "0.5"
 tar = "0.4"
-tower = { version = "0.5", features = ["util"] }
 # URL parsing
 url = "2"
 # Testing

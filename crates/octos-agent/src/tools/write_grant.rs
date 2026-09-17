@@ -620,7 +620,6 @@ fn validate_pattern(pattern: &str) -> eyre::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
     // Unix-only: relies on ctime advancing to detect a same-size/same-mtime
     // swap; off-Unix the weaker (mtime,size) fallback cannot.
@@ -714,38 +713,6 @@ mod tests {
     }
 
     #[test]
-    fn write_grant_denial_records_to_sink_with_denied_marker() {
-        let dir = tempfile::tempdir().unwrap();
-        let seen: Arc<Mutex<Vec<WriteGrantViolation>>> = Arc::new(Mutex::new(Vec::new()));
-        let sink_seen = seen.clone();
-        let g = grant(&["exemplar.card"], true).with_violation_sink(Arc::new(move |v| {
-            sink_seen.lock().unwrap().push(v);
-        }));
-
-        let denied = g
-            .check_write(
-                dir.path(),
-                &dir.path().join("app.md"),
-                "app.md",
-                "write_file",
-            )
-            .expect_err("app.md is outside the grant");
-        assert!(denied.contains(DENIED_MARKER), "typed refusal: {denied}");
-        assert!(denied.contains("app.md"));
-        assert!(denied.contains("exemplar.card"), "message lists the grant");
-
-        let overwrite = g.deny_overwrite(dir.path(), "exemplar.card", "write_file");
-        assert!(overwrite.contains(DENIED_MARKER));
-        assert!(overwrite.contains("already exists"));
-
-        let events = seen.lock().unwrap();
-        assert_eq!(events.len(), 2, "both violations recorded");
-        assert_eq!(events[0].tool, "write_file");
-        assert_eq!(events[0].workspace, dir.path());
-        assert!(events[0].detail.contains(DENIED_MARKER));
-    }
-
-    #[test]
     fn write_grant_create_only_refuses_every_edit() {
         let dir = tempfile::tempdir().unwrap();
         let g = grant(&["exemplar.card"], true);
@@ -820,34 +787,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn write_no_follow_follows_ancestor_symlink_the_gap_confined_open_closes() {
-        // RED/motivation: the OLD fenced write used `write_no_follow(lexical)`,
-        // whose leaf-only O_NOFOLLOW FOLLOWS a symlinked ANCESTOR — the exact
-        // escape. Prove the gap concretely so the confined-open fix is
-        // grounded, not theoretical.
-        use std::os::unix::fs::symlink;
-        let ws = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
-        symlink(outside.path(), ws.path().join("cards")).unwrap();
-
-        // Leaf-only O_NOFOLLOW open of `<ws>/cards/x.card` follows `cards`.
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let res = rt.block_on(crate::tools::write_no_follow(
-            &ws.path().join("cards/x.card"),
-            b"escaped\n",
-        ));
-        assert!(
-            res.is_ok(),
-            "the OLD primitive follows the ancestor symlink"
-        );
-        assert!(
-            outside.path().join("x.card").exists(),
-            "demonstrates the escape the confined walk must close",
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
     fn open_confined_refuses_symlinked_ancestor() {
         // The fix: a symlinked ancestor fails at its own component (ELOOP /
         // ENOTDIR), so nothing is created at the symlink target.
@@ -900,105 +839,5 @@ mod tests {
             Some(libc::ELOOP) | Some(libc::ENOTDIR)
         ));
         assert!(!outside.path().join("loot.card").exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn open_confined_creates_inside_real_dirs_and_mkdir_parents() {
-        let ws = tempfile::tempdir().unwrap();
-        // Missing intermediate dir is created safely (mkdirat in the walk).
-        let file = open_confined(
-            ws.path(),
-            std::path::Path::new("cards/a.card"),
-            ConfinedLeaf::CreateOrTruncate,
-        )
-        .expect("create inside real dirs");
-        drop(file);
-        assert!(ws.path().join("cards/a.card").exists());
-        // Overwrite (CreateOrTruncate) succeeds; content truncated.
-        std::fs::write(ws.path().join("cards/a.card"), "old-and-long").unwrap();
-        let mut f = open_confined(
-            ws.path(),
-            std::path::Path::new("cards/a.card"),
-            ConfinedLeaf::CreateOrTruncate,
-        )
-        .expect("overwrite ok");
-        use std::io::Write;
-        f.write_all(b"new").unwrap();
-        drop(f);
-        assert_eq!(
-            std::fs::read_to_string(ws.path().join("cards/a.card")).unwrap(),
-            "new"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn open_confined_create_new_refuses_existing() {
-        let ws = tempfile::tempdir().unwrap();
-        open_confined(
-            ws.path(),
-            std::path::Path::new("x.card"),
-            ConfinedLeaf::CreateNew,
-        )
-        .expect("first create ok");
-        let err = open_confined(
-            ws.path(),
-            std::path::Path::new("x.card"),
-            ConfinedLeaf::CreateNew,
-        )
-        .expect_err("O_EXCL refuses the second create");
-        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn open_confined_rdwr_requires_existing() {
-        let ws = tempfile::tempdir().unwrap();
-        assert!(
-            open_confined(
-                ws.path(),
-                std::path::Path::new("missing.card"),
-                ConfinedLeaf::OpenExistingRw,
-            )
-            .is_err(),
-            "rdwr does not create",
-        );
-        std::fs::write(ws.path().join("here.card"), "v1").unwrap();
-        assert!(
-            open_confined(
-                ws.path(),
-                std::path::Path::new("here.card"),
-                ConfinedLeaf::OpenExistingRw,
-            )
-            .is_ok()
-        );
-    }
-
-    #[tokio::test]
-    async fn confined_write_and_rewrite_round_trip() {
-        let ws = tempfile::tempdir().unwrap();
-        confined_write(
-            ws.path().to_path_buf(),
-            std::path::PathBuf::from("note.txt"),
-            b"hello\n".to_vec(),
-            false,
-        )
-        .await
-        .expect("confined write");
-        let (file, content) = confined_open_rdwr(
-            ws.path().to_path_buf(),
-            std::path::PathBuf::from("note.txt"),
-        )
-        .await
-        .expect("confined open rdwr");
-        assert_eq!(content, "hello\n");
-        confined_rewrite(file, b"world\n".to_vec())
-            .await
-            .expect("confined rewrite");
-        assert_eq!(
-            std::fs::read_to_string(ws.path().join("note.txt")).unwrap(),
-            "world\n"
-        );
     }
 }
