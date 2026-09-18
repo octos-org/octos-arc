@@ -1289,3 +1289,28 @@ deepseek-v4-flash 拿过 32/32。ctrip 同期每约 80 秒过一个 spec，12306
 
 仍是机理层证据，不是通过率结论：两个预算下 REQ-2 最终都没过（1.5B 本身不够强）。
 要拿通过率结论得在够强的模型上做同样的单变量对照，那要等提交 D 收口之后。
+
+### keep 在 D 里挣扎，而它的失败形态正好验证了备好的那个杠杆
+
+keep 的「局部通过」数停在 9 超过一小时，看起来像卡死。动手之前先取证——上一次没验证就取消
+在跑的运行，毁掉了两个已在 80% 线之上的结果。把事件流按「非心跳」过滤后：
+
+| | 非心跳事件 | passed | failed | 最后一条实事件 |
+|---|---|---|---|---|
+| keep | 20 / 127 | 3 | 1 | 17:50:40 `acceptance specs still failing after repair rounds` |
+| ctrip | 41 / 116 | 11 | 0 | 17:59:31 `1 acceptance spec file(s) pass locally` |
+
+**结论：keep 不是卡死，是在挣扎。** 它在推进，只是节点过不去；同期 ctrip 的 passed 事件是它的
+3.7 倍且零失败。所以不取消——取消会白扔掉它已有的进度，还要消耗掉两次尝试中的一次。
+
+**更有价值的是它失败在哪**：`acceptance specs still failing after repair rounds`——
+失败发生在 **repair 阶段**，而不是 implement 阶段。这正是
+`arc/model-routes-glm-escalate.json` 要打的靶：implement 留在便宜的 flash，
+只有 repair（即「便宜档已经失败了」的那些轮次）升级到 `glm-5.3`。
+
+这条把那个杠杆从「凭 keep 曾用 deepseek 拿过 32/32 的猜测」变成了**有失败形态支持的选择**。
+但顺序不变：等 D 六题各自用完 `MAX_ATTEMPTS=2` 再动，建新提交会杀掉在跑的运行。
+
+**并发仍保持 3。** 修好误报之后对三个在跑的运行实测 `quota_trouble` 返回 `None`，
+确实没有限流；但加到 4 同时放大燃烧速率和「撞墙时一次损失几个」，
+而流水线本来就会在某一题结束时自动补位。
