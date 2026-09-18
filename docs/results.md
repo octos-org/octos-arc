@@ -2447,3 +2447,46 @@ D 还有 stackoverflow 没有创建运行。**此刻建 E，等于让 D 永远�
 榜单按参与者取最好快照，`_leaderboard_candidate_key = (avg_pass_rate, eligible, cost_efficiency)`
 通过率优先——E 若更差，显示的仍是 D。
 所以顺序是死的：**先等 stackoverflow 起来，再谈 E。**
+
+### 平台不再发默认 key —— 这给所有新参赛者设了一个结构性天花板
+
+想用平台自带的 access key 进 arc-bench-lite（既当探针测余额，又是唯一可能拿到效率值的路），
+被直接拒了：
+
+```
+POST /submissions -> 400: {"detail":"API key is required"}
+```
+
+本机也没有任何平台 access key（`demo-config/octos-access-key.txt` 不存在）。
+所以这不是「余额耗尽、等充值」，而是**新提交必须自带 key**。
+
+后果是结构性的，且不只作用于我们：`meter_usage_service.delta()` 计量的是**平台自己那把 key**
+的用量。提交自带 key，平台那把 key 用量不变 → delta 0 → 费用 0 →
+`_cost_efficiency` 遇到 `cost <= 0` 返回 None。也就是说，**现在开始参赛的任何人都拿不到效率值**。
+榜上那些有效率值的条目（web 2 条、lite 7 条）是平台还在发 key 的时期留下的。
+
+于是两个赛道的名次天花板是**锁死的**，不是暂时的：
+
+| 赛道 | 有效率值的条目 | 我们的天花板 | 需要的平均通过率 |
+|---|---|---|---|
+| arc-bench-web | 2 | **第 3 名** | > 83.60 进第 4 |
+| arc-bench-lite | 7 | **第 8 名** | > 69.50 |
+
+这条必须如实说出来：**按榜单自己的排序规则，「断崖式领先」现在对任何新参赛者都是取不到的**，
+与 agent 强弱无关。能取的是排序键里第二个数——**通过率**，那才是纯能力项。
+
+### 两个赛道的入口查清了，一个是死路
+
+* `ticket-booking-evolution`：`data/competition/ticket-booking-evolution/` 下**只有 competition.yaml，没有任何题目目录**，
+  API 也报 `task_count: 0`。平台的提示是「Add task folders directly to the competition directory」——
+  那等于给自己参赛的赛道出题，与「我既是提交者又是参赛者」的红线冲突。**这条赛道不可进入**，
+  以后不要再把它当作机会列进待办。
+* `arc-bench-lite`：真实题目是 **bookstack + keep**（取自 `data/competition/arc-bench-lite/` 的目录）。
+  提交已建：`3eca47edf572`（自带 key）。**运行先不起**——它这两题正是 D 此刻在跑的两题，
+  等 D 的 keep 收口、看到 glm-5.3-flash 在 keep 上的真实分数，再决定值不值得花 19 小时重跑一遍。
+
+顺带记一个差点用错的接口：`/requirements?competition_id=<X>` **会忽略过滤条件**，
+lite / web / ticket-booking / 不带参数，四种调法返回的都是同样两行（`__demo__`、`ticketbooking`）。
+据它推断赛道题目会得出完全错误的结论。查赛道题目要看平台仓库的 `data/competition/<id>/`。
+（我当时还差点用「lite 共 66 个测试 = keep 32 + stackoverflow 34」这个凑巧的算式去坐实一个错答案，
+ 而 bookstack 自己就正好是 66。）
