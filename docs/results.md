@@ -1568,3 +1568,24 @@ smoke 领先第 4 名 3.8×、evolution 领先第 5 名 4.3×、ticket-booking �
 
 榜上出现过的模型：`deepseek-v4-flash`(155)、`qwen3.6-flash`(2)、`glm-5.3-flash`(2)、
 `qwen3.7-max`(1)、`deepseek-v4-pro`(2)、`deepseek-v4.1-flash`(1)、`kimi-k3`(1)。
+
+### 升级路由的端到端验证：真实运行里模型确实被改写了
+
+单元测试覆盖了两头——路由规则本身（`route_request`），以及喂给它的判定（`phase_for_label`）。
+中间那条链没验过：**路由文件 → 环境变量 → 代理改写 → 上游接受**。
+
+用一个可判定的方式验：把 `implement`（而不是 repair）临时路由到 `glm-5.3`，
+`MODEL` 仍是 `glm-5.3-flash`，跑一次 `smoke-evolution--counter`：
+
+```
+.arc/llm-usage.jsonl:   ('implement', 'glm-5.3') -> 1 次
+[acceptance] full suite round 0: 2/2
+```
+
+用量日志里记的是 `glm-5.3`，不是环境变量给的 `glm-5.3-flash`——**代理确实改写了模型，
+上游也接受了，而且运行照样满分**。repair 走的是同一套机制，只是 `phases` 不同，
+那一格由 `phase_for_label` 的单测覆盖。
+
+**顺带发现一个此前没用上的观测资产**：`.arc/llm-usage.jsonl` 按请求记录 `phase` 与 `model`。
+这意味着提交 D 跑完之后，可以直接从日志统计每个阶段各用了多少请求、多少 token，
+不必依赖平台计量器——这正是先前「计量器坏了就没法报成本」那个死结的第二条出路。
