@@ -1259,3 +1259,33 @@ deepseek-v4-flash 拿过 32/32。ctrip 同期每约 80 秒过一个 spec，12306
 那句日志是拼出来的，不是源码里的字面量——本地 `main.py` 里同样找不到它。换成
 `drop_unseen_rewrites` / `switches to tool mode` / `codegen_blocked` 三个真实标记后，守卫确实在包里。
 教训很小但很实用：**验证产物要用源码里真实存在的标识符，不要用日志里看到的句子。**
+
+### 给弱模型更大的上下文，反而让它更糟（2026-09-18，零额度，单变量）
+
+同模型（`qwen2.5-coder:1.5b`）、同题（`smoke-evolution--counter`）、同种子模板，
+只改 `OCTOS_ARC_CODEGEN_CONTEXT_CHARS`：
+
+| 引用预算 | `reply contained no file blocks` | 接受的文件块 | 守卫拒写 | 模型实际吐了什么 |
+|---|---|---|---|---|
+| 9,000 | **0 次** | **5 个** | 4 个 | 五个文件块（分隔符不规范但内容对路） |
+| 400,000（全量引用） | 2 次 | **0 个** | — | 跑题：把看到的第一个 package.json 原样吐回 |
+
+新加的 digest 把第二种情况说清楚了，而这正是它的用途：
+
+    [codegen] REQ-2 implement: reply contained no file blocks; len=120 open=absent close=0
+      head='```json\n{\n  "name": "b",\n  "private": true,\n  "type": "commonjs", ...}\n```'
+
+**这不是格式问题，是模型跑题**：该节点要改的是 `index.html`，它交的是 `backend/package.json`，
+而且内容完整、格式合法。改前这两种失败在日志里长得一模一样（都只有一句
+`reply contained no file blocks`），现在能一眼分开。
+
+**由此得出一条不该做的事**：不要把「裸代码块兜底」从 markup 扩展到任意内容。
+现有兜底只在回复像 markup 且节点有唯一目标文件时才启用；若扩展到 JSON，
+这次就会把一份 package.json 的内容写进 index.html。**捞回来的东西是错的，比丢掉更糟。**
+
+**以及一条正面结论**：上下文越大越好在这里不成立。65KB 源码全量塞进去之后，
+1.5B 从「五个大致对路的文件块」退化成「原样回声」。这是「引用更少、提示更短」那条线的
+第一份直接证据——而它之所以可以安全尝试，正是因为守卫会接住「模型重写没见过的文件」这个副作用。
+
+仍是机理层证据，不是通过率结论：两个预算下 REQ-2 最终都没过（1.5B 本身不够强）。
+要拿通过率结论得在够强的模型上做同样的单变量对照，那要等提交 D 收口之后。
