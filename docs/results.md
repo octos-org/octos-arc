@@ -1644,3 +1644,32 @@ prompt 三次完全相同（14,729，确定性的），所以这是干净的单�
 
 教训很直白：**n=1 在随机系统上不足以下任何结论**，哪怕方向看起来很干净。
 这一轮里同样的纪律已经救过一次（7B 的预算结论在比赛模型上不成立）。
+
+### 从源码钉死：提交 D 的费用必定是 None，两条路都是
+
+先前说「自带 key 导致费用记成 0」是推断。读 `meter_usage_service.py` 之后可以钉死了——
+计量器对 **`meter.arc-bench.com` 上平台自己的 access key** 做运行前后两次快照再取差值，
+和容器输出、和我们的适配器报的 `[usage] provider totals` **毫无关系**：
+
+```python
+def delta(start, end):
+    if start is None or end is None:
+        return None                                   # 计量器登不上 → None
+    ...
+    return MeterUsageDelta(token_count=max(0, end.total_tokens - start.total_tokens),
+                           cost=max(Decimal("0"), end.total_cost - start.total_cost), ...)
+```
+
+两条路都通向同一个结果：
+
+| 情形 | 结果 | 再经 `_cost_efficiency` |
+|---|---|---|
+| 计量器 401（当前） | 快照为 None → `delta` 返回 None → 费用 `None` | `cost is None` → **None** |
+| 计量器恢复 | 我们的 key 不经平台网关 → 差值 **0** | `cost <= 0` → **None** |
+
+**所以提交 D 的条目一定落进 `None` 组，排在所有有效率值的条目之后。** 这不再是估计。
+
+**一个值得注意的推论**：计量器 401 是**平台级**故障，今天所有新运行都拿不到费用。
+所以我们相对**新**条目并不吃亏，只相对历史上已经有数值的条目吃亏。
+换句话说，这一格的损失是「时间差」造成的，不是自带 key 独有的惩罚——
+自带 key 独有的那部分，是即便计量器修好也仍然为 0。
