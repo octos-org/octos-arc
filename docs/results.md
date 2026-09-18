@@ -939,3 +939,39 @@ b[0]... v+=1 ;  b[1]... v-=1 ;  b[2]... v=0
 云端日志里出现过的开标记全是规范的三个 `>`，而且日志基本不保留原始回复，所以既不能证实也不能证伪。
 准确结论是：**付费模型上存在 36 次整份丢弃的 codegen 轮次，成因待查**，需要在日志里保留
 被丢弃回复的头尾片段才能定性——这是下一步该加的观测点，不是已经拿到的结论。
+
+### 两个机制在同一次真实运行里咬合：qwen2.5-coder:1.5b（2026-09-18，零额度）
+
+这是整场里这两个改动最强的证据，而且实验对象正是我先前判为「太弱，发不出 `<<<FILE>>>` 块」的 1.5B。
+它发出了**五个**文件块，全部用非规范分隔符：
+
+```
+[codegen] REQ-2 implement: accepted 5 block(s) with a non-canonical delimiter:
+          ['backend/server.js', 'frontend/src/archive.html',
+           'frontend/src/index.html', 'frontend/src/reports.html']
+[codegen] REQ-2 implement: refused 4 rewrite(s) of file(s) never shown to this turn:
+          ['frontend/src/settings.html', 'frontend/src/reports.html',
+           'frontend/src/archive.html', 'backend/server.js']; this node switches to tool mode
+[codegen] REQ-2 implement: wrote 1 file(s): ['frontend/src/index.html']
+```
+
+**改前这五个块会被整份丢弃**（`reply contained no file blocks`）。改后：宽容把它们捞回来，
+守卫再把其中四个「模型这一轮根本没见过」的挡掉，只放过唯一被引用过的那个文件。
+
+交付目录逐一核对：
+
+| 文件 | 本轮是否被引用 | 结果 |
+|---|---|---|
+| `backend/server.js` | 否 | sha `9d1c4056…` **与模板一致** |
+| `frontend/src/settings.html` | 否 | sha `80c7d41d…` **与模板一致** |
+| `frontend/src/reports.html` | 否 | sha `e27ac2c6…` **与模板一致** |
+| `frontend/src/archive.html` | 否 | sha `05d44d28…` **与模板一致** |
+| `frontend/src/index.html` | 是 | `ea1bd13c…` → `dd32ca0e…`（正常改写） |
+
+整份日志里 `reply contained no file blocks` 出现 **0 次**。
+
+**两条改动是互补的，缺一不可**：没有宽容，五个块全丢；没有守卫，一个 1.5B 会盲写四个它没看过的文件
+（其中 `server.js` 是整个应用的服务端）。两条合起来，一个很弱的模型也能安全地贡献它真正看过的那部分。
+
+**这同时第二次推翻我自己的判断**：先前「1.5B 太弱，发不出 `<<<FILE>>>` 块」是错的——它发得出，
+一次发五个，只是分隔符不规范。我把适配器的脆弱两次读成了模型的无能。
