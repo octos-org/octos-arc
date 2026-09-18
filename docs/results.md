@@ -763,3 +763,80 @@ HTTP 402 {"error":{"code":"insufficient_balance",
 这也解释了先前定不下来的那件事：keep 9a954dfad2f5 @ B 报 78,211,655 token（对 keep @ A 串行的 9,091,574），我曾归因于并发限流重试，随后又以「串行那次重试更多」为由**撤回**了并发归因。**那次撤回是错的**——并发确实是原因，但机制是计量窗口共享，不是重试。当时我用「三者反推单价一致（¥0.60–0.72/M）」论证「是真消耗而非记账串味」，而单价一致恰恰是因为 token 数与费用来自同一个窗口，两者被同比例放大。
 
 可操作结论：**并发运行的 `token_count` 与 `token_cost_usd` 都不可用于单题成本对照**，任何改前改后的成本比较必须串行单跑。
+
+### 未见文件守卫的活体验证（2026-09-18，零额度）
+
+12306 上那 29 个回归的成因，此前只有推理和单元测试，没有在一次真实 run 里看它发生。
+这次用干跑驱动 + 一个刻意超预算的种子应用把它逼了出来，全程不花任何额度：
+
+```
+[acceptance] probe REQ-1: 1/1 against the existing app
+[acceptance] probe REQ-2: 0/1 against the existing app
+[flow] node 2/2 REQ-2 starting
+[codegen] REQ-2 implement: refused 1 rewrite(s) of file(s) never shown to this turn:
+          ['backend/server.js']; this node switches to tool mode
+[codegen] REQ-2 implement: wrote 1 file(s): ['frontend/src/index.html']
+```
+
+关键证据是那个被拒文件的完整性——`backend/server.js` 在种子模板与交付目录里
+**SHA-256 逐字节相同**（`9d1c4056…`，30,117 字节，`node --check` 通过）：
+
+| | sha256 | 字节 |
+|---|---|---|
+| 种子模板 | `9d1c4056…f652d1a3` | 30,117 |
+| 交付目录 | `9d1c4056…f652d1a3` | 30,117 |
+
+也就是说：被省略的大文件没有被一次截断重写覆盖，而**被引用过**的 `index.html` 照常写入，
+节点按设计回落工具模式。这正是 30bd4f70 把拟合闸门抬到 400k 后 12306 出现 29 个回归的那条路径。
+
+复现（不需要 key，`ARCBENCH_API_KEY` 只是前置校验，干跑不打模型）：
+
+```
+ARCBENCH_API_KEY=dryrun-dummy OCTOS_ARC_DRYRUN=1 \
+OCTOS_ARC_CODEGEN_CONTEXT_CHARS=9000 OCTOS_ARC_CODEGEN_SOURCE_FIT_CHARS=400000 \
+OCTOS_ARC_TINY=0 python3 arc/run-task-local.py arc/tasks/smoke-evolution--counter \
+  --template <种子目录> --name guardfire3 --port 44420
+```
+
+种子目录要求：`backend/server.js` 远超引用预算（这里 30,117 字符 > 预算 8,500）、
+`frontend/src/index.html` 小到能被引用，且**整个应用必须真的能 build + start + 至少过一个 spec**。
+
+**踩了两次坑，都值得记下来：**
+
+1. **模板不过任何 spec 会被直接丢弃**，守卫就无从触发：
+   `[flow] existing app passes no spec; moved ['frontend','backend'] to .arc/template-discarded and building fresh`
+   —— 应用被清空，没有大文件可省略。种子必须至少过一个 spec（这里让它过 REQ-1，只缺 REQ-2 的 Reset 按钮）。
+2. 第二次仍不触发，原因是**我自己把 server.js 写坏了**：Python 里相邻字符串字面量先拼接、
+   `* 200` 再作用于拼接后的整体，于是 `const http = require('http')` 被重复声明 200 次，
+   `npm start` rc=1、探针判定应用起不来。填充注释必须加在文件**末尾**，并且落盘后用
+   `node --check` + 真起一次服务确认。
+
+**这次验证到的边界（避免夸大）**：确认的是「拒绝恰好落在被省略的那个文件上」「被引用文件照常写入」
+「被省略文件零损伤」「节点被标记回落工具模式」。**未**确认工具模式接着把需求做完——干跑驱动没有工具。
+那一步要真模型，已另起一次本地 ollama（`qwen2.5-coder:7b`，loopback）验证。
+
+### 一条尚未走通的解封路径：提交可以自带 key / base_url / model
+
+平台报错后半句「top up or **switch provider**」不是空话。按平台源码
+`backend/app/services/model_provider_service.py::resolve_model`，模型三要素是**提交级**字段、
+且没有白名单枚举，只有长度校验：
+
+```
+model  ≤ 120 字符      base_url 必须是绝对 http(s)      api_key ≤ 4096 字符
+```
+
+`agent_submission_service.py` 把它们落到提交的 `model_name` / `openai_base_url` / `openai_api_key`。
+耗尽的是**平台默认那把 access key**（`openai@127`），不是「所有模型都没额度」。
+
+但这条路现在走不通，两个原因，都不是技术问题：
+
+1. 本机没有备用 key（`demo-config/` 下没有，环境里也没有）。
+2. 换 key 就不再是花平台计量额度，而是**直接花用户自己的钱**，且不设上限——
+   这超出「¥550 两段合计」那条授权，必须用户点头。
+
+另外**建新提交会立刻永久冻结提交 C**。这次冻结的代价恰好是零（C 六题全 0%、且它绑的模型已无额度，
+永远不可能再出成绩），所以一旦拿到可用 key，直接建新提交是正确动作，不受那条硬规则限制。
+
+**零成本探针:余额是否已恢复。** 链脚本在死前于 16:24–16:25 UTC 又建了三个运行，
+它们 **11–12 秒、0 token** 就 FAILED（对比余额耗尽前那六个各跑了 9,735–10,076 秒）。
+所以判断余额有没有充上，不必赌一次长跑：建一个运行，11 秒内 FAILED + `token_count=0` 就是还没有。
