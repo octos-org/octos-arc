@@ -1213,3 +1213,27 @@ D 的包（`326ae1ae`）在其后，所以 D 同时带上了守卫与新措辞�
 
 另一个早期信号：ctrip 在 D 里**每约 80 秒过一个 spec**，而 C 那批 implement 轮的中位是 140 秒。
 同样受限于两个变量，只作为进度参考，不作为结论。
+
+### D 是全阶段 flash 档，以及一个备好但现在不能用的杠杆
+
+排查 keep 的「implementation incomplete」时先验了一个可能的严重问题：包里的
+`model-routes.json` 若把某些阶段指向 deepseek 模型，在 z.ai 上会 404。**结论是没有这个问题**——
+`pack.sh` 只在有 `ROUTES` 环境变量时才把路由文件塞进包，而仓库里没有这个文件，
+D 的包里 json 文件数为 0。所以 D 是**全阶段 glm-5.3-flash**，不存在跨供应商的模型名 404。
+
+顺手验了 coding plan 上可用的档位：
+
+| 模型 | coding plan 端点 |
+|---|---|
+| `glm-5.3-flash` | HTTP 200 |
+| `glm-5.3`（更强） | HTTP 200 |
+
+**第一个「flash 档可能偏弱」的信号**：keep 到目前为止报了 3 次
+`implementation incomplete; existing code awaiting acceptance`，而它在提交 A 上用
+deepseek-v4-flash 拿过 32/32。ctrip 同期每约 80 秒过一个 spec，12306 已过 6 个，都正常。
+
+**下一步杠杆已经备好，但现在不能用**：把难阶段（implement / repair）路由到 `glm-5.3`、
+简单阶段留在 flash，用 `ROUTES` 打进包。这需要建新提交，而**建新提交会杀掉 D 正在跑的运行**。
+所以顺序是：等 D 六题各自用完 `MAX_ATTEMPTS=2` 的机会，再判断要不要为不过线的题换档。
+
+不提前动手的理由和上一次一样——上一次没验证就取消在跑的运行，毁了两个已在 80% 线之上的结果。
