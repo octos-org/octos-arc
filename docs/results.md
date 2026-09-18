@@ -2114,3 +2114,29 @@ API Error: Usage credits required for 1M context
 
 教训和这一天的其它几条同类：**建完不等于能用**。
 包打完要解出来跑一次，任务建完要手动触发一次——否则「已经设好了」只是一句话。
+
+### 提前验分析工具，果然是坏的
+
+keep 约三小时后最先结束，那是第一份「glm 在完整大题上到底怎么样」的数据。
+与其到时候现摸工具，先拿 C 的一个已完成运行验一遍 `arc/postmortem.py`——**它直接 401**。
+
+原因：它接受 `--cookie-jar`，不给就没有会话，而 traceback 指向 urllib，看不出缺的是 cookie。
+已改成默认回落到 `~/.arc-web-driver/session.jar`（`bf8ec8cf`）。
+**三小时后正在分析的时候，不是重新发现一个命令行参数的好时机。**
+
+修好后对 C 的 keep 给出的分解：
+
+```
+passed first try        22
+passed after repair      1   ['REQ-2.6.1']
+regressed (was passing)  1   ['REQ-2.5.4']
+never passed             8   ['REQ-2.5.1','REQ-3.2','REQ-4.1','REQ-4.2','REQ-5.1','REQ-5.2','REQ-6.1','REQ-6.2']
+```
+
+**但这里有个读法陷阱**：那 8 个「never passed」里，REQ-4.x / REQ-5.x / REQ-6.x 是连续的**后段**需求，
+而这次运行正是在末尾撞上 402 余额耗尽的。也就是说它们多半**根本没拿到一次可用的模型调用**，
+不是「试过做不出来」。
+
+`postmortem.py` 目前区分不了这两者——它只看 spec 有没有通过过。所以：
+**「never passed」在一次因额度/供应商错误而死的运行里，不能读成能力不足。**
+D 的运行没有这个问题（自带 key 一路可用），所以等它结束后这个分类才是可信的。
