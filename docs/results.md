@@ -975,3 +975,45 @@ b[0]... v+=1 ;  b[1]... v-=1 ;  b[2]... v=0
 
 **这同时第二次推翻我自己的判断**：先前「1.5B 太弱，发不出 `<<<FILE>>>` 块」是错的——它发得出，
 一次发五个，只是分隔符不规范。我把适配器的脆弱两次读成了模型的无能。
+
+### 解封路径走通了：coding plan 端点，以及它暴露出的第三个真缺陷（2026-09-18）
+
+用户提供了自己 GLM coding plan 的 key。三个候选端点实测，只有 coding plan 那个有额度：
+
+| base_url | 结果 |
+|---|---|
+| `https://api.z.ai/api/coding/paas/v4` | **HTTP 200，glm-5.3-flash 正常** |
+| `https://api.z.ai/api/paas/v4` | 429 `Insufficient balance or no resource package` |
+| `https://open.bigmodel.cn/api/paas/v4` | 429 `余额不足或无可用资源包` |
+
+**先在本地真跑一遍再动云端**，这个决定立刻付了钱：每一轮（implement 与 repair 一样）都在 2 秒内失败：
+
+```
+[proxy] http://127.0.0.1:51170/v1 -> https://api.z.ai/api/coding/paas/v4
+API error (custom/glm-5.3-flash, api_style=openai_chat_completions): model not found — HTTP 404
+{"status":404,"error":"Not Found","path":"/v4/v1/chat/completions"}
+```
+
+**不是模型不存在，是路径被拼错了。** 代理对适配器宣告 `http://127.0.0.1:<port>/v1`，
+转发时只在**上游 base 自己也以 `/v1` 结尾**时才剥掉这个本地前缀：
+
+```python
+if path.startswith("/v1") and proxy.upstream.endswith("/v1"):   # 改前
+    path = path[3:]
+```
+
+于是凡是前缀拼法不同的供应商全部不可达——z.ai 是 `/v4`，Zhipu 的 `open.bigmodel.cn/api/paas/v4`
+也是 `/v4`。按 `OPENAI_BASE_URL` 的约定，base 本身就带前缀（客户端直接往后接
+`/chat/completions`），所以判据应该是**base 有没有路径**，而不是它怎么拼。裸主机（无路径）
+才保留 `/v1`，因为那时没有别处提供版本段。修在 `fba4d222`，新增 4 个测试，324 全绿。
+
+这条和前两条是同一类毛病，值得并排看：
+
+| 缺陷 | 表面症状 | 真因 | 被挡住的能力 |
+|---|---|---|---|
+| 分隔符不宽容 | `reply contained no file blocks` | 少两个 `>` | 便宜模型不可用 |
+| 未见文件被重写 | 大树上成片回归 | 提示词邀请重写未展示文件 | 大树不能走 codegen |
+| 前缀只认 `/v1` | `model not found — HTTP 404` | base 有自己的前缀时没剥本地 `/v1` | **自带 key / 自建供应商不可用** |
+
+三条都不是「模型不够强」，都是适配器把自己的脆弱表现成了对方的无能。第三条尤其关键：
+它正是「平台默认 key 耗尽后还能不能继续比」这件事的唯一通路。
