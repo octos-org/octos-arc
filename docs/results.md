@@ -1053,3 +1053,31 @@ Meter baseline unavailable: meter login failed: 401 Client Error: Unauthorized
 2. **不把因计量看不见而得到的 0 成本效率当成成果。** 如果平台给出 0 费用，
    本文件会明确写它是计量假象，并另行报出自 z.ai 侧的真实消耗。
 3. 任何「效率提升 N 倍」的对比，仍然只能用同一计量口径下的数字（即 C 之前那批平台计量的运行）。
+
+### 提交 D 已在跑：三题并发，零错误（2026-09-18 17:25 UTC）
+
+先单起 keep 验证云端，确认整条链在容器里走通之后才扩量。验证的证据是日志里这几行：
+
+```
+design folded into the implementation turn (no JSON file)
+<<<FILE ...>>>  …完整页面（表单 / 搜索 / 置顶 / localStorage）… <<<END FILE>>>
+1 acceptance spec file(s) pass locally
+```
+
+GLM-5.3-flash 在容器里正常产码，用的是**规范分隔符**，且已有节点通过。此时才起后两题。
+
+当前状态：
+
+| 题 | run | 状态 | 局部通过的 spec 数 | 错误 |
+|---|---|---|---|---|
+| keep | `45e9c8f401d1` | RUNNING | 9 | 无 |
+| ctrip | `cc8ffb1eac6b` | RUNNING | 3 | 无 |
+| 12306 | `135aac595035` | RUNNING | 0（刚起） | 无 |
+
+**并发上限从 6 降到 3**，理由写进了 `run_web.py` 的注释：并发聚合吞吐确实是串行的 2.4–4.8 倍，
+但提交 C 的教训是硬额度会**一次掐死全部在跑的运行**；现在烧的是用户自己的 coding plan 额度，
+留 3 个在跑、分批收口，能让先起的几题有机会跑完，而不是六题同时撞上同一个窗口上限。
+并发 3 下暂未出现任何限流（`429` / `rate limit` 零次）。
+
+监督者已交给 launchd 常驻（`com.octos.arcweb`，pid 30779），断点续跑、跳过已过线的题、
+每题最多 2 次。它检测到目标提交从 C 变为 D 后自动清零了重试计数——这是先前加的按提交隔离在起作用。
