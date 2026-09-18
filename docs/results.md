@@ -1783,3 +1783,38 @@ OCTOS_TIME_BUDGET   seconds for the whole generation (default max(3600, 1500 x n
 不是推出来的。可达且已达成的是另一个口径：在输出量足以产生该应用的条目里我们第 1，
 smoke 领先第 4 名 3.8×（121,359 vs 32,268）。而 smoke 这条已经只发 1 次请求，
 连「把领先从 3.8× 拉到 7×」的空间都没有——除非模型单价下降。
+
+### 好消息：提交 C 那两条 0% 的死行会被 D 替换掉，不是永久损伤
+
+Web 榜上我们现在有两条 0.00 的行（第 17、18 / 18），是提交 C 余额耗尽后留下的。
+先前担心 D 跑完会变成「再加一行」，让死行一直挂着。读平台源码之后可以放心：
+
+```python
+# A participant may upload several snapshots.  Keep only the best
+# complete snapshot for each user/team entry; otherwise every retry
+# would appear as a separate leaderboard row.
+if previous is None or self._leaderboard_candidate_key(candidate) > self._leaderboard_candidate_key(previous):
+    best_by_participant[participant_key] = candidate
+
+def _leaderboard_candidate_key(item):
+    return (float(item.avg_pass_rate),                      # 通过率优先
+            1 if item.efficiency_eligible else 0,
+            float(item.cost_efficiency or 0.0))
+```
+
+**每个参赛者只保留最佳快照，判据第一位是通过率。** 所以 D 只要通过率高于 0，
+就会**替换**掉 C 那一行——哪怕 D 的费用是 `None`（`cost_efficiency or 0.0` 把 None 当 0，
+但那是第三位判据，通过率已经先分出胜负）。
+
+**另外一条同样重要的规则**：
+
+```python
+if set(by_task) != expected_ids:
+    continue          # 六题没跑全的提交根本不上榜
+```
+
+提交必须**每道题都有完成的运行**才会形成一行。C 之所以在榜上，是因为它六题都「完成」了
+（全部 FAILED、0/0、通过率 0.0，但状态是完成）。这也再次说明为什么 D 必须六题跑完——
+少一题就完全不上榜，不是「按已完成的题算个平均」。
+
+（`OctosArc` 与 `octos` 是两个不同的用户名，各自保留一行；替换只发生在同一参赛者内部。）
