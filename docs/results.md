@@ -2140,3 +2140,29 @@ never passed             8   ['REQ-2.5.1','REQ-3.2','REQ-4.1','REQ-4.2','REQ-5.1
 `postmortem.py` 目前区分不了这两者——它只看 spec 有没有通过过。所以：
 **「never passed」在一次因额度/供应商错误而死的运行里，不能读成能力不足。**
 D 的运行没有这个问题（自带 key 一路可用），所以等它结束后这个分类才是可信的。
+
+### 让 postmortem 说出「这次的 never passed 不能读成能力不足」
+
+上一条记下了那个读法陷阱，这一条把它写进工具，免得下次还得靠记性。
+
+`never passed` 这一类读起来像能力缺口——「修复轮拿到了证据仍然做不出来」。
+但一次供应商挂掉的运行会产出**一模一样**的分类，原因完全不同。
+现在它会把日志里出现的供应商故障列出来并明说这层歧义：
+
+```
+never passed  8 ['REQ-2.5.1','REQ-3.2','REQ-4.1','REQ-4.2','REQ-5.1','REQ-5.2','REQ-6.1','REQ-6.2']
+!! the provider failed during this run (insufficient_balance, quota exhausted,
+   PermanentProviderError, HTTP 402) -- 'never passed' here may mean those nodes
+   never got a working model call, not that they were attempted and could not be done
+```
+
+**双向都用真实运行验过：**
+
+| 运行 | 供应商故障 |
+|---|---|
+| keep @ A（32/32、零回归） | 无 ✓ |
+| keep @ C（402 致死） | `insufficient_balance` / `quota exhausted` / `PermanentProviderError` / `HTTP 402` |
+
+顺带看清了那个标杆长什么样——**keep @ A：官方 32/32、功能率 100%、零回归、零 never-passed、
+隐性干扰 0**，24 个首次通过、8 个修复后通过，用的是 deepseek-v4-flash。
+D 的 keep 要复现的就是这条线。
