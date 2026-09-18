@@ -903,3 +903,39 @@ b[0]... v+=1 ;  b[1]... v-=1 ;  b[2]... v=0
 它发得出，只是差两个字符，而我把适配器的脆弱读成了模型的无能。
 
 316 个测试全绿（新增 5 个）。
+
+### 改前/改后 A/B：同题、同模型、同种子，只差这一个修复
+
+不是回放，是两次真实运行（`qwen2.5-coder:7b`，loopback endpoint，`smoke-evolution--counter`，
+同一个种子模板）：
+
+| | 改前（`guardfire-real`） | 改后（`guardfire-real2`） |
+|---|---|---|
+| REQ-2 implement | `reply contained no file blocks` | `accepted 1 block(s) with a non-canonical delimiter: ['frontend/src/index.html']` |
+| 写入文件 | 0 | 1 |
+| 节点去向 | `generation did not complete` → 工具模式 | 直接写入 |
+| REQ-2 验收 | 0/1 | **1/1（1s）** |
+| 全套 | `full suite round 0: 1/2` | **`full suite round 0: 2/2; failing nodes []`** |
+| `backend/server.js` | sha `9d1c4056…` 未变 | sha `9d1c4056…` 未变 |
+
+**0/1 → 2/2，单一变量。** 那条 `accepted ... non-canonical delimiter` 日志也按设计出现了，
+模型的协议偏离没有被静默吸收。同时这次真模型运行里守卫依然守住了 30k 的 `server.js`
+（模型只写了被引用的那个文件，没有尝试重写没见过的文件——这才是正确行为）。
+
+### 云端付费模型上的同类损失：有 36 次，但不能归因于分隔符
+
+顺手量了提交 C 那五个长跑的日志（526–729 KB/个）：
+
+| 运行 | `reply contained no file blocks` | 成功 `wrote` | 日志里开标记的 `>` 个数 |
+|---|---|---|---|
+| d3b295e835f6 | 4 | 124 | `{3: 7}` |
+| 11d624ba0370 | 8 | 84 | 无 |
+| f1ec298d70b1 | 4 | 123 | 无 |
+| 652e8dd0964d | 0 | 120 | 无 |
+| 327be5ef4b29 | 20 | 120 | 无 |
+| **合计** | **36** | **571** | — |
+
+约 6% 的 codegen 轮次被整份丢弃，这是付费模型上实打实的损失。**但不能说这是分隔符漂移造成的**：
+云端日志里出现过的开标记全是规范的三个 `>`，而且日志基本不保留原始回复，所以既不能证实也不能证伪。
+准确结论是：**付费模型上存在 36 次整份丢弃的 codegen 轮次，成因待查**，需要在日志里保留
+被丢弃回复的头尾片段才能定性——这是下一步该加的观测点，不是已经拿到的结论。
