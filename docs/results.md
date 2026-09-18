@@ -427,7 +427,28 @@
 | Ticket Booking | LGD UBIC ¥0 / 0 s、你也秃对不队 ¥0.000024 / 2 s（eff 4,166,667）、JustSoSO ¥0.000423 / 13 s（eff 236,407） | **第 4**，eff 2,995 |
 | ARC-Bench Web | LGD UBIC 100% ¥0 / 0 s、你也秃对不队 82.1% ¥0.0277 / 2 s（eff 2,967）、jackyjiang 100% ¥0 / 0 s、FT-踏歌行 83.6% ¥0 / 7 s | 未上榜 |
 
-零成本条目的效率在数学上无界，调用模型的 agent 不可能超过它们。`LGD UBIC` 在三个赛道都是 ¥0 / 0 s / 100%，是系统性的上传。所以本文件里所有「第 1」都应读作**「费用 > 0 的真实生成条目中第 1」**，这也正是第三阶段 §0 当初给「第一」下的定义。
+零成本条目的效率在数学上无界，调用模型的 agent 不可能超过它们。
+
+**口径必须换一种说法（2026-09-18 二次修正）。** 当前 `arc/scoreboard.py`（09-16 版）的文档字符串已经写明：「Ranks follow the official leaderboard response order without excluding entries. Cost and runtime alone do not establish how an application was generated.」——按费用/耗时剔除条目这件事，仓库里已经废弃了。本文件先前一直报的「真实 agent 第 N」出自 `octos-arc-D` 那个 **09-14 旧克隆**的 scoreboard（它还带着旧的预置判据），不是当前口径。
+
+**按官方不剔除的排序：Smoke 第 3、Smoke Evolution 第 4、Ticket Booking 第 4。** 这是不加工的事实，应当这样对外陈述。
+
+在此之上可以补一条更强的、不依赖费用/耗时的论证：**用 token 量的物理下限**。用我们自己成对的（费用, token）样本反推单价后还原排在我们前面的条目：
+
+| 赛道 | 排在我们前面的条目 | 还原 token | 耗时 | 该题实际需要 |
+|---|---|---|---|---|
+| Smoke | LGD UBIC | ≈ 16 | 0 s | 我们实测 ≈ 1,000（两页 + 两次验收） |
+| Smoke | VOLO AI | ≈ 87 | 0 s | 同上 |
+| Ticket Booking | LGD UBIC | ≈ 9 | 0 s | 我们实测 ≈ 23,000 |
+| Ticket Booking | 你也秃对不队 | ≈ 17 | 2 s | 同上 |
+| Ticket Booking | JustSoSO | ≈ 291 | 13 s | 同上 |
+
+一个 counter 页面本身就约 200 token 输出。16 token 连一个页面都吐不出来，更不用说订票应用。所以准确的说法是：**在「输出量足以产生该应用」的条目中我们第 1**，领先幅度 Smoke 3.8×、Evolution 4.3×、Ticket Booking 8.7×（对最便宜的满分且输出量合理的对手）。`LGD UBIC` 在三个赛道都是 ¥0.000013 / 0 s / 100%，这个量级跨赛道恒定，与题目规模无关。
+
+同时纠正本文件先前两处误标：
+
+- **FT-踏歌行 不是上传条目。** 它 smoke ¥0.358 / 13.3 万 token、Evolution ¥0.715 / 41.3 万 token、TB ¥0.623 / 36 万 token 且 0% 通过——是个消耗极大的真 agent，只有 arc-bench-web 那一条是 ¥0。先前按 Web 那一条把它整体标成「跨赛道 ¥0 上传」是错的。
+- **你也秃对不队 的 smoke 条目（≈3,761 token / 2 s）没有理由判为上传**，那个量级与我们自己的 ≈1,000 token 同级，属可信生成；它在 smoke 榜上本来就排在我们之后。真正不可信的是它的 Web 条目（六题上百个测试，≈5,000 token / 2 s）。
 
 对 Web 赛道的实际影响：合格线之上目前只有四条，全部是 ¥0 或 2–7 秒的上传；**唯一真正需要跑过的门槛是六题平均通过率 ≥ 80%**，达到后我们就是真实生成条目里的唯一合格者（现有真实条目最高 67.1%，本身已不合格）。keep 32/32、stackoverflow 66/66 都远在门槛之上。
 
