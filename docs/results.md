@@ -840,3 +840,66 @@ model  ≤ 120 字符      base_url 必须是绝对 http(s)      api_key ≤ 409
 **零成本探针:余额是否已恢复。** 链脚本在死前于 16:24–16:25 UTC 又建了三个运行，
 它们 **11–12 秒、0 token** 就 FAILED（对比余额耗尽前那六个各跑了 9,735–10,076 秒）。
 所以判断余额有没有充上，不必赌一次长跑：建一个运行，11 秒内 FAILED + `token_count=0` 就是还没有。
+
+### 便宜模型答对了，适配器却因为少两个 `>` 把成果扔掉（2026-09-18，零额度）
+
+上面那次 ollama 真模型验证的副产品，比原计划验证的东西更值钱。
+
+`qwen2.5-coder:7b` 在 `smoke-evolution--counter` 的 REQ-2 上答出了**完整且正确**的实现：
+
+```html
+<div data-testid="count">0</div>
+<button type="button" id="increment">Increment</button>
+<button type="button" id="decrement">Decrement</button>
+<button type="button" id="reset">Reset</button>
+...
+b[0]... v+=1 ;  b[1]... v-=1 ;  b[2]... v=0
+```
+
+三个按钮全部正确接线，Reset 置 0——REQ-1 与 REQ-2 都会过。但适配器的日志是：
+
+```
+[flow] REQ-2 implement ok in 25s (tools=0 wrote=False verified=False): '...<<<END FILE>>>'
+[codegen] REQ-2 implement: reply contained no file blocks
+[flow] REQ-2: generation did not complete; testing the existing app
+```
+
+从事件流里取出原始回复，原因只有两个字符：
+
+```
+模型写的：  <<<FILE frontend/src/index.html>      ← 一个 >
+协议要的：  <<<FILE frontend/src/index.html>>>    ← 三个 >
+闭标记：    <<<END FILE>>>                        ← 正确
+```
+
+`FILE_BLOCK` 要求恰好 `>>>`，于是 3,957 字符的正确回复整份作废。
+
+**这不是孤例。** 翻早先的 `ollama-fixed.log`，同一模型在另一个文件上漂移成**两个** `>`：
+
+```
+103: [flow] REQ-1 implement ok in 19s (...): '>\n<<<FILE frontend/package.json>>\n{...'
+105: [codegen] REQ-1 implement: reply contained no file blocks
+123: [codegen] REQ-1 rewrite (repair 1): reply contained no file blocks
+```
+
+那次连丢两轮（implement 与 repair 1，各约 19s）。两次独立观测：开标记漂移、闭标记正确、内容无误。
+
+**修法**（`d5646f99`）：路径模式本身已排除 `>`，所以把两个标记的分隔符放宽到「一个或多个」
+不产生歧义——路径里真含 `>` 的标记依旧完全不匹配，和改前一样。同时加 `delimiter_drift()`，
+把用到宽容的块名写进日志，漂移不被静默吸收：一个模型偏离协议多远是它自己的属性，
+这决定便宜档要不要更硬的格式指令。
+
+用**真实捕获的那份回复**回放验证：
+
+| | 改前 | 改后 |
+|---|---|---|
+| 解析出的文件 | 无 | `frontend/src/index.html` |
+| 页面长度 | — | 655 字符 |
+| Reset / count / Increment+Decrement | — | 全部在位 |
+| 闭标记后的散文被吞进正文 | — | 没有 |
+
+**为什么这条比它看起来重要**：整个成本效率论点押在「便宜模型可用」上。一个答对了的便宜模型，
+不该因为两个字符丢掉整轮。这也解释了此前把 7B 判为「太弱，发不出 `<<<FILE>>>` 块」——
+它发得出，只是差两个字符，而我把适配器的脆弱读成了模型的无能。
+
+316 个测试全绿（新增 5 个）。
