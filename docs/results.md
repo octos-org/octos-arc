@@ -1396,3 +1396,31 @@ package.json」。两个不同规模的模型，同一个方向。
 **对下一个提交的影响**：预算不是杠杆。有实测支持的杠杆只剩一条——
 keep 的失败形态是 `acceptance specs still failing after repair rounds`，
 对应 `arc/model-routes-glm-escalate.json`：implement 留在 flash，只有 repair 升级到 `glm-5.3`。
+
+### 「未变文件」观测点：本地四次真实运行里保持沉默
+
+`unchanged_rewrites` 加进去之后还没在真实运行里见过数据。GLM 那四次用的正是含它的代码，
+结果是 `(N unchanged: ...)` 一次都没出现——每次都是 `wrote 1 file(s): ['frontend/src/index.html']`，
+写入的那个文件确实改过。（日志里搜到的 `unchanged` 是 `evolution mode: ... unchanged nodes []`，
+不是观测点的输出。）
+
+这说明观测点**在没有可报的东西时正确地不吭声**，但也说明这道题太小，答不了真正的问题：
+deepseek 那批云端运行是 282 轮写了 688 个文件、平均 2.44 个/轮，其中有多少是原样吐回的浪费——
+那要等一个带着这个观测点的云端运行，也就是下一个提交。
+
+### 补上一处没被测试覆盖的判定：label → phase
+
+`phases: ["repair"]` 这条规则值多少，完全取决于运行时把哪些轮次判成 repair。路由规则本身有测试，
+**喂给它的那个判定却是一段内联三元式、没有自己的测试**。已抽成 `phase_for_label()`（`6a582efc`），
+并用流程真实发出的 label 覆盖：
+
+| label | phase |
+|---|---|
+| `REQ-3.2 implement` / `REQ-3.2 implement (tiny)` | implement |
+| `REQ-3.2 repair 1/5` / `REQ-3.2 rewrite (repair 1)` / `full-suite repair 1/3` | **repair** |
+| `final check` | verify |
+| `design` | design |
+
+还加了一条端到端断言：这三个 repair label 配上已备好的升级配置，选中的都是 `glm-5.3`，
+而 implement 仍留在提交自带的模型上。这条直接关系到 keep——它的失败写的是
+`acceptance specs still failing after repair rounds`，升级只有在那些轮次真的落在 repair 上才有用。
