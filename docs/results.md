@@ -1673,3 +1673,39 @@ def delta(start, end):
 所以我们相对**新**条目并不吃亏，只相对历史上已经有数值的条目吃亏。
 换句话说，这一格的损失是「时间差」造成的，不是自带 key 独有的惩罚——
 自带 key 独有的那部分，是即便计量器修好也仍然为 0。
+
+### 提前把提交 E 的包打一遍，当场抓到一个会静默失败的用法
+
+不等 keep 的结果，先把 E 的候选包打出来验一遍。**第一次就失败了，而且是静默失败**：
+按笔记里写的 `ROUTES=<路径> bash arc/pack.sh` 打出来的包**不含路由文件**，
+其余八项都在——如果等到真需要 E 的那一刻才发现，就是在压力下调试。
+
+真因：`pack.sh` 把路由路径当作**位置参数 `$1`**，不是环境变量：
+
+```sh
+ROUTES=""
+if [ -n "$1" ]; then ROUTES="$(... abspath ...)" ; fi
+cd "$(dirname "$0")"
+```
+
+正确用法是 `bash arc/pack.sh arc/model-routes-glm-escalate.json`。笔记已更正。
+
+**E 候选包现已验过**（sha `e13ba017`，76 个文件，直接从 zip 读源码核对）：
+
+| | |
+|---|---|
+| ✓ | 分隔符宽容、未见文件守卫、丢弃 digest、供应商前缀修复（D 已有的四项） |
+| ✓ | 未变文件计数、包装反馈更正、phase 判定抽出、引用预算拆分（D 之后新增） |
+| ✓ | **升级路由文件**，内容 `[{"model":"glm-5.3","phases":["repair"],"tools":true,"images":true}]` |
+
+**顺带确认一处此前担心的缺口不存在**：修复循环在「用完轮次」和「时间不够」两个出口
+确实不回滚——但循环**之后**有无条件兜底，注释也写明了理由：
+
+```python
+# Failed repairs can leave dirty files without changing HEAD. Restore the files,
+# even when the current commit already equals the best recorded commit.
+if best_passed > 0 and best_sha:
+    self.restore_app(best_sha)
+```
+
+今天第二次「多读几行避免了假警报」（第一次是拿日志里的句子去源码里找标识符）。
