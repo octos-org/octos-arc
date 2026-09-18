@@ -730,3 +730,36 @@ prestashop（86 节点）、ctrip（125）、12306（117）跑完后可进一步
 | 计划 | bookstack 结束后的空窗：统筹先用 main@6974ffcd（round 32 极小 spec 档位）串行重跑 Smoke（李尧、octos 两账号）与 octos 的 Evolution，再起 stackoverflow | 紧随 bookstack |
 | 规则 | 期间**任何工作流都不要用这把 key**（本机运行会计入正在跑的云端账单）；C 不发起云端运行；每题结束由统筹发运行号，C 归档到 evidence/ 与本文件 | — |
 | 已结束 | keep 2224a9013528（32/32、¥16.58）；octos 官方账号五道小题（29f7f30395c0 / 92895ec3437e / c30b29eab45b / 10b04d36f704 / 4c4146be7bbf） | — |
+
+### 提交 C 六题全部失败：access key 余额耗尽（2026-09-18 16:22 UTC）
+
+六题在同一时刻死亡，`failure_reason` 都是
+`Command '['python3', '/workspace/submission/main.py', ...]' returned non-zero exit status 1`，
+判分 0/0。日志里的真因：
+
+```
+[flow] aborted: PermanentProviderError('runtime_error: Provider quota exhausted
+(openai@127/deepseek-v4-flash) — top up or switch provider (HTTP 402 ...
+```
+
+直接探测确认：
+
+```
+POST https://api.arc-bench.com/v1/chat/completions
+HTTP 402 {"error":{"code":"insufficient_balance",
+          "message":"access key balance is exhausted"}}
+```
+
+不是代码缺陷，也不是成本护栏（护栏上限 85,000,000 token，死在 72.7M）。是账户额度用完。`demo-config/` 下没有备用 key。**在充值或换 key 之前，任何云端运行都不可能成功**，常驻监督者已停（`launchctl unload com.octos.arcweb`），否则它会不断创建注定失败的运行。
+
+已到手的三个赛道条目完好，不受影响（榜单取每题最近一次完成的运行，其数字在完成时已记定）：Smoke 第 3/44、Evolution 第 4/30、Ticket Booking 第 4/50，均 100% 通过率与功能实现率。
+
+### 这次事故同时更正了一条我先前的结论
+
+四题报出的 `token_count` 分别是 72,693,779 / 72,711,612 / 72,711,612 / 72,702,826——**12306 与 ctrip 完全相同**，四者相差不到 0.03%。不同题目不可能消耗一样多 token，所以这个字段不是单次运行的用量，而是**该 access key 的共享计量窗口**读数；日志原文也写着 `Meter usage captured: tokens=72693779, cost=42.694669 CNY`。
+
+因此 `¥42.70 × 4` 不是花了约 ¥171，而是同一笔约 ¥42.70 被记了四次。
+
+这也解释了先前定不下来的那件事：keep 9a954dfad2f5 @ B 报 78,211,655 token（对 keep @ A 串行的 9,091,574），我曾归因于并发限流重试，随后又以「串行那次重试更多」为由**撤回**了并发归因。**那次撤回是错的**——并发确实是原因，但机制是计量窗口共享，不是重试。当时我用「三者反推单价一致（¥0.60–0.72/M）」论证「是真消耗而非记账串味」，而单价一致恰恰是因为 token 数与费用来自同一个窗口，两者被同比例放大。
+
+可操作结论：**并发运行的 `token_count` 与 `token_cost_usd` 都不可用于单题成本对照**，任何改前改后的成本比较必须串行单跑。
