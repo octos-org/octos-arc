@@ -2943,3 +2943,28 @@ repair_rounds = 3（大树：n_nodes > 2 时从 5 降到 3）
 
 lite 的提交随之换成含这个修复的新包：`1af1f8418375`
 （前一个 `7fc319f3579e` 零运行，冻结无代价）。这个修复正落在损失发生的地方——修复路径上。
+
+### 同一类洞的第二处：修复轮整份丢在外壳上时，之前什么都不会说
+
+`truncation_correction` 的 docstring 当年就写明「repair 与 rewrite 轮什么都不做」，
+并补上了**截断**那一半。**没有文件块**那一半被落下了：`no_files_correction` 只挂在
+implement 路径上（`main.py:2640`），两个修复调用点（rewrite、repair）只问截断。
+
+后果就是本机探针里看到的那一幕：修复轮回复整份丢在外壳上，**没有任何人告诉它这件事**，
+下一轮原样重复。
+
+新加 `repair_wrote_nothing_correction`，两个修复调用点都接上。
+**它不能直接复用 `no_files_correction`**——那条消息结尾是
+「Ignore any suggestion that your previous files failed; there were none.」
+在 implement 路径上成立，在修复轮上是**假的**：implement 轮写过文件，而且它们确实失败了。
+照搬会把模型引向错误结论。新消息点明外壳问题，同时保住「那些失败仍然成立、
+但它们不是关于你那个没被应用的修法的证据」这个上下文。
+
+两件事各配一条测试钉住：
+* 两条消息在「there were none」这一点上必须保持相反（免得日后有人把它们合并掉）；
+* `acceptance_loop` 里必须出现**两次**调用——只补一处，正是截断那一半当年留下这个洞的方式。
+
+352 个测试全绿，通用性审计退出码 0。lite 的提交刷新为 `37895b09ceb7`。
+
+（lite 的提交这一段换了几次。代价是零：每次旧的都还是零运行，而 `run_lite.py` 读
+`target-arc-bench-lite.txt`，永远指向最新那个。等它真要起跑时，拿到的是当时最好的包。）
