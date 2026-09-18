@@ -2249,3 +2249,36 @@ ticket-booking 那次卡住了：`ConnectionResetError: [Errno 54] Connection re
 
 **诚实的结论边界**：两道 smoke 在当前代码下确认没坏；ticket-booking **未经验证**。
 不写成「三条赛道都没坏」——没测成就是没测成。
+
+### 补测 ticket-booking 时撞出一个真缺陷：截断的修复轮会静默作废
+
+回归检查里 ticket-booking 那次本地跑没测成，重试后拿到了**比原计划更有价值的东西**：
+
+```
+[flow] REQ-1 implement FAILED in 900s: 'octos turn timed out'
+[flow] REQ-1 rewrite (repair 1) FAILED in 582s:
+       'output_truncated: Model output was truncated (max_tokens); the response is incomplete'
+[flow] REQ-1: 17s left, below the 300s a repair needs; keeping the best state
+```
+
+用量日志佐证：那一次请求 `completion_tokens` **恰好 32,768**——正是代理的下限
+（`ensure_max_tokens` 把内核发的 4096 抬到 32768，且不下调）。
+
+**缺陷**：`grep -n truncated arc/main.py` 只有一处命中，在 **implement** 轮——
+它会重试一次并要求「一次只写一个文件」。**repair 与 rewrite 轮没有任何处理**，
+所以被截断的那一轮整份作废、除了自己那行 FAILED 不留痕迹，下一轮也不知道发生过什么。
+
+已修（`7992b64d`）：两条路径都把与 implement 重试相同的指令交给下一轮。
+**不加新的重试**——那一轮的预算已经花掉了；这是便宜的那一半：让下一次知道。
+
+**顺带一个模型能力的观察（一次运行，不作结论）**：同一道 ticket-booking，
+我们平台上那条 100% 的成绩是 deepseek 跑的、**117 秒**；glm-5.3-flash 在本地
+**耗尽 1500 秒节点预算、REQ-1 始终没过**。glm 是推理模型，推理 token 也计入 completion，
+32,768 里真正留给文件的比这个数字看着要少。
+
+**直接后果**：先前决定「不用 glm 重跑已有成绩的三个赛道」是对的——
+真那样做，ticket-booking 的第 4 名会丢掉。
+
+修复过程中还带出一处测试问题：两个修复相关测试把 `codegen_turn` / `turn` 桩成了裸 `Mock`，
+而真实签名是 `tuple[bool, str]`。它们此前能过，只是因为旧代码把返回值丢掉了。
+桩已改为同形——否则测的是「返回值被忽略」这个旧行为，不是接口。
