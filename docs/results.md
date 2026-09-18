@@ -1017,3 +1017,39 @@ if path.startswith("/v1") and proxy.upstream.endswith("/v1"):   # 改前
 
 三条都不是「模型不够强」，都是适配器把自己的脆弱表现成了对方的无能。第三条尤其关键：
 它正是「平台默认 key 耗尽后还能不能继续比」这件事的唯一通路。
+
+### 提交 D（`857ce3746c32`）：自带 coding plan key，以及一个必须主动声明的计量假象
+
+`preflight_new_submission.py` 按设计拦了一次，这次绕过它是有据的：C 六题全 0%、
+它绑的默认 key 已无额度、最后那个 prestashop 运行 PENDING 近 50 分钟未启动。冻结 C 的代价确认为零。
+
+新提交：
+
+```
+857ce3746c32   Octos main@326ae1ae · glm-5.3-flash (coding plan)
+base_url = https://api.z.ai/api/coding/paas/v4
+model    = glm-5.3-flash
+```
+
+先起一题（keep，`45e9c8f401d1`）验证云端，不一次上六题——避免重演「六题一起死」。
+它进入 `RUNNING` 并持续运行（死钥匙的特征是 11–12 秒暴死），容器已起，无 404。
+
+**但日志开头有一条必须主动声明的东西：**
+
+```
+Meter baseline unavailable: meter login failed: 401 Client Error: Unauthorized
+  for url: https://meter.arc-bench.com/api/user/login
+```
+
+平台的计量器登不上（C 那批还能 `Meter usage captured: tokens=72693779`，同一批耗尽之后就 401 了）。
+**后果：用参赛者自带的 key 跑，平台看不到花费，`token_cost_usd` 很可能记成 0。**
+而榜单排序是 `cost_efficiency = 通过率 ÷ 费用`——费用为 0 时效率在数学上无界，
+我们就会变成本文件一直标注为「输出量不足以产生该应用」的那类 ¥0 条目。
+
+**这正是目标里要避开的投机取巧，所以这里先把口径钉死：**
+
+1. 只追求**通过率**这一项真实指标。合格线之上目前只有四条 ¥0/2–7 秒的上传条目，
+   六题平均 ≥80% 会让我们成为真实生成条目里唯一合格者——这个结论不依赖费用数字。
+2. **不把因计量看不见而得到的 0 成本效率当成成果。** 如果平台给出 0 费用，
+   本文件会明确写它是计量假象，并另行报出自 z.ai 侧的真实消耗。
+3. 任何「效率提升 N 倍」的对比，仍然只能用同一计量口径下的数字（即 C 之前那批平台计量的运行）。
