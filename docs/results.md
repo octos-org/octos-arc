@@ -1237,3 +1237,25 @@ deepseek-v4-flash 拿过 32/32。ctrip 同期每约 80 秒过一个 spec，12306
 所以顺序是：等 D 六题各自用完 `MAX_ATTEMPTS=2` 的机会，再判断要不要为不过线的题换档。
 
 不提前动手的理由和上一次一样——上一次没验证就取消在跑的运行，毁了两个已在 80% 线之上的结果。
+
+### 核对：提交 D 的包里到底装了什么
+
+直接从上传的那个 zip 里读源码核对，不靠 git 日志推断。**D（`326ae1ae`）实际在检验这六项：**
+
+| | |
+|---|---|
+| ✓ | 分隔符宽容（`CANONICAL_FILE_BLOCK` + `>+`） |
+| ✓ | 漂移可见（`delimiter_drift` → `non-canonical` 日志） |
+| ✓ | 未见文件守卫 + 回落工具模式（`drop_unseen_rewrites` / `switches to tool mode` / `codegen_blocked`） |
+| ✓ | 丢弃原因 digest（`unparsed_reply_digest`） |
+| ✓ | 供应商前缀修复（`_forward_path` / `upstream_has_prefix`） |
+| ✓ | loopback 绕系统代理（`open_upstream` / `_loopback`） |
+| ✗ | 未变文件计数（`unchanged_rewrites`，在重打包之后） |
+| ✗ | repair 升级到 `glm-5.3`（路由文件未进包） |
+
+包里 `main.py` 190,285 字符、本地 190,469，差的 184 字符正是 `unchanged_rewrites` 那段，对得上。
+
+**第一次核对我差点报了一个假警报**：我用 `never shown to this turn` 去找守卫，结果「不在包里」。
+那句日志是拼出来的，不是源码里的字面量——本地 `main.py` 里同样找不到它。换成
+`drop_unseen_rewrites` / `switches to tool mode` / `codegen_blocked` 三个真实标记后，守卫确实在包里。
+教训很小但很实用：**验证产物要用源码里真实存在的标识符，不要用日志里看到的句子。**
