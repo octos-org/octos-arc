@@ -1890,3 +1890,42 @@ $ python3 run_web.py --selftest
 
 模块开头的说明原本写着「『已完成』的判据是完成且通过率 ≥ 80%」——那是**逐题**的旧口径，
 会把接手的人继续带偏，已一并改成平台的真实规则。
+
+### 从**包**里跑一次，而不是从源码树（2026-09-18）
+
+平台执行的是上传的那个 zip，不是仓库。所以把 E 候选包解出来、按平台的调用方式跑一次：
+
+```
+python3 /private/tmp/ebundle/main.py <requirements-dir> --output-dir <out>
+```
+
+结果：**端到端跑通**。供应商前缀修复在包里生效
+（`[proxy] ... -> https://api.z.ai/api/coding/paas/v4`），tiny 档正常写页，路由文件在包里。
+这验证了源码树验不了的东西——`pack.sh` 有没有漏带文件。
+
+（顺带一个自己给自己挖的坑：第一次跑我写了 `timeout 900`，macOS 上没有这个命令，
+`exit 127` 直接失败。这条早就知道，还是又踩了一次。）
+
+### 包里跑出来的日志暴露了一句会误导人的话
+
+```
+[codegen] REQ-1 implement (tiny): wrote 1 file(s): ['frontend/src/index.html']
+[flow] REQ-1: tiny tier produced no page; compact tier next        ← 上一行刚写了页面
+```
+
+写了又说没写。查代码才发现四种条件印同一句话，只有一种真的是「没产出页面」：
+
+```python
+if not ok or not page.is_file() or self.runner is None or not specs:
+    log(f"[flow] {node_id}: tiny tier produced no page; compact tier next")
+```
+
+已改成指名道姓（`4760d997`）。**第一次使用就纠正了我的猜测**——我以为命中的是
+「没有 spec 文件」，重跑后日志说的是：
+
+```
+[flow] REQ-1: tiny tier unverified (no runner to serve it); compact tier next
+```
+
+这和这两天做的分隔符 digest、丢弃原因 digest 是同一类改动：**让日志说出真正发生的事**。
+代价是几行代码，收益是下一个人（包括我自己）不会再对着一句笼统的话去找不存在的缺陷。
