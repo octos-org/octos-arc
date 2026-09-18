@@ -2869,3 +2869,45 @@ repair_rounds = 3（大树：n_nodes > 2 时从 5 降到 3）
 那个改动因此会第三次换理由：
 最初是直觉 → 然后被我用一个错读「证明」（已撤回）→ 现在是时间预算内的最强配置 →
 若预言成立，才真正落到「修复轮是瓶颈」这个被证据支持的位置上。
+
+### 本机探针：拿到一条真观察，同时欠一条更正
+
+用本机 ollama（零 GLM 额度、零外网）跑 ticket-booking，只为验一件**结构性**的事：
+失败节点到底会不会把修复轮跑满。直接观察到的：
+
+```
+[acceptance] REQ-1 round 0: 0/1
+[flow] REQ-1 rewrite (repair 1) ok in 3s (tools=0 wrote=False verified=False): '```json\n{ ... }'
+[acceptance] REQ-1 round 1: 0/1
+[flow] REQ-1: identical failure twice; switching repairs to tool mode
+```
+
+（这个日志每行都被 stdout+stderr 各记一遍，计数要除以二，别重复算。）
+
+三点收获：
+
+1. **修复循环确实在失败节点上逐轮推进**（round 0 → round 1）。结构性那一半成立。
+2. **`identical failure twice` 在 round 1 就触发了，不是 round 3。** 也就是说循环常常**不会**跑满轮数，
+   而是提前改走工具模式。这**削弱**了我上一节「3 轮 × 200 秒」的账，并给出一个竞争解释：
+   **2 个快的 codegen 轮 + 1 个慢的工具模式轮**。两者都能凑出 612 秒，
+   但后者现在有一次直接观察，前者只有算术。区分它们的证据仍是云端的轮次分布：
+   前者预言最高轮次 3，后者预言最高轮次约 2 且伴随一行 `switching repairs to tool mode`。
+   定时任务的提示里已经写了要看这一行。
+3. `wrote=False` 配一个 ```json 围栏回复，正是 `no_files_correction` 那一类；
+   日志里 `reply contained no file blocks` 确实出现了（2 次真实事件）。
+
+**欠的更正**：我先前告诉用户，本机 A/B 死于
+`failed to send streaming request` 是「本机到 api.z.ai 的链路问题」。
+**这条不成立**——同样的错误这次出现在**打 localhost 的 ollama** 上。
+所以那个归因没有依据，撤回。
+
+顺带查清本机为什么不可靠，两条都与 ARC 无关但影响「能不能拿本机当证据」：
+
+* ollama 的 `/v1/chat/completions` **当前是坏的**：带工具/不带工具、流式/非流式、小提示/大提示，
+  五种形态全部 `RemoteDisconnected`；而原生 `/api/generate` 200 正常返回。
+  今天早些时候它是能用的（那些守卫实验跑出过真实结果），所以是中途坏的。
+* llama-server 的启动参数是 **`-c 4096`**——4096 token 上下文，
+  而适配器的提示最大到 90,000 字符（约 2.5 万 token），**超出 6 倍**。
+  这意味着今天所有本机 ollama 实验都是在上下文溢出下跑的。
+  那些实验里「机制被触发」的观察仍然有效（分隔符容忍捞回 5 块、拒写 4 个未见文件且 SHA 逐一相同），
+  但**不能**用它们推断模型在正常条件下的能力。
