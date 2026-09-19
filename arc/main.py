@@ -29,7 +29,7 @@ Environment (all optional):
     OCTOS_TIME_BUDGET         seconds for the whole generation (default max(3600, 1500 x nodes))
     OCTOS_SECONDS_PER_NODE    per-node allowance used for that default (1500)
     OCTOS_MIN_REPAIR_SECONDS  do not start a repair turn with less than this left (300)
-    OCTOS_NODE_TIME_BUDGET    cap per node incl. repairs (default 1500)
+    OCTOS_NODE_TIME_BUDGET    cap per node incl. repairs (default 3000; was 1500)
     OCTOS_REPAIR_ROUNDS       K, acceptance repair rounds per node (default 5)
     OCTOS_DESIGN_TURN         "0" disables the design turn
     OCTOS_DESIGN_MODE         inline (default) | separate (own read-only design turn)
@@ -1512,6 +1512,25 @@ class Flow:
         # 抬到 3000 之后，`node_timeout`（1200）会先卡住 implement 轮，
         # 剩下的 ≥1800s 归验收循环——够两到三轮修复，而不是恰好一轮。
         # 上限仍在（不是取消），且 `remaining / nodes_left` 继续保护后面的节点。
+        #
+        # 2026-09-19 用实测数据量化了这个改动到底消掉多少。先把饥饿写成一个判据：
+        # 节点跑完第一轮（实测约 600s）后，余额还要 ≥ OCTOS_MIN_REPAIR_SECONDS(300)
+        # 才起得了第二轮修复，所以
+        #     被挤死 ⟺ node_budget − implement < 600 + 300 = 900s
+        # 代入云端实测的 implement 耗时（相邻 test 时刻之差再减去验收循环）：
+        #
+        #     场景              节点   cap1500 预测   cap3000 预测   实际失败
+        #     5 路并发 keep      31    8（26%）       0（0%）        6
+        #     隔离 keep          31    1（3%）        0（0%）        0
+        #     4 路并发 12306     72    36（50%）      0（0%）        判定中约 23/73
+        #
+        # 三个场景都对得上（预测略高于实际——有些被挤的节点第一轮就过了，
+        # 所以它是上界，方向正确）。cap 3000 下三个场景预测被挤死的都是 **0**，
+        # 连 5 路并发也不例外，即这个机制被整个消掉而不只是缓解。
+        #
+        # 根因是 implement 撞上 `0.6 × node_budget_cap` 这个上限：同一道 keep，
+        # implement 中位数随并发度从 84s（隔离）涨到 204s 再到 390s（5 路），
+        # 触顶 900s 的节点从 3% 涨到 13% 再到 26%——所以并发才是主因，不是应用体积。
         self.node_budget_cap = int(os.environ.get("OCTOS_NODE_TIME_BUDGET", "3000"))
         self.repair_rounds = int(os.environ.get("OCTOS_REPAIR_ROUNDS", "5"))
         self.repair_rounds_explicit = bool(os.environ.get("OCTOS_REPAIR_ROUNDS"))
