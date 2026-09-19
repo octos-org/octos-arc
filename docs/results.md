@@ -3129,3 +3129,44 @@ A 的 keep 实际用量   78,211,655 token
 **轮次上限不动**：轮次是墙钟的代理、不是钱的代理，那是真约束。
 
 367 个测试全绿；通用性审计 0；丢弃审计 0。
+
+### 本机验证这六处修复：机制全部按设计触发，但通过率**没有**提高
+
+ollama 的 `/v1` 自己好了（之前那次全形态 `RemoteDisconnected` 是暂态），
+于是用同一道题、同一个模型（qwen2.5-coder:1.5b）跑了一次前后对照，零 GLM 负载。
+
+| | 修复前（rounds-probe） | 修复后（verify-fixes） |
+|---|---|---|
+| 最高轮次 | REQ-1 round **1** | REQ-1 round **3**、REQ-2 round **2** |
+| 「转工具模式」 | **1 次**（round 1 就转） | **0 次** |
+| 「写不进盘」被告知 | **0 次** | **9 次** |
+| 「应用从未改变」判定 | 机制不存在 | **5 次** |
+| 我的改动导致的崩溃 | — | **0** |
+
+日志原文（不是我转述的）：
+
+```
+[flow] REQ-1: identical failure, but the last repair wrote no files -- the app never
+       changed, so this repeat is not evidence about the fix; staying in codegen mode
+[flow] REQ-1: rewrite turn wrote no files; naming the wrapper for the next round
+[flow] REQ-1: repair turn wrote no files; naming the wrapper for the next round
+```
+
+修复前那一次在 **round 1** 就因为一个**不含信息**的重复放弃了 codegen 模式；
+现在它把轮次用完了。这正是改动想要的行为差异，而且是实测出来的。
+
+**但必须把话说全：通过率没有提高。** 每一轮都是 `0/1`：
+
+```
+[acceptance] REQ-2 round 0: 0/1
+[acceptance] REQ-2 round 1: 0/1
+[acceptance] REQ-2 round 2: 0/1
+```
+
+原因也清楚：这是个 1.5B 模型，而且 llama-server 只给了 `-c 4096` 上下文，
+而适配器的提示能到 2.5 万 token——**超出 6 倍**。它压根做不动这道题。
+
+所以这次验证**证明的是**：六处改动按设计触发、没有引入崩溃、
+并且把「因无信息的重复而提前放弃 codegen 模式」这个行为消掉了。
+**它没有证明**通过率会提高——那需要一个真正做得动这道题的模型，
+也就是 lite 那两题（bookstack、keep）跑起来之后才知道。
