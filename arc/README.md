@@ -53,6 +53,7 @@ sh arc/pack.sh                               # 得到 octos-arc-bundle.zip
 | `CHANGELOG.md` | 每条改动的改前改后数据 |
 | `public-tests/<题目>/` | 平台公开的 Playwright 验收测试（会自动喂给模型） |
 | `tasks/<题目>/` | 各题需求文件的离线副本 |
+| `template/` | 平台初始工作区模板（frontend + backend + README.md + template.yaml）：pack.sh 打进 zip 根，平台铺成初始工作区（`ARCBENCH_TEMPLATE_DIR`） |
 | `run-task-local.py` / `grade-local.py` / `pack.sh` | 本机做题、打分、打包 |
 
 已知平台细节：容器里 `/workspace/tests` 有验收测试；订票题的测试默认连 3301 端口而平台起在 3000，`main.py` 会要求后端两个端口都监听；容器到 npmjs 很慢，提示词要求零依赖并走 npmmirror。
