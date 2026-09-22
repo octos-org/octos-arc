@@ -764,3 +764,14 @@ Cloud: 未评测 (needs a TB gap). Unit tests 105 OK.
 - **partial 运行的读数会变。** 同一次 stackoverflow 在第 44 个节点时是 55% 工具模式 / 8.8 倍，跑完是 65% / 19.6 倍。引用要用跑完的数字。
 
 Cloud: 闸门回退与守卫都尚未评测（提交 C `bea95120a928` 跑的是回退后的闸门，不含守卫）。Unit tests 304 OK（1 个 error 为改动前即存在的 `test_proxy_routes_real_http` 本机网络测试）。
+
+## 2026-09-21：打包带上平台契约的 template/，staged 打包
+
+平台把提交包 zip 根的 `template/` 铺成初始工作区（`ARCBENCH_TEMPLATE_DIR`）再调 main.py。本仓库的 codegen 提示词本就按「初始 package.json 已存在、保持既有架构」书写，postflight 也早有「workspace 里找不到 frontend/+backend/ 会被 runner 拒绝」的警告；但 pack.sh 此前不打包任何 template/，初始工作区只能靠 runner 兜底、首轮 mandatory-files 从零补。2026-09-20 的一次平台提交以 "web template is incomplete" 被拒，修复方式是让包根带上完整的 template/——本条把该修复移植进本仓库。
+
+改动：
+
+- 新增 `arc/template/`：frontend/src/index.html 种子页；两个 package.json 与 main.py 的 `CODEGEN_MANIFESTS` 逐字节一致（`write_codegen_manifests()` 幂等跳过已存在文件，不冲突）；零依赖 CommonJS 种子 server.js（serve `../frontend/dist`：`/`→index.html、`/<name>`→`<name>.html`、其余 404）；README.md 与 template.yaml。
+- pack.sh 重写为 mktemp 暂存后按显式清单拷贝打包：包内容=清单本身，工作树临时产物与开发文件（tests/、tasks/、public-tests/）结构上进不了包；python 校验步骤之后统一清理 `__pycache__`/`.pyc`/`.DS_Store`（先清理后生成会让 pyc 回流）。ROUTES 参数、public-tests 不进包的语义、输出路径与文件名不变。
+
+验证（本机）：`sh arc/pack.sh` 后 zip 根含 main.py、requirements.txt、template/ 10 件，无 tests/tasks/public-tests/__pycache__；包内两个 package.json 与 `json.dumps(CODEGEN_MANIFESTS[...], indent=2)` 逐字节相等；`sh arc/pack.sh routes.json` 把校验过的规则写为包根 model-routes.json，坏规则打包即失败；模板从 zip 抽出自测 `npm run build` + `npm start`，`/` 返回种子页、未定义路径与 `/../etc/passwd` 均 404。云端未评测；仓库中已提交的 octos-arc-bundle.zip 需按原流程重打（enter_competition 的字节校验针对 main.py，本条未改运行时代码）。

@@ -1,0 +1,31 @@
+schema_version: "1.0"
+id: web-node-static
+name: Web Application (static frontend + Node http backend)
+type: web_app
+version: 1.0.0
+description: Zero-dependency web application template for generation agents.
+stack:
+  frontend:
+    framework: none
+    language: HTML / CSS / JavaScript
+    build: npm run build copies src/* to dist/ verbatim
+  backend:
+    framework: Node http (CommonJS)
+    language: JavaScript
+    database: task-defined JSON file store, only if the requirements need persistence
+  tests:
+    e2e: Playwright
+copy:
+  exclude:
+    - template.yaml
+    - frontend/node_modules
+    - frontend/dist
+    - backend/node_modules
+preview:
+  html: frontend/dist/index.html
+  assets: frontend/dist
+agent_guidance:
+  ui_root: frontend/src
+  api_root: backend/server.js
+  function_root: backend
+  e2e_test_root: tests
