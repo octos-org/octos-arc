@@ -8,14 +8,9 @@ so the agent never blocks unattended.
 
 from __future__ import annotations
 
-import json
-import queue
-import subprocess
-import threading
-import time
-import uuid
+import json, queue, subprocess, threading, time, uuid
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import Callable
 
 
 class OctosProtocolError(RuntimeError):
@@ -56,9 +51,7 @@ class OctosStdioSession:
         for line in self.proc.stderr:
             line = line.rstrip()
             self._stderr_lines.append(line)
-            if "[arc-mod]" in line:
-                # Patched-core proof marker (examples/core-mod): forward it so
-                # the driver can log it into the graded stdout/stderr capture.
+            if "[arc-mod]" in line:      # patched-core proof marker
                 self.on_event("core/marker", {"line": line})
 
     def _read_stdout(self) -> None:
@@ -116,15 +109,11 @@ class OctosStdioSession:
     # ------------------------------------------------------------ protocol
 
     def bootstrap_profile(self, provider: str, model: str, base_url: str | None,
-                          api_key_env: str | None, timeout: float = 60.0,
-                          hooks: list | None = None, tools_disabled: bool = False) -> None:
-        """Create a solo profile and select its LLM (serve mode has no config-
-        file default profile like `octos chat` does, so we onboard one).
-
-        The requested id must be unique per call: the runner machine's
-        profile store persists across submissions and across our own retry
-        re-bootstraps, so a fixed id collides with earlier runs
-        ("local profile 'arc-2' already exists with different email")."""
+                          api_key_env: str | None, timeout: float = 60.0) -> None:
+        """Create a solo profile and select its LLM (serve mode has no
+        config-file default profile). The id must be unique per call: the
+        profile store persists across runs, so a fixed id collides with
+        "local profile 'arc-2' already exists with different email"."""
         import os
         unique = f"arc-{os.getpid()}-{int(time.time() * 1000) % 10_000_000}"
         res = self._send("profile/local/create", {
@@ -137,15 +126,6 @@ class OctosStdioSession:
         self.profile_id = res.get("profile_id") if isinstance(res, dict) else None
         if not self.profile_id:
             raise OctosProtocolError(f"profile/local/create gave no profile_id: {res}")
-        fields = {"hooks": hooks} if hooks else {}
-        if tools_disabled:
-            fields["tool_policy"] = {"deny": ["*"]}
-        if fields:
-            # The solo ProfileRuntime builds its HookExecutor from the profile's
-            # own config (config_from_profile), not from the host config.json or
-            # profile-defaults.json — verified with real stdio turns. Patch the
-            # registry file before the LLM upsert re-reads and re-saves it.
-            self._patch_profile_config(fields)
         api_type = "anthropic" if provider == "anthropic" else "openai"
         route: dict = {"api_type": api_type}
         if base_url:
@@ -161,23 +141,6 @@ class OctosStdioSession:
                 "route": route,
             },
         }, want_response=True, timeout=timeout)
-
-    def _patch_profile_config(self, fields: dict) -> None:
-        import json as _json
-        from pathlib import Path as _Path
-        for root in (self.data_dir, self.data_dir / "profiles"):
-            path = _Path(root) / "profiles" / f"{self.profile_id}.json" if root == self.data_dir \
-                else _Path(root) / f"{self.profile_id}.json"
-            if not path.is_file():
-                continue
-            try:
-                data = _json.loads(path.read_text(encoding="utf-8"))
-                data.setdefault("config", {}).update(fields)
-                path.write_text(_json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-                return
-            except (OSError, ValueError) as exc:
-                raise OctosProtocolError(f"could not patch profile config at {path}: {exc}") from exc
-        raise OctosProtocolError(f"profile registry file for {self.profile_id} not found under {self.data_dir}")
 
     def open(self, timeout: float = 120.0) -> None:
         params = {"session_id": self.session_id, "cwd": self.cwd}
@@ -216,8 +179,7 @@ class OctosStdioSession:
                 continue
             if method == "message/delta" and params.get("turn_id") == turn_id:
                 chunks.append(str(params.get("text", "")))
-            elif method == "approval/requested":
-                # Auto-approve so unattended runs never block.
+            elif method == "approval/requested":   # never block unattended
                 try:
                     self._send("approval/respond", {
                         "approval_id": params.get("approval_id"),
@@ -241,9 +203,3 @@ class OctosStdioSession:
                 self.proc.kill()
             except Exception:
                 pass
-
-    def __enter__(self) -> "OctosStdioSession":
-        return self
-
-    def __exit__(self, *exc) -> None:
-        self.close()

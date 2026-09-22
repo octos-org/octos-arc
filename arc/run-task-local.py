@@ -31,6 +31,11 @@ for required in (binary, python, task / "requirements.yaml", adapter / "main.py"
 environment = os.environ.copy()
 for name in ("OCTOS_HOME", "OCTOS_CONFIG_DIR", "ARCBENCH_TEMPLATE_DIR", "ARCBENCH_TASK_DIR", "OCTOS_INSTANCE_DATA_DIR", "OCTOS_DANGER_FULL_ACCESS"):
     environment.pop(name, None)
+# The container mounts the public specs at /workspace/tests; locally they
+# live in the repo. main.py reads this only as the local fallback.
+_local_tests = root / "public-tests" / task.name
+if _local_tests.is_dir():
+    environment["OCTOS_ARC_LOCAL_TESTS"] = str(_local_tests)
 environment.update(
     OCTOS_BIN=str(binary),
     OPENAI_API_KEY=key,

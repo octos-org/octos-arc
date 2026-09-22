@@ -140,6 +140,27 @@ codegen_source_fit_chars = 0    # OCTOS_ARC_CODEGEN_SOURCE_FIT_CHARS — 0 = 用
                                 # 榜单 efficiency_eligible 是通过率 >= 80%，掉下去等于零分，
                                 # 所以工具模式的 19.6 倍单节点代价值得付。
 
+[pipeline]
+# The adapter hands the whole build loop to the kernel's octos-pipeline engine.
+# main.py emits <data_dir>/pipelines/<name>.dot for the task (one implement node
+# + one acceptance node per requirement, chained by dependency, with a failure
+# back-edge as the repair round) and then names it on the first turn.
+#
+# Requires OCTOS_PIPELINE_DAG=1 (main.py sets it): only the DAG scheduler does
+# back-edge retries and hands the failing node's output back to its target.
+name = "arc_build"              # OCTOS_ARC_PIPELINE_NAME — the bare name run_pipeline selects
+repair_rounds = 5               # OCTOS_REPAIR_ROUNDS — per-node `max_retries` in the .dot
+node_timeout_seconds = 1200     # OCTOS_NODE_TIMEOUT — one implement node
+verify_timeout_seconds = 900    # OCTOS_ARC_VERIFY_TIMEOUT — one acceptance node
+max_iterations = 40             # OCTOS_MAX_ITERATIONS — tool iterations inside an implement node
+run_timeout_seconds = 3600      # OCTOS_TIME_BUDGET — whole run
+node_tools = "read_file,write_file,edit_file,glob,grep,list_dir"  # OCTOS_ARC_NODE_TOOLS
+# K1: an explicitly DISABLED reasoning effort makes the kernel emit the generic
+# `reasoning_effort: "none"` on any OpenAI-compatible endpoint. K2: the output
+# ceiling is the gateway budget. Neither needs a local proxy.
+reasoning_effort = "none"       # OCTOS_ARC_REASONING — none | low | medium | high | max
+max_output_tokens = 65536       # OCTOS_ARC_MAX_TOKENS
+
 [session]
 scope = "turn"          # OCTOS_SESSION_SCOPE — turn | node | run
 driver = "stdio"        # OCTOS_DRIVER — stdio | chat
