@@ -1,0 +1,505 @@
+{
+  "schema_version": 1,
+  "description": "Blob-SHA pin on the upstream decision records the ARC-Bench competition baseline inherits. arc-runtime-lock.json pins the code; this pins the decisions. Verified by scripts/check-decision-lock.py (#70).",
+  "upstream": {
+    "repository": "octos-org/octos",
+    "commit": "8558a3bff41f43838130808a1fa6cf0299e0bc40",
+    "tag": "arc-base-20260910",
+    "drift_ref": "main"
+  },
+  "groups": {
+    "protocol-spec": {
+      "description": "The OUP protocol specification and wire inventory, plus the client feature-requirement records. scripts/check-ui-protocol-upcr.sh gates changes to these against a UPCR.",
+      "patterns": [
+        "api/*.md"
+      ]
+    },
+    "upcr": {
+      "description": "UI Protocol Change Requests — the numbered record of every protocol decision.",
+      "patterns": [
+        "docs/OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_*.md"
+      ]
+    },
+    "adr": {
+      "description": "Architecture decision records, both the docs/adr/ directory and the older *-ADR / *-SPEC documents in docs/.",
+      "patterns": [
+        "docs/adr/*",
+        "docs/*-ADR.md",
+        "docs/*-SPEC.md"
+      ]
+    },
+    "contracts": {
+      "description": "Runtime, release and harness contract documents.",
+      "patterns": [
+        "docs/*CONTRACT*.md",
+        "docs/*CONTRACT*.txt"
+      ]
+    },
+    "task-specs": {
+      "description": "Per-task specification records.",
+      "patterns": [
+        "specs/*"
+      ]
+    }
+  },
+  "entries": [
+    {
+      "path": "api/OCTOSCODE_FEATURE_REQUIREMENTS.md",
+      "group": "protocol-spec",
+      "arc_blob_sha": "4715096cd3b0a9a4fc883d65c402f201d21d7724",
+      "upstream_blob_sha": "4715096cd3b0a9a4fc883d65c402f201d21d7724"
+    },
+    {
+      "path": "api/OCTOS_APP_FEATURE_REQUIREMENTS.md",
+      "group": "protocol-spec",
+      "arc_blob_sha": "68f5c9a41be86db3db21d5a7737ca396daae3a6b",
+      "upstream_blob_sha": "68f5c9a41be86db3db21d5a7737ca396daae3a6b"
+    },
+    {
+      "path": "api/OCTOS_SERVER_FEATURE_REQUIREMENTS.md",
+      "group": "protocol-spec",
+      "arc_blob_sha": "d7b886c1473366ede1328e39dc87b3358ff5a67d",
+      "upstream_blob_sha": "d7b886c1473366ede1328e39dc87b3358ff5a67d"
+    },
+    {
+      "path": "api/OCTOS_UI_PROTOCOL_V1_SPEC_2026-04-24.md",
+      "group": "protocol-spec",
+      "arc_blob_sha": "e6c75e0b1355b887d08579e1863a7e094a8fe0a7",
+      "upstream_blob_sha": "e6c75e0b1355b887d08579e1863a7e094a8fe0a7"
+    },
+    {
+      "path": "api/OCTOS_UI_PROTOCOL_WIRE_INVENTORY_2026-05-24.md",
+      "group": "protocol-spec",
+      "arc_blob_sha": "888e80b172d47e032dcc73b5f7d0680bd6761454",
+      "upstream_blob_sha": "888e80b172d47e032dcc73b5f7d0680bd6761454"
+    },
+    {
+      "path": "docs/FLEET-KERNEL-FOUNDATION-SPEC.md",
+      "group": "adr",
+      "arc_blob_sha": "b4bb2d149bbd6eade48506b15f5360a6c085710b",
+      "upstream_blob_sha": "b4bb2d149bbd6eade48506b15f5360a6c085710b"
+    },
+    {
+      "path": "docs/FLEET-KERNEL-V1-SPEC.md",
+      "group": "adr",
+      "arc_blob_sha": "eae45b5bd893afe2ad83c8b4b56b6e880a807c62",
+      "upstream_blob_sha": "eae45b5bd893afe2ad83c8b4b56b6e880a807c62"
+    },
+    {
+      "path": "docs/FLEET-RUNTIME-ADR.md",
+      "group": "adr",
+      "arc_blob_sha": "2b8022cf21b37d196b7591c4aeb823daaee7f119",
+      "upstream_blob_sha": "2b8022cf21b37d196b7591c4aeb823daaee7f119"
+    },
+    {
+      "path": "docs/M11-PROFILE-SESSION-RUNTIME-ADR.md",
+      "group": "adr",
+      "arc_blob_sha": "952c0154a25717fa8bca9163ccb121e0dbf1e171",
+      "upstream_blob_sha": "952c0154a25717fa8bca9163ccb121e0dbf1e171"
+    },
+    {
+      "path": "docs/M17_AGENT_CONTEXT_ORCHESTRATION_CONTRACT.txt",
+      "group": "contracts",
+      "arc_blob_sha": "aa87d6047a0a06fb7a8262092ab5a241f2a19a31",
+      "upstream_blob_sha": "aa87d6047a0a06fb7a8262092ab5a241f2a19a31"
+    },
+    {
+      "path": "docs/M18_APPUI_STDIO_TRANSPORT_PARITY_CONTRACT.txt",
+      "group": "contracts",
+      "arc_blob_sha": "2f71220c595b1c7e8b263a7034c96354091ca76c",
+      "upstream_blob_sha": "2f71220c595b1c7e8b263a7034c96354091ca76c"
+    },
+    {
+      "path": "docs/M9-ALPHA-SOLE-TRANSPORT-ADR.md",
+      "group": "adr",
+      "arc_blob_sha": "540cd41ce17e3b9a6f7c88c8f6b8f0c46d60e2a0",
+      "upstream_blob_sha": "540cd41ce17e3b9a6f7c88c8f6b8f0c46d60e2a0"
+    },
+    {
+      "path": "docs/M9-GAMMA-SERVER-PROJECTION-ADR.md",
+      "group": "adr",
+      "arc_blob_sha": "e45001bd30db36033d44a64020c6d1fe52756b3f",
+      "upstream_blob_sha": "e45001bd30db36033d44a64020c6d1fe52756b3f"
+    },
+    {
+      "path": "docs/M9-LEDGER-DURABILITY-ADR.md",
+      "group": "adr",
+      "arc_blob_sha": "661d994fb366b3ba8c0a3746bccc0612599c32d3",
+      "upstream_blob_sha": "661d994fb366b3ba8c0a3746bccc0612599c32d3"
+    },
+    {
+      "path": "docs/OCTOS_HARNESS_M5_CODING_RUNNER_CONTRACT.md",
+      "group": "contracts",
+      "arc_blob_sha": "b1abc6ae34403bcc4166bb2c158702fafbd0ec2e",
+      "upstream_blob_sha": "b1abc6ae34403bcc4166bb2c158702fafbd0ec2e"
+    },
+    {
+      "path": "docs/OCTOS_RELEASE_CONTRACT_2026-04-17.md",
+      "group": "contracts",
+      "arc_blob_sha": "48ebc0572af21df3d9318dc263c3ffaf0b7d39fa",
+      "upstream_blob_sha": "48ebc0572af21df3d9318dc263c3ffaf0b7d39fa"
+    },
+    {
+      "path": "docs/OCTOS_ROBOTICS_CONTRACTS.md",
+      "group": "contracts",
+      "arc_blob_sha": "0e62258c3a59027833b75376413cac9d57a8d1fd",
+      "upstream_blob_sha": "0e62258c3a59027833b75376413cac9d57a8d1fd"
+    },
+    {
+      "path": "docs/OCTOS_RUNTIME_PHASE3_CONTRACT.md",
+      "group": "contracts",
+      "arc_blob_sha": "8907b1f2b376dc48c662394a453b6c5e5b9d764a",
+      "upstream_blob_sha": "8907b1f2b376dc48c662394a453b6c5e5b9d764a"
+    },
+    {
+      "path": "docs/OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_2026_001_TYPED_APPROVAL.md",
+      "group": "upcr",
+      "arc_blob_sha": "bf9accc8cc784ae690287359bb34b3a319d291dd",
+      "upstream_blob_sha": "bf9accc8cc784ae690287359bb34b3a319d291dd"
+    },
+    {
+      "path": "docs/OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_2026_002_PANE_SNAPSHOTS.md",
+      "group": "upcr",
+      "arc_blob_sha": "7c6a5b460def92255c1b6770b481a91853d92186",
+      "upstream_blob_sha": "7c6a5b460def92255c1b6770b481a91853d92186"
+    },
+    {
+      "path": "docs/OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_2026_003_SESSION_WORKSPACE_CWD.md",
+      "group": "upcr",
+      "arc_blob_sha": "0fb0b4a48d0bfcefdbca409ec67858d5e0a11eec",
+      "upstream_blob_sha": "0fb0b4a48d0bfcefdbca409ec67858d5e0a11eec"
+    },
+    {
+      "path": "docs/OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_2026_004_TASK_RUNTIME_CANCELLED.md",
+      "group": "upcr",
+      "arc_blob_sha": "85a8163b0a859c6037c85361f1b4b918d8fca1c6",
+      "upstream_blob_sha": "85a8163b0a859c6037c85361f1b4b918d8fca1c6"
+    },
+    {
+      "path": "docs/OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_2026_005_TASK_CONTROL_RPCS.md",
+      "group": "upcr",
+      "arc_blob_sha": "f920a8df1643aec099ef5fb3eb8f558a04a53e1c",
+      "upstream_blob_sha": "f920a8df1643aec099ef5fb3eb8f558a04a53e1c"
+    },
+    {
+      "path": "docs/OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_2026_006_TASK_OUTPUT_SNAPSHOT_PROJECTION.md",
+      "group": "upcr",
+      "arc_blob_sha": "643756692b5ec7070a8fa49c642fe41445ae4d15",
+      "upstream_blob_sha": "643756692b5ec7070a8fa49c642fe41445ae4d15"
+    },
+    {
+      "path": "docs/OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_2026_007_SESSION_OPEN_CAPABILITIES.md",
+      "group": "upcr",
+      "arc_blob_sha": "8ffc213be056d64503748a7279ff5885d92e3e2b",
+      "upstream_blob_sha": "8ffc213be056d64503748a7279ff5885d92e3e2b"
+    },
+    {
+      "path": "docs/OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_2026_008_TURN_INTERRUPT_TYPED_FIELDS.md",
+      "group": "upcr",
+      "arc_blob_sha": "ec61567b99f044dfd20eef33cce4b1e6daa64490",
+      "upstream_blob_sha": "ec61567b99f044dfd20eef33cce4b1e6daa64490"
+    },
+    {
+      "path": "docs/OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_2026_009_SESSION_HYDRATE.md",
+      "group": "upcr",
+      "arc_blob_sha": "06fd03b653fc8c6f34e26fb7ffeacca80f31cef2",
+      "upstream_blob_sha": "06fd03b653fc8c6f34e26fb7ffeacca80f31cef2"
+    },
+    {
+      "path": "docs/OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_2026_010_THREAD_GRAPH_GET.md",
+      "group": "upcr",
+      "arc_blob_sha": "68a363e01c667a60d9dbfd125bedaed97f9d3b41",
+      "upstream_blob_sha": "68a363e01c667a60d9dbfd125bedaed97f9d3b41"
+    },
+    {
+      "path": "docs/OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_2026_011_TURN_STATE_GET.md",
+      "group": "upcr",
+      "arc_blob_sha": "816c53bb302af338d6cf2dfe87c3f0a1c0ab1853",
+      "upstream_blob_sha": "816c53bb302af338d6cf2dfe87c3f0a1c0ab1853"
+    },
+    {
+      "path": "docs/OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_2026_012_MESSAGE_PERSISTED.md",
+      "group": "upcr",
+      "arc_blob_sha": "9ab86814e0022cc054ab317d6a5b73cab920c0bf",
+      "upstream_blob_sha": "9ab86814e0022cc054ab317d6a5b73cab920c0bf"
+    },
+    {
+      "path": "docs/OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_2026_014_PROJECTION_ENVELOPE.md",
+      "group": "upcr",
+      "arc_blob_sha": "ef214d700a07f8f78e78a3cd326146e5e90d0a44",
+      "upstream_blob_sha": "ef214d700a07f8f78e78a3cd326146e5e90d0a44"
+    },
+    {
+      "path": "docs/OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_2026_015_TURN_START_MEDIA_TOPIC_REWRITE.md",
+      "group": "upcr",
+      "arc_blob_sha": "06ec931362f23a5d4229c81036b04f44d21f1d98",
+      "upstream_blob_sha": "06ec931362f23a5d4229c81036b04f44d21f1d98"
+    },
+    {
+      "path": "docs/OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_2026_016_STDIO_TRANSPORT.md",
+      "group": "upcr",
+      "arc_blob_sha": "9696bd1a0b27466cd1c646a40f2fa4916abd8d6e",
+      "upstream_blob_sha": "9696bd1a0b27466cd1c646a40f2fa4916abd8d6e"
+    },
+    {
+      "path": "docs/OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_2026_017_RUNTIME_PROFILE_INSPECTION.md",
+      "group": "upcr",
+      "arc_blob_sha": "9e01388f71865882de5f11a36aff6aa075df26d0",
+      "upstream_blob_sha": "9e01388f71865882de5f11a36aff6aa075df26d0"
+    },
+    {
+      "path": "docs/OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_2026_018_LOCAL_SOLO_ONBOARDING_AND_POLICY.md",
+      "group": "upcr",
+      "arc_blob_sha": "003317dd9d49fc8c10f81efe82c4e6d8da02d9fc",
+      "upstream_blob_sha": "003317dd9d49fc8c10f81efe82c4e6d8da02d9fc"
+    },
+    {
+      "path": "docs/OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_2026_019_AGENT_SUPERVISION.md",
+      "group": "upcr",
+      "arc_blob_sha": "86de3fa505dccf83cefc37f4374f3d8ace656532",
+      "upstream_blob_sha": "86de3fa505dccf83cefc37f4374f3d8ace656532"
+    },
+    {
+      "path": "docs/OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_2026_020_CODEX_TOOL_PARITY.md",
+      "group": "upcr",
+      "arc_blob_sha": "fe3ceecafbcf62200379e8d2789bfe04074e9d3d",
+      "upstream_blob_sha": "fe3ceecafbcf62200379e8d2789bfe04074e9d3d"
+    },
+    {
+      "path": "docs/OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_2026_021_AGENT_GOAL_LOOP_AUTONOMY.md",
+      "group": "upcr",
+      "arc_blob_sha": "ceb8dd4df321d9fb2c8fffe7a4c99cbd21b9e176",
+      "upstream_blob_sha": "ceb8dd4df321d9fb2c8fffe7a4c99cbd21b9e176"
+    },
+    {
+      "path": "docs/OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_2026_022.md",
+      "group": "upcr",
+      "arc_blob_sha": "70b5b7a2d64ce1ac5b4d177fac41edf716294520",
+      "upstream_blob_sha": "70b5b7a2d64ce1ac5b4d177fac41edf716294520"
+    },
+    {
+      "path": "docs/OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_2026_022_SESSION_POLICY.md",
+      "group": "upcr",
+      "arc_blob_sha": "636fa6d6ea3b145b903cf84ebece9840104d9e12",
+      "upstream_blob_sha": "636fa6d6ea3b145b903cf84ebece9840104d9e12"
+    },
+    {
+      "path": "docs/OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_2026_023_ASK_USER_QUESTION.md",
+      "group": "upcr",
+      "arc_blob_sha": "b90787fff42b3ee993234e46e91d8b0511da85ce",
+      "upstream_blob_sha": "b90787fff42b3ee993234e46e91d8b0511da85ce"
+    },
+    {
+      "path": "docs/OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_2026_024_VOICE_VISUAL_LIFECYCLE.md",
+      "group": "upcr",
+      "arc_blob_sha": "224b2b3af89aac75b4a4dad6f680b4cb145aa4b6",
+      "upstream_blob_sha": "224b2b3af89aac75b4a4dad6f680b4cb145aa4b6"
+    },
+    {
+      "path": "docs/OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_2026_025_VOICE_EXIT.md",
+      "group": "upcr",
+      "arc_blob_sha": "e978b2473af66a71a90f855ff246f094ef8ace5a",
+      "upstream_blob_sha": "e978b2473af66a71a90f855ff246f094ef8ace5a"
+    },
+    {
+      "path": "docs/OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_2026_026_COMPACTION_STARTED.md",
+      "group": "upcr",
+      "arc_blob_sha": "c865bf8a043820c90058f6425454acee53fc1540",
+      "upstream_blob_sha": "c865bf8a043820c90058f6425454acee53fc1540"
+    },
+    {
+      "path": "docs/OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_2026_026_SKILL_ACTIONS.md",
+      "group": "upcr",
+      "arc_blob_sha": "075c9fe3645993692712935aaac2174225c5dc49",
+      "upstream_blob_sha": "075c9fe3645993692712935aaac2174225c5dc49"
+    },
+    {
+      "path": "docs/OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_2026_027_SECTION6_CATALOG_GUARD.md",
+      "group": "upcr",
+      "arc_blob_sha": "dcdd860686545e60c10116865d15f99f805bb6ac",
+      "upstream_blob_sha": "dcdd860686545e60c10116865d15f99f805bb6ac"
+    },
+    {
+      "path": "docs/OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_2026_027_SKILL_ACTION_JOBS.md",
+      "group": "upcr",
+      "arc_blob_sha": "df12c574d9f9b9ec8c119dd007af078b6bd146bd",
+      "upstream_blob_sha": "df12c574d9f9b9ec8c119dd007af078b6bd146bd"
+    },
+    {
+      "path": "docs/OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_2026_028_CATALOG_GUARD_FIRST_SERVER.md",
+      "group": "upcr",
+      "arc_blob_sha": "fc9ce25e3c5a9070f16d101bc57fa495edbcf19c",
+      "upstream_blob_sha": "fc9ce25e3c5a9070f16d101bc57fa495edbcf19c"
+    },
+    {
+      "path": "docs/OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_2026_029_SEMANTIC_CONTEXT_CACHE_DIAGNOSTICS.md",
+      "group": "upcr",
+      "arc_blob_sha": "46fd9463a9e1bfdc04b638bbcb56835123b19fe6",
+      "upstream_blob_sha": "46fd9463a9e1bfdc04b638bbcb56835123b19fe6"
+    },
+    {
+      "path": "docs/ROBRIX-PHASE4-APPROVAL-FLOW-ADR.md",
+      "group": "adr",
+      "arc_blob_sha": "e9fb4ceca6e114c69fa8eeb814f0f9aca30f506e",
+      "upstream_blob_sha": "e9fb4ceca6e114c69fa8eeb814f0f9aca30f506e"
+    },
+    {
+      "path": "docs/STREAMING-TRANSACTIONAL-BOUNDARY-ADR.md",
+      "group": "adr",
+      "arc_blob_sha": "d48df11f6edb9be0d34557adfe56681260a5d605",
+      "upstream_blob_sha": "d48df11f6edb9be0d34557adfe56681260a5d605"
+    },
+    {
+      "path": "docs/adr/m12-phase-d-auxiliary-rest-to-ws.md",
+      "group": "adr",
+      "arc_blob_sha": "12e13da1b19ecfdfe0933fb06eab287a4b3e50bb",
+      "upstream_blob_sha": "12e13da1b19ecfdfe0933fb06eab287a4b3e50bb"
+    },
+    {
+      "path": "docs/adr/mcp-rmcp-oauth-migration.md",
+      "group": "adr",
+      "arc_blob_sha": "cc7e325ee78685d9d78595d8068ef09573d0cd8e",
+      "upstream_blob_sha": "cc7e325ee78685d9d78595d8068ef09573d0cd8e"
+    },
+    {
+      "path": "docs/adr/octos-diagnostics-extraction-scope.md",
+      "group": "adr",
+      "arc_blob_sha": "0385bac527a11f8b6df36d3f079b3264eb134aaa",
+      "upstream_blob_sha": "0385bac527a11f8b6df36d3f079b3264eb134aaa"
+    },
+    {
+      "path": "docs/adr/oup-semantic-boundary-context-cache.md",
+      "group": "adr",
+      "arc_blob_sha": "bf9ba9c7af473cc0d966a9c4758fd104e6532c68",
+      "upstream_blob_sha": "bf9ba9c7af473cc0d966a9c4758fd104e6532c68"
+    },
+    {
+      "path": "specs/arc-agent-task-v1-mcp.spec.md",
+      "group": "task-specs",
+      "arc_blob_sha": "4b95e4b03a23be1cbac41cd360a5fc61a7aa1e0b",
+      "upstream_blob_sha": "4b95e4b03a23be1cbac41cd360a5fc61a7aa1e0b"
+    },
+    {
+      "path": "specs/kv-cache-friendly-compaction.spec.md",
+      "group": "task-specs",
+      "arc_blob_sha": "fb312ead03ff793a4966728d06317154112ce036",
+      "upstream_blob_sha": "fb312ead03ff793a4966728d06317154112ce036"
+    },
+    {
+      "path": "specs/task-approval-post-tool-continuation.spec.md",
+      "group": "task-specs",
+      "arc_blob_sha": "decef71a972767be686a6401edef805aebd508cc",
+      "upstream_blob_sha": "decef71a972767be686a6401edef805aebd508cc"
+    },
+    {
+      "path": "specs/task-compaction-instruction-priority.spec.md",
+      "group": "task-specs",
+      "arc_blob_sha": "85f1028834d727903b3ef6aba2402c3296681f5f",
+      "upstream_blob_sha": "85f1028834d727903b3ef6aba2402c3296681f5f"
+    },
+    {
+      "path": "specs/task-ephemeral-shared-profile-context.spec",
+      "group": "task-specs",
+      "arc_blob_sha": "3cbb89fadabc14bf284fe73ed926f52a2733a9b0",
+      "upstream_blob_sha": "3cbb89fadabc14bf284fe73ed926f52a2733a9b0"
+    },
+    {
+      "path": "specs/task-evo-goal-verifier.spec.md",
+      "group": "task-specs",
+      "arc_blob_sha": "9b12d4ddbe9e520c9302b5c6e62fecb0f986aa78",
+      "upstream_blob_sha": "9b12d4ddbe9e520c9302b5c6e62fecb0f986aa78"
+    },
+    {
+      "path": "specs/task-evo-peer-turn-status.spec.md",
+      "group": "task-specs",
+      "arc_blob_sha": "07cd177e6ec12d8929961680c2f1c297149d4e52",
+      "upstream_blob_sha": "07cd177e6ec12d8929961680c2f1c297149d4e52"
+    },
+    {
+      "path": "specs/task-interrupt-breaks-progress-wait.spec.md",
+      "group": "task-specs",
+      "arc_blob_sha": "e87a8b16137c7ea84298aecf20eee52bbf6db5b6",
+      "upstream_blob_sha": "e87a8b16137c7ea84298aecf20eee52bbf6db5b6"
+    },
+    {
+      "path": "specs/task-issue-2236-fenced-peer-build-cache.spec.md",
+      "group": "task-specs",
+      "arc_blob_sha": "06c823b78a7c8d80b98077c31337c079ea74d0bc",
+      "upstream_blob_sha": "06c823b78a7c8d80b98077c31337c079ea74d0bc"
+    },
+    {
+      "path": "specs/task-issue-2237-goal-create-admits-archived.spec.md",
+      "group": "task-specs",
+      "arc_blob_sha": "a073450014f2c0ac40958e0b57a72fd367df6063",
+      "upstream_blob_sha": "a073450014f2c0ac40958e0b57a72fd367df6063"
+    },
+    {
+      "path": "specs/task-non-oup-incomplete-response.spec",
+      "group": "task-specs",
+      "arc_blob_sha": "2edfc87891d56d9183be093e540f9c7b2d616d6e",
+      "upstream_blob_sha": "2edfc87891d56d9183be093e540f9c7b2d616d6e"
+    },
+    {
+      "path": "specs/task-olp-obs-p2-producers.spec.md",
+      "group": "task-specs",
+      "arc_blob_sha": "9c3c0b95bbd415e2e2cf2410ac1eeeb529f64648",
+      "upstream_blob_sha": "9c3c0b95bbd415e2e2cf2410ac1eeeb529f64648"
+    },
+    {
+      "path": "specs/task-oup-json-partial-error.spec",
+      "group": "task-specs",
+      "arc_blob_sha": "31d6e7758aada49e7d9e7444d590581034ad5ced",
+      "upstream_blob_sha": "31d6e7758aada49e7d9e7444d590581034ad5ced"
+    },
+    {
+      "path": "specs/task-return-unconsumed-steer-inputs.spec.md",
+      "group": "task-specs",
+      "arc_blob_sha": "b65d101bcecdcc8b49c6027fb67fc16e69cd70f0",
+      "upstream_blob_sha": "b65d101bcecdcc8b49c6027fb67fc16e69cd70f0"
+    },
+    {
+      "path": "specs/task-s-broken-pipe-shutdown.spec.md",
+      "group": "task-specs",
+      "arc_blob_sha": "2892471762a9557889244aba10d524ca96b0c5ec",
+      "upstream_blob_sha": "2892471762a9557889244aba10d524ca96b0c5ec"
+    },
+    {
+      "path": "specs/task-synthetic-abort-snapshot.spec",
+      "group": "task-specs",
+      "arc_blob_sha": "90640292e00ca72dc7c92aa0b081fb7785b961ab",
+      "upstream_blob_sha": "90640292e00ca72dc7c92aa0b081fb7785b961ab"
+    },
+    {
+      "path": "specs/task-sysinfo-proc-stat-fd-budget.spec.md",
+      "group": "task-specs",
+      "arc_blob_sha": "fabe92851c7870bf5811d486a3c3a754c133b5bb",
+      "upstream_blob_sha": "fabe92851c7870bf5811d486a3c3a754c133b5bb"
+    },
+    {
+      "path": "specs/task-turn-interrupt-steer-correlation-logs.spec.md",
+      "group": "task-specs",
+      "arc_blob_sha": "3b5ac6d4dc20ac1b5039489157b77114e15de133",
+      "upstream_blob_sha": "3b5ac6d4dc20ac1b5039489157b77114e15de133"
+    }
+  ],
+  "upcr_numbering": {
+    "note": "Collisions and gaps recorded here are inherited verbatim from upstream@pin, not introduced downstream. They are tracked upstream; the gate fails only on a NEW collision or gap, which would mean this tree lost or duplicated a record.",
+    "known_collisions": {
+      "022": [
+        "OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_2026_022.md",
+        "OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_2026_022_SESSION_POLICY.md"
+      ],
+      "026": [
+        "OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_2026_026_COMPACTION_STARTED.md",
+        "OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_2026_026_SKILL_ACTIONS.md"
+      ],
+      "027": [
+        "OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_2026_027_SECTION6_CATALOG_GUARD.md",
+        "OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_2026_027_SKILL_ACTION_JOBS.md"
+      ]
+    },
+    "known_gaps": [
+      "013"
+    ]
+  }
+}
