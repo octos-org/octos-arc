@@ -105,8 +105,10 @@ differs from its `upstream_blob_sha` must carry a `delta.reason`. Prefer a narro
 delta over a wholesale resync — resyncing a document to current upstream makes it describe
 a runtime this baseline does not build.
 
-Upstream moving past the pin is reported, never enforced. Moving the baseline is a
-deliberate act; the lock exists so that it is a decision rather than a surprise.
+Upstream moving past the pin is reported on request, never enforced and never polled.
+Moving the baseline is a deliberate act; the lock exists so that it is a decision rather
+than a surprise — not so that a robot files a weekly reminder about a pin that is
+supposed to stay put.
 
 ## Repository isolation
 
@@ -116,9 +118,10 @@ workflows run here:
 - `.github/workflows/arc-linux-release.yml` — the standalone `workflow_dispatch`
   publisher. It builds and publishes only the ARC Linux bundle, and is the only
   workflow that produces an artifact.
-- `.github/workflows/decision-lock.yml` — the decision-record pin. Its `verify` job is
-  read-only and offline; its weekly `drift` job reads upstream and writes an issue.
-  It publishes nothing and touches no release artifact.
+- `.github/workflows/decision-lock.yml` — the decision-record pin. A single offline,
+  read-only `verify` job. It publishes nothing, writes nothing, and reaches no network.
+  There is no scheduled run: whether upstream has moved past the pin is a manual
+  question, answered by `scripts/check-decision-lock.py --upstream`.
 
 The `legacy` branch is historical reference only. Its old downloader and execution
 behavior have intentionally not been modernized; it is not the new competition runtime.
