@@ -18,9 +18,9 @@ PR：https://github.com/octos-org/octos-arc/pull/228 （draft，未 merge）
 | **打分** | **1/1 passed，score=100** | **1/1 passed，score=100** |
 | 通过率 / 功能率 | 1/1（100%）/ 1/1（100%） | 1/1（100%）/ 1/1（100%） |
 | 节点状态 | REQ-1 PASSED、ROOT PASSED | pipeline `success=true`，`nodes_executed=3` |
-| Token | prompt 491 / completion 1815 | prompt 3166 / completion 2663 |
-| 费用 | 估算 $0.001163 | 估算 $0.00092265 |
-| 耗时 | 88s（含 Playwright 私有安装 46s） | 59s |
+| Token | prompt 491 / completion 1815 | prompt 3166 / completion 2663（最快那次） |
+| 费用 | 估算 $0.001163 | 估算 $0.00092265（最快那次） |
+| 耗时 | 88s（含 Playwright 私有安装 46s） | 59s / 109s / 186s（三次，见下） |
 | 提交包 Python | 7,870 行 | **798 行** |
 
 **关于费用**：这台机器上没有 `ARCBENCH_API_KEY`（全盘找过）。两次跑分都用你提供的自建
@@ -33,8 +33,19 @@ OpenAI 兼容端点 `http://office.liyao.space:40101/v1`（模型 `qwen3.6:35b-a
 `finish_reason: length`；换成真实 codegen 任务（max_tokens=3000）是 **152.7s vs 22.3s**，
 `qwen3.6:35b-a3b` 快约 7 倍。改前改后都用它，保证可比。
 
-改后跑了两次，都通过：一次 `nodes_executed=5`（验收失败一次，回边修复后通过，103s），
-一次 `nodes_executed=3`（一次就对，51s）。**修复环是真的在工作**，不是没被触发。
+改后一共跑了三次，**三次都 score=100**，但耗时有明显方差，如实列出：
+
+| 次 | nodes_executed | pipeline 耗时 | 全程 | token(in/out) | 说明 |
+|---|---|---|---|---|---|
+| 1 | 5 | 103s | 109s | 10364 / 5543 | 验收失败一次，回边修复后通过 |
+| 2 | 3 | 51s | 59s | 3166 / 2663 | 一次就对，没触发修复 |
+| 3 | 5 | 150s | 186s | 17612 / 8055 | 验收失败一次，回边修复后通过（提交态复核） |
+
+`nodes_executed=5` 意味着 start → impl → check(失败) → impl → check(通过)，
+**修复环是真的在跑**，不是没被触发。方差主要来自模型这一轮有没有一次写对；
+单节点小题上改后比改前慢，因为 pipeline 的 codergen 节点是**工具模式**
+（模型自己调 `write_file`），而改前的 tiny tier 是单请求出码、由 Python 落盘。
+这是这次重构确定要付的代价：编排交给内核，就得走内核的工具循环。
 
 ---
 
