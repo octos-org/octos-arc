@@ -227,7 +227,7 @@ def build_pipeline(nodes, specs, tests_dir, out, pol, ports, deadline) -> str:
     def impl_node(name, label, prompt) -> str:
         return (f'    {name} [handler="codergen", label="{dot_quote(label)}", '
                 f'tools="{pol["tools"]}", max_iterations="{pol["max_iterations"]}", '
-                f'max_retries="1", continue_on_error="true", timeout_secs="{pol["node_timeout"]}", '
+                f'max_retries="0", continue_on_error="true", timeout_secs="{pol["node_timeout"]}", '
                 f'prompt="{dot_quote(prompt)}"]')
 
     fail = 'outcome.status == \\"fail\\"'
