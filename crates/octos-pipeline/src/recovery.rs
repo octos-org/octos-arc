@@ -331,7 +331,11 @@ mod tests {
     fn classify_fail_of_a_command_node_is_terminal() {
         // A shell_check's prompt is its command: re-engaging it would run the
         // recovery text (quoting the failure output) through `sh -c`.
-        for handler in [HandlerKind::ShellCheck, HandlerKind::Shell, HandlerKind::Noop] {
+        for handler in [
+            HandlerKind::ShellCheck,
+            HandlerKind::Shell,
+            HandlerKind::Noop,
+        ] {
             let node = PipelineNode {
                 handler,
                 ..dummy_node("check")

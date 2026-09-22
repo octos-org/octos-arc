@@ -800,7 +800,9 @@ mod tests {
         // shell_check must not be flagged.
         let diags = crate::validate::diagnostics(&graph);
         assert!(
-            !diags.iter().any(|d| d.rule_id == crate::validate::RuleId::NoShell),
+            !diags
+                .iter()
+                .any(|d| d.rule_id == crate::validate::RuleId::NoShell),
             "shell_check must not trip the NoShell rule: {diags:?}",
         );
     }

@@ -839,7 +839,10 @@ impl Handler for CodergenHandler {
             max_timeout: node.timeout_secs.map(Duration::from_secs),
             save_episodes: false,
             chat_max_tokens: max_tokens,
-            reasoning_effort: node.reasoning_effort.as_deref().and_then(parse_reasoning_effort),
+            reasoning_effort: node
+                .reasoning_effort
+                .as_deref()
+                .and_then(parse_reasoning_effort),
             // Pipeline workers don't have a channel-bound send_file tool
             // registered (deny-listed above + outer pipeline orchestration
             // handles delivery via PipelineResult.modified_files). Without

@@ -590,7 +590,9 @@ fn pipeline_timeout_ceiling() -> u64 {
     std::env::var("OCTOS_PIPELINE_TIMEOUT_MAX_SECS")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
-        .map_or(PIPELINE_TIMEOUT_MAX_SECS, |v| v.max(PIPELINE_TIMEOUT_MAX_SECS))
+        .map_or(PIPELINE_TIMEOUT_MAX_SECS, |v| {
+            v.max(PIPELINE_TIMEOUT_MAX_SECS)
+        })
 }
 
 /// Operator allow-list of pipeline names (`OCTOS_PIPELINE_ALLOW`, comma
@@ -854,7 +856,8 @@ impl Tool for RunPipelineTool {
         let input: Input = serde_json::from_value(args.clone())
             .map_err(|e| format!("invalid run_pipeline input: {e}"))?;
         if let Some(allow) = pipeline_allowlist() {
-            let using_ir = self.ir_enabled && input.ir.as_deref().is_some_and(|s| !s.trim().is_empty());
+            let using_ir =
+                self.ir_enabled && input.ir.as_deref().is_some_and(|s| !s.trim().is_empty());
             if let Some(message) = allowlist_rejection(&allow, &input.pipeline, using_ir) {
                 return Err(message);
             }
@@ -2127,8 +2130,14 @@ mod tests {
     fn resolve_pipeline_timeout_honours_a_raised_ceiling() {
         // An operator-raised ceiling lets a long DOT default through, and
         // still clamps anything above it.
-        assert_eq!(resolve_pipeline_timeout_with_ceiling(None, Some(20_000), 36_000), 20_000);
-        assert_eq!(resolve_pipeline_timeout_with_ceiling(Some(90_000), None, 36_000), 36_000);
+        assert_eq!(
+            resolve_pipeline_timeout_with_ceiling(None, Some(20_000), 36_000),
+            20_000
+        );
+        assert_eq!(
+            resolve_pipeline_timeout_with_ceiling(Some(90_000), None, 36_000),
+            36_000
+        );
         assert_eq!(
             resolve_pipeline_timeout_with_ceiling(None, Some(7200), PIPELINE_TIMEOUT_MAX_SECS),
             3600
@@ -2140,12 +2149,16 @@ mod tests {
         let allow = vec!["arc_build".to_string()];
         assert_eq!(allowlist_rejection(&allow, "arc_build", false), None);
         assert_eq!(allowlist_rejection(&allow, " arc_build ", false), None);
-        assert!(allowlist_rejection(&allow, "deep_research", false)
-            .unwrap()
-            .contains("not allowed"));
-        assert!(allowlist_rejection(&allow, "arc_build", true)
-            .unwrap()
-            .contains("IR"));
+        assert!(
+            allowlist_rejection(&allow, "deep_research", false)
+                .unwrap()
+                .contains("not allowed")
+        );
+        assert!(
+            allowlist_rejection(&allow, "arc_build", true)
+                .unwrap()
+                .contains("IR")
+        );
     }
 
     /// NEW-15 (7): clamping applies to the DOT default too — a skill
