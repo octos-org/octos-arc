@@ -1,1 +1,0 @@
-The official Playwright specs ({n_specs} files) live under {tests_dir}; each later turn receives the spec files for its own node. In THIS turn read only the shared helpers ({support}) and at most two spec files to learn the base URL, navigation and header conventions; do not implement the features yet.
