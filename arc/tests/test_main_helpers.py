@@ -2029,6 +2029,68 @@ class UnfinishedRepairNoteTests(unittest.TestCase):
 
 
 
+class FailureConsoleTests(unittest.TestCase):
+    """What the run log shows about a failure is the only record left once the
+    run ends, so it has to carry the evidence, not just the headline."""
+
+    def test_should_keep_the_error_body_under_an_observation(self):
+        """`Observation:` is followed by the build/start log tail on its own
+        lines. The console filter matched line prefixes only, so a bookstack
+        node that died with `npm start exited early (rc=1):` logged exactly
+        that and dropped every line of the Node traceback that said why."""
+        failures = (
+            "- Feature: app startup\n"
+            "  Failed at: build/start\n"
+            "  Observation: backend `npm start` exited early (rc=1):\n"
+            "SyntaxError: Unexpected token '}'\n"
+            "    at wrapSafe (node:internal/modules/cjs/loader:1281:20)\n"
+            "  Steps: npm run build -> npm start")
+        shown = "\n".join(m.failure_console_lines(failures))
+        self.assertIn("Failed at: build/start", shown)
+        self.assertIn("exited early (rc=1)", shown)
+        self.assertIn("SyntaxError: Unexpected token", shown)
+        self.assertNotIn("Steps: npm run build", shown)
+
+    def test_should_collapse_and_bound_a_long_observation(self):
+        failures = "  Observation: boom\n" + "\n".join(f"frame {i}" for i in range(400))
+        shown = m.failure_console_lines(failures)
+        self.assertEqual(len(shown), 1)
+        # clip_ends keeps max_chars of text and adds its own elision marker.
+        self.assertLessEqual(len(shown[0]), 800 + 60)
+        self.assertIn("characters elided", shown[0])
+        self.assertIn("boom", shown[0])
+
+    def test_should_still_show_a_single_line_observation(self):
+        shown = "\n".join(m.failure_console_lines("  Observation: locator not found\n  Steps: click"))
+        self.assertIn("locator not found", shown)
+
+
+class CodegenOverflowMessageTests(unittest.TestCase):
+    """Crossing the codegen context budget is the most expensive event in a
+    run: every node after it repairs through tool mode, which on bookstack cost
+    about 19 requests per node instead of one. The log has to name the side
+    that actually overflowed."""
+
+    def test_should_report_the_source_total_that_caused_the_overflow(self):
+        """The old line quoted the spec size -- `exceeds one-request allowance
+        (10112 spec chars)` -- while the limit is 90000 and the spec was well
+        under it. The app's own sources were what had grown past the budget, so
+        the number printed sent the reader after the wrong thing."""
+        import tempfile
+        from pathlib import Path as P
+        with tempfile.TemporaryDirectory() as tmp:
+            out = P(tmp)
+            (out / "backend").mkdir()
+            (out / "backend" / "server.js").write_text("x" * 5000, encoding="utf-8")
+            (out / "frontend" / "src").mkdir(parents=True)
+            (out / "frontend" / "src" / "index.html").write_text("y" * 3000, encoding="utf-8")
+            self.assertEqual(m.app_source_chars(out), 8000)
+
+    def test_should_be_zero_before_the_app_exists(self):
+        import tempfile
+        from pathlib import Path as P
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(m.app_source_chars(P(tmp)), 0)
 class UnseenRewriteGuardTests(unittest.TestCase):
     """A codegen turn must not rewrite a file it was never shown.
 

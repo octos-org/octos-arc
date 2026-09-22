@@ -15,6 +15,20 @@ class InjectTests(unittest.TestCase):
         self.assertEqual(out["thinking"], {"type": "disabled"})
         self.assertNotIn("reasoning_effort", out)
 
+    def test_should_control_reasoning_on_glm_not_only_deepseek(self):
+        """GLM accepts the same two fields, measured on z.ai's coding endpoint
+        for one identical prompt: no field 787 reasoning tokens / 17s,
+        `thinking: disabled` 6 / 8s, `reasoning_effort: low` 0 / 6s. Gating the
+        injection on the DeepSeek name alone let a GLM turn spend its whole
+        32768-token output budget on reasoning (32607 of it) and return 161
+        tokens of content after 433s."""
+        out = json.loads(inject_reasoning(json.dumps({"model": "glm-5.3", "messages": []}).encode(), "low"))
+        self.assertEqual(out["reasoning_effort"], "low")
+        self.assertEqual(out["thinking"], {"type": "enabled"})
+        off = json.loads(inject_reasoning(json.dumps({"model": "glm-5.3", "messages": []}).encode(), "none"))
+        self.assertEqual(off["thinking"], {"type": "disabled"})
+        self.assertNotIn("reasoning_effort", off)
+
     def test_should_leave_other_models_and_non_chat_bodies_alone(self):
         body = json.dumps({"model": "gpt-5", "messages": []}).encode()
         self.assertEqual(inject_reasoning(body, "low"), body)
@@ -153,6 +167,45 @@ class SystemOverrideTests(unittest.TestCase):
         self.assertEqual(out["messages"][0]["content"], "short")
 
 
+class ToolTrimTests(unittest.TestCase):
+    """Two stubborn bookstack nodes escalated to tool mode and spent 201 of the
+    run's 232 requests and 7.39M of its 7.83M prompt tokens. Every one of those
+    requests carried 67 tool schemas, 73005 characters, of which the repair
+    could use ten."""
+
+    ALL = ["read_file", "write_file", "edit_file", "diff_edit", "apply_patch", "list_dir", "glob",
+           "grep", "view_image", "check_background_tasks", "smart_home_control_device", "get_weather",
+           "send_email", "voice_synthesize", "news_fetch", "cron", "spawn_agent", "peer_handoff",
+           "goal_plan", "run_pipeline", "search", "web_search", "browser", "workspace_diff",
+           "write_stdin", "request_user_input", "image_generation", "download_model"]
+
+    def _trim(self, names):
+        body = json.dumps({"messages": [], "tools": [{"function": {"name": n}} for n in names]}).encode()
+        out = json.loads(trim_request(body))
+        return [(t.get("function") or {}).get("name") for t in out["tools"]]
+
+    def test_should_keep_the_tools_a_repair_actually_uses(self):
+        kept = self._trim(self.ALL)
+        for name in ("read_file", "write_file", "edit_file", "diff_edit", "apply_patch",
+                     "list_dir", "glob", "grep", "view_image", "check_background_tasks"):
+            self.assertIn(name, kept)
+
+    def test_should_drop_schemas_a_web_app_repair_cannot_use(self):
+        """Smart home, weather, email, voice, news, cron, multi-agent, the goal
+        system, the research pipelines, the browser and the slides/sites
+        workspace tools are all reachable from a repair turn and all useless to
+        one; `write_stdin` only drives `exec_command`, which is already dropped."""
+        kept = self._trim(self.ALL)
+        for name in ("smart_home_control_device", "get_weather", "send_email", "voice_synthesize",
+                     "news_fetch", "cron", "spawn_agent", "peer_handoff", "goal_plan", "run_pipeline",
+                     "search", "web_search", "browser", "workspace_diff", "write_stdin",
+                     "request_user_input", "image_generation", "download_model"):
+            self.assertNotIn(name, kept)
+
+    def test_should_pass_through_a_tool_it_has_never_heard_of(self):
+        """A deny list, not an allow list: an octos release that adds a tool the
+        repair needs must not have it silently removed."""
+        self.assertIn("some_future_tool", self._trim(["read_file", "some_future_tool"]))
 class LoopbackUpstreamTests(unittest.TestCase):
     """A self-hosted upstream must not be sent through the system proxy.
 

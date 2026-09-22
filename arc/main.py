@@ -381,6 +381,23 @@ def inline_sources(output_dir: Path, max_chars: int = 90000, exts: tuple = (".js
 SOURCE_EXTS = (".html", ".js", ".mjs", ".cjs", ".css", ".json")  # visibility and layout failures may originate in CSS
 
 
+def app_source_chars(output_dir: Path, exts: tuple = SOURCE_EXTS) -> int:
+    """Total size of the generated app's own sources.
+
+    This is what the codegen context budget is really spent on, and crossing it
+    is the most expensive event in a run: from that node on, every node repairs
+    through tool mode instead of one request. On bookstack that was about 19
+    requests per node instead of one, for the last seven nodes.
+    """
+    total = 0
+    for path in app_source_files(output_dir, exts):
+        try:
+            total += len(path.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+    return total
+
+
 def app_source_files(output_dir: Path, exts: tuple = SOURCE_EXTS) -> list[Path]:
     files: list[Path] = []
     for part in ("frontend", "backend"):
@@ -1443,6 +1460,37 @@ def spec_base_ports(tests_dir: Path | None) -> list[int]:
     return sorted(ports)
 
 
+FAILURE_FIELD_PREFIXES = ("- Feature:", "Feature:", "Failed at:", "Observation:", "Steps:")
+
+
+def failure_console_lines(failures: str, max_chars: int = 800) -> list[str]:
+    """Console lines for one acceptance failure block.
+
+    `Observation:` carries the build/start log tail on the lines that follow it,
+    and a prefix-only filter dropped all of them -- a node that died with
+    `npm start exited early (rc=1):` logged that and nothing about why. The
+    continuation is folded into the observation and clipped at both ends, so
+    the first line (which names the error) survives a long traceback.
+    """
+    lines = (failures or "").splitlines()
+    out: list[str] = []
+    index = 0
+    while index < len(lines):
+        stripped = lines[index].strip()
+        if stripped.startswith("Failed at:"):
+            out.append(" ".join(stripped.split())[:max_chars])
+        elif stripped.startswith("Observation:"):
+            body = [stripped]
+            index += 1
+            while index < len(lines) and not lines[index].strip().startswith(FAILURE_FIELD_PREFIXES):
+                body.append(lines[index].strip())
+                index += 1
+            out.append(clip_ends(" ".join(" ".join(body).split()), max_chars))
+            continue
+        index += 1
+    return out
+
+
 def acceptance_tests_prompt(tests_dir: Path | None, web_port: int, smoke_port: int,
                             files: list[str] | None = None, inline: bool = False) -> str:
     if not tests_dir:
@@ -1918,8 +1966,19 @@ class Flow:
         return True
 
     def codegen_repair_prompt(self, node_id: str, prompt: str) -> str | None:
+        """One-request repair prompt, or None when it cannot be built safely.
+
+        `codegen_repair_block` records which of the three unrelated conditions
+        took the expensive branch, because they call for different responses: a
+        node with no spec is nothing to act on, a clipped source means the app
+        has outgrown the context budget, and an oversized prompt says by how
+        much. The run log used to report all three as one sentence with no
+        numbers.
+        """
+        self.codegen_repair_block = ""
         spec = self.spec_bodies(node_id)
         if not spec or spec == "(none)":
+            self.codegen_repair_block = "no spec to quote for this node"
             return None
         # Tool-free repairs must see the source instead of instructions to read it.
         # Requote using the total context allowance, then check the complete prompt
@@ -1933,10 +1992,15 @@ class Flow:
             if any(line.startswith("--- ") and (" --- (omitted," in line
                                                 or " --- (too large to quote whole," in line)
                    for line in sources.splitlines()):
+                self.codegen_repair_block = (
+                    f"app sources no longer quote whole ({app_source_chars(self.output_dir)} source chars "
+                    f"vs {self.codegen_context_chars()} allowed)")
                 return None
             prompt = prompt.replace(current_sources, sources, 1)
         full = prompt + CODEGEN_REPAIR_SUFFIX.format(spec=spec)
-        if len(full) + len(FORMAT_INSTRUCTIONS) > self.codegen_context_chars():
+        size = len(full) + len(FORMAT_INSTRUCTIONS)
+        if size > self.codegen_context_chars():
+            self.codegen_repair_block = f"repair prompt is {size} chars vs {self.codegen_context_chars()} allowed"
             return None
         return full
 
@@ -2484,9 +2548,8 @@ class Flow:
                 # One cheap codegen repair (failure digest + quoted sources) is allowed; then tools.
                 self.codegen_blocked = True
                 log(f"[flow] {node_id}: codegen attempt {attempt} still failing; repairs use tool mode")
-            for line in (failures or "").splitlines():
-                if line.strip().startswith(("Failed at:", "Observation:")):
-                    log(f"[acceptance]   {' '.join(line.strip().split())[:360]}")
+            for line in failure_console_lines(failures):
+                log(f"[acceptance]   {line}")
             if summary.total and passed == summary.total:
                 self.commit(f"{node_id} (accepted): {passed}/{summary.total} acceptance tests pass")
                 return True
@@ -2560,7 +2623,8 @@ class Flow:
             else:
                 if self.codegen_mode():
                     self.codegen_blocked = True
-                    log(f"[flow] {node_id}: complete repair evidence unavailable within codegen budget; using tools")
+                    log(f"[flow] {node_id}: one-request repair unavailable "
+                        f"({getattr(self, 'codegen_repair_block', '') or 'reason not recorded'}); using tools")
                 p_ok, p_text = self.turn(
                     prompt, min(self.node_timeout, left),
                     f"{node_id} repair {attempt + 1}/{self.repair_rounds}")
@@ -2762,7 +2826,9 @@ class Flow:
             ok, text = self.codegen_turn(compact, implement_timeout, f"{node_id} implement", spec_chars=self.current_spec_chars)
         else:
             if self.codegen_mode():
-                log(f"[flow] {node_id}: spec or existing source exceeds one-request allowance ({len(self.spec_bodies(node_id))} spec chars); tool mode")
+                log(f"[flow] {node_id}: codegen context exceeded ({len(self.spec_bodies(node_id))} spec chars "
+                    f"+ {app_source_chars(self.output_dir)} source chars vs {self.codegen_context_chars()} allowed); "
+                    f"tool mode from here")
             ok, text = self.turn(prompt, implement_timeout, f"{node_id} implement")
         if not ok and "truncated" in text.lower():
             # Cloud 76fb32a69d81: output cut by max_tokens, nothing written. Retry

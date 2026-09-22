@@ -28,6 +28,46 @@ def _iter_jsonl(path: Path):
                 continue
 
 
+TURN_CUTOFF_S = 1190  # OCTOS_NODE_TIMEOUT defaults to 1200; a cut turn loses its partial work
+
+
+def cost_profile(records: list[dict]) -> dict:
+    """Where a run's prompt tokens went, from the proxy's own request log.
+
+    Split by mode, because the two behave nothing alike: codegen sends one
+    large request per node and gets a file back, while a tool-mode escalation
+    sends many requests that are mostly re-sent context. On one bookstack run
+    two of 34 nodes escalated and took 201 of the 232 requests and 7.39M of the
+    7.83M prompt tokens, which a single total hides completely.
+
+    `avg_tools_chars` is the tool-schema payload repeated on every tool-mode
+    request; `reasoning_pct` catches a model spending its output budget on
+    thinking; `turns_near_cutoff` counts turns that came within ten seconds of
+    the node timeout, where the partial work is lost rather than returned.
+    """
+    def bucket(rows: list[dict]) -> dict:
+        return {
+            "requests": len(rows),
+            "prompt_tokens": sum(int(r.get("prompt_tokens") or 0) for r in rows),
+            "completion_tokens": sum(int(r.get("completion_tokens") or 0) for r in rows),
+            "avg_tools_chars": round(sum(int((r.get("request") or {}).get("tools_chars") or 0)
+                                         for r in rows) / len(rows)) if rows else 0,
+        }
+
+    tool_mode = [r for r in records if int((r.get("request") or {}).get("tools") or 0) > 0]
+    codegen = [r for r in records if int((r.get("request") or {}).get("tools") or 0) == 0]
+    out = sum(int(r.get("completion_tokens") or 0) for r in records)
+    reasoning = sum(int(r.get("reasoning_tokens") or 0) for r in records)
+    elapsed = [int(r.get("elapsed_ms") or 0) / 1000 for r in records]
+    return {
+        "codegen": bucket(codegen),
+        "tool_mode": bucket(tool_mode),
+        "reasoning_pct": round(100 * reasoning / out) if out else 0,
+        "turns_near_cutoff": sum(1 for e in elapsed if e >= TURN_CUTOFF_S),
+        "max_turn_s": round(max(elapsed)) if elapsed else 0,
+    }
+
+
 def summarize(output_dir: Path) -> dict:
     arc = output_dir / ".arc"
     turns = tokens_in = tokens_out = 0
@@ -80,7 +120,8 @@ def summarize(output_dir: Path) -> dict:
     except (OSError, json.JSONDecodeError, AttributeError):
         pass
     billed = {"requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "cache_hit": 0}
-    for rec in _iter_jsonl(arc / "llm-usage.jsonl"):
+    usage = list(_iter_jsonl(arc / "llm-usage.jsonl"))
+    for rec in usage:
         billed["requests"] += int(rec.get("requests") or 1)  # kernel-session turns carry their LLM-call count
         billed["prompt_tokens"] += int(rec.get("prompt_tokens") or 0)
         billed["completion_tokens"] += int(rec.get("completion_tokens") or 0)
@@ -98,6 +139,7 @@ def summarize(output_dir: Path) -> dict:
         "tokens_in_all": sum(in_by_session.values()), "tokens_out_all": sum(out_by_session.values()),
         "cost": round(sum(cost_by_session.values()), 6), "duration_s": duration,
         "node_states": node_states, "last_events": states, "grade": grade, "billed": billed,
+        "cost_profile": cost_profile(usage),
     }
 
 
@@ -115,6 +157,13 @@ def main(argv: list[str]) -> int:
     print(f"| {Path(data['output_dir']).name} | {data['turns']} | {data['tokens_in_all']} | {data['tokens_out_all']} | "
           f"{data['cost']} | {data['duration_s']} | {grade} | {data['node_states']} | "
           f"billed req={b['requests']} prompt={b['prompt_tokens']} (cache {b['cache_hit']}) completion={b['completion_tokens']} |")
+    p = data["cost_profile"]
+    print(f"  codegen  req={p['codegen']['requests']} prompt={p['codegen']['prompt_tokens']} "
+          f"completion={p['codegen']['completion_tokens']}")
+    print(f"  toolmode req={p['tool_mode']['requests']} prompt={p['tool_mode']['prompt_tokens']} "
+          f"completion={p['tool_mode']['completion_tokens']} avg_tool_schema_chars={p['tool_mode']['avg_tools_chars']}")
+    print(f"  reasoning={p['reasoning_pct']}% of output | max turn {p['max_turn_s']}s | "
+          f"turns near the {TURN_CUTOFF_S}s cut-off: {p['turns_near_cutoff']}")
     return 0
 
 
