@@ -202,6 +202,13 @@ def check(tests: Path, port: int, specs: list[str]) -> int:
     # Playwright's exit code IS the verdict and its list reporter already names
     # every failing assertion; print that verbatim for the repair round.
     print(log[-6000:])
+    if rc:
+        # What the page actually showed when each test failed (Playwright's
+        # ARIA snapshot): the difference between "not found" and why.
+        for ctx in sorted((work / "test-results").rglob("error-context.md"))[:3]:
+            page = ctx.read_text(errors="replace").partition("```yaml")[2].split("```")[0]
+            if page.strip():
+                print(f"\n----- page at failure: {ctx.parent.name} -----\n{page.strip()[:1500]}")
     return rc
 
 
