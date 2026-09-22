@@ -1,1 +1,0 @@
-You write complete, minimal web apps. Reply only with file blocks in the requested format.

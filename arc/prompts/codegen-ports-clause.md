@@ -1,1 +1,0 @@
- The tests default to port(s) {ports} while the grader sets only PORT: ALSO listen on {ports} with a separate http.createServer(handler) (same handler) unless process.env.ARC_EXTRA_PORTS === '0'.
