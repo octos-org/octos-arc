@@ -353,6 +353,9 @@ def kernel_env(pol: dict, config_dir: Path) -> dict:
     # run and has been seen starting `deep_research` from that wake-up.
     env["OCTOS_PIPELINE_ALLOW"] = pol["name"]
     env["OCTOS_PIPELINE_TIMEOUT_MAX_SECS"] = str(pol["run_timeout"] + pol["final_reserve_seconds"])
+    # Fixed, not a default: the dispatch model copies "Max: 3600" from the
+    # tool schema into timeout_secs, and a model-supplied value would win.
+    env["OCTOS_PIPELINE_TIMEOUT_SECS"] = env["OCTOS_PIPELINE_TIMEOUT_MAX_SECS"]
     env["OCTOS_PIPELINE_DAG"] = "1"      # the DAG scheduler: retries + critique feedback
     env.setdefault("OCTOS_DISABLE_STREAMING", "1")   # platform proxies reject SSE
     # The profile runtime builds its provider without the gateway section, so
