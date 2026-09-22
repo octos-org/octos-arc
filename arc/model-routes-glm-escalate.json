@@ -1,0 +1,8 @@
+[
+  {
+    "model": "glm-5.3",
+    "phases": ["repair"],
+    "tools": true,
+    "images": true
+  }
+]

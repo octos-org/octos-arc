@@ -1,0 +1,274 @@
+[
+  {
+    "name": "unicode implement",
+    "body": {
+      "model": "original",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好 🌱"
+        }
+      ],
+      "thinking": {
+        "type": "enabled"
+      },
+      "max_tokens": 100
+    },
+    "rules": [
+      {
+        "model": "small",
+        "phases": [
+          "implement"
+        ],
+        "max_input_chars": 1000
+      },
+      {
+        "model": "repairer",
+        "phases": [
+          "repair"
+        ],
+        "tools": true,
+        "parameters": {
+          "max_completion_tokens": 200
+        }
+      }
+    ],
+    "phase": "implement",
+    "model": "small"
+  },
+  {
+    "name": "same task repair",
+    "body": {
+      "model": "original",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好 🌱"
+        }
+      ],
+      "thinking": {
+        "type": "enabled"
+      },
+      "max_tokens": 100
+    },
+    "rules": [
+      {
+        "model": "small",
+        "phases": [
+          "implement"
+        ],
+        "max_input_chars": 1000
+      },
+      {
+        "model": "repairer",
+        "phases": [
+          "repair"
+        ],
+        "tools": true,
+        "parameters": {
+          "max_completion_tokens": 200
+        }
+      }
+    ],
+    "phase": "repair",
+    "model": "repairer"
+  },
+  {
+    "name": "unmatched verification",
+    "body": {
+      "model": "original",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好 🌱"
+        }
+      ],
+      "thinking": {
+        "type": "enabled"
+      },
+      "max_tokens": 100
+    },
+    "rules": [
+      {
+        "model": "small",
+        "phases": [
+          "implement"
+        ],
+        "max_input_chars": 1000
+      },
+      {
+        "model": "repairer",
+        "phases": [
+          "repair"
+        ],
+        "tools": true,
+        "parameters": {
+          "max_completion_tokens": 200
+        }
+      }
+    ],
+    "phase": "verify",
+    "model": "original"
+  },
+  {
+    "name": "tool history",
+    "body": {
+      "model": "original",
+      "messages": [
+        {
+          "role": "tool",
+          "content": "result"
+        }
+      ],
+      "thinking": {
+        "type": "enabled"
+      },
+      "max_tokens": 100
+    },
+    "rules": [
+      {
+        "model": "small",
+        "phases": [
+          "implement"
+        ],
+        "max_input_chars": 1000
+      },
+      {
+        "model": "repairer",
+        "phases": [
+          "repair"
+        ],
+        "tools": true,
+        "parameters": {
+          "max_completion_tokens": 200
+        }
+      }
+    ],
+    "phase": "implement",
+    "model": "original"
+  },
+  {
+    "name": "tool schema",
+    "body": {
+      "model": "original",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好 🌱"
+        }
+      ],
+      "thinking": {
+        "type": "enabled"
+      },
+      "max_tokens": 100,
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "read",
+            "description": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+          }
+        }
+      ]
+    },
+    "rules": [
+      {
+        "model": "short-tools",
+        "tools": true,
+        "max_input_chars": 1000
+      }
+    ],
+    "phase": "repair",
+    "model": "original"
+  },
+  {
+    "name": "image capability",
+    "body": {
+      "model": "original",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "input_image",
+              "image_url": "image"
+            }
+          ]
+        }
+      ],
+      "thinking": {
+        "type": "enabled"
+      },
+      "max_tokens": 100
+    },
+    "rules": [
+      {
+        "model": "small",
+        "phases": [
+          "implement"
+        ],
+        "max_input_chars": 1000
+      },
+      {
+        "model": "repairer",
+        "phases": [
+          "repair"
+        ],
+        "tools": true,
+        "parameters": {
+          "max_completion_tokens": 200
+        }
+      }
+    ],
+    "phase": "implement",
+    "model": "original"
+  },
+  {
+    "name": "exact unicode bound",
+    "body": {
+      "model": "original",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好 🌱"
+        }
+      ],
+      "thinking": {
+        "type": "enabled"
+      },
+      "max_tokens": 100
+    },
+    "rules": [
+      {
+        "model": "small",
+        "max_input_chars": 58
+      }
+    ],
+    "phase": "implement",
+    "model": "small"
+  },
+  {
+    "name": "one over unicode bound",
+    "body": {
+      "model": "original",
+      "messages": [
+        {
+          "role": "user",
+          "content": "你好 🌱"
+        }
+      ],
+      "thinking": {
+        "type": "enabled"
+      },
+      "max_tokens": 100
+    },
+    "rules": [
+      {
+        "model": "small",
+        "max_input_chars": 57
+      }
+    ],
+    "phase": "implement",
+    "model": "original"
+  }
+]

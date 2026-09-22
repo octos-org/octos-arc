@@ -1,0 +1,105 @@
+{
+ "interfaces": [],
+ "tests": [
+  {
+   "test_id": "REQ-1.1-reject-a-duplicate-username-without-creating-a-signed-in-session",
+   "req_id": "REQ-1",
+   "scenario_id": "REQ-1::scenario-1",
+   "type": "e2e",
+   "file_path": "REQ-1.1-user-registration.spec.ts",
+   "first_line": null,
+   "status": "passed",
+   "content": null
+  },
+  {
+   "test_id": "REQ-1.1-reject-duplicate-email-with-a-different-username",
+   "req_id": "REQ-1",
+   "scenario_id": "REQ-1::scenario-2",
+   "type": "e2e",
+   "file_path": "REQ-1.1-user-registration.spec.ts",
+   "first_line": null,
+   "status": "passed",
+   "content": null
+  },
+  {
+   "test_id": "REQ-1.1-reject-malformed-username-email-or-password-without-signing-in",
+   "req_id": "REQ-1",
+   "scenario_id": "REQ-1::scenario-3",
+   "type": "e2e",
+   "file_path": "REQ-1.1-user-registration.spec.ts",
+   "first_line": null,
+   "status": "passed",
+   "content": null
+  },
+  {
+   "test_id": "REQ-1.1-reject-mismatched-passwords-without-creating-a-signed-in-session",
+   "req_id": "REQ-1",
+   "scenario_id": "REQ-1::scenario-4",
+   "type": "e2e",
+   "file_path": "REQ-1.1-user-registration.spec.ts",
+   "first_line": null,
+   "status": "passed",
+   "content": null
+  },
+  {
+   "test_id": "REQ-1.1-reject-missing-required-registration-values-before-creating-a-session",
+   "req_id": "REQ-1",
+   "scenario_id": "REQ-1::scenario-5",
+   "type": "e2e",
+   "file_path": "REQ-1.1-user-registration.spec.ts",
+   "first_line": null,
+   "status": "passed",
+   "content": null
+  },
+  {
+   "test_id": "REQ-1.1-successfully-register-a-new-account-and-remain-signed-in",
+   "req_id": "REQ-1",
+   "scenario_id": "REQ-1::scenario-6",
+   "type": "e2e",
+   "file_path": "REQ-1.1-user-registration.spec.ts",
+   "first_line": null,
+   "status": "passed",
+   "content": null
+  },
+  {
+   "test_id": "REQ-1.2-reject-an-unknown-account-and-stay-logged-out",
+   "req_id": "REQ-2",
+   "scenario_id": "REQ-2::scenario-1",
+   "type": "e2e",
+   "file_path": "REQ-1.2-user-login.spec.ts",
+   "first_line": null,
+   "status": "passed",
+   "content": null
+  },
+  {
+   "test_id": "REQ-1.2-reject-wrong-password-and-incomplete-credentials-with-the-same-generic-error",
+   "req_id": "REQ-2",
+   "scenario_id": "REQ-2::scenario-2",
+   "type": "e2e",
+   "file_path": "REQ-1.2-user-login.spec.ts",
+   "first_line": null,
+   "status": "passed",
+   "content": null
+  },
+  {
+   "test_id": "REQ-1.2-sign-in-with-a-case-insensitive-email-and-password",
+   "req_id": "REQ-2",
+   "scenario_id": "REQ-2::scenario-3",
+   "type": "e2e",
+   "file_path": "REQ-1.2-user-login.spec.ts",
+   "first_line": null,
+   "status": "passed",
+   "content": null
+  },
+  {
+   "test_id": "REQ-1.2-sign-in-with-a-valid-username-and-password",
+   "req_id": "REQ-2",
+   "scenario_id": "REQ-2::scenario-4",
+   "type": "e2e",
+   "file_path": "REQ-1.2-user-login.spec.ts",
+   "first_line": null,
+   "status": "passed",
+   "content": null
+  }
+ ]
+}

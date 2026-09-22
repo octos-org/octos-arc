@@ -86,8 +86,9 @@ class TurnMonitor:
         out: list[str] = []
         if self.expect_verification and self.wrote_files and not self.verified and _CLAIM.search(self._final_text):
             out.append("Your previous turn claimed completion without running any build, start or "
-                       "request command. Never declare a step done before executing `npm run build`, "
-                       "starting the backend on the smoke port and exercising the endpoint with curl.")
+                       "request command. Use the supplied isolated verification command before claiming success. "
+                       "If no verification entry is supplied, build and exercise the app in a disposable copy "
+                       "so validation does not change the delivered application's persistent data.")
         if self._max_repeat >= self.repeat_threshold:
             out.append(f"You hit the same error {self._max_repeat} times in a row "
                        f"({self._repeated_error[:160]!r}). Stop repeating the command; diagnose the "

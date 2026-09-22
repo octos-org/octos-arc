@@ -20,6 +20,7 @@ use sha2::{Digest, Sha256};
 const LEGACY_CONTEXT_MANAGER_SCHEMA: &str = "octos.context-manager.v1";
 const CONTEXT_MANAGER_SCHEMA: &str = "octos.context-manager.v2";
 const DEFAULT_TOOL_OUTPUT_POLICY_ID: &str = "tool-output-v1";
+const DEFAULT_MODEL_VISIBLE_TOOL_OUTPUT_MAX_BYTES: usize = 8 * 1024;
 const TOOL_OUTPUT_UI_PREVIEW_MAX_BYTES: usize = 512;
 const SYNTHETIC_MISSING_TOOL_OUTPUT: &str =
     "[tool output missing: aborted before result was recorded]";
@@ -352,7 +353,7 @@ impl Default for ToolOutputPolicy {
         Self {
             policy_id: DEFAULT_TOOL_OUTPUT_POLICY_ID.to_owned(),
             inline_raw_threshold_bytes: 16 * 1024,
-            model_visible_max_bytes: 4 * 1024,
+            model_visible_max_bytes: DEFAULT_MODEL_VISIBLE_TOOL_OUTPUT_MAX_BYTES,
         }
     }
 }
@@ -8174,5 +8175,15 @@ mod tests {
                 .adopt_source_items_after(&canonical, watermark)
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn default_tool_output_policy_keeps_eight_kibibytes_for_model() {
+        let policy = ToolOutputPolicy::default();
+        assert_eq!(
+            policy.model_visible_max_bytes,
+            DEFAULT_MODEL_VISIBLE_TOOL_OUTPUT_MAX_BYTES
+        );
+        assert_eq!(policy.model_visible_max_bytes, 8 * 1024);
     }
 }

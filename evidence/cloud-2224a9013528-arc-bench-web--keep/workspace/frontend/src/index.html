@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Keep</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="app-header">
+    <button id="menu-button" class="icon-button" title="Main menu" aria-label="Main menu">&#9776;</button>
+    <div class="logo">
+      <span class="logo-icon">&#128221;</span>
+      <span class="logo-title">Keep</span>
+    </div>
+    <button id="view-toggle" class="view-toggle" type="button" aria-label="List view" title="List view">List view</button>
+    <div class="search-wrap" id="search-wrap">
+      <input id="search-input" class="search-input" type="search" placeholder="Search" aria-label="Search" autocomplete="off" />
+      <div id="search-filters" class="search-filters" role="listbox" aria-label="Suggested filters" hidden></div>
+    </div>
+    <div class="settings-wrap" id="settings-wrap">
+      <button id="settings-button" class="icon-button" title="Settings menu" aria-label="Settings menu">&#9881;</button>
+      <div id="settings-menu" class="settings-menu" role="menu" aria-label="Settings options" hidden>
+        <button type="button" class="settings-menu-item" role="menuitem" data-settings="settings">Settings</button>
+        <button type="button" class="settings-menu-item" role="menuitem" data-settings="shortcuts">Keyboard shortcuts</button>
+        <button type="button" class="settings-menu-item" role="menuitem" data-settings="help">Help</button>
+      </div>
+    </div>
+  </header>
+
+  <div class="sidebar" id="sidebar" hidden>
+    <button class="sidebar-item active" data-view="notes" aria-label="Notes"><span>&#9998;</span><span class="sidebar-item-label">Notes</span></button>
+    <button class="sidebar-item" data-view="archive" aria-label="Archive"><span>&#128193;</span><span class="sidebar-item-label">Archive</span></button>
+    <button class="sidebar-item" data-view="trash" aria-label="Trash"><span>&#128465;</span><span class="sidebar-item-label">Trash</span></button>
+    <button id="edit-labels-button" class="sidebar-item sidebar-edit-labels" type="button" aria-label="Edit Labels"><span>&#9999;</span><span class="sidebar-item-label">Edit Labels</span></button>
+    <div class="sidebar-labels">
+      <div class="sidebar-labels-title">Labels</div>
+      <button class="sidebar-item sidebar-label" data-label="Work" aria-label="Work"><span>&#128278;</span> Work</button>
+      <button class="sidebar-item sidebar-label" data-label="Projects" aria-label="Projects"><span>&#128278;</span> Projects</button>
+      <button class="sidebar-item sidebar-label" data-label="Reminders" aria-label="Reminders"><span>&#128278;</span> Reminders</button>
+      <button class="sidebar-item sidebar-label" data-label="Personal" aria-label="Personal"><span>&#128278;</span> Personal</button>
+      <button class="sidebar-item sidebar-label" data-label="Home" aria-label="Home"><span>&#128278;</span> Home</button>
+      <button class="sidebar-item sidebar-label" data-label="Ideas" aria-label="Ideas"><span>&#128278;</span> Ideas</button>
+      <button class="sidebar-item sidebar-label" data-label="Shopping" aria-label="Shopping"><span>&#128278;</span> Shopping</button>
+      <button class="sidebar-item sidebar-label" data-label="Travel" aria-label="Travel"><span>&#128278;</span> Travel</button>
+    </div>
+  </div>
+
+  <div id="label-dialog" class="label-dialog" role="dialog" aria-label="Change labels" hidden>
+    <div class="label-dialog-panel">
+      <div class="label-dialog-title">Change labels</div>
+      <div class="label-dialog-list" id="label-dialog-list">
+        <div class="label-option"><label for="label-work"><input type="checkbox" id="label-work" value="Work" /> Work</label></div>
+        <div class="label-option"><label for="label-projects"><input type="checkbox" id="label-projects" value="Projects" /> Projects</label></div>
+        <div class="label-option"><label for="label-reminders"><input type="checkbox" id="label-reminders" value="Reminders" /> Reminders</label></div>
+        <div class="label-option"><label for="label-personal"><input type="checkbox" id="label-personal" value="Personal" /> Personal</label></div>
+        <div class="label-option"><label for="label-home"><input type="checkbox" id="label-home" value="Home" /> Home</label></div>
+        <div class="label-option"><label for="label-ideas"><input type="checkbox" id="label-ideas" value="Ideas" /> Ideas</label></div>
+        <div class="label-option"><label for="label-shopping"><input type="checkbox" id="label-shopping" value="Shopping" /> Shopping</label></div>
+        <div class="label-option"><label for="label-travel"><input type="checkbox" id="label-travel" value="Travel" /> Travel</label></div>
+      </div>
+      <div class="label-dialog-actions">
+        <button id="label-dialog-done" class="label-dialog-done" type="button">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="manage-labels-dialog" class="label-dialog" role="dialog" aria-label="Edit Labels" hidden>
+    <div class="label-dialog-panel manage-labels-panel">
+      <div class="label-dialog-title">Edit Labels</div>
+      <div class="label-dialog-list manage-labels-list" id="manage-labels-list">
+        <div class="label-manage-row"><label for="label-name-work-editable" class="visually-hidden">Work editable</label><input id="label-name-work-editable" class="label-name-input" type="text" value="Work editable" aria-label="Work editable" /></div>
+        <div class="label-manage-row"><label for="label-name-work" class="visually-hidden">Work</label><input id="label-name-work" class="label-name-input" type="text" value="Work" aria-label="Work" /></div>
+        <div class="label-manage-row"><label for="label-name-projects" class="visually-hidden">Projects</label><input id="label-name-projects" class="label-name-input" type="text" value="Projects" aria-label="Projects" /></div>
+        <div class="label-manage-row"><label for="label-name-reminders" class="visually-hidden">Reminders</label><input id="label-name-reminders" class="label-name-input" type="text" value="Reminders" aria-label="Reminders" /></div>
+        <div class="label-manage-row"><label for="label-name-personal" class="visually-hidden">Personal</label><input id="label-name-personal" class="label-name-input" type="text" value="Personal" aria-label="Personal" /></div>
+        <div class="label-manage-row"><label for="label-name-home" class="visually-hidden">Home</label><input id="label-name-home" class="label-name-input" type="text" value="Home" aria-label="Home" /></div>
+        <div class="label-manage-row"><label for="label-name-ideas" class="visually-hidden">Ideas</label><input id="label-name-ideas" class="label-name-input" type="text" value="Ideas" aria-label="Ideas" /></div>
+        <div class="label-manage-row"><label for="label-name-shopping" class="visually-hidden">Shopping</label><input id="label-name-shopping" class="label-name-input" type="text" value="Shopping" aria-label="Shopping" /></div>
+        <div class="label-manage-row"><label for="label-name-travel" class="visually-hidden">Travel</label><input id="label-name-travel" class="label-name-input" type="text" value="Travel" aria-label="Travel" /></div>
+      </div>
+      <div class="label-add-row">
+        <label for="label-new-input" class="visually-hidden">New label</label>
+        <input id="label-new-input" class="label-new-input" type="text" placeholder="New label" aria-label="New label" />
+        <button id="label-add-button" class="label-add-button" type="button">Add</button>
+      </div>
+      <div class="label-dialog-actions">
+        <button id="manage-labels-done" class="label-dialog-done" type="button">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <main class="app-main" id="app-main">
+    <div class="composer" id="composer">
+      <label class="visually-hidden" for="composer-input">Take a note</label>
+      <input id="composer-input" class="composer-input" placeholder="Take a note..." aria-label="Take a note" />
+      <div class="composer-editor" id="composer-editor">
+        <label class="visually-hidden" for="note-title">Title</label>
+        <input id="note-title" class="composer-title" type="text" placeholder="Title" aria-label="Title" />
+        <label class="visually-hidden" for="note-content">Content</label>
+        <textarea id="note-content" class="composer-content" placeholder="Take a note..." aria-label="Content"></textarea>
+        <div class="composer-toolbar">
+          <div class="composer-palette-wrap">
+            <button id="composer-color" class="composer-color" type="button" aria-label="Background options">Background</button>
+            <div id="composer-palette" class="composer-palette" hidden>
+              <button type="button" class="palette-swatch palette-green" aria-label="Light green" title="Light green" data-composer-color="#ccff90"></button>
+            </div>
+          </div>
+          <div class="composer-menu-wrap">
+            <button id="composer-more" class="composer-more" type="button" aria-label="More options">More</button>
+            <div id="composer-menu" class="composer-menu" hidden>
+              <button id="composer-labels-item" class="composer-menu-item" type="button">Change labels</button>
+            </div>
+          </div>
+          <div class="composer-actions">
+            <button id="composer-pin" class="composer-pin" type="button">Pin</button>
+            <button id="composer-close" class="composer-close" type="button">Close</button>
+          </div>
+        </div>
+      </div>
+      <div id="composer-error" class="composer-error" role="alert" hidden></div>
+    </div>
+
+    <div id="notification" class="app-notification" role="status" hidden></div>
+
+    <section class="notes-section" id="pinned-section">
+      <h2 class="section-title">Pinned</h2>
+      <div class="notes-grid" id="pinned-notes"></div>
+    </section>
+
+    <section class="notes-section" id="others-section">
+      <h2 class="section-title">Others</h2>
+      <div class="notes-grid" id="other-notes"></div>
+    </section>
+
+    <section class="notes-section archive-section" id="archive-section" hidden>
+      <h2 class="section-title">Archive</h2>
+      <div class="notes-grid" id="archive-notes"></div>
+    </section>
+
+    <section class="notes-section trash-section" id="trash-section" hidden>
+      <h2 class="section-title">Trash</h2>
+      <button id="empty-trash" class="empty-trash-button" type="button">Empty Trash</button>
+      <div class="notes-grid" id="trash-notes"></div>
+    </section>
+  </main>
+
+  <div id="settings-dialog" class="settings-dialog" role="dialog" aria-label="Settings" hidden>
+    <div class="settings-dialog-panel">
+      <div class="settings-dialog-title">Settings</div>
+      <div class="settings-dialog-options">
+        <div class="settings-option">
+          <label for="settings-new-bottom"><input type="checkbox" id="settings-new-bottom" /> Show new notes at the bottom</label>
+        </div>
+        <div class="settings-option">
+          <label for="settings-checked-bottom"><input type="checkbox" id="settings-checked-bottom" /> Show checked items at the bottom</label>
+        </div>
+      </div>
+      <div class="settings-dialog-actions">
+        <button id="settings-save" class="settings-save" type="button">Save</button>
+        <button id="settings-cancel" class="settings-cancel" type="button">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

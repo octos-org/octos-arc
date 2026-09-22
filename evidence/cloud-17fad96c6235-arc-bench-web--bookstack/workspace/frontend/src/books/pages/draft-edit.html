@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Edit Draft - BookStack</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="top-nav">
+    <nav class="nav-inner" aria-label="Main navigation">
+      <a class="brand" href="/" aria-label="BookStack">
+        <span class="brand-logo">BookStack</span>
+      </a>
+      <div class="nav-links">
+        <a class="nav-link" href="/shelves">Shelves</a>
+        <a class="nav-link" href="/books">Books</a>
+      </div>
+      <div class="nav-right">
+        <form class="search-form" action="/search" method="get" role="search">
+          <label for="search-input" class="visually-hidden">Search</label>
+          <input id="search-input" name="q" type="search" placeholder="Search" autocomplete="off" />
+        </form>
+        <!--__HEADER_RIGHT__-->
+      </div>
+    </nav>
+  </header>
+
+  <main class="container">
+    <p class="breadcrumb"><a class="crumb-link" href="/books">Books</a></p>
+
+    <section class="form-card">
+      <h1 class="form-title">Edit Draft</h1>
+      <p class="tagline">Edit the existing draft for this book.</p>
+
+      <form class="book-form" id="draft-form" novalidate>
+        <div class="form-error" id="form-error" role="alert" hidden></div>
+
+        <div class="form-group">
+          <label for="name">Name</label>
+          <input id="name" name="name" type="text" value="__DRAFT_NAME__" autocomplete="off" />
+        </div>
+
+        <div class="form-group">
+          <label for="content">Content</label>
+          <textarea id="content" name="content" rows="12" autocomplete="off">__DRAFT_CONTENT__</textarea>
+        </div>
+
+        <div class="form-actions">
+          <a class="cancel-btn" id="cancel-link" href="__CANCEL_HREF__">Cancel</a>
+          <button class="submit-btn draft-btn" id="save-draft-btn" type="button">Save Draft</button>
+          <button class="submit-btn save-btn" type="submit">Save Page</button>
+        </div>
+      </form>
+
+      <section class="draft-actions" aria-label="Draft actions">
+        <a class="action-btn danger-btn" href="__DELETE_HREF__">Delete Draft</a>
+      </section>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <span>BookStack Knowledge Base System</span>
+  </footer>
+  <script>
+    (function () {
+      'use strict';
+      var form = document.getElementById('draft-form');
+      var errorBox = document.getElementById('form-error');
+      if (!form) return;
+
+      form.addEventListener('submit', function (evt) {
+        evt.preventDefault();
+        var name = document.getElementById('name').value.trim();
+        var content = document.getElementById('content').value.trim();
+
+        if (!name) {
+          errorBox.textContent = 'Name is required.';
+          errorBox.hidden = false;
+          return;
+        }
+        errorBox.hidden = true;
+
+        var payload = { name: name, content: content, bookId: '__BOOK_ID__' };
+        fetch('/api/pages', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        })
+          .then(function (res) {
+            if (res.ok) {
+              return res.json().then(function (data) {
+                window.location.href = '/books/' + data.page.bookId;
+              });
+            } else {
+              return res.json().then(function (data) {
+                throw new Error((data && data.error) || 'Unable to save page.');
+              });
+            }
+          })
+          .catch(function (err) {
+            errorBox.textContent = err.message || 'Unable to save page.';
+            errorBox.hidden = false;
+          });
+      });
+    })();
+  </script>
+  <script src="/app.js"></script>
+</body>
+</html>

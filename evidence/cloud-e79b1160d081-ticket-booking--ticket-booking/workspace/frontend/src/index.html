@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Home</title>
+</head>
+<body>
+<div id="guest">
+<a href="/login">登录</a>
+<a href="/register">Register</a>
+</div>
+<div id="user" style="display:none;">
+<span id="username"></span>
+<a href="/logout">退出登录</a>
+</div>
+<script>
+(async () => {
+  try {
+    const res = await fetch('/api/session');
+    if (res.ok) {
+      const data = await res.json();
+      document.getElementById('username').textContent = data.username;
+      document.getElementById('guest').style.display = 'none';
+      document.getElementById('user').style.display = 'block';
+    }
+  } catch (e) {}
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Shelves - BookStack</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="top-nav">
+    <nav class="nav-inner" aria-label="Main navigation">
+      <a class="brand" href="/" aria-label="BookStack">
+        <span class="brand-logo">BookStack</span>
+      </a>
+      <div class="nav-links">
+        <a class="nav-link" href="/shelves">Shelves</a>
+        <a class="nav-link" href="/books">Books</a>
+      </div>
+      <div class="nav-right">
+        <form class="search-form" action="/search" method="get" role="search">
+          <label for="search-input" class="visually-hidden">Search</label>
+          <input id="search-input" name="q" type="search" placeholder="Search" autocomplete="off" />
+        </form>
+        <!--__HEADER_RIGHT__-->
+      </div>
+    </nav>
+  </header>
+
+  <main class="container">
+    <section class="welcome">
+      <h1>Shelves</h1>
+      <p class="tagline">Browse and organize the top-level content containers in your knowledge base.</p>
+    </section>
+
+    <section class="content-card">
+      <!--__SHELF_LIST__-->
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <span>BookStack Knowledge Base System</span>
+  </footer>
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -6,7 +6,7 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use clap::{Args, ValueEnum};
+use clap::{Args, Subcommand, ValueEnum};
 use eyre::{Result, WrapErr, ensure, eyre};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -24,24 +24,66 @@ pub enum Mode {
     Evolve,
 }
 
+/// `octos arc run`: the harness that absorbed the Python adapter's strategy.
+#[derive(Debug, Subcommand)]
+pub enum ArcSubcommand {
+    /// Run a whole ARC task from a runner-spec.json with the harness policy
+    Run(crate::run::RunCommand),
+    /// before_tool_call hook: deny file writes inside protected directories
+    /// (payload on stdin; exit 1 = deny). Used by `octos arc run` itself.
+    #[command(hide = true, name = "deny-protected")]
+    DenyProtected(DenyProtectedCommand),
+}
+
 #[derive(Debug, Args)]
+pub struct DenyProtectedCommand {
+    /// Protected directories (official tests, requirements).
+    #[arg(value_name = "DIR")]
+    pub dirs: Vec<PathBuf>,
+}
+
+/// Exit code for the hook: 0 allow, 1 deny (reason on stdout).
+pub fn execute_deny_protected(command: DenyProtectedCommand) -> i32 {
+    let mut raw = String::new();
+    if std::io::Read::read_to_string(&mut std::io::stdin(), &mut raw).is_err() {
+        return 0;
+    }
+    let Ok(payload) = serde_json::from_str::<Value>(&raw) else {
+        return 0;
+    };
+    match crate::guard::deny_protected(&payload, &command.dirs) {
+        Some(reason) => {
+            println!("{reason}");
+            1
+        }
+        None => 0,
+    }
+}
+
+#[derive(Debug, Args)]
+#[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
 pub struct ArcCommand {
+    #[command(subcommand)]
+    pub subcommand: Option<ArcSubcommand>,
     #[arg(
         value_name = "REQUIREMENT_PATH",
+        required = true,
         help = "Official requirements file or directory"
     )]
-    pub requirement_path: PathBuf,
+    pub requirement_path: Option<PathBuf>,
     #[arg(
         long,
+        required = true,
         help = "Existing generated project for evolve; empty directory for create"
     )]
-    pub output_dir: PathBuf,
+    pub output_dir: Option<PathBuf>,
     #[arg(
         long,
         value_enum,
+        required = true,
         help = "Explicitly choose create or evolve; never auto-rebuild a project"
     )]
-    pub mode: Mode,
+    pub mode: Option<Mode>,
     #[arg(
         long,
         help = "Prior official requirements when importing a project without a saved Octos snapshot"
@@ -167,7 +209,7 @@ fn previous_specification(
     project: &Path,
     files: &BTreeMap<String, String>,
 ) -> Result<Option<Specification>> {
-    match options.mode {
+    match options.mode.expect("mode validated by execute") {
         Mode::Create => {
             ensure!(
                 files.is_empty(),
@@ -623,13 +665,22 @@ fn redact(output: &mut Output, key: &str) {
 pub fn execute(options: ArcCommand, identity: BinaryIdentity<'_>) -> Result<Value> {
     let started = Instant::now();
     let deadline = started + Duration::from_secs(options.budget_seconds);
-    let specification = Specification::read(&options.requirement_path)?;
-    fs::create_dir_all(&options.output_dir)?;
-    ensure!(
-        !options.output_dir.is_symlink(),
-        "Project root cannot be a symlink"
-    );
-    let project = options.output_dir.canonicalize()?;
+    let (requirement_path, output_dir) = match (
+        &options.requirement_path,
+        &options.output_dir,
+        options.mode,
+    ) {
+        (Some(requirement_path), Some(output_dir), Some(_)) => {
+            (requirement_path.clone(), output_dir.clone())
+        }
+        _ => eyre::bail!(
+            "octos arc needs REQUIREMENT_PATH, --output-dir and --mode (or the `run` subcommand)"
+        ),
+    };
+    let specification = Specification::read(&requirement_path)?;
+    fs::create_dir_all(&output_dir)?;
+    ensure!(!output_dir.is_symlink(), "Project root cannot be a symlink");
+    let project = output_dir.canonicalize()?;
     for path in [
         project.join(".arc"),
         project.join(".arc/octos"),
@@ -661,7 +712,7 @@ pub fn execute(options: ArcCommand, identity: BinaryIdentity<'_>) -> Result<Valu
     )?;
     write_json(&run_dir.join("delta.json"), &delta)?;
     write_json(&run_dir.join("node-budgets.json"), &node_budgets)?;
-    let mut report = json!({"schema_version":1,"run_id":run_id,"mode":options.mode,"status":"prepared","requirements_sha256":specification.sha256,"previous_requirements_sha256":previous.as_ref().map(|value| &value.sha256),"delta":delta,"node_budgets":node_budgets,"source_before":before,"official_evaluation":"not_run","score":null,"evidence":[],"started_at":chrono::Utc::now().to_rfc3339()});
+    let mut report = json!({"schema_version":1,"run_id":run_id,"mode":options.mode.expect("mode validated by execute"),"status":"prepared","requirements_sha256":specification.sha256,"previous_requirements_sha256":previous.as_ref().map(|value| &value.sha256),"delta":delta,"node_budgets":node_budgets,"source_before":before,"official_evaluation":"not_run","score":null,"evidence":[],"started_at":chrono::Utc::now().to_rfc3339()});
     write_json(&run_dir.join("report.json"), &report)?;
     if options.prepare_only {
         return Ok(report);

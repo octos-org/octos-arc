@@ -63,8 +63,12 @@ if arguments.template:
         sys.exit(f"模板目录缺少 frontend/ 或 backend/：{template}")
     if output.exists():
         sys.exit(f"交付目录已存在，不覆盖：{output}")
+    # Mirror the platform: the template is the committed repo, so per-run
+    # event streams (.arc/*.jsonl, .arc/design) do not carry over; only
+    # .arc/traceability (committed) does.
     shutil.copytree(template, output, symlinks=True,
-                    ignore=shutil.ignore_patterns("node_modules", "dist", "requirements", "skill-output", ".octos"))
+                    ignore=shutil.ignore_patterns("node_modules", "dist", "requirements", "skill-output", ".octos",
+                                                  "octos-events.jsonl", "runner-events.jsonl", "llm-usage.jsonl", "design"))
     print(f"模板：{template}（已复制，进入 evolution 模式）", flush=True)
 os.chdir(adapter)
 os.execve(str(python), [str(python), "main.py", str(task), "--output-dir", str(output), "--type", "web", "--web-port", str(arguments.port)], environment)

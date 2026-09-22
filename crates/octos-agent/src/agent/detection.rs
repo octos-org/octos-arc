@@ -513,6 +513,26 @@ fn strip_code_fence(input: &str) -> &str {
         .trim()
 }
 
+/// `OCTOS_DISABLE_STREAMING=1` sends every chat request non-streaming from
+/// the first call (the platform-side meter of ARC-Bench summed the cumulative
+/// usage of every SSE chunk, over-billing streamed turns many times over).
+/// Read once per process; the P1-4 per-provider fallback still applies on top.
+pub(super) fn streaming_disabled_by_env() -> bool {
+    static FLAG: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+        streaming_disabled_flag(std::env::var("OCTOS_DISABLE_STREAMING").ok().as_deref())
+    });
+    *FLAG
+}
+
+/// Pure parser behind [`streaming_disabled_by_env`]: `1`, `true`, `yes`, `on`
+/// disable streaming; anything else (including unset) keeps it.
+pub(super) fn streaming_disabled_flag(value: Option<&str>) -> bool {
+    matches!(
+        value.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+        Some("1") | Some("true") | Some("yes") | Some("on")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1020,5 +1040,13 @@ mod tests {
         };
         let with_tool = make_response_with_stop(None, vec![tool], 100, StopReason::MaxTokens);
         assert!(!is_empty_max_tokens_response(&with_tool));
+    }
+
+    #[test]
+    fn should_disable_streaming_only_for_truthy_env_values() {
+        assert!(streaming_disabled_flag(Some("1")));
+        assert!(streaming_disabled_flag(Some(" true ")));
+        assert!(!streaming_disabled_flag(Some("0")));
+        assert!(!streaming_disabled_flag(None));
     }
 }

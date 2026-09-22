@@ -1,0 +1,117 @@
+{
+ "id": "92895ec3437e",
+ "submission_id": "eac335962327",
+ "display_name": "Octos official · main@032a57ac · kernel arc.11",
+ "model_name": "deepseek-v4-flash",
+ "original_filename": "octos-arc-bundle.zip",
+ "catalog": "competition",
+ "competition_id": "smoke",
+ "requirement_id": "smoke--dice",
+ "runtime": "python",
+ "agent_source": "upload",
+ "status": "PASSED",
+ "score": 100.0,
+ "test_pass_rate": 100.0,
+ "passed_count": 1,
+ "failed_count": 0,
+ "run_duration_seconds": 19,
+ "token_count": 871,
+ "token_cost_usd": 0.004695,
+ "token_cost_currency": "CNY",
+ "feature_implemented_count": 1,
+ "feature_total_count": 1,
+ "feature_implementation_rate": 100.0,
+ "created_at": "2026-09-14T08:42:25.081063",
+ "started_at": "2026-09-14T08:42:27.421791",
+ "finished_at": "2026-09-14T08:42:58.449164",
+ "failure_reason": null,
+ "steps": [
+  {
+   "key": "deploy_agent",
+   "title": "Preparing environment",
+   "status": "completed",
+   "description": "Done",
+   "logs": [
+    "Traceability initialized with 2 requirements and 1 scenarios",
+    "Running environment preflight",
+    "Environment preflight passed"
+   ]
+  },
+  {
+   "key": "start_agent",
+   "title": "Running agent",
+   "status": "completed",
+   "description": "Done",
+   "logs": [
+    "Installing agent dependencies",
+    "Agent dependencies installed",
+    "Launching generation agent",
+    "Generation agent finished successfully",
+    "Uploaded agent finished; traceability artifacts are expected to be written directly by the SDK"
+   ]
+  },
+  {
+   "key": "run_tests",
+   "title": "Evaluating result",
+   "status": "completed",
+   "description": "Done",
+   "logs": [
+    "Installing dependencies for frontend",
+    "Dependencies installed for frontend",
+    "Building template frontend",
+    "Template frontend built",
+    "Installing dependencies for backend",
+    "Dependencies installed for backend",
+    "Starting template application server",
+    "Template application server started (pid=367)",
+    "Template application is reachable on http://127.0.0.1:3000",
+    "Preparing Playwright configuration",
+    "Using preinstalled Playwright package from runner image",
+    "Deploying generated application",
+    "Generated application is reachable on http://127.0.0.1:3000",
+    "Deploying test environment",
+    "Test environment ready with 4 workers",
+    "Executing tests with 4 workers",
+    "Test progress 0/1",
+    "Test progress 0/1",
+    "Playwright test process finished with code 0",
+    "Playwright results parsed: passed=1, failed=0, score=100.0",
+    "Collecting test artifacts",
+    "Test artifacts collected",
+    "Test results parsed: passed=1, failed=0, score=100.0",
+    "Submission finished successfully"
+   ]
+  }
+ ],
+ "stdout_path": "/mnt/arcbench/bucket-23/users/467f463e0e3849b7ab6b5d5fa1d8769a/runs/92895ec3437e/logs/generation-1/stdout.log",
+ "stderr_path": "/mnt/arcbench/bucket-23/users/467f463e0e3849b7ab6b5d5fa1d8769a/runs/92895ec3437e/logs/generation-1/stderr.log",
+ "result_path": null,
+ "workspace_path": "/var/lib/arcbench/executor-workspaces/467f463e0e3849b7ab6b5d5fa1d8769a/92895ec3437e/generation-1/workspace",
+ "logs_available": true,
+ "tests": [
+  {
+   "name": "REQ-1: roll and display a six-sided dice value",
+   "status": "passed",
+   "passed": true,
+   "duration_ms": 146,
+   "error": null,
+   "file": "REQ-1.spec.ts",
+   "req_id": null,
+   "scenario_id": null
+  }
+ ],
+ "node_states": {
+  "REQ-1": "test-passed",
+  "ROOT": "test-passed"
+ },
+ "can_pause": false,
+ "can_resume": false,
+ "can_rewind": false,
+ "can_manual_edit": false,
+ "manual_edit_node_id": null,
+ "manual_edit_phase": null,
+ "manual_edit_dirty": false,
+ "pause_available": true,
+ "can_cancel": false,
+ "can_continue": false
+}

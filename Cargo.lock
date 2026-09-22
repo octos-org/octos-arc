@@ -4594,16 +4594,22 @@ dependencies = [
 name = "octos-arc"
 version = "2.0.3-rc.11"
 dependencies = [
+ "axum",
  "chrono",
  "clap",
  "eyre",
  "fs2",
+ "octos-core",
+ "octos-llm",
+ "regex",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
  "serde_yml",
  "sha2",
  "tempfile",
+ "tokio",
+ "toml 0.8.23",
  "uuid",
 ]
 

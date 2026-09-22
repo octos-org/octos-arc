@@ -1,0 +1,324 @@
+{
+  "notes": [
+    {
+      "id": "note-pinned",
+      "title": "Sprint goals",
+      "content": "Ship the Keep feature set on time.",
+      "pinned": true,
+      "archived": false,
+      "trashed": false,
+      "color": null,
+      "labels": [],
+      "createdAt": 1789368880580,
+      "updatedAt": 1789368880580
+    },
+    {
+      "id": "note-groceries",
+      "title": "Groceries",
+      "content": "Milk, eggs, bread, coffee.",
+      "pinned": false,
+      "archived": false,
+      "trashed": false,
+      "color": null,
+      "labels": [],
+      "createdAt": 1789368881580,
+      "updatedAt": 1789368881580
+    },
+    {
+      "id": "note-study-schedule",
+      "title": "Study schedule",
+      "content": "Best time to study is every morning before work.",
+      "pinned": false,
+      "archived": false,
+      "trashed": false,
+      "color": null,
+      "labels": [],
+      "createdAt": 1789368881680,
+      "updatedAt": 1789368881680
+    },
+    {
+      "id": "note-garden-existing",
+      "title": "Garden tasks existing",
+      "content": "Tend the garden beds and water the seedlings.",
+      "pinned": false,
+      "archived": false,
+      "trashed": false,
+      "color": "#ccff90",
+      "labels": [],
+      "createdAt": 1789368881830,
+      "updatedAt": 1789374343010
+    },
+    {
+      "id": "note-project-ideas",
+      "title": "Project ideas",
+      "content": "Updated editable content for the note editor.",
+      "pinned": false,
+      "archived": false,
+      "trashed": false,
+      "color": null,
+      "labels": [],
+      "createdAt": 1789368882080,
+      "updatedAt": 1789374339418
+    },
+    {
+      "id": "note-delete231",
+      "title": "Delete me 2.3.1",
+      "content": "Temporary note for deletion flow",
+      "pinned": false,
+      "archived": false,
+      "trashed": true,
+      "color": null,
+      "labels": [],
+      "createdAt": 1789368882580,
+      "updatedAt": 1789374336515
+    },
+    {
+      "id": "note-delete232",
+      "title": "Delete me 2.3.2",
+      "content": "Temporary note for deletion flow",
+      "pinned": false,
+      "archived": false,
+      "trashed": false,
+      "color": null,
+      "labels": [],
+      "createdAt": 1789368883580,
+      "updatedAt": 1789374339408
+    },
+    {
+      "id": "note-delete233",
+      "title": "Delete me 2.3.3",
+      "content": "Temporary note for deletion flow",
+      "pinned": false,
+      "archived": false,
+      "trashed": true,
+      "color": null,
+      "labels": [],
+      "createdAt": 1789368884580,
+      "updatedAt": 1789374339414
+    },
+    {
+      "id": "note-archive251",
+      "title": "Travel plans 2.5.1",
+      "content": "Archive workflow note",
+      "pinned": false,
+      "archived": true,
+      "trashed": false,
+      "color": null,
+      "labels": [],
+      "createdAt": 1789368884680,
+      "updatedAt": 1789374339414
+    },
+    {
+      "id": "note-archive252",
+      "title": "Travel plans 2.5.2",
+      "content": "Archive workflow note",
+      "pinned": false,
+      "archived": false,
+      "trashed": false,
+      "color": null,
+      "labels": [],
+      "createdAt": 1789368884730,
+      "updatedAt": 1789374342212
+    },
+    {
+      "id": "note-archive253",
+      "title": "Travel plans 2.5.3",
+      "content": "Archive workflow note",
+      "pinned": false,
+      "archived": true,
+      "trashed": false,
+      "color": null,
+      "labels": [],
+      "createdAt": 1789368884780,
+      "updatedAt": 1789374342131
+    },
+    {
+      "id": "note-archive254",
+      "title": "Travel plans 2.5.4",
+      "content": "Archive workflow note",
+      "pinned": false,
+      "archived": false,
+      "trashed": false,
+      "color": null,
+      "labels": [],
+      "createdAt": 1789368884880,
+      "updatedAt": 1789374343510
+    },
+    {
+      "id": "note-4e6bb3a001c2da5c",
+      "title": "Garden tasks created",
+      "content": "Color me later",
+      "pinned": false,
+      "archived": false,
+      "trashed": false,
+      "color": "#ccff90",
+      "labels": [],
+      "createdAt": 1789368893522,
+      "updatedAt": 1789368893522
+    },
+    {
+      "id": "note-label-add",
+      "title": "Team retro add label",
+      "content": "Agenda for team retro",
+      "pinned": false,
+      "archived": false,
+      "trashed": false,
+      "color": null,
+      "labels": [
+        "Work"
+      ],
+      "createdAt": 1789368884980,
+      "updatedAt": 1789374345608
+    },
+    {
+      "id": "note-label-remove",
+      "title": "Team retro remove label",
+      "content": "Agenda for team retro",
+      "pinned": false,
+      "archived": false,
+      "trashed": false,
+      "color": null,
+      "labels": [],
+      "createdAt": 1789369460282,
+      "updatedAt": 1789374346310
+    },
+    {
+      "id": "note-design-review",
+      "title": "Design review",
+      "content": "Review the design mockups with the team.",
+      "pinned": false,
+      "archived": false,
+      "trashed": false,
+      "color": null,
+      "labels": [
+        "Work"
+      ],
+      "createdAt": 1789368884900,
+      "updatedAt": 1789368884900
+    },
+    {
+      "id": "note-movie-list",
+      "title": "Movie list",
+      "content": "Films to watch this weekend.",
+      "pinned": false,
+      "archived": false,
+      "trashed": false,
+      "color": null,
+      "labels": [],
+      "createdAt": 1789368884850,
+      "updatedAt": 1789370932194
+    },
+    {
+      "id": "note-call-dentist-existing",
+      "title": "Call dentist existing",
+      "content": "Schedule a checkup with the dentist.",
+      "pinned": false,
+      "archived": false,
+      "trashed": false,
+      "color": null,
+      "labels": [
+        "Reminders"
+      ],
+      "createdAt": 1789368884780,
+      "updatedAt": 1789368884780
+    },
+    {
+      "id": "note-df2110405bfcb291",
+      "title": "Final check",
+      "content": "x",
+      "pinned": false,
+      "archived": false,
+      "trashed": false,
+      "color": null,
+      "labels": [
+        "Reminders"
+      ],
+      "createdAt": 1789369828165,
+      "updatedAt": 1789369828165
+    },
+    {
+      "id": "note-meeting-281",
+      "title": "Meeting agenda 2.8.1",
+      "content": "Pin this note",
+      "pinned": true,
+      "archived": false,
+      "trashed": false,
+      "color": null,
+      "labels": [],
+      "createdAt": 1789368880400,
+      "updatedAt": 1789374349510
+    },
+    {
+      "id": "note-meeting-282",
+      "title": "Meeting agenda 2.8.2",
+      "content": "Pin this note",
+      "pinned": false,
+      "archived": false,
+      "trashed": false,
+      "color": null,
+      "labels": [],
+      "createdAt": 1789368880360,
+      "updatedAt": 1789374350510
+    },
+    {
+      "id": "note-eb328da3fa82659e",
+      "title": "Weekend plan",
+      "content": "Visit the farmers market and prep lunches.",
+      "pinned": false,
+      "archived": false,
+      "trashed": false,
+      "color": null,
+      "labels": [],
+      "createdAt": 1789374336811,
+      "updatedAt": 1789374336811
+    },
+    {
+      "id": "note-91fee7805bd54044",
+      "title": "Garden tasks created",
+      "content": "Color me later",
+      "pinned": false,
+      "archived": false,
+      "trashed": false,
+      "color": "#ccff90",
+      "labels": [],
+      "createdAt": 1789374344615,
+      "updatedAt": 1789374344615
+    },
+    {
+      "id": "note-67827a7f0866810e",
+      "title": "Call dentist created",
+      "content": "Prepare reminders note",
+      "pinned": false,
+      "archived": false,
+      "trashed": false,
+      "color": null,
+      "labels": [
+        "Reminders"
+      ],
+      "createdAt": 1789374347211,
+      "updatedAt": 1789374347211
+    },
+    {
+      "id": "note-e05c150b62908c7a",
+      "title": "Meeting agenda created",
+      "content": "Pin this note",
+      "pinned": true,
+      "archived": false,
+      "trashed": false,
+      "color": null,
+      "labels": [],
+      "createdAt": 1789374351810,
+      "updatedAt": 1789374351810
+    }
+  ],
+  "labels": [
+    "Work",
+    "Projects",
+    "Reminders",
+    "Personal",
+    "Home",
+    "Ideas",
+    "Shopping",
+    "Travel"
+  ]
+}

@@ -1,0 +1,322 @@
+{
+  "meta": {
+    "appName": "BookStack",
+    "version": "1.0.0"
+  },
+  "user": {
+    "nickname": "BookStack User",
+    "email": "bookstack_user@example.com",
+    "passwordHash": "5f3c9a1e7b2d4f6a8c0e1d2b3a4c5d6e:5edfc28597ae32ed148e4b77a4d8977f18df3050722081f75a983847a1ab8affb6e59bccb4392744c9f308c06e1abea3c172abb94985cbdbe411b2552e924fed"
+  },
+  "shelves": [
+    {
+      "id": 1,
+      "name": "Shelf 4.1",
+      "description": "Reference shelf for REQ-4.1.",
+      "tags": [],
+      "createdAt": "2026-09-14T10:31:27.818Z"
+    },
+    {
+      "id": 2,
+      "name": "Shelf 4.2.1",
+      "description": "Reference shelf for REQ-4.2.1.",
+      "tags": [],
+      "createdAt": "2026-09-14T10:31:27.819Z"
+    },
+    {
+      "id": 3,
+      "name": "Shelf 4.3.1",
+      "description": "Reference shelf for REQ-4.3.1.",
+      "tags": [],
+      "createdAt": "2026-09-14T10:31:27.819Z"
+    },
+    {
+      "id": 4,
+      "name": "Shelf 4.3.2",
+      "description": "Reference shelf for REQ-4.3.2.",
+      "tags": [],
+      "createdAt": "2026-09-14T10:31:27.819Z"
+    },
+    {
+      "id": 8,
+      "name": "Shelf 4.4.2",
+      "description": "Shelf to keep when deletion is cancelled for REQ-4.4.2.",
+      "tags": [],
+      "createdAt": "2026-09-14T10:31:27.819Z"
+    },
+    {
+      "id": 9,
+      "name": "Shelf Updated 4.5.1",
+      "description": "Shelf updated by REQ-4.5.1.",
+      "tags": [
+        "knowledge-base",
+        "docs"
+      ],
+      "createdAt": "2026-09-14T10:31:27.819Z"
+    },
+    {
+      "id": 10,
+      "name": "Shelf 4.5.2",
+      "description": "Reference shelf description.",
+      "tags": [
+        "knowledge-base",
+        "docs"
+      ],
+      "createdAt": "2026-09-14T10:31:27.819Z"
+    },
+    {
+      "id": 11,
+      "name": "Shelf 5.2.2",
+      "description": "Reference shelf for REQ-5.2.2.",
+      "tags": [],
+      "createdAt": "2026-09-14T10:31:27.819Z"
+    },
+    {
+      "id": 12,
+      "name": "Shelf 5.6.1",
+      "description": "Reference shelf for REQ-5.6.1.",
+      "tags": [],
+      "createdAt": "2026-09-14T10:31:27.819Z"
+    },
+    {
+      "id": 13,
+      "name": "Shelf 7.1",
+      "description": "Reference shelf for REQ-7.1.",
+      "tags": [],
+      "createdAt": "2026-09-14T10:31:27.819Z"
+    },
+    {
+      "id": 14,
+      "name": "Shelf 7.2",
+      "description": "Reference shelf for REQ-7.2.",
+      "tags": [],
+      "createdAt": "2026-09-14T10:31:27.819Z"
+    },
+    {
+      "id": 15,
+      "name": "Shelf Created 4.3.1",
+      "description": "Shelf created by REQ-4.3.1.",
+      "tags": [
+        "created",
+        "shelf"
+      ],
+      "createdAt": "2026-09-14T11:32:30.946Z"
+    }
+  ],
+  "books": [
+    {
+      "id": 1,
+      "name": "Book 5.1",
+      "description": "Reference book for REQ-5.1.",
+      "tags": [],
+      "shelfId": null,
+      "createdAt": "2026-09-14T10:31:27.819Z"
+    },
+    {
+      "id": 2,
+      "name": "Book 5.2.1",
+      "description": "Reference book for REQ-5.2.1.",
+      "tags": [],
+      "shelfId": null,
+      "createdAt": "2026-09-14T10:31:27.819Z"
+    },
+    {
+      "id": 3,
+      "name": "Book 5.2.2",
+      "description": "Reference book for REQ-5.2.2.",
+      "tags": [],
+      "shelfId": 11,
+      "createdAt": "2026-09-14T10:31:27.819Z"
+    },
+    {
+      "id": 4,
+      "name": "Book Updated 5.4.1",
+      "description": "Book updated by REQ-5.4.1.",
+      "tags": [
+        "manual",
+        "handbook"
+      ],
+      "shelfId": null,
+      "createdAt": "2026-09-14T10:31:27.819Z"
+    },
+    {
+      "id": 5,
+      "name": "Book 5.4.2",
+      "description": "Reference book description.",
+      "tags": [
+        "manual",
+        "handbook"
+      ],
+      "shelfId": null,
+      "createdAt": "2026-09-14T10:31:27.819Z"
+    },
+    {
+      "id": 7,
+      "name": "Book 5.5.2",
+      "description": "Book to keep when deletion is cancelled for REQ-5.5.2.",
+      "tags": [],
+      "shelfId": null,
+      "createdAt": "2026-09-14T10:31:27.819Z"
+    },
+    {
+      "id": 9,
+      "name": "Book 6.1.1",
+      "description": "Reference book for REQ-6.1.1.",
+      "tags": [],
+      "shelfId": null,
+      "createdAt": "2026-09-14T10:31:27.819Z"
+    },
+    {
+      "id": 10,
+      "name": "Book 6.1.2",
+      "description": "Reference book for REQ-6.1.2.",
+      "tags": [],
+      "shelfId": null,
+      "createdAt": "2026-09-14T10:31:27.819Z"
+    },
+    {
+      "id": 11,
+      "name": "Book 6.1.3",
+      "description": "Reference book for REQ-6.1.3.",
+      "tags": [],
+      "shelfId": null,
+      "createdAt": "2026-09-14T10:31:27.819Z"
+    },
+    {
+      "id": 12,
+      "name": "Book 6.2.1",
+      "description": "Reference book for REQ-6.2.1.",
+      "tags": [],
+      "shelfId": null,
+      "createdAt": "2026-09-14T10:31:27.819Z"
+    },
+    {
+      "id": 13,
+      "name": "Book 6.3.1",
+      "description": "Reference book for REQ-6.3.1.",
+      "tags": [],
+      "shelfId": null,
+      "createdAt": "2026-09-14T10:31:27.819Z"
+    },
+    {
+      "id": 14,
+      "name": "Book 6.3.2",
+      "description": "Reference book for REQ-6.3.2.",
+      "tags": [],
+      "shelfId": null,
+      "createdAt": "2026-09-14T10:31:27.819Z"
+    },
+    {
+      "id": 15,
+      "name": "Book 8.1",
+      "description": "Reference book for REQ-8.1.",
+      "tags": [],
+      "shelfId": null,
+      "createdAt": "2026-09-14T10:31:27.819Z"
+    },
+    {
+      "id": 16,
+      "name": "Book 8.2",
+      "description": "Reference book for REQ-8.2.",
+      "tags": [],
+      "shelfId": null,
+      "createdAt": "2026-09-14T10:31:27.819Z"
+    },
+    {
+      "id": 17,
+      "name": "Book 9.1",
+      "description": "Reference book for REQ-9.1.",
+      "tags": [],
+      "shelfId": null,
+      "createdAt": "2026-09-14T10:31:27.819Z"
+    },
+    {
+      "id": 18,
+      "name": "Book Created 5.3.1",
+      "description": "Book created by REQ-5.3.1.",
+      "tags": [
+        "created",
+        "book"
+      ],
+      "shelfId": null,
+      "createdAt": "2026-09-14T11:32:37.553Z"
+    },
+    {
+      "id": 19,
+      "name": "Book Created 5.6.1",
+      "description": "Book created by REQ-5.6.1.",
+      "tags": [
+        "created",
+        "shelf-book"
+      ],
+      "shelfId": 12,
+      "createdAt": "2026-09-14T11:32:41.747Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": 1,
+      "bookId": 12,
+      "name": "Chapter Created 6.2.1",
+      "description": "Chapter created by REQ-6.2.1.",
+      "createdAt": "2026-09-14T11:32:45.051Z"
+    }
+  ],
+  "pages": [
+    {
+      "id": 1,
+      "bookId": 9,
+      "name": "Page Created 6.1.1",
+      "content": "Page content created by REQ-6.1.1.",
+      "createdAt": "2026-09-14T10:31:46.702Z"
+    },
+    {
+      "id": 2,
+      "bookId": 13,
+      "name": "Page 6.3.1",
+      "content": "Page content for REQ-6.3.1.",
+      "createdAt": "2026-09-14T10:31:27.819Z"
+    },
+    {
+      "id": 3,
+      "bookId": 14,
+      "name": "Page 6.3.2",
+      "content": "Page content for REQ-6.3.2.",
+      "createdAt": "2026-09-14T10:31:27.819Z"
+    },
+    {
+      "id": 4,
+      "bookId": 17,
+      "name": "Page Updated 9.1",
+      "content": "Page content created by REQ-9.1.",
+      "createdAt": "2026-09-14T11:29:05.411Z"
+    },
+    {
+      "id": 5,
+      "bookId": 9,
+      "name": "Page Created 6.1.1",
+      "content": "Page content created by REQ-6.1.1.",
+      "createdAt": "2026-09-14T11:32:43.551Z"
+    },
+    {
+      "id": 6,
+      "bookId": 17,
+      "name": "Page Updated 9.1",
+      "content": "Page content created by REQ-9.1.",
+      "createdAt": "2026-09-14T11:32:50.051Z"
+    }
+  ],
+  "drafts": [
+    {
+      "id": 2,
+      "bookId": 10,
+      "name": "Page Draft 6.1.2",
+      "content": "Draft content created by REQ-6.1.2.",
+      "createdAt": "2026-09-14T11:32:43.850Z"
+    }
+  ],
+  "favorites": [
+    "book:15",
+    "book:16"
+  ]
+}

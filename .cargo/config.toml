@@ -1,0 +1,7 @@
+# Keep debug build artifacts small: the target/ directory was growing past
+# 70 GB within hours (incremental caches + full DWARF for many test binaries).
+[build]
+incremental = false
+
+[profile.dev]
+debug = "line-tables-only"

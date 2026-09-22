@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Edit Book - BookStack</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="top-nav">
+    <nav class="nav-inner" aria-label="Main navigation">
+      <a class="brand" href="/" aria-label="BookStack">
+        <span class="brand-logo">BookStack</span>
+      </a>
+      <div class="nav-links">
+        <a class="nav-link" href="/shelves">Shelves</a>
+        <a class="nav-link" href="/books">Books</a>
+      </div>
+      <div class="nav-right">
+        <form class="search-form" action="/search" method="get" role="search">
+          <label for="search-input" class="visually-hidden">Search</label>
+          <input id="search-input" name="q" type="search" placeholder="Search" autocomplete="off" />
+        </form>
+        <!--__HEADER_RIGHT__-->
+      </div>
+    </nav>
+  </header>
+
+  <main class="container">
+    <p class="breadcrumb"><a class="crumb-link" href="/books">Books</a></p>
+
+    <section class="form-card">
+      <h1 class="form-title">Edit Book</h1>
+      <p class="tagline">Update the details of this book.</p>
+
+      <form class="book-form" id="edit-book-form" action="__EDIT_HREF__" method="post">
+        <div class="form-error" id="form-error" role="alert" hidden></div>
+
+        <div class="form-group">
+          <label for="name">Name</label>
+          <input id="name" name="name" type="text" value="__BOOK_NAME__" autocomplete="off" />
+        </div>
+
+        <div class="form-group">
+          <label for="description">Description</label>
+          <input id="description" name="description" type="text" value="__BOOK_DESC__" autocomplete="off" />
+        </div>
+
+        <div class="form-group">
+          <label for="tags">Tags</label>
+          <input id="tags" name="tags" type="text" value="__BOOK_TAGS__" autocomplete="off" />
+        </div>
+
+        <div class="form-actions">
+          <a class="cancel-btn" href="__CANCEL_HREF__">Cancel</a>
+          <button class="submit-btn save-btn" type="submit">Save Book</button>
+        </div>
+      </form>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <span>BookStack Knowledge Base System</span>
+  </footer>
+  <script>
+    (function () {
+      'use strict';
+      var form = document.getElementById('edit-book-form');
+      var errorBox = document.getElementById('form-error');
+      if (!form) return;
+
+      form.addEventListener('submit', function (evt) {
+        var name = document.getElementById('name').value.trim();
+        if (!name) {
+          evt.preventDefault();
+          errorBox.textContent = 'Name is required.';
+          errorBox.hidden = false;
+          return;
+        }
+        errorBox.hidden = true;
+      });
+    })();
+  </script>
+  <script src="/app.js"></script>
+
+</body>
+</html>

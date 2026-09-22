@@ -1,0 +1,10 @@
+{
+  "name": "bookstack-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Plain HTML/CSS/JS frontend for the BookStack knowledge base system.",
+  "scripts": {
+    "build": "node copy.mjs",
+    "start": "node copy.mjs"
+  }
+}

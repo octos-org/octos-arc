@@ -1,0 +1,25 @@
+{
+ "interfaces": [],
+ "tests": [
+  {
+   "test_id": "REQ-1-preserve-six-sided-dice-behavior",
+   "req_id": "REQ-1",
+   "scenario_id": "REQ-1::scenario-1",
+   "type": "e2e",
+   "file_path": "REQ-1.spec.ts",
+   "first_line": null,
+   "status": "passed",
+   "content": null
+  },
+  {
+   "test_id": "REQ-2-count-completed-rolls",
+   "req_id": "REQ-2",
+   "scenario_id": "REQ-2::scenario-1",
+   "type": "e2e",
+   "file_path": "REQ-2.spec.ts",
+   "first_line": null,
+   "status": "passed",
+   "content": null
+  }
+ ]
+}

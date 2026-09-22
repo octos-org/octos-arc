@@ -1,0 +1,210 @@
+{
+ "id": "4c4146be7bbf",
+ "submission_id": "2ad0b1cc7095",
+ "display_name": "Octos official · main@032a57ac · kernel arc.11",
+ "model_name": "deepseek-v4-flash",
+ "original_filename": "octos-arc-bundle.zip",
+ "catalog": "competition",
+ "competition_id": "ticket-booking",
+ "requirement_id": "ticket-booking--ticket-booking",
+ "runtime": "python",
+ "agent_source": "upload",
+ "status": "FAILED",
+ "score": 90.0,
+ "test_pass_rate": 90.0,
+ "passed_count": 9,
+ "failed_count": 1,
+ "run_duration_seconds": 100,
+ "token_count": 23173,
+ "token_cost_usd": 0.134373,
+ "token_cost_currency": "CNY",
+ "feature_implemented_count": 1,
+ "feature_total_count": 2,
+ "feature_implementation_rate": 50.0,
+ "created_at": "2026-09-14T08:54:33.486848",
+ "started_at": "2026-09-14T08:54:36.168607",
+ "finished_at": "2026-09-14T08:56:40.897129",
+ "failure_reason": "Runner exited with test failures or runtime errors",
+ "steps": [
+  {
+   "key": "deploy_agent",
+   "title": "Preparing environment",
+   "status": "completed",
+   "description": "Done",
+   "logs": [
+    "Traceability initialized with 3 requirements and 7 scenarios",
+    "Running environment preflight",
+    "Environment preflight passed"
+   ]
+  },
+  {
+   "key": "start_agent",
+   "title": "Running agent",
+   "status": "completed",
+   "description": "Done",
+   "logs": [
+    "Still working: Launching generation agent",
+    "Still working: Launching generation agent",
+    "Still working: Launching generation agent",
+    "Generation agent finished successfully",
+    "Uploaded agent finished; traceability artifacts are expected to be written directly by the SDK"
+   ]
+  },
+  {
+   "key": "run_tests",
+   "title": "Evaluating result",
+   "status": "completed",
+   "description": "Done",
+   "logs": [
+    "Installing dependencies for frontend",
+    "Dependencies installed for frontend",
+    "Building template frontend",
+    "Template frontend built",
+    "Installing dependencies for backend",
+    "Dependencies installed for backend",
+    "Starting template application server",
+    "Template application server started (pid=882)",
+    "Template application is reachable on http://127.0.0.1:3000",
+    "Preparing Playwright configuration",
+    "Using preinstalled Playwright package from runner image",
+    "Deploying generated application",
+    "Generated application is reachable on http://127.0.0.1:3000",
+    "Deploying test environment",
+    "Test environment ready with 4 workers",
+    "Executing tests with 4 workers",
+    "Test progress 0/10",
+    "Test progress 0/10",
+    "Playwright test process finished with code 1",
+    "Playwright results parsed: passed=9, failed=1, score=90.0",
+    "Collecting test artifacts",
+    "Test artifacts collected",
+    "Test results parsed: passed=9, failed=1, score=90.0",
+    "Runner exited with test failures or runtime errors"
+   ]
+  }
+ ],
+ "stdout_path": "/mnt/arcbench/bucket-23/users/467f463e0e3849b7ab6b5d5fa1d8769a/runs/4c4146be7bbf/logs/generation-1/stdout.log",
+ "stderr_path": "/mnt/arcbench/bucket-23/users/467f463e0e3849b7ab6b5d5fa1d8769a/runs/4c4146be7bbf/logs/generation-1/stderr.log",
+ "result_path": null,
+ "workspace_path": "/var/lib/arcbench/executor-workspaces/467f463e0e3849b7ab6b5d5fa1d8769a/4c4146be7bbf/generation-1/workspace",
+ "logs_available": true,
+ "tests": [
+  {
+   "name": "REQ-1.1: successfully register a new account and remain signed in",
+   "status": "passed",
+   "passed": true,
+   "duration_ms": 1120,
+   "error": null,
+   "file": "REQ-1.1-user-registration.spec.ts",
+   "req_id": null,
+   "scenario_id": null
+  },
+  {
+   "name": "REQ-1.1: reject a duplicate username without creating a signed-in session",
+   "status": "passed",
+   "passed": true,
+   "duration_ms": 695,
+   "error": null,
+   "file": "REQ-1.1-user-registration.spec.ts",
+   "req_id": null,
+   "scenario_id": null
+  },
+  {
+   "name": "REQ-1.1: reject duplicate email with a different username",
+   "status": "passed",
+   "passed": true,
+   "duration_ms": 675,
+   "error": null,
+   "file": "REQ-1.1-user-registration.spec.ts",
+   "req_id": null,
+   "scenario_id": null
+  },
+  {
+   "name": "REQ-1.1: reject mismatched passwords without creating a signed-in session",
+   "status": "passed",
+   "passed": true,
+   "duration_ms": 364,
+   "error": null,
+   "file": "REQ-1.1-user-registration.spec.ts",
+   "req_id": null,
+   "scenario_id": null
+  },
+  {
+   "name": "REQ-1.1: reject missing required registration values before creating a session",
+   "status": "passed",
+   "passed": true,
+   "duration_ms": 667,
+   "error": null,
+   "file": "REQ-1.1-user-registration.spec.ts",
+   "req_id": null,
+   "scenario_id": null
+  },
+  {
+   "name": "REQ-1.1: reject malformed username, email, or password without signing in",
+   "status": "passed",
+   "passed": true,
+   "duration_ms": 927,
+   "error": null,
+   "file": "REQ-1.1-user-registration.spec.ts",
+   "req_id": null,
+   "scenario_id": null
+  },
+  {
+   "name": "REQ-1.2: sign in with a valid username and password",
+   "status": "timedOut",
+   "passed": false,
+   "duration_ms": 10012,
+   "error": "\u001b[31mTest timeout of 10000ms exceeded.\u001b[39m",
+   "file": "REQ-1.2-user-login.spec.ts",
+   "req_id": null,
+   "scenario_id": null
+  },
+  {
+   "name": "REQ-1.2: sign in with a case-insensitive email and password",
+   "status": "passed",
+   "passed": true,
+   "duration_ms": 626,
+   "error": null,
+   "file": "REQ-1.2-user-login.spec.ts",
+   "req_id": null,
+   "scenario_id": null
+  },
+  {
+   "name": "REQ-1.2: reject wrong password and incomplete credentials with the same generic error",
+   "status": "passed",
+   "passed": true,
+   "duration_ms": 744,
+   "error": null,
+   "file": "REQ-1.2-user-login.spec.ts",
+   "req_id": null,
+   "scenario_id": null
+  },
+  {
+   "name": "REQ-1.2: reject an unknown account and stay logged out",
+   "status": "passed",
+   "passed": true,
+   "duration_ms": 760,
+   "error": null,
+   "file": "REQ-1.2-user-login.spec.ts",
+   "req_id": null,
+   "scenario_id": null
+  }
+ ],
+ "node_states": {
+  "REQ-1": "test-passed",
+  "REQ-1.1": "test-passed",
+  "REQ-1.2": "test-passed",
+  "REQ-2": "test-passed",
+  "ROOT": "test-passed"
+ },
+ "can_pause": false,
+ "can_resume": false,
+ "can_rewind": false,
+ "can_manual_edit": false,
+ "manual_edit_node_id": null,
+ "manual_edit_phase": null,
+ "manual_edit_dirty": false,
+ "pause_available": true,
+ "can_cancel": false,
+ "can_continue": false
+}

@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Confirm Delete - BookStack</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="top-nav">
+    <nav class="nav-inner" aria-label="Main navigation">
+      <a class="brand" href="/" aria-label="BookStack">
+        <span class="brand-logo">BookStack</span>
+      </a>
+      <div class="nav-links">
+        <a class="nav-link" href="/shelves">Shelves</a>
+        <a class="nav-link" href="/books">Books</a>
+      </div>
+      <div class="nav-right">
+        <form class="search-form" action="/search" method="get" role="search">
+          <label for="search-input" class="visually-hidden">Search</label>
+          <input id="search-input" name="q" type="search" placeholder="Search" autocomplete="off" />
+        </form>
+        <!--__HEADER_RIGHT__-->
+      </div>
+    </nav>
+  </header>
+
+  <main class="container">
+    <p class="breadcrumb"><a class="crumb-link" href="/books">Books</a></p>
+
+    <section class="login-card">
+      <h1 class="form-title">Confirm Delete</h1>
+      <p class="tagline">Are you sure you want to delete the book named "<span class="book-name-ref">__BOOK_NAME__</span>"? This action cannot be undone.</p>
+
+      <form class="login-form" action="__DELETE_HREF__" method="post">
+        <div class="form-actions">
+          <a class="cancel-btn" href="__CANCEL_HREF__">Cancel</a>
+          <button class="submit-btn delete-btn" type="submit">Delete</button>
+        </div>
+      </form>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <span>BookStack Knowledge Base System</span>
+  </footer>
+  <script src="/app.js"></script>
+</body>
+</html>

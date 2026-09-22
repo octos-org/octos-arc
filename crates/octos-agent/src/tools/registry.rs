@@ -1328,7 +1328,7 @@ impl ToolRegistry {
                 .with_file_access(permissions.file_access),
         );
         registry.register(GlobTool::new(cwd).with_filesystem_scope(permissions.filesystem_scope));
-        registry.register(GrepTool::new(cwd));
+        registry.register(GrepTool::new(cwd).with_filesystem_scope(permissions.filesystem_scope));
         registry
             .register(ListDirTool::new(cwd).with_filesystem_scope(permissions.filesystem_scope));
         registry.register(WebSearchTool::new());
@@ -1541,7 +1541,7 @@ impl ToolRegistry {
                 .with_file_access(permissions.file_access),
         );
         registry.register(GlobTool::new(cwd).with_filesystem_scope(permissions.filesystem_scope));
-        registry.register(GrepTool::new(cwd));
+        registry.register(GrepTool::new(cwd).with_filesystem_scope(permissions.filesystem_scope));
         registry
             .register(ListDirTool::new(cwd).with_filesystem_scope(permissions.filesystem_scope));
         registry.register(CheckWorkspaceContractTool::new(cwd));
@@ -3577,5 +3577,56 @@ mod spec_order_tests {
         assert!(notebook_turn.is_tool_visible("notebook_only"));
         assert!(!ordinary_turn.is_tool_visible("notebook_only"));
         assert!(!base.is_tool_visible("notebook_only"));
+    }
+}
+
+#[cfg(test)]
+mod grep_permission_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn should_preserve_grep_filesystem_scope_on_creation_and_rebind() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let file = outside.path().join("reference.txt");
+        std::fs::write(&file, "external reference needle\n").unwrap();
+        for permissions in [
+            EffectivePermissions::workspace_write(),
+            EffectivePermissions::danger_full_access(),
+        ] {
+            let initial = ToolRegistry::with_builtins_and_permissions(
+                workspace.path(),
+                Box::new(NoSandbox),
+                permissions,
+            );
+            let rebound = initial.rebind_cwd_with_permissions(
+                workspace.path(),
+                Box::new(NoSandbox),
+                permissions,
+            );
+            for registry in [initial, rebound] {
+                let result = registry
+                    .get("grep")
+                    .unwrap()
+                    .execute(&serde_json::json!({
+                        "pattern": "needle", "path": file.to_str().unwrap()
+                    }))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    result.success,
+                    permissions.filesystem_scope.is_host(),
+                    "{}",
+                    result.output
+                );
+                if result.success {
+                    assert!(
+                        result.output.contains("external reference needle"),
+                        "{}",
+                        result.output
+                    );
+                }
+            }
+        }
     }
 }

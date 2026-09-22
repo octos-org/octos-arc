@@ -26,6 +26,7 @@ use tracing::{info, warn};
 use crate::commands::chat;
 use crate::commands::gateway::build_system_prompt;
 use crate::commands::gateway::profile_factory::{profile_plugin_env, profile_search_provider_keys};
+use crate::commands::gateway::prompt::GatewayPromptParts;
 use crate::config::Config;
 use crate::cron_tool::CronTool;
 use crate::profiles::{ReviewConfig, UserProfile, config_from_profile};
@@ -40,7 +41,7 @@ pub(crate) fn enable_stdio_solo_lean_defaults() {
     STDIO_SOLO_LEAN_DEFAULTS.store(true, Ordering::Release);
 }
 
-fn stdio_solo_lean_defaults_enabled() -> bool {
+pub(crate) fn stdio_solo_lean_defaults_enabled() -> bool {
     STDIO_SOLO_LEAN_DEFAULTS.load(Ordering::Acquire)
         || std::env::var("OCTOS_SKIP_BUNDLED_SKILLS").ok().as_deref() == Some("1")
 }
@@ -74,6 +75,50 @@ const STDIO_SOLO_CODING_TOOLS: &[&str] = &[
 
 fn is_stdio_solo_coding_tool(name: &str) -> bool {
     STDIO_SOLO_CODING_TOOLS.contains(&name)
+}
+
+/// `OCTOS_STDIO_SOLO_TOOLS`: an optional comma-separated allow-list the ARC
+/// harness narrows a stdio/solo session to (a codegen-style repair turn drops
+/// the shell, the planning tools are never useful to it). It is applied with
+/// `retain`, so it can only ever narrow the surface: names that are not
+/// registered match nothing. Unset or empty keeps the built-in set.
+pub(crate) fn stdio_solo_tool_allowlist(raw: Option<&str>) -> Option<Vec<String>> {
+    let raw = raw?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    Some(
+        raw.split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect(),
+    )
+}
+
+/// The allow-list from the process environment (read per call: the harness
+/// starts one kernel process per turn shape).
+pub(crate) fn stdio_solo_tool_allowlist_from_env() -> Option<Vec<String>> {
+    stdio_solo_tool_allowlist(std::env::var("OCTOS_STDIO_SOLO_TOOLS").ok().as_deref())
+}
+
+/// Keep the headless ARC transport on the same compact instruction surface as
+/// `octos chat --profile coding`. The gateway prompt is intentionally broad
+/// (web/research/media/plugin guidance) and is the wrong default for an
+/// unauthenticated stdio coding session: it costs the provider cache roughly
+/// the entire prompt budget before the user's first sentence arrives.
+///
+/// An explicit profile system prompt remains authoritative. The normal ARC
+/// path has no such override, so it gets the stable worker prompt and the
+/// small post-memory section produced by the regular assembler.
+fn apply_stdio_solo_prompt_defaults(
+    parts: &mut GatewayPromptParts,
+    explicit_system_prompt: Option<&str>,
+    lean_defaults: bool,
+) {
+    if lean_defaults && explicit_system_prompt.is_none() {
+        parts.pre_memory = octos_agent::DEFAULT_WORKER_PROMPT.to_owned();
+    }
 }
 
 /// Immutable inputs needed to rebuild only a profile's plugin-derived layer.
@@ -814,6 +859,11 @@ impl ProfileRuntime {
             prompt_parts.post_memory.push_str("\n\n");
             prompt_parts.post_memory.push_str(fragment);
         }
+        apply_stdio_solo_prompt_defaults(
+            &mut prompt_parts,
+            reload.gateway_system_prompt.as_deref(),
+            stdio_solo_lean_defaults_enabled(),
+        );
         if let Some(profile) = &self.agent_profile
             && let Some(template) = &profile.system_prompt_template
             && let Some(template) =
@@ -1531,7 +1581,13 @@ impl ProfileRuntime {
             let (profile, _) = octos_agent::profile::ProfileDefinition::load("coding")
                 .wrap_err("failed to load built-in coding profile for stdio/solo")?;
             profile.apply_to_registry(&mut tools);
-            tools.retain(is_stdio_solo_coding_tool);
+            let allowlist = stdio_solo_tool_allowlist_from_env();
+            tools.retain(|name| {
+                is_stdio_solo_coding_tool(name)
+                    && allowlist
+                        .as_ref()
+                        .is_none_or(|allowed| allowed.iter().any(|allow| allow == name))
+            });
             Some(Arc::new(profile))
         } else {
             None
@@ -1584,6 +1640,11 @@ impl ProfileRuntime {
             prompt_parts.post_memory.push_str("\n\n");
             prompt_parts.post_memory.push_str(fragment);
         }
+        apply_stdio_solo_prompt_defaults(
+            &mut prompt_parts,
+            profile.config.gateway.system_prompt.as_deref(),
+            stdio_solo_lean_defaults_enabled(),
+        );
         let system_prompt = prompt_parts.joined();
         let prompt_parts_for_runtime = prompt_parts.clone();
 
@@ -1793,6 +1854,38 @@ mod tests {
         assert_eq!(STDIO_SOLO_CODING_TOOLS.len(), 12);
         assert!(is_stdio_solo_coding_tool("shell"));
         assert!(!is_stdio_solo_coding_tool("run_pipeline"));
+    }
+
+    #[test]
+    fn stdio_tool_allowlist_parses_names_and_ignores_blank_input() {
+        assert_eq!(stdio_solo_tool_allowlist(None), None);
+        assert_eq!(stdio_solo_tool_allowlist(Some("  ")), None);
+        assert_eq!(
+            stdio_solo_tool_allowlist(Some("read_file, write_file,,bash ")),
+            Some(vec![
+                "read_file".to_owned(),
+                "write_file".to_owned(),
+                "bash".to_owned()
+            ])
+        );
+    }
+
+    #[test]
+    fn stdio_lean_prompt_uses_compact_worker_instructions_but_honors_override() {
+        let mut parts = GatewayPromptParts {
+            pre_memory: "large gateway prompt".to_owned(),
+            post_memory: "tool guidance".to_owned(),
+        };
+        apply_stdio_solo_prompt_defaults(&mut parts, None, true);
+        assert_eq!(parts.pre_memory, octos_agent::DEFAULT_WORKER_PROMPT);
+        assert_eq!(parts.post_memory, "tool guidance");
+
+        let mut overridden = GatewayPromptParts {
+            pre_memory: "operator prompt".to_owned(),
+            post_memory: String::new(),
+        };
+        apply_stdio_solo_prompt_defaults(&mut overridden, Some("operator prompt"), true);
+        assert_eq!(overridden.pre_memory, "operator prompt");
     }
 
     /// Build a minimal `UserProfile` with no LLM contract. M11-D

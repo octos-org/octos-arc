@@ -263,6 +263,8 @@ pub struct OpenAIProvider {
     /// explicit opt-in/out must survive either builder-call order (mirrors
     /// `AnthropicProvider::prompt_caching_override`).
     prompt_cache_affinity_override: Option<bool>,
+    /// Total timeout of one non-streaming chat request.
+    chat_timeout: std::time::Duration,
 }
 
 const OFFICIAL_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
@@ -297,6 +299,7 @@ impl OpenAIProvider {
             provider_label: "openai".to_string(),
             prompt_cache_affinity: true,
             prompt_cache_affinity_override: None,
+            chat_timeout: std::time::Duration::from_secs(crate::provider::DEFAULT_LLM_TIMEOUT_SECS),
         }
     }
 
@@ -343,7 +346,7 @@ impl OpenAIProvider {
         // don't emit DeepSeek-specific fields there by default. Operators opt in
         // per route via `model_hints` (with_hints, applied after this, still wins).
         if self.hints.reasoning_style == ReasoningStyle::EffortAndThinkingToggle
-            && !url.contains("api.deepseek.com")
+            && !deepseek_v4_reasoning_endpoint(&url)
         {
             self.hints.reasoning_style = ReasoningStyle::None;
         }
@@ -405,6 +408,15 @@ impl OpenAIProvider {
         self
     }
 
+    /// Total timeout of one non-streaming chat request (default
+    /// [`crate::provider::DEFAULT_LLM_TIMEOUT_SECS`]). Long single-response
+    /// generations (whole applications in one reply) need more than the
+    /// interactive default; streaming requests are unaffected.
+    pub fn with_chat_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.chat_timeout = timeout;
+        self
+    }
+
     /// POST a non-streaming chat request. Factored so the graceful
     /// image-modality fallback can re-send a rebuilt (text-only) request
     /// without duplicating the wire setup.
@@ -416,9 +428,7 @@ impl OpenAIProvider {
                 format!("Bearer {}", self.api_key.expose_secret()),
             )
             .header("Content-Type", "application/json")
-            .timeout(std::time::Duration::from_secs(
-                crate::provider::DEFAULT_LLM_TIMEOUT_SECS,
-            ))
+            .timeout(self.chat_timeout)
             .json(request)
             .send()
             .await
@@ -804,6 +814,14 @@ impl OpenAIProvider {
             self.prompt_cache_input_manifest(request, config).trace();
         }
     }
+}
+
+/// ARC-Bench exposes DeepSeek V4 through an OpenAI-compatible gateway.  It
+/// implements the same `reasoning_effort`/`thinking` fields as the official
+/// endpoint, so keep the provider controls enabled there as well.  Other
+/// custom endpoints remain opt-in through explicit `model_hints`.
+fn deepseek_v4_reasoning_endpoint(url: &str) -> bool {
+    url.contains("api.deepseek.com") || url.contains("api.arc-bench.com")
 }
 
 /// Request keys octos sets via dedicated `OpenAIRequest` fields; if an operator
@@ -1915,6 +1933,13 @@ mod tests {
             .with_base_url("https://api.deepseek.com/v1");
         assert_eq!(
             official.hints.reasoning_style,
+            ReasoningStyle::EffortAndThinkingToggle
+        );
+        // ARC-Bench's gateway implements the same DeepSeek V4 controls.
+        let arc = OpenAIProvider::new("k", "deepseek-v4-flash")
+            .with_base_url("https://api.arc-bench.com/v1");
+        assert_eq!(
+            arc.hints.reasoning_style,
             ReasoningStyle::EffortAndThinkingToggle
         );
         // The same model name on a non-DeepSeek endpoint must not inherit it.

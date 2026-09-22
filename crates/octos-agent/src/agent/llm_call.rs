@@ -211,11 +211,12 @@ impl Agent {
             let input_estimate = (input_bytes / 3) as u32;
 
             let attempt_config: &ChatConfig = bumped_config.as_ref().unwrap_or(&provider_config);
-            let streaming_disabled = self
-                .streaming_disabled_providers
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .contains(&streaming_provider_key);
+            let streaming_disabled = super::detection::streaming_disabled_by_env()
+                || self
+                    .streaming_disabled_providers
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .contains(&streaming_provider_key);
             let build_and_consume = with_prompt_cache_observation_context(
                 attempt_config.prompt_cache_context.as_ref(),
                 iteration,

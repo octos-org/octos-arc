@@ -117,7 +117,7 @@ class OctosStdioSession:
 
     def bootstrap_profile(self, provider: str, model: str, base_url: str | None,
                           api_key_env: str | None, timeout: float = 60.0,
-                          hooks: list | None = None) -> None:
+                          hooks: list | None = None, tools_disabled: bool = False) -> None:
         """Create a solo profile and select its LLM (serve mode has no config-
         file default profile like `octos chat` does, so we onboard one).
 
@@ -137,12 +137,15 @@ class OctosStdioSession:
         self.profile_id = res.get("profile_id") if isinstance(res, dict) else None
         if not self.profile_id:
             raise OctosProtocolError(f"profile/local/create gave no profile_id: {res}")
-        if hooks:
+        fields = {"hooks": hooks} if hooks else {}
+        if tools_disabled:
+            fields["tool_policy"] = {"deny": ["*"]}
+        if fields:
             # The solo ProfileRuntime builds its HookExecutor from the profile's
             # own config (config_from_profile), not from the host config.json or
             # profile-defaults.json — verified with real stdio turns. Patch the
             # registry file before the LLM upsert re-reads and re-saves it.
-            self._patch_profile_config({"hooks": hooks})
+            self._patch_profile_config(fields)
         api_type = "anthropic" if provider == "anthropic" else "openai"
         route: dict = {"api_type": api_type}
         if base_url:
@@ -184,15 +187,17 @@ class OctosStdioSession:
 
     def run_turn(self, text: str, timeout: float = 1800.0) -> tuple[bool, str]:
         """Run one turn; stream events to on_event. Returns (ok, full_text)."""
+        deadline = time.monotonic() + timeout
+        if timeout <= 0:
+            return False, "octos turn timed out"
         turn_id = str(uuid.uuid4())
         self._send("turn/start", {
             "session_id": self.session_id,
             "turn_id": turn_id,
             "input": [{"kind": "text", "text": text}],
-        }, want_response=True, timeout=60.0)
+        }, want_response=True, timeout=min(60.0, timeout))
 
         chunks: list[str] = []
-        deadline = time.monotonic() + timeout
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
