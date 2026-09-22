@@ -18,7 +18,7 @@ pipeline moves on instead of spending the budget of the requirements to come.
 Every step has its own timeout below the node's, because a shell_check that
 overruns its node timeout is an ERROR that aborts the whole pipeline.
 """
-import json, os, shutil, signal, socket, subprocess, sys, time
+import json, os, shutil, signal, socket, subprocess, sys, tempfile, time
 from pathlib import Path
 
 STOP = "ARC_NO_MORE_REPAIRS"
@@ -76,22 +76,42 @@ def sh(cmd, cwd, env, timeout):
         return 124, (out.decode(errors="replace") if isinstance(out, bytes) else out) + f"\n[timed out after {timeout}s]"
 
 
-def playwright_root(env: dict) -> Path | None:
-    """A directory holding node_modules/@playwright/test. Preinstalled first
-    (the platform image may ship one); otherwise a cached private install every
-    later node check reuses."""
-    for cand in filter(None, [os.environ.get("OCTOS_ARC_PLAYWRIGHT_ROOT"), "/workspace"]):
-        if (Path(cand) / "node_modules" / "@playwright" / "test").is_dir():
-            return Path(cand)
-    root = Path(os.environ.get("TMPDIR", "/tmp")) / "arc-playwright"
-    if (root / "node_modules" / "@playwright" / "test").is_dir():
-        return root
+PLAYWRIGHT_VERSION = "1.63.0"   # never `latest`: an unpinned install broke cloud grading once
+
+
+def playwright_root(env: dict) -> tuple[Path | None, dict]:
+    """A directory holding node_modules/@playwright/test, plus the env its
+    browsers need. The runner image ships one (/opt/arcbench on the platform,
+    seen in every cloud run); a private pinned install through the mirrors is
+    the fallback, cached for every later check."""
+    private = Path(os.environ.get("TMPDIR", "/tmp")) / "arc-playwright"
+    cands = [os.environ.get("OCTOS_ARC_PLAYWRIGHT_ROOT"), "/opt/arcbench", "/workspace", "/workspace/tests"]
+    rc, npm_root = sh(["npm", "root", "-g"], "/", env, 20)
+    if rc == 0 and npm_root.strip():
+        cands.append(str(Path(npm_root.strip().splitlines()[-1]).parent))
+    has = lambda root: (Path(root) / "node_modules" / "@playwright" / "test").is_dir()  # noqa: E731
+    for cand in filter(None, cands):
+        if has(cand):
+            return Path(cand), {}
+    browsers = {"PLAYWRIGHT_BROWSERS_PATH": str(private / "browsers")}
+    if has(private):
+        return private, browsers if (private / "browsers").is_dir() else {}
+    rc, hits = sh(["find", "/", "-maxdepth", "6", "-type", "d", "-path", "*/node_modules/@playwright/test",
+                   "-not", "-path", "/proc/*", "-not", "-path", "/sys/*"], "/", env, 25)
+    for hit in sorted(hits.split(), key=len):
+        if hit.startswith("/") and has(Path(hit).parents[2]):
+            return Path(hit).parents[2], {}
     if os.environ.get("OCTOS_ARC_INSTALL_PLAYWRIGHT", "1") != "1":
-        return None
-    root.mkdir(parents=True, exist_ok=True)
-    rc, _ = sh("npm init -y >/dev/null 2>&1 && " + INSTALL + " @playwright/test "
-               "&& npx playwright install chromium", root, env, 600)
-    return root if rc == 0 else None
+        return None, {}
+    private.mkdir(parents=True, exist_ok=True)
+    (private / "package.json").write_text('{"name": "arc-verify", "private": true}')
+    mirror = dict(env, npm_config_registry="https://registry.npmmirror.com",
+                  PLAYWRIGHT_DOWNLOAD_HOST="https://npmmirror.com/mirrors/playwright", **browsers)
+    rc, log = sh(f"{INSTALL} @playwright/test@{PLAYWRIGHT_VERSION} && "
+                 "./node_modules/.bin/playwright install chromium", private, mirror, 600)
+    if rc:
+        print(f"[verify] private Playwright install failed:\n{log[-800:]}")
+    return (private, browsers) if rc == 0 else (None, {})
 
 
 def check(tests: Path, port: int, specs: list[str]) -> int:
@@ -104,6 +124,7 @@ def check(tests: Path, port: int, specs: list[str]) -> int:
         print("[verify] no frontend/src: the implement node wrote nothing to verify")
         return 1
     env = os.environ.copy()
+    env.pop("FORCE_COLOR", None)           # plain text for the model reading the failure
     if os.environ.get("NODE_BIN"):
         env["PATH"] = os.environ["NODE_BIN"] + ":" + env.get("PATH", "")
     for cwd, step in ((out / "frontend", f"{INSTALL} && npm run build"), (out / "backend", INSTALL)):
@@ -114,9 +135,10 @@ def check(tests: Path, port: int, specs: list[str]) -> int:
     if not free(port):
         print(f"[verify] port {port} already serving; refusing to score another process")
         return 1
-    root = playwright_root(env) if specs else None
+    root, pw_env = playwright_root(env) if specs else (None, {})
     if specs and root is None:
-        print("[verify] Playwright unavailable; cannot run the acceptance specs")
+        # Nothing the model can fix: stop, do not spend repair rounds on it.
+        print(f"[verify] Playwright unavailable; cannot run the acceptance specs\n{STOP}: no test runner")
         return 1
 
     server_log = out / ".arc-server.log"      # a file, not a pipe: a chatty server never blocks
@@ -143,10 +165,17 @@ def check(tests: Path, port: int, specs: list[str]) -> int:
                 code = exc
             print(f"[verify] no public spec; GET / -> {code}")
             return 0 if code == 200 else 1
-        work = root / "run"
-        if work.exists():
-            shutil.rmtree(work)
-        (work / "tests").mkdir(parents=True)
+        # Specs `import '@playwright/test'` and Node resolves that upward from
+        # the spec, so the copy sits under the install when it is writable
+        # (NODE_PATH covers the temp-dir fallback).
+        work = root / ".octos-acceptance" / "run"
+        try:
+            if work.exists():
+                shutil.rmtree(work)
+            (work / "tests").mkdir(parents=True)
+        except OSError:
+            work = Path(tempfile.mkdtemp(prefix="arc-verify-")) / "run"
+            (work / "tests").mkdir(parents=True)
         # The node's specs plus the helpers they import (support/*.ts), at the
         # same relative paths so `../support/e2e` still resolves.
         helpers = [p.relative_to(tests) for p in tests.rglob("*")
@@ -160,11 +189,13 @@ def check(tests: Path, port: int, specs: list[str]) -> int:
         # same limit so a slow app fails here, where it can still be repaired.
         (work / "playwright.config.ts").write_text(
             "import { defineConfig } from '@playwright/test';\n"
-            "export default defineConfig({ testDir: './tests', timeout: %s, retries: 0, workers: 4, "
+            "export default defineConfig({ testDir: './tests', outputDir: './test-results', timeout: %s, retries: 0, workers: 4, "
             "reporter: [['list']], use: { headless: true, baseURL: process.env.E2E_BASE_URL } });\n"
             % os.environ.get("OCTOS_ARC_TEST_TIMEOUT_MS", "10000"))
-        rc, log = sh(["npx", "playwright", "test", "-c", str(work / "playwright.config.ts")], root,
-                     dict(env, E2E_BASE_URL=f"http://127.0.0.1:{port}"),
+        rc, log = sh([str(root / "node_modules" / ".bin" / "playwright"), "test", "-c",
+                      str(work / "playwright.config.ts")], work,
+                     dict(env, E2E_BASE_URL=f"http://127.0.0.1:{port}", CI="1",
+                          NODE_PATH=str(root / "node_modules"), **pw_env),
                      int(os.environ.get("OCTOS_ARC_PLAYWRIGHT_TIMEOUT", "600")))
     finally:
         stop(srv)
