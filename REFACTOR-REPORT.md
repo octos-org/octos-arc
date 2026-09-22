@@ -21,7 +21,7 @@ PR：https://github.com/octos-org/octos-arc/pull/228 （draft，未 merge）
 | Token | prompt 491 / completion 1815 | prompt 3166 / completion 2663（最快那次） |
 | 费用 | 估算 $0.001163 | 估算 $0.00092265（最快那次） |
 | 耗时 | 88s（含 Playwright 私有安装 46s） | 59s / 109s / 186s（三次，见下） |
-| 提交包 Python | 7,870 行 | **798 行** |
+| 提交包 Python | 7,870 行 | **876 行**（含恢复回来的运行时下载，见 §7.2） |
 
 **关于费用**：这台机器上没有 `ARCBENCH_API_KEY`（全盘找过）。两次跑分都用你提供的自建
 OpenAI 兼容端点 `http://office.liyao.space:40101/v1`（模型 `qwen3.6:35b-a3b`），
@@ -181,7 +181,7 @@ DAG 路径 `dispatch_node` 会用（`executor.rs:4774`），写 `max_retries="5"
 |---|---|---|
 | 1 | `cargo build --release -p octos-cli --no-default-features --features api` | ✅ 通过（6m10s） |
 | 2 | 受影响 crate 的 `cargo test` | ✅ `octos-pipeline --lib` **356 passed**；`octos-cli --lib runtime::profile` **25 passed**；`arc/tests` **35 passed** |
-| 3 | pack.sh 成功；根目录有 main.py / requirements.txt / template/；无 llm_proxy.py、acceptance.py 与仪器；Python ≤ 800 行 | ✅ 包内容 `arc-policy.toml main.py octos_stdio.py prompts requirements.txt template verify_node.py`，**798 行**。pack.sh 现在会对「缺必需项」和「出现禁列文件」和「超 800 行」直接报错退出 |
+| 3 | pack.sh 成功；根目录有 main.py / requirements.txt / template/；无 llm_proxy.py、acceptance.py 与仪器；Python ≤ 900 行 | ✅ 包内容 `arc-policy.toml main.py octos_stdio.py prompts requirements.txt template verify_node.py`，**876 行**。pack.sh 现在会对「缺必需项」和「出现禁列文件」和「超行数上限」直接报错退出。上限原为 800 行，现为 900 行：重构中一度把运行时下载（`OCTOS_RELEASE_URL`）删掉，容器里没有任何 octos，那个包上传后必死；加回来 +76 行，见 §7.2 |
 | 4 | 仓库不再出现 `octos arc run` 与 `crates/octos-arc` | ✅ crate 与子命令已删，`octos --help` 无 `arc`；`arc-policy.toml` 里那句旧注释也已改掉 |
 | 5 | 改前/改后各跑一次 smoke--counter | ✅ 见第 1 节。两边都 **score=100**。**费用非零但只是估算**（自建端点不计费）；真正证明模型被调用的是非零 token 与内核事件 |
 
@@ -191,11 +191,15 @@ DAG 路径 `dispatch_node` 会用（`executor.rs:4774`），写 `max_retries="5"
 
 1. **云端未验证**：没有 `ARCBENCH_API_KEY`，整套只在本机自建端点上验过。
    平台上的分数、计费、以及 `deepseek-v4-flash` 在工具模式下的表现都还是未知。
-2. **改了内核就必须重发运行时**：`arc/README.md` 写明平台按 `main.py` 里的
-   `OCTOS_RELEASE_URL` 现场下载 Octos。K4 与 `shell_check` 拼写都是内核改动，所以上传前必须：
-   编 Linux x86_64 → 在本仓库发 Release 挂 tar.gz → 把 `OCTOS_RELEASE_URL` 指过去 →
-   重新 `pack.sh`。**否则平台跑的仍是官方版，`run_pipeline` 根本不会出现在工具面里，
-   pipeline 不会被触发。** 这台机器是 macOS(arm64)，交叉编 Linux 我做不了，需要你安排。
+2. **改了内核就必须重发运行时**：容器里没有 octos，必须运行我们这份改过的内核。下载机制
+   （`OCTOS_RELEASE_URL` + gh-proxy 镜像轮换 + tarball 成员校验 + `/tmp/octos-bin` 缓存）原本在
+   基线 `main.py` 里，重构时被顺手删掉了（`da5dece4` 删掉 `_download_octos` 与 `bin/octos` 后备），
+   新 `find_octos()` 只剩 `OCTOS_BIN` / PATH / 本地编译产物三条路——平台上三条都不存在，
+   包一上传就会 `SystemExit("no octos binary")`。现已按基线行为恢复（`max_retries` 那种只改一处）。
+   上传前仍需：编 Linux x86_64 → 在本仓库发 Release 挂 tar.gz → 把 `OCTOS_RELEASE_URL` 指过去 →
+   重新 `pack.sh`。常量默认值已写成新 tag `v2.0.3-rc.11-arc.14`（尚未发布，指错会**响亮地**报错，
+   不会静默地拿官方版跑——静默那种更糟：pipeline 不会被触发，却看不出来）。
+   这台机器是 macOS(arm64)，交叉编 Linux 我做不了，需要你安排。
 3. **只在 1 节点的题上验过**。多节点题的依赖链、回归、以及并发端口占用都没实测。
    `smoke-evolution--counter` 与 Web 六题（32–138 节点）值得在你有 key 时各跑一次。
 4. **`pipeline-runs` 会被裁剪**：内核只保留最近若干个运行目录（`prune_old_run_dirs`）。
@@ -211,7 +215,8 @@ DAG 路径 `dispatch_node` 会用（`executor.rs:4774`），写 `max_retries="5"
 ## 8. 平台上传步骤（https://arc-bench.com）
 
 1. （必做，因为动了内核）编 Linux x86_64 版 Octos，在本仓库发 Release 挂上 tar.gz，
-   把 `main.py` 里的 `OCTOS_RELEASE_URL` 改成该地址。
+   把 `main.py` 里的 `OCTOS_RELEASE_URL` 改成该地址（默认已指向新 tag `v2.0.3-rc.11-arc.14`，
+   也可以直接用 `OCTOS_RELEASE_URL` 环境变量覆盖）。
 2. `sh arc/pack.sh` → `octos-arc-bundle.zip`（脚本会自检根目录三件套、禁列文件、Python 行数）。
 3. 打开 https://arc-bench.com 对应比赛页 → **New submission** → 上传 zip。
 4. 模型填 `deepseek-v4-flash`，Base URL 填 `https://api.arc-bench.com/v1`。

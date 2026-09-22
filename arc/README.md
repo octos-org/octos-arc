@@ -12,7 +12,7 @@ export ARCBENCH_API_KEY=ak_...               # arc-bench.com 个人页的 API ke
 export NODE_BIN=/opt/homebrew/opt/node@24/bin # 你的 node 目录（Linux 一般不用设）
 
 # 1. 拿一个 Octos 二进制：官方版，或自己编的魔改版
-export OCTOS_BIN=/path/to/octos              # 不设则用 ../target/release/octos
+export OCTOS_BIN=/path/to/octos              # 不设则依次找 bin/octos、PATH、../target/release/octos，最后从 release 下载
 cargo build --release -p octos-cli --no-default-features --features api   # 编魔改版时
 
 # 2. 本机做题（约 5 分钟，不到一分钱）

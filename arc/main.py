@@ -11,7 +11,7 @@ acceptance runner. That policy lives in arc-policy.toml and prompts/.
 """
 from __future__ import annotations
 
-import argparse, functools, json, os, re, shlex, shutil, sys, tempfile, time, tomllib
+import argparse, functools, json, os, re, shlex, shutil, subprocess, sys, tempfile, time, tomllib
 from pathlib import Path
 
 import yaml
@@ -264,12 +264,90 @@ def kernel_env(pol: dict, config_dir: Path) -> dict:
     return env
 
 
+#: The container ships no octos, and it must be OUR kernel: K4's policy-driven
+#: tool surface and the `shell_check` DOT spelling are kernel changes the stock
+#: release does not have. Without them `run_pipeline` never appears in the tool
+#: surface, so the pipeline is never triggered. Published from the refactor
+#: branch as a Linux x86_64 bundle; override with OCTOS_RELEASE_URL.
+OCTOS_RELEASE_URL = (
+    "https://github.com/octos-org/octos-arc/releases/download/v2.0.3-rc.11-arc.14/"
+    "octos-bundle-x86_64-unknown-linux-gnu.tar.gz"
+)
+
+
+def _octos_url() -> str:
+    return os.environ.get("OCTOS_RELEASE_URL", OCTOS_RELEASE_URL)
+
+
+def _cached_octos(cache_dir: Path) -> str | None:
+    """The cached binary, but only if it came from the URL in force now."""
+    try:
+        if (cache_dir / "octos").is_file() and (cache_dir / "source-url.txt").read_text() == _octos_url():
+            return str(cache_dir / "octos")
+    except OSError:
+        pass
+    return None
+
+
+def _tarball_ok(tarball: Path) -> bool:
+    import tarfile
+    try:
+        with tarfile.open(tarball) as tf:
+            return tf.getmember("octos") is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _download_octos(cache_dir: Path) -> str:
+    """gh-proxy mirrors first: the runner's own path to GitHub stalls HTTP/2.
+    12 rotating attempts plus a member check, so a truncated file is never run."""
+    import tarfile, urllib.request
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    tarball, url = cache_dir / "octos-bundle.tar.gz", _octos_url()
+    if _cached_octos(cache_dir) is None:
+        tarball.unlink(missing_ok=True)     # an older URL's archive is stale
+    mirrors = [f"{prefix}/{url}" for prefix in ("https://ghfast.top", "https://gh-proxy.com")] + [url]
+    for attempt in range(1, 13):
+        if _tarball_ok(tarball):
+            break
+        mirror = mirrors[(attempt - 1) % len(mirrors)]
+        log(f"[octos] download attempt {attempt} ({mirror}) ...")
+        if shutil.which("curl"):
+            cmd = ["curl", "-fsSL", "--http1.1", "-C", "-", "--connect-timeout", "30",
+                   "--speed-limit", "10240", "--speed-time", "60", "--retry", "2",
+                   "-o", str(tarball), mirror]
+            try:
+                subprocess.run(cmd, check=False, timeout=600)
+            except subprocess.TimeoutExpired:
+                log(f"[octos] attempt {attempt} stalled 600s; rotating mirror")
+        else:
+            try:
+                urllib.request.urlretrieve(mirror, tarball)
+            except Exception as exc:  # noqa: BLE001
+                log(f"[octos] download error: {exc}")
+    if not _tarball_ok(tarball):
+        raise RuntimeError(f"failed to download our octos release after 12 attempts: {url}")
+    with tarfile.open(tarball) as tf:
+        for member in ("octos", "octos-sandbox"):
+            try:
+                tf.extract(member, cache_dir, filter="data")
+            except KeyError:
+                pass
+    for name in ("octos", "octos-sandbox"):
+        if (cache_dir / name).is_file():
+            (cache_dir / name).chmod(0o755)
+    (cache_dir / "source-url.txt").write_text(url)
+    return str(cache_dir / "octos")
+
+
 def find_octos() -> str:
-    for cand in [os.environ.get("OCTOS_BIN"), shutil.which("octos"),
-                 BUNDLE_DIR.parent / "target" / "release" / "octos"]:
+    """OCTOS_BIN, bundled bin/octos, PATH, a local build -- then the release."""
+    for cand in (os.environ.get("OCTOS_BIN"), BUNDLE_DIR / "bin" / "octos",
+                 shutil.which("octos"), BUNDLE_DIR.parent / "target" / "release" / "octos"):
         if cand and Path(cand).is_file():
             return str(Path(cand).resolve())
-    raise SystemExit("no octos binary: set OCTOS_BIN")
+    cache_dir = Path(os.environ.get("OCTOS_CACHE_DIR", "/tmp/octos-bin"))
+    return _cached_octos(cache_dir) or _download_octos(cache_dir)
 
 
 
