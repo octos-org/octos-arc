@@ -770,6 +770,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn should_parse_shell_check_handler_and_keep_it_off_the_no_shell_rule() {
+        // An operator-authored DOT pipeline needs a command validator ("run
+        // the acceptance spec, branch on its exit status"). `shell` is banned
+        // outright by validate rule 23; `ShellCheck` is the handler that rule
+        // exempts, and it must be reachable from DOT — not only from the IR
+        // palette. The command rides on `prompt` (what `ShellCheckHandler`
+        // reads) and `max_retries` bounds the node's own retries.
+        let dot = r#"
+            digraph acceptance {
+                build [handler="codergen", prompt="write the app"]
+                verify [handler="shell_check", prompt="npx playwright test REQ-1.spec.ts", timeout_secs="600", max_retries="5"]
+                build -> verify
+            }
+        "#;
+
+        let graph = parse_dot(dot).unwrap();
+        let verify = &graph.nodes["verify"];
+        assert_eq!(verify.handler, crate::graph::HandlerKind::ShellCheck);
+        assert_eq!(
+            verify.prompt.as_deref(),
+            Some("npx playwright test REQ-1.spec.ts"),
+            "the command must survive as `prompt` — ShellCheckHandler reads it from there",
+        );
+        assert_eq!(verify.max_retries, 5);
+
+        // Rule 23 (NoShell) targets `HandlerKind::Shell` only, so a DOT-authored
+        // shell_check must not be flagged.
+        let diags = crate::validate::diagnostics(&graph);
+        assert!(
+            !diags.iter().any(|d| d.rule_id == crate::validate::RuleId::NoShell),
+            "shell_check must not trip the NoShell rule: {diags:?}",
+        );
+    }
+
+    #[test]
     fn test_parse_simple_graph() {
         let dot = r#"
             digraph test {

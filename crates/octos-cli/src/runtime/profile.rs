@@ -77,11 +77,19 @@ fn is_stdio_solo_coding_tool(name: &str) -> bool {
     STDIO_SOLO_CODING_TOOLS.contains(&name)
 }
 
-/// `OCTOS_STDIO_SOLO_TOOLS`: an optional comma-separated allow-list the ARC
-/// harness narrows a stdio/solo session to (a codegen-style repair turn drops
-/// the shell, the planning tools are never useful to it). It is applied with
-/// `retain`, so it can only ever narrow the surface: names that are not
-/// registered match nothing. Unset or empty keeps the built-in set.
+/// `OCTOS_STDIO_SOLO_TOOLS`: an optional comma-separated allow-list that
+/// decides a stdio/solo session's tool surface for the turn (a codegen-style
+/// repair turn drops the shell, the planning tools are never useful to it).
+///
+/// K4: when the variable IS set it is the AUTHORITY for the turn, not merely a
+/// narrowing filter over [`STDIO_SOLO_CODING_TOOLS`]. That lets a policy-driven
+/// turn ask for a registered tool the built-in coding set omits — the ARC
+/// harness names `run_pipeline` on its pipeline turn so the kernel's own
+/// pipeline engine can be triggered instead of a bespoke Python orchestrator.
+/// It is still applied with `retain`, so it can only select among tools that
+/// are actually REGISTERED: naming an unknown tool matches nothing and can
+/// never conjure a capability that the profile did not build. Unset or empty
+/// keeps the built-in set.
 pub(crate) fn stdio_solo_tool_allowlist(raw: Option<&str>) -> Option<Vec<String>> {
     let raw = raw?.trim();
     if raw.is_empty() {
@@ -787,7 +795,15 @@ impl ProfileRuntime {
         }
         if let Some(profile) = &self.agent_profile {
             tools.filter_by_profile(&profile.tools);
-            if !profile.tools.allows("run_pipeline") {
+            // K4: an explicit stdio/solo policy allow-list that NAMES
+            // `run_pipeline` decides the turn's surface (see
+            // `stdio_solo_tool_allowlist`), so it survives the profile's own
+            // verdict here. Without this the envelope would strip the tool
+            // straight back off on every cwd rebind / dynamic registration.
+            let policy_wants_pipeline = stdio_solo_lean_defaults_enabled()
+                && stdio_solo_tool_allowlist_from_env()
+                    .is_some_and(|allowed| allowed.iter().any(|name| name == "run_pipeline"));
+            if !profile.tools.allows("run_pipeline") && !policy_wants_pipeline {
                 tools.retain(|name| name != "run_pipeline");
             }
         }
@@ -1582,11 +1598,12 @@ impl ProfileRuntime {
                 .wrap_err("failed to load built-in coding profile for stdio/solo")?;
             profile.apply_to_registry(&mut tools);
             let allowlist = stdio_solo_tool_allowlist_from_env();
-            tools.retain(|name| {
-                is_stdio_solo_coding_tool(name)
-                    && allowlist
-                        .as_ref()
-                        .is_none_or(|allowed| allowed.iter().any(|allow| allow == name))
+            tools.retain(|name| match allowlist.as_ref() {
+                // K4: an explicit policy allow-list decides the turn's surface
+                // outright, so it may widen past the built-in coding set as
+                // well as narrow it (still only over REGISTERED tools).
+                Some(allowed) => allowed.iter().any(|allow| allow == name),
+                None => is_stdio_solo_coding_tool(name),
             });
             Some(Arc::new(profile))
         } else {

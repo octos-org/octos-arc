@@ -12,7 +12,6 @@ members = [
     "crates/octos-store",
     "crates/octos-services",
     "crates/octos-cli",
-    "crates/octos-arc",
     "crates/app-skills/news",
     "crates/app-skills/deep-search",
     "crates/app-skills/deep-crawl",
@@ -59,7 +58,6 @@ octos-diagnostics = { path = "crates/octos-diagnostics" }
 octos-memory = { path = "crates/octos-memory" }
 octos-llm = { path = "crates/octos-llm" }
 octos-agent = { path = "crates/octos-agent" }
-octos-arc = { path = "crates/octos-arc" }
 octos-bus = { path = "crates/octos-bus" }
 octos-workflows = { path = "crates/octos-workflows" }
 octos-server = { path = "crates/octos-server" }

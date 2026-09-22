@@ -51,7 +51,6 @@ use eyre::Result;
 
 pub use account::AccountCommand;
 pub use acp::AcpCommand;
-pub use octos_arc::ArcCommand;
 // Test-support seam for the `octos acp` bridge: the end-to-end integration test
 // in `crates/octos-cli/tests/acp_integration.rs` drives the real ACP handler
 // wiring with a `MockLlm`-backed agent over an in-process transport. Hidden
@@ -140,7 +139,6 @@ pub enum Command {
     Channels(ChannelsCommand),
     /// Interactive multi-turn chat with an agent.
     Chat(ChatCommand),
-    Arc(ArcCommand),
     /// Inspect and reclaim the build-cache pool (`status` / `gc` / `gate`).
     Cache(CacheCommand),
     /// Inspect the saved startup config (`show` / `path`); read-only.
@@ -211,8 +209,7 @@ pub fn reserve_stdout(command: &Command) -> bool {
         Command::Acp(_)
         | Command::Profile(_)
         | Command::McpServe(_)
-        | Command::Chat(_)
-        | Command::Arc(_) => true,
+        | Command::Chat(_) => true,
         // `inbox path` is a machine-readable single path.
         Command::Inbox(_) => true,
         Command::Doctor(cmd) => cmd.json,
@@ -412,37 +409,6 @@ impl Executable for Command {
             Self::Auth(cmd) => cmd.execute(),
             Self::Channels(cmd) => cmd.execute(),
             Self::Chat(cmd) => cmd.execute(),
-            Self::Arc(cmd) => {
-                match cmd.subcommand {
-                    Some(octos_arc::ArcSubcommand::Run(run)) => {
-                        let code = octos_arc::execute_run(run)?;
-                        if code != 0 {
-                            std::process::exit(code);
-                        }
-                        return Ok(());
-                    }
-                    Some(octos_arc::ArcSubcommand::DenyProtected(deny)) => {
-                        std::process::exit(octos_arc::execute_deny_protected(deny));
-                    }
-                    None => {}
-                }
-                eyre::ensure!(
-                    cfg!(feature = "api") || cmd.prepare_only,
-                    "ARC coding requires an Octos build with the api feature"
-                );
-                let executable = std::env::current_exe()?;
-                let result = octos_arc::execute(
-                    cmd,
-                    octos_arc::pin::BinaryIdentity {
-                        executable: &executable,
-                        source_commit: env!("OCTOS_GIT_SHA"),
-                        target: env!("OCTOS_BUILD_TARGET"),
-                        dirty: env!("OCTOS_SOURCE_DIRTY") != "false",
-                    },
-                )?;
-                println!("{}", serde_json::to_string_pretty(&result)?);
-                Ok(())
-            }
             Self::Cache(cmd) => cmd.execute(),
             Self::Config(cmd) => cmd.execute(),
             Self::Cron(cmd) => cmd.execute(),

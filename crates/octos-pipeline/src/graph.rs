@@ -270,6 +270,17 @@ impl HandlerKind {
         match s {
             "codergen" => Some(Self::Codergen),
             "shell" => Some(Self::Shell),
+            // The command-validator handler was previously reachable ONLY from
+            // the typed-IR palette, so an operator-installed DOT pipeline had
+            // no way to spell "run this fixed command and branch on its exit
+            // status" — `shell` is banned outright by validate rule 23
+            // (`RuleId::NoShell`) because it is arbitrary code execution.
+            // `ShellCheck` is the sanctioned alternative that rule already
+            // exempts: the command is fixed by the graph author, and the node
+            // gets no LLM tool surface. Giving it a DOT spelling adds no new
+            // capability — it only lets a DOT author reach the same handler
+            // the IR path has always been able to build.
+            "shell_check" => Some(Self::ShellCheck),
             "gate" => Some(Self::Gate),
             "noop" => Some(Self::Noop),
             "parallel" => Some(Self::Parallel),
