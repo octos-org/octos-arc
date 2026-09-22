@@ -25,7 +25,8 @@ def atomic(node_id, deps=(), with_specs=False):
 POLICY = dict(name="arc_build", repairs=5, node_timeout=1200, verify_timeout=900,
               max_iterations=40, run_timeout=3600, tools="read_file,write_file",
               reasoning="none", max_output_tokens=65536, node_budget=600,
-              min_node_seconds=120, final_reserve_seconds=600, final_repairs=2)
+              min_node_seconds=120, final_reserve_seconds=600, final_repairs=2,
+              context_window=0)
 
 
 def build(nodes_spec):

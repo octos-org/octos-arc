@@ -42,6 +42,11 @@ _POLICY = {
     "tools": ("node_tools", "OCTOS_ARC_NODE_TOOLS", "read_file,write_file,edit_file,glob,grep,list_dir"),
     "reasoning": ("reasoning_effort", "OCTOS_ARC_REASONING", "none"),
     "max_output_tokens": ("max_output_tokens", "OCTOS_ARC_MAX_TOKENS", 65536),
+    # 0 = trust the kernel's model catalog. Set it for an endpoint serving a
+    # smaller window than the model's nominal one (a local server loaded with
+    # 32k): the node's worker then trims to fit instead of overflowing into
+    # empty responses.
+    "context_window": ("context_window", "OCTOS_ARC_CONTEXT_WINDOW", 0),
 }
 
 
@@ -224,8 +229,10 @@ def build_pipeline(nodes, specs, tests_dir, out, pol, ports, deadline) -> str:
         return dot_quote(" ".join(shlex.quote(str(a)) for a in
                                   [sys.executable, BUNDLE_DIR / "verify_node.py", *args]))
 
+    window = f'context_window="{pol["context_window"]}", ' if pol["context_window"] else ""
+
     def impl_node(name, label, prompt) -> str:
-        return (f'    {name} [handler="codergen", label="{dot_quote(label)}", '
+        return (f'    {name} [handler="codergen", label="{dot_quote(label)}", {window}'
                 f'tools="{pol["tools"]}", max_iterations="{pol["max_iterations"]}", '
                 f'max_retries="0", continue_on_error="true", timeout_secs="{pol["node_timeout"]}", '
                 f'prompt="{dot_quote(prompt)}"]')
