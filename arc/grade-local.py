@@ -81,7 +81,8 @@ def main(argv: list[str]) -> int:
         shutil.copytree(specs, work / "tests")
         (work / "playwright.config.ts").write_text(
             "import { defineConfig } from '@playwright/test';\n"
-            "export default defineConfig({ testDir: './tests', timeout: 60000, retries: 0, workers: 4, reporter: [['json', { outputFile: 'report.json' }], ['line']], use: { headless: true, baseURL: process.env.E2E_BASE_URL } });\n")
+            "export default defineConfig({ testDir: './tests', timeout: %s, retries: 0, workers: 4, reporter: [['json', { outputFile: 'report.json' }], ['line']], use: { headless: true, baseURL: process.env.E2E_BASE_URL } });\n"
+            % os.environ.get("ARC_GRADE_TIMEOUT_MS", "10000"))
         tenv = dict(env, E2E_BASE_URL=f"http://127.0.0.1:{port}")
         t0 = time.time()
         r = subprocess.run(["npx", "playwright", "test", "-c", str(work/"playwright.config.ts")], cwd=grader, env=tenv, capture_output=True, text=True)

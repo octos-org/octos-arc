@@ -4758,6 +4758,32 @@ async fn should_escalate_when_bucket_exhausted() {
 }
 
 #[tokio::test]
+async fn should_retry_same_lane_on_provider_5xx_until_bucket_exhausted() {
+    // A provider 5xx classifies as ProviderUnavailable (SwitchProvider hint).
+    // With no rotation hook the loop re-issues the call on the same lane
+    // instead of bailing and discarding the task's progress; the bucket
+    // limit still ends it.
+    let agent = build_dispatch_test_agent().await;
+    let mut retry_state = LoopRetryState::with_limits(crate::agent::loop_state::LoopRetryLimits {
+        provider_unavailable: 1,
+        ..Default::default()
+    });
+    let mut messages: Vec<Message> = Vec::new();
+    let server_error: eyre::Report =
+        LlmError::from_status(500, "XML syntax error on line 434").into();
+    assert_eq!(
+        agent.handle_loop_error_with_dispatch(&server_error, &mut retry_state, 1, &mut messages),
+        LoopErrorAction::Retry,
+        "a first provider 5xx must retry on the same lane"
+    );
+    assert_eq!(
+        agent.handle_loop_error_with_dispatch(&server_error, &mut retry_state, 2, &mut messages),
+        LoopErrorAction::Bail,
+        "an exhausted provider_unavailable bucket must bail"
+    );
+}
+
+#[tokio::test]
 async fn should_bail_on_authentication_error_without_compaction() {
     // F-001 coverage #3: FailFast-hint variants (Authentication) must
     // land on Bail immediately, regardless of whether a compaction

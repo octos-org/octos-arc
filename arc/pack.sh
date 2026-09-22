@@ -58,8 +58,10 @@ for banned in llm_proxy.py acceptance.py rust_engine.py verify_app.py path_split
 done
 # 800 with the runtime fetch inlined; the container has no octos of its own and
 # ours must come from the release, so the fetch (main.py OCTOS_RELEASE_URL)
-# counts against the budget rather than being trimmed away.
-LIMIT_PY=900
+# counts against the budget rather than being trimmed away. 1100 since the
+# acceptance command bounds its own repairs and steps (verify_node.py) and the
+# graph grew a seed node and a regression pass -- still glue, not a loop.
+LIMIT_PY=1100
 PYLINES=$(find "$PKG" -name '*.py' -exec cat {} + | wc -l | tr -d ' ')
 echo "打包内容：$(find "$PKG" -maxdepth 1 -mindepth 1 -printf '%f ' 2>/dev/null || ls "$PKG" | tr '\n' ' ')"
 echo "包内 Python 行数：$PYLINES"

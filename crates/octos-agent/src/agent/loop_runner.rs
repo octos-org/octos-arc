@@ -572,14 +572,19 @@ impl Agent {
             LoopDecision::RotateAndRetry => {
                 // No in-band credential rotation hook on Agent in this
                 // release — lane rotation is already owned by the outer
-                // provider chain. Degrade to Bail so the caller surfaces
-                // the error rather than looping on a sick lane.
+                // provider chain, which has already given up on its lanes by
+                // the time the error reaches here. Re-issue the call on the
+                // same lane instead of bailing: a 5xx is often one bad
+                // response (e.g. a malformed tool-call rendering), and bailing
+                // throws away every tool call this task has made so far. The
+                // provider_unavailable bucket still bounds it — past the limit
+                // `observe` returns Exhausted and the loop bails.
                 tracing::warn!(
                     variant = classified.variant_name(),
                     iteration,
-                    "loop retry: rotate_and_retry requested but no hook wired; bailing"
+                    "loop retry: provider unavailable and no rotation hook; retrying the same lane"
                 );
-                LoopErrorAction::Bail
+                LoopErrorAction::Retry
             }
             LoopDecision::Escalate => {
                 tracing::warn!(

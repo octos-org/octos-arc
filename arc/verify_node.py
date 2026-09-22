@@ -9,11 +9,19 @@ on retry. Playwright's exit code IS the verdict; nothing re-derives it.
 The app dir is the CWD = the pipeline run dir, the only place this node's
 write_file calls land (its file tools are fenced there).
 
-usage: verify_node.py <tests_dir> <port> <spec.ts> [spec.ts ...]
+usage: verify_node.py <tests_dir> <port> [--tag ID --attempts N --deadline EPOCH] [spec.ts ...]
+       verify_node.py --seed <deliverable_dir>
+
+A failing run prints STOP when this tag has used its N attempts or the
+deadline has passed; the repair back-edge does not fire on that marker, so the
+pipeline moves on instead of spending the budget of the requirements to come.
+Every step has its own timeout below the node's, because a shell_check that
+overruns its node timeout is an ERROR that aborts the whole pipeline.
 """
 import json, os, shutil, signal, socket, subprocess, sys, time
 from pathlib import Path
 
+STOP = "ARC_NO_MORE_REPAIRS"
 INSTALL = "npm install --no-audit --no-fund --no-package-lock"
 
 # The harness owns the two manifests so the model never spends a turn on them
@@ -24,6 +32,21 @@ MANIFESTS = {
     "backend/package.json": {"name": "b", "private": True, "type": "commonjs",
                              "scripts": {"start": "node server.js"}},
 }
+
+
+def seed(src: Path) -> int:
+    """Start the run dir from the existing app (evolution tasks, the platform
+    template), else the bundle's own template: the model extends real files
+    instead of rebuilding from nothing, and nothing stale survives collection."""
+    out = Path.cwd()
+    for base in (src, Path(__file__).resolve().parent / "template"):
+        if (base / "frontend").is_dir() and not (out / "frontend").exists():
+            for part in ("frontend", "backend"):
+                if (base / part).is_dir():
+                    shutil.copytree(base / part, out / part, dirs_exist_ok=True,
+                                    ignore=shutil.ignore_patterns("node_modules", "dist", ".git"))
+            print(f"[seed] workspace seeded from {base}")
+    return 0
 
 
 def free(port: int) -> bool:
@@ -43,6 +66,16 @@ def stop(proc) -> None:
             continue
 
 
+def sh(cmd, cwd, env, timeout):
+    try:
+        r = subprocess.run(cmd, cwd=cwd, env=env, shell=isinstance(cmd, str),
+                           capture_output=True, text=True, timeout=timeout)
+        return r.returncode, r.stdout + r.stderr
+    except subprocess.TimeoutExpired as exc:
+        out = (exc.stdout or b"") + (exc.stderr or b"")
+        return 124, (out.decode(errors="replace") if isinstance(out, bytes) else out) + f"\n[timed out after {timeout}s]"
+
+
 def playwright_root(env: dict) -> Path | None:
     """A directory holding node_modules/@playwright/test. Preinstalled first
     (the platform image may ship one); otherwise a cached private install every
@@ -56,14 +89,13 @@ def playwright_root(env: dict) -> Path | None:
     if os.environ.get("OCTOS_ARC_INSTALL_PLAYWRIGHT", "1") != "1":
         return None
     root.mkdir(parents=True, exist_ok=True)
-    rc = subprocess.run("npm init -y >/dev/null 2>&1 && " + INSTALL + " @playwright/test "
-                        "&& npx playwright install chromium",
-                        cwd=root, env=env, shell=True).returncode
+    rc, _ = sh("npm init -y >/dev/null 2>&1 && " + INSTALL + " @playwright/test "
+               "&& npx playwright install chromium", root, env, 600)
     return root if rc == 0 else None
 
 
-def main(argv: list[str]) -> int:
-    out = Path.cwd(); tests = Path(argv[0]).resolve(); port = int(argv[1]); specs = argv[2:]
+def check(tests: Path, port: int, specs: list[str]) -> int:
+    out = Path.cwd()
     for rel, data in MANIFESTS.items():
         if not (out / rel).exists():
             (out / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -75,58 +107,108 @@ def main(argv: list[str]) -> int:
     if os.environ.get("NODE_BIN"):
         env["PATH"] = os.environ["NODE_BIN"] + ":" + env.get("PATH", "")
     for cwd, step in ((out / "frontend", f"{INSTALL} && npm run build"), (out / "backend", INSTALL)):
-        r = subprocess.run(step, cwd=cwd, env=env, shell=True, capture_output=True, text=True)
-        if r.returncode:
-            print(f"[verify] {cwd.name}: {step!r} failed\n{(r.stdout + r.stderr)[-1500:]}")
+        rc, log = sh(step, cwd, env, 240)
+        if rc:
+            print(f"[verify] {cwd.name}: {step!r} failed\n{log[-1500:]}")
             return 1
-    root = playwright_root(env)
-    if root is None:
-        print("[verify] Playwright unavailable; cannot run the acceptance specs")
-        return 1
     if not free(port):
         print(f"[verify] port {port} already serving; refusing to score another process")
         return 1
-
-    work = root / "run"
-    if work.exists():
-        shutil.rmtree(work)
-    (work / "tests").mkdir(parents=True)
-    copied = 0
-    for rel in specs:
-        if (tests / rel).is_file():
-            shutil.copy2(tests / rel, work / "tests" / Path(rel).name)
-            copied += 1
-    if not copied:
-        # No specs means nothing was checked. Never report success for an empty
-        # run -- that is exactly the "ships without being verified" path.
-        print(f"[verify] no spec files found for {specs} under {tests}")
+    root = playwright_root(env) if specs else None
+    if specs and root is None:
+        print("[verify] Playwright unavailable; cannot run the acceptance specs")
         return 1
-    (work / "playwright.config.ts").write_text(
-        "import { defineConfig } from '@playwright/test';\n"
-        "export default defineConfig({ testDir: './tests', timeout: %s, retries: 0, workers: 4, "
-        "reporter: [['list']], use: { headless: true, baseURL: process.env.E2E_BASE_URL } });\n"
-        % os.environ.get("OCTOS_ARC_TEST_TIMEOUT_MS", "20000"))
 
+    server_log = out / ".arc-server.log"      # a file, not a pipe: a chatty server never blocks
     srv = subprocess.Popen("npm run start", cwd=out / "backend", env=dict(env, PORT=str(port)),
-                           shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
+                           shell=True, stdout=server_log.open("w"), stderr=subprocess.STDOUT,
                            text=True, preexec_fn=os.setsid)
     try:
         for _ in range(60):
-            if not free(port):
+            if not free(port) or srv.poll() is not None:
                 break
             time.sleep(0.5)
-        else:
-            print(f"[verify] backend never bound port {port}")
+        if free(port):
+            stop(srv)
+            print(f"[verify] backend never bound port {port}\n{server_log.read_text(errors='replace')[-1500:]}")
             return 1
-        run = subprocess.run(["npx", "playwright", "test", "-c", str(work / "playwright.config.ts")],
-                             cwd=root, env=dict(env, E2E_BASE_URL=f"http://127.0.0.1:{port}"),
-                             capture_output=True, text=True)
+        if not specs:
+            # No public example for this requirement: the app must still build,
+            # boot and serve its home page.
+            import urllib.request
+            try:
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                code = opener.open(f"http://127.0.0.1:{port}/", timeout=30).status
+            except Exception as exc:  # noqa: BLE001 -- any failure is the verdict
+                code = exc
+            print(f"[verify] no public spec; GET / -> {code}")
+            return 0 if code == 200 else 1
+        work = root / "run"
+        if work.exists():
+            shutil.rmtree(work)
+        (work / "tests").mkdir(parents=True)
+        # The node's specs plus the helpers they import (support/*.ts), at the
+        # same relative paths so `../support/e2e` still resolves.
+        helpers = [p.relative_to(tests) for p in tests.rglob("*")
+                   if p.is_file() and "node_modules" not in p.parts and not p.name.endswith(".spec.ts")
+                   and p.suffix in (".ts", ".js", ".mjs", ".cjs", ".json")]
+        for rel in [*specs, *helpers]:
+            if (tests / rel).is_file():
+                (work / "tests" / rel).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(tests / rel, work / "tests" / rel)
+        # The platform grades with a 10 s per-test timeout; verify under the
+        # same limit so a slow app fails here, where it can still be repaired.
+        (work / "playwright.config.ts").write_text(
+            "import { defineConfig } from '@playwright/test';\n"
+            "export default defineConfig({ testDir: './tests', timeout: %s, retries: 0, workers: 4, "
+            "reporter: [['list']], use: { headless: true, baseURL: process.env.E2E_BASE_URL } });\n"
+            % os.environ.get("OCTOS_ARC_TEST_TIMEOUT_MS", "10000"))
+        rc, log = sh(["npx", "playwright", "test", "-c", str(work / "playwright.config.ts")], root,
+                     dict(env, E2E_BASE_URL=f"http://127.0.0.1:{port}"),
+                     int(os.environ.get("OCTOS_ARC_PLAYWRIGHT_TIMEOUT", "600")))
     finally:
         stop(srv)
     # Playwright's exit code IS the verdict and its list reporter already names
     # every failing assertion; print that verbatim for the repair round.
-    print((run.stdout + run.stderr)[-4000:])
-    return run.returncode
+    print(log[-6000:])
+    return rc
+
+
+def inventory(out: Path) -> str:
+    """The app's source files with line counts. This output is the next
+    implement node's input, so it starts oriented instead of spending its
+    first turns on list_dir/glob."""
+    rows = []
+    for part in ("frontend", "backend"):
+        for f in sorted((out / part).rglob("*")) if (out / part).is_dir() else []:
+            rel = f.relative_to(out)
+            if f.is_file() and not {"node_modules", "dist"} & set(rel.parts) and f.stat().st_size < 1_000_000:
+                rows.append(f"{rel} ({len(f.read_bytes().splitlines())} lines)")
+    return "Workspace files: " + ", ".join(rows[:80])
+
+
+def main(argv: list[str]) -> int:
+    if argv[:1] == ["--seed"]:
+        return seed(Path(argv[1]))
+    opts, specs, it = {}, [], iter(argv[2:])
+    for arg in it:
+        if arg.startswith("--"):
+            opts[arg[2:]] = next(it)
+        else:
+            specs.append(arg)
+    rc = check(Path(argv[0]).resolve(), int(argv[1]), specs)
+    print(inventory(Path.cwd()))
+    if "tag" in opts:                           # the adapter reads the last verdict
+        (Path.cwd() / ".arc-status").mkdir(exist_ok=True)
+        (Path.cwd() / ".arc-status" / opts["tag"]).write_text(str(rc))
+    if rc and "tag" in opts:
+        counter = Path.cwd() / ".arc-attempts" / opts["tag"]
+        counter.parent.mkdir(exist_ok=True)
+        attempts = int(counter.read_text() or 0) + 1 if counter.is_file() else 1
+        counter.write_text(str(attempts))
+        if attempts >= int(opts.get("attempts", 6)) or time.time() >= float(opts.get("deadline", "inf")):
+            print(f"{STOP}: attempt {attempts} for {opts['tag']}; moving on")
+    return rc
 
 
 if __name__ == "__main__":
