@@ -22,7 +22,6 @@ octos-core = { workspace = true }
 # Releases API. Self-update mutation stays on the existing `updater.rs` (Stage 3).
 octos-diagnostics = { workspace = true, features = ["github"] }
 octos-agent = { workspace = true }
-octos-arc = { workspace = true }
 octos-memory = { workspace = true }
 octos-llm = { workspace = true }
 octos-bus = { workspace = true }
