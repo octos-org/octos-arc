@@ -238,7 +238,11 @@ def build_pipeline(nodes, specs, tests_dir, out, pol, ports, deadline) -> str:
     # `retry` in the condition is what makes these legal back-edges.
     repair = (f'{fail} && !outcome.contains(\\"{STOP}\\") '
               f'&& context.retry_budget != \\"exhausted\\"')
+    # run_pipeline kills the whole run at its timeout -- 1800 s unless the
+    # graph says otherwise. The adapter owns the budget, so the graph carries
+    # it (plus the final reserve); kernel_env raises the clamp ceiling to match.
     lines = [f'digraph {pol["name"]} {{',
+             f'    graph [default_timeout_secs="{pol["run_timeout"] + pol["final_reserve_seconds"]}"]',
              '    start [handler="noop", label="Start"]',
              f'    seed [handler="shell_check", label="seed workspace", timeout_secs="120", '
              f'prompt="{verify("--seed", out)}"]',
@@ -324,6 +328,10 @@ def kernel_env(pol: dict, config_dir: Path) -> dict:
     env["OCTOS_CONFIG_DIR"] = str(config_dir)
     # K4: name the turn's tool surface -- run_pipeline hands the kernel the loop.
     env["OCTOS_STDIO_SOLO_TOOLS"] = "run_pipeline"
+    # ...and only OUR pipeline: the session is woken by its own background
+    # run and has been seen starting `deep_research` from that wake-up.
+    env["OCTOS_PIPELINE_ALLOW"] = pol["name"]
+    env["OCTOS_PIPELINE_TIMEOUT_MAX_SECS"] = str(pol["run_timeout"] + pol["final_reserve_seconds"])
     env["OCTOS_PIPELINE_DAG"] = "1"      # the DAG scheduler: retries + critique feedback
     env.setdefault("OCTOS_DISABLE_STREAMING", "1")
     env.setdefault("OCTOS_DANGER_FULL_ACCESS", "1")
@@ -590,7 +598,7 @@ def wait_for_pipeline(session, state: dict, pol: dict, data_dir: Path) -> None:
     """`run_pipeline` is spawn_only: the dispatch turn returns as soon as the
     pipeline is queued, so the glue waits here for the background run."""
     import queue
-    deadline = state["started"] + pol["run_timeout"]
+    deadline = state["started"] + pol["run_timeout"] + pol["final_reserve_seconds"]
     idle_limit = pol["verify_timeout"] + 120
     last_progress = time.time()
     while time.time() < deadline:
