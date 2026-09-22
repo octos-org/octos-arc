@@ -61,7 +61,9 @@ done
 # counts against the budget rather than being trimmed away. 1100 since the
 # acceptance command bounds its own repairs and steps (verify_node.py) and the
 # graph grew a seed node and a regression pass -- still glue, not a loop.
-LIMIT_PY=1100
+# 1200 once the timeouts, output caps and reasoning controls the profile
+# runtime ignores in config.json moved onto the graph and the env (#230).
+LIMIT_PY=1200
 PYLINES=$(find "$PKG" -name '*.py' -exec cat {} + | wc -l | tr -d ' ')
 echo "打包内容：$(find "$PKG" -maxdepth 1 -mindepth 1 -printf '%f ' 2>/dev/null || ls "$PKG" | tr '\n' ' ')"
 echo "包内 Python 行数：$PYLINES"
