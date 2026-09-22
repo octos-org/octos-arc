@@ -1,9 +1,18 @@
-# ARC harness policy — read at runtime by `octos arc run --policy arc/arc-policy.toml`.
+# ARC harness policy — read at runtime by arc/main.py.
+#
+# LIVE SECTION: [pipeline]. That is the only table the current adapter reads
+# (see main.py::policy); every key there has an OCTOS_* environment override.
+#
+# Everything below [pipeline] describes the PREVIOUS in-Python orchestrator,
+# which the kernel's octos-pipeline engine replaced. Those tables are inert —
+# nothing reads them — and are kept because the numbers and the reasoning
+# behind them (tier thresholds, repair budgets, cost-guard calibration) are the
+# record of what was measured on real cloud runs, and CHANGELOG.md refers to
+# them. Treat them as history, not configuration.
 #
 # Every field has a built-in default (the values shown here are those
 # defaults, identical to the Python adapter's OCTOS_* environment variables).
-# Precedence: `octos arc run --set key=value` > environment variable > this
-# file > built-in default. Prompt text lives in prompts/*.md next to this
+# Precedence: environment variable > this file > built-in default. Prompt text lives in prompts/*.md next to this
 # file; a missing prompt file falls back to the copy compiled into the kernel.
 #
 # Changing this file or a prompt never needs a cargo build.
@@ -24,6 +33,28 @@
 #   repair.rounds / rounds_large_tree, stall_limit or the cost guard stops the node. Setting
 #   repair.codegen_repairs = 0 makes the first failure fall back to tool mode directly.
 #   Targets (phase 3): <= 5 requests and <= ¥0.2 per node; the cost guard ([budget]) bounds the run.
+
+
+[pipeline]
+# The adapter hands the whole build loop to the kernel's octos-pipeline engine.
+# main.py emits <data_dir>/pipelines/<name>.dot for the task (one implement node
+# + one acceptance node per requirement, chained by dependency, with a failure
+# back-edge as the repair round) and then names it on the first turn.
+#
+# Requires OCTOS_PIPELINE_DAG=1 (main.py sets it): only the DAG scheduler does
+# back-edge retries and hands the failing node's output back to its target.
+name = "arc_build"              # OCTOS_ARC_PIPELINE_NAME — the bare name run_pipeline selects
+repair_rounds = 5               # OCTOS_REPAIR_ROUNDS — per-node `max_retries` in the .dot
+node_timeout_seconds = 1200     # OCTOS_NODE_TIMEOUT — one implement node
+verify_timeout_seconds = 900    # OCTOS_ARC_VERIFY_TIMEOUT — one acceptance node
+max_iterations = 40             # OCTOS_MAX_ITERATIONS — tool iterations inside an implement node
+run_timeout_seconds = 3600      # OCTOS_TIME_BUDGET — whole run
+node_tools = "read_file,write_file,edit_file,glob,grep,list_dir"  # OCTOS_ARC_NODE_TOOLS
+# K1: an explicitly DISABLED reasoning effort makes the kernel emit the generic
+# `reasoning_effort: "none"` on any OpenAI-compatible endpoint. K2: the output
+# ceiling is the gateway budget. Neither needs a local proxy.
+reasoning_effort = "none"       # OCTOS_ARC_REASONING — none | low | medium | high | max
+max_output_tokens = 65536       # OCTOS_ARC_MAX_TOKENS
 
 [mode]
 codegen = true              # OCTOS_ARC_CODEGEN — one-request codegen turns for small trees
@@ -139,28 +170,6 @@ codegen_source_fit_chars = 0    # OCTOS_ARC_CODEGEN_SOURCE_FIT_CHARS — 0 = 用
                                 # 却被要求整文件返回，就会丢掉属于别人 spec 的处理逻辑。
                                 # 榜单 efficiency_eligible 是通过率 >= 80%，掉下去等于零分，
                                 # 所以工具模式的 19.6 倍单节点代价值得付。
-
-[pipeline]
-# The adapter hands the whole build loop to the kernel's octos-pipeline engine.
-# main.py emits <data_dir>/pipelines/<name>.dot for the task (one implement node
-# + one acceptance node per requirement, chained by dependency, with a failure
-# back-edge as the repair round) and then names it on the first turn.
-#
-# Requires OCTOS_PIPELINE_DAG=1 (main.py sets it): only the DAG scheduler does
-# back-edge retries and hands the failing node's output back to its target.
-name = "arc_build"              # OCTOS_ARC_PIPELINE_NAME — the bare name run_pipeline selects
-repair_rounds = 5               # OCTOS_REPAIR_ROUNDS — per-node `max_retries` in the .dot
-node_timeout_seconds = 1200     # OCTOS_NODE_TIMEOUT — one implement node
-verify_timeout_seconds = 900    # OCTOS_ARC_VERIFY_TIMEOUT — one acceptance node
-max_iterations = 40             # OCTOS_MAX_ITERATIONS — tool iterations inside an implement node
-run_timeout_seconds = 3600      # OCTOS_TIME_BUDGET — whole run
-node_tools = "read_file,write_file,edit_file,glob,grep,list_dir"  # OCTOS_ARC_NODE_TOOLS
-# K1: an explicitly DISABLED reasoning effort makes the kernel emit the generic
-# `reasoning_effort: "none"` on any OpenAI-compatible endpoint. K2: the output
-# ceiling is the gateway budget. Neither needs a local proxy.
-reasoning_effort = "none"       # OCTOS_ARC_REASONING — none | low | medium | high | max
-max_output_tokens = 65536       # OCTOS_ARC_MAX_TOKENS
-
 [session]
 scope = "turn"          # OCTOS_SESSION_SCOPE — turn | node | run
 driver = "stdio"        # OCTOS_DRIVER — stdio | chat
