@@ -109,6 +109,12 @@ class PipelineDot(unittest.TestCase):
         self.assertIn('outcome.status == \\"fail\\"', fwd[0])
         self.assertIn('continue_on_error="true"', dot)
 
+    def test_acceptance_runs_whatever_the_implement_node_ended_with(self):
+        dot = build([atomic("REQ-1")])
+        edge = [a for s, d, a, back in self.edges(dot) if s == "impl_n_REQ_1" and d == "check_n_REQ_1"][0]
+        for status in ("pass", "fail", "error"):
+            self.assertIn(f'outcome.status == \\"{status}\\"', edge)
+
     def test_workspace_is_seeded_before_the_first_requirement(self):
         dot = build([atomic("REQ-1")])
         self.assertIn("start -> seed", dot)

@@ -232,6 +232,9 @@ def build_pipeline(nodes, specs, tests_dir, out, pol, ports, deadline) -> str:
 
     fail = 'outcome.status == \\"fail\\"'
     settled = f'outcome.status == \\"pass\\" || {fail}'
+    # A codergen node that ends Fail (e.g. out of iterations) must still hand
+    # what it wrote to acceptance; an unconditional edge would prune it.
+    anyway = f'{settled} || outcome.status == \\"error\\"'
     # `retry` in the condition is what makes these legal back-edges.
     repair = (f'{fail} && !outcome.contains(\\"{STOP}\\") '
               f'&& context.retry_budget != \\"exhausted\\"')
@@ -263,7 +266,7 @@ def build_pipeline(nodes, specs, tests_dir, out, pol, ports, deadline) -> str:
             f'    {check} [handler="shell_check", label="verify {dot_quote(nid)}", '
             f'timeout_secs="{pol["verify_timeout"]}", prompt="{verify(tests_dir or out, ports[0], "--tag", nid, "--attempts", pol["repairs"] + 1, "--deadline", int(deadline - reserve), *specs.get(nid, []))}"]')
         lines.append(f'    {prev} -> {impl}' + (f' [condition="{prev_cond}"]' if prev_cond else ""))
-        lines.append(f"    {impl} -> {check}")
+        lines.append(f'    {impl} -> {check} [condition="{anyway}"]')
         lines.append(f'    {check} -> {impl} [condition="{repair}"]')
         prev, prev_cond = check, settled
     # Regression pass: every public spec against the finished app. A later
