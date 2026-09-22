@@ -2,6 +2,15 @@
 
 > 🌐 **[中文文档](/octos/zh/)**
 
+> 📌 **Pinned snapshot.** This book is vendored into `octos-org/octos-arc` at the
+> competition baseline — upstream `octos-org/octos` commit `8558a3bf`, tag
+> `arc-base-20260910` — so it describes the runtime this repository actually builds
+> rather than current upstream. Upstream has moved on in places; where the two
+> disagree, this copy is what runs here. The pin, the list of intentional
+> differences, and the drift check that enforces them are in
+> [`ARC_BASELINE.md`](https://github.com/octos-org/octos-arc/blob/main/ARC_BASELINE.md).
+> For current upstream documentation, see <https://octos-org.github.io/octos/>.
+
 ## What is Octos?
 
 Octos is an open-source AI agent platform that turns any LLM into a multi-channel, multi-user intelligent assistant. You deploy a single Rust binary, connect your LLM API keys and messaging channels (Telegram, Discord, Slack, WhatsApp, Email, WeChat, and more), and Octos handles everything else -- conversation routing, tool execution, memory, provider failover, and multi-tenant isolation.

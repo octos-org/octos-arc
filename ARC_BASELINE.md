@@ -10,7 +10,7 @@ their Git history; it is not a GitHub fork-network repository.
 - Octos commit: `8558a3bff41f43838130808a1fa6cf0299e0bc40`
 - Baseline tag: `arc-base-20260910`
 - Cargo.lock SHA-256: `9761e8904a0949aa0cff189cdd75b6a5f0b00daf7c968a883cdf39786bbd3088`
-- Inherited decision records: pinned by blob SHA in `decision-lock.json`
+- Inherited decision records and vendored docs: pinned by blob SHA in `decision-lock.json`
   (see [Decision records](#decision-records))
 - `main` contains the Octos source and downstream provenance documents.
 - `legacy` preserves the existing adapter at `b0999c95f7875c8d4ff3e58e733fb2c5abc8caf7`,
@@ -43,13 +43,48 @@ Never use a `latest` release URL, a moving branch reference, or an unverified bi
 from PATH as the selected ARC runtime. If the pinned artifact is unavailable, stop.
 Changing a pin requires an explicit new version; do not silently replace an existing artifact.
 
+## Vendored documentation snapshot
+
+`book/` (21 files), `book-zh/` (20 files) and `docs/ARCHITECTURE.md` are **a pinned
+snapshot of the upstream documentation at `8558a3bf`**, not a tracking copy. They
+describe the runtime this repository actually builds. Upstream has since moved ahead in
+five English chapters (`channels`, `cli-reference`, `configuration`, `memory-skills`,
+`providers`) and three Chinese ones; those changes document post-pin behaviour — new
+embedding defaults, a 17th provider, changed routing thresholds — and importing them
+would make the book describe a runtime participants are not running.
+
+Both books say so on their first page, and `decision-lock.json` pins every file, so the
+snapshot can no longer drift silently in either direction.
+
+### Intentional differences from upstream
+
+Four files diverge from `8558a3bf` on purpose. Each carries a `delta.reason` in
+`decision-lock.json`:
+
+| File | Why |
+| --- | --- |
+| `book/src/cli-reference.md` | Backports the `--auth-token` process-list warning from upstream `e89e266fc` (octos#2381) |
+| `book-zh/src/cli-reference.md` | The same warning in Chinese — upstream has not translated it |
+| `book/src/introduction.md` | The pinned-snapshot banner |
+| `book-zh/src/introduction.md` | The pinned-snapshot banner |
+
+The `--auth-token` warning is operator-facing guidance that applies to the pinned build:
+the flag, `OCTOS_AUTH_TOKEN`, and the config-file path all exist here. The rest of
+upstream's fix is a code-side change that keeps tokens out of argv, and this baseline
+does **not** carry it — so the warning matters more here, not less. The ARC harness
+itself launches `octos serve --stdio --solo` with no token, so competition runs are
+unaffected; the exposure is the dashboard/deploy path.
+
+Prefer a narrow recorded delta to a resync. Backport a security correction; leave a
+feature description alone.
+
 ## Decision records
 
 The code pin above fixes what the baseline *builds*. `decision-lock.json` fixes what it
 *inherited*: the 73 spec, ADR, UPCR, contract and protocol records carried over from
-upstream, each recorded by Git blob SHA. Without it those records could be edited
-downstream, or superseded upstream, with nothing noticing — the same exposure the
-Cargo.lock SHA-256 closes for dependencies.
+upstream, plus the 42 vendored documentation files above — each recorded by Git blob
+SHA. Without it those records could be edited downstream, or superseded upstream, with
+nothing noticing — the same exposure the Cargo.lock SHA-256 closes for dependencies.
 
 `scripts/check-decision-lock.py` verifies the inventory:
 

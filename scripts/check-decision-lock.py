@@ -2,11 +2,16 @@
 """Verify decision-lock.json — the blob-SHA pin on inherited upstream records.
 
 The competition baseline pins the CODE (`8558a3bf` + the Cargo.lock SHA-256 in
-`arc-runtime-lock.json`) but, before this gate existed, nothing pinned the
-DECISIONS. The spec / ADR / UPCR / protocol records this tree inherited from
-upstream could be edited downstream, or superseded upstream, without anything
-noticing. `decision-lock.json` inventories those records by Git blob SHA;
-this script is the check (#70).
+`arc-runtime-lock.json`) but, before this gate existed, nothing pinned what it
+INHERITED. Two kinds of thing are at risk:
+
+  * the decision records — spec / ADR / UPCR / protocol documents, which could
+    be edited downstream or superseded upstream without anything noticing (#70);
+  * the vendored documentation — the en/zh books and docs/ARCHITECTURE.md, which
+    participants read to operate the runtime this tree builds, and which had no
+    pin statement and no sync check at all (#215).
+
+`decision-lock.json` inventories both by Git blob SHA; this script is the check.
 
 A Git blob SHA is a content hash, so "same blob SHA" means "byte-identical"
 with no diffing and no network.
@@ -103,6 +108,36 @@ def git_tree(root: Path, ref: str = "HEAD") -> dict[str, str]:
     return tree
 
 
+def dirty_paths(root: Path) -> set[str]:
+    """Paths with staged or unstaged changes, so mismatches can be explained.
+
+    The lock is verified against committed content, which is the right thing
+    for a lock file but confusing mid-edit: without this, a staged-but-
+    uncommitted change reports as "edited downstream" when the real answer is
+    "not committed yet".
+    """
+    try:
+        out = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    except (FileNotFoundError, subprocess.CalledProcessError):  # pragma: no cover
+        return set()
+
+    paths: set[str] = set()
+    for line in out.splitlines():
+        if len(line) < 4:
+            continue
+        path = line[3:]
+        if " -> " in path:  # rename: take the destination
+            path = path.split(" -> ", 1)[1]
+        paths.add(path.strip('"'))
+    return paths
+
+
 def github_tree(repo: str, ref: str) -> dict[str, str]:
     """Return {path: blob_sha} for a GitHub repo at `ref`, recursively."""
     url = f"{API_ROOT}/repos/{repo}/git/trees/{ref}?recursive=1"
@@ -179,8 +214,11 @@ def matches(path: str, pairs: list[tuple[str, str]]) -> str | None:
 # ── checks ────────────────────────────────────────────────────────────
 
 
-def check_entries(lock: dict, tree: dict[str, str]) -> list[str]:
+def check_entries(
+    lock: dict, tree: dict[str, str], dirty: set[str] | None = None
+) -> list[str]:
     """Checks A, B and C: presence, pinned content, and recorded divergence."""
+    dirty = dirty or set()
     problems: list[str] = []
     for entry in lock["entries"]:
         path = entry["path"]
@@ -196,13 +234,21 @@ def check_entries(lock: dict, tree: dict[str, str]) -> list[str]:
             continue
 
         if actual != recorded:
-            problems.append(
-                f"{path}: content changed (locked {recorded[:12]}, found "
-                f"{actual[:12]}). An inherited decision record was edited "
-                f"downstream. If that is intended, re-run "
-                f"`scripts/check-decision-lock.py --update` and record a "
-                f"delta.reason explaining the divergence."
-            )
+            if path in dirty:
+                problems.append(
+                    f"{path}: has uncommitted changes. The lock is verified "
+                    f"against committed content, so commit first, then re-run "
+                    f"`scripts/check-decision-lock.py --update` if the change "
+                    f"is intended."
+                )
+            else:
+                problems.append(
+                    f"{path}: content changed (locked {recorded[:12]}, found "
+                    f"{actual[:12]}). An inherited record was edited "
+                    f"downstream. If that is intended, re-run "
+                    f"`scripts/check-decision-lock.py --update` and record a "
+                    f"delta.reason explaining the divergence."
+                )
             continue
 
         if upstream and recorded != upstream:
@@ -304,7 +350,7 @@ def check_upstream(lock: dict) -> tuple[list[str], dict]:
     pairs = patterns_of(lock)
     inventoried = {entry.get("upstream_path", entry["path"]) for entry in lock["entries"]}
 
-    changed, deleted = [], []
+    changed, deleted, absorbed = [], [], []
     for entry in lock["entries"]:
         upstream_path = entry.get("upstream_path", entry["path"])
         recorded = entry.get("upstream_blob_sha")
@@ -314,7 +360,13 @@ def check_upstream(lock: dict) -> tuple[list[str], dict]:
         if current is None:
             deleted.append(upstream_path)
         elif current != recorded:
-            changed.append(upstream_path)
+            if current == entry["arc_blob_sha"]:
+                # A recorded delta already brought this file up to what
+                # upstream now has. Reporting it as outstanding drift would
+                # keep it in the weekly issue forever with nothing to do.
+                absorbed.append(upstream_path)
+            else:
+                changed.append(upstream_path)
 
     added = sorted(
         path
@@ -328,6 +380,7 @@ def check_upstream(lock: dict) -> tuple[list[str], dict]:
         "changed_since_pin": sorted(changed),
         "deleted_since_pin": sorted(deleted),
         "added_since_pin": added,
+        "absorbed_since_pin": sorted(absorbed),
     }
     return problems, report
 
@@ -395,7 +448,7 @@ def run(args: argparse.Namespace) -> int:
         return 0
 
     problems: list[str] = []
-    problems += check_entries(lock, tree)
+    problems += check_entries(lock, tree, dirty_paths(root))
     problems += check_coverage(lock, tree)
     problems += check_upcr(lock, tree)
 
@@ -423,17 +476,18 @@ def run(args: argparse.Namespace) -> int:
         for problem in problems:
             print(f"  - {problem}", file=sys.stderr)
         print(
-            "\nThe baseline pins inherited decision records by blob SHA so a "
-            "downstream edit or an upstream supersession cannot pass unnoticed "
-            "(#70). See ARC_BASELINE.md.",
+            "\nThe baseline pins the decision records and vendored documentation "
+            "it inherited, by blob SHA, so a downstream edit or an upstream "
+            "supersession cannot pass unnoticed (#70, #215). See ARC_BASELINE.md.",
             file=sys.stderr,
         )
         return 1
 
+    declared = sum(1 for entry in lock["entries"] if entry.get("delta"))
     print(
-        f"decision-lock: {len(lock['entries'])} inherited decision records "
-        f"match the pin ({lock['upstream']['repository']}@"
-        f"{lock['upstream']['commit'][:12]})"
+        f"decision-lock: {len(lock['entries'])} inherited records match the pin "
+        f"({lock['upstream']['repository']}@{lock['upstream']['commit'][:12]})"
+        + (f", {declared} with a declared delta" if declared else "")
     )
     if args.upstream:
         print(
@@ -462,6 +516,14 @@ def run(args: argparse.Namespace) -> int:
                     print(f"  {label:>7}: {path}")
         else:
             print(f"decision-lock: upstream {report['drift_ref']} matches the pin")
+        if report["absorbed_since_pin"]:
+            print(
+                f"\ndecision-lock: {len(report['absorbed_since_pin'])} file(s) "
+                f"already carry what upstream {report['drift_ref']} has, via a "
+                f"recorded delta — nothing outstanding:"
+            )
+            for path in report["absorbed_since_pin"]:
+                print(f"  absorbed: {path}")
     return 0
 
 
