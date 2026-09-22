@@ -674,6 +674,15 @@ fn looks_like_inline_dot(s: &str) -> bool {
 
 #[async_trait]
 impl Tool for RunPipelineTool {
+    /// The registry's per-tool backstop (1800 s) killed runs the pipeline's
+    /// own timeout still allowed -- `deep_research` ships a 2400 s default,
+    /// and an operator-raised ceiling goes further. Back the pipeline's own
+    /// clamp ceiling instead, with slack so its timeout fires first and the
+    /// run ends through the normal timed-out result path.
+    fn execution_timeout_secs(&self) -> Option<u64> {
+        Some(pipeline_timeout_ceiling() + 300)
+    }
+
     fn name(&self) -> &str {
         "run_pipeline"
     }
@@ -2912,6 +2921,16 @@ mod tests {
             dir.path().to_path_buf(),
         )
         .with_ir_enabled(ir_enabled)
+    }
+
+    #[tokio::test]
+    async fn registry_backstop_outlasts_the_pipeline_timeout() {
+        // The registry kills a tool at its execution timeout; for run_pipeline
+        // that must never undercut the pipeline's own (clamped) timeout.
+        let tool = make_ir_tool(false).await;
+        let backstop = octos_agent::tools::Tool::execution_timeout_secs(&tool).unwrap();
+        assert!(backstop > resolve_pipeline_timeout(None, Some(u64::MAX)));
+        assert!(backstop > PIPELINE_TIMEOUT_MAX_SECS);
     }
 
     #[tokio::test]
