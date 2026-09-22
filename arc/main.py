@@ -373,7 +373,7 @@ def kernel_env(pol: dict, config_dir: Path) -> dict:
 #: surface, so the pipeline is never triggered. Published from the refactor
 #: branch as a Linux x86_64 bundle; override with OCTOS_RELEASE_URL.
 OCTOS_RELEASE_URL = (
-    "https://github.com/octos-org/octos-arc/releases/download/v2.0.3-rc.11-arc.14/"
+    "https://github.com/octos-org/octos-arc/releases/download/v2.0.3-rc.11-arc.15/"
     "octos-bundle-x86_64-unknown-linux-gnu.tar.gz"
 )
 
@@ -445,11 +445,17 @@ def _download_octos(cache_dir: Path) -> str:
 
 def find_octos() -> str:
     """OCTOS_BIN, bundled bin/octos, PATH, a local build -- then the release."""
+    cache_dir = Path(os.environ.get("OCTOS_CACHE_DIR", "/tmp/octos-bin"))
     for cand in (os.environ.get("OCTOS_BIN"), BUNDLE_DIR / "bin" / "octos",
                  shutil.which("octos"), BUNDLE_DIR.parent / "target" / "release" / "octos"):
         if cand and Path(cand).is_file():
-            return str(Path(cand).resolve())
-    cache_dir = Path(os.environ.get("OCTOS_CACHE_DIR", "/tmp/octos-bin"))
+            path = Path(cand).resolve()
+            if not os.access(path, os.X_OK):
+                # The platform's unzip drops the exec bit on bundled files.
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                path = Path(shutil.copy2(path, cache_dir / "octos-bundled"))
+                path.chmod(0o755)
+            return str(path)
     return _cached_octos(cache_dir) or _download_octos(cache_dir)
 
 
