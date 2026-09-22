@@ -715,3 +715,63 @@ Cloud: 未评测 (needs a TB gap). Unit tests 105 OK.
 看板移除未经证实的“预生成”判定和排除排名，只显示官方响应顺序；小额费用保留到六位小数，¥0.000024 不再显示为零。
 
 验证：账户错误、请求 ID 混入状态码、默认流程余额错误中止、完整看板渲染均有回归测试。Python 119 项通过；Rust 99 单元与 1 集成通过，1 既有忽略；clippy/fmt 通过。真实成绩未提升，当前 provider 额度不足，未创建新的云端运行。
+
+## 2026-09-18 · 大题回归的真因、闸门回退，以及两条被长期破坏的路径
+
+### 起点：大题的时间与费用都被工具模式吃掉
+
+云端 stackoverflow `97848d542ac8`（66 节点、66/66、7.5 h、¥51.73、1.32 亿 token）按 design 事件区分实现路径：
+
+| 路径 | 节点 | 相邻完成间隔中位 | 合计 |
+|---|---|---|---|
+| codegen 单请求 | 23（35%） | 20 s | 45.8 min |
+| 工具模式 | 43（65%） | **392 s** | **402.9 min** |
+
+65% 的节点吃掉 90% 的墙钟，单节点慢 19.6 倍。排除项：首轮通过率 44/44（不是修复 churn）；检查点边界只多出约 18 分钟（占 7%）；是落进工具模式本身，且按时间分布。工具用 `arc/path_split.py`（本轮新增）。
+
+根因：`codegen_context_fits` 用 `codegen_context_chars`（90,000，**输出**预算）当闸门，#192 分离输入/输出预算时漏了这一处。应用长过 9 万字符后每个节点都掉进工具模式。
+
+### 于是提高闸门（30bd4f70）——这是错的，已回退（2807a9aa）
+
+给闸门独立预算 400,000 字符，提交为 `95da0dc11e93`。同题对照（`arc/postmortem.py` 分类失分）：
+
+| 运行 | 路径 | 结果 | 回归 | 从没通过 |
+|---|---|---|---|---|
+| stackoverflow 97848d542ac8（旧闸门） | 65% 工具模式 | **66/66** | **0** | 0 |
+| stackoverflow 34ca94da0075（400k 闸门） | 100% codegen | 中途 67% | 9 | 7 |
+| 12306 99196f2e802b（400k 闸门） | 100% codegen | 中途 62% | **29** | **0** |
+
+12306 的失败**全部**是回归，没有一个是做不出来。这是 `codegen_context_fits` 自己文档里那条不变量被破坏：不要在源码有遗漏时要求整文件替换。榜单 `efficiency_eligible` 是通过率 ≥ 80%，掉下去得零分，所以工具模式 19.6 倍的单节点代价值得付。
+
+顺带纠正 30bd4f70 提交信息里的一处错误说法：提高闸门**不会**增大提示词。codegen 轮实际引用的仍是 `relevant_sources(..., codegen_context_chars() - len(spec))`，闸门只决定够不够格走 codegen。真正的权衡是「部分源码只列文件名」对「整个节点走工具模式」。
+
+### 真正的机制在提示词里（a5bd9338）
+
+`relevant_sources()` 把预算外的文件标成 `Other files, unchanged unless the requirement needs them`，而表头要求「返回你改动的每个文件的完整内容」。模型认为需要某个**从未见过**的文件就会从零重写它，删掉别的需求依赖的行为。
+
+**这与闸门无关**：引用预算是「预算减 spec 长度」，spec 一大就有省略；闸门只管应用总大小。回退闸门只是缩小暴露面。
+
+两层修复：措辞改成明确禁止并给出替代做法（用一行说明需要哪个文件并停下）；`drop_unseen_rewrites()` 代码强制——磁盘上已存在且未被引用的文件，其整文件替换直接丢弃并回灌 correction。新文件放行（没有东西可毁），被引用过的放行，本轮没有引用集合的（tiny 档位、工具模式、骨架轮）不介入。`quoted_source_paths()` 与 `relevant_sources()` 共用一套排序，模型看到的与 harness 强制的不会漂移。
+
+### 两条被长期破坏的路径
+
+- **`OCTOS_ARC_DRYRUN=1` 自 #140 起失效（194b163d）。** #140 给真 driver 加了 `without_tools()` 并在每个 codegen 轮调用，没同步给 `DryRunDriver`，于是 round 31 那条「不花模型额度跑完整流程」的路径在第一个 codegen 节点就 `AttributeError` 中止。keep 的 dry run 修前停在节点 1/32，修后走完 30+/32、零中止。
+- **`OCTOS_ARC_CHECKPOINT_REPAIRS` 在云端拧不动（f9630089）。** 适配层从环境变量读它，而云端运行传不进环境变量，`arc-policy.toml` 也从未镜像它。现已镜像，默认 1 → 2（依据：keep `4e18c76637ae` 在检查点 8 与 16 共回归五个节点，一轮只清掉两个，REQ-2.2/2.4 挂了 97 分钟三个检查点，最后靠终检才修好）。
+
+### 测量方法的两条教训
+
+- **`design → test` 间隔不能当「节点内耗时」。** design 事件在它所描述的模型调用**之后**才发出，那个间隔不含模型调用。据它算出「中位 3 秒、86% 时间在节点外」是废数。可用信号只有相邻节点首次判定之间的间隔。
+- **partial 运行的读数会变。** 同一次 stackoverflow 在第 44 个节点时是 55% 工具模式 / 8.8 倍，跑完是 65% / 19.6 倍。引用要用跑完的数字。
+
+Cloud: 闸门回退与守卫都尚未评测（提交 C `bea95120a928` 跑的是回退后的闸门，不含守卫）。Unit tests 304 OK（1 个 error 为改动前即存在的 `test_proxy_routes_real_http` 本机网络测试）。
+
+## 2026-09-21：打包带上平台契约的 template/，staged 打包
+
+平台把提交包 zip 根的 `template/` 铺成初始工作区（`ARCBENCH_TEMPLATE_DIR`）再调 main.py。本仓库的 codegen 提示词本就按「初始 package.json 已存在、保持既有架构」书写，postflight 也早有「workspace 里找不到 frontend/+backend/ 会被 runner 拒绝」的警告；但 pack.sh 此前不打包任何 template/，初始工作区只能靠 runner 兜底、首轮 mandatory-files 从零补。2026-09-20 的一次平台提交以 "web template is incomplete" 被拒，修复方式是让包根带上完整的 template/——本条把该修复移植进本仓库。
+
+改动：
+
+- 新增 `arc/template/`：frontend/src/index.html 种子页；两个 package.json 与 main.py 的 `CODEGEN_MANIFESTS` 逐字节一致（`write_codegen_manifests()` 幂等跳过已存在文件，不冲突）；零依赖 CommonJS 种子 server.js（serve `../frontend/dist`：`/`→index.html、`/<name>`→`<name>.html`、其余 404）；README.md 与 template.yaml。
+- pack.sh 重写为 mktemp 暂存后按显式清单拷贝打包：包内容=清单本身，工作树临时产物与开发文件（tests/、tasks/、public-tests/）结构上进不了包；python 校验步骤之后统一清理 `__pycache__`/`.pyc`/`.DS_Store`（先清理后生成会让 pyc 回流）。ROUTES 参数、public-tests 不进包的语义、输出路径与文件名不变。
+
+验证（本机）：`sh arc/pack.sh` 后 zip 根含 main.py、requirements.txt、template/ 10 件，无 tests/tasks/public-tests/__pycache__；包内两个 package.json 与 `json.dumps(CODEGEN_MANIFESTS[...], indent=2)` 逐字节相等；`sh arc/pack.sh routes.json` 把校验过的规则写为包根 model-routes.json，坏规则打包即失败；模板从 zip 抽出自测 `npm run build` + `npm start`，`/` 返回种子页、未定义路径与 `/../etc/passwd` 均 404。云端未评测；仓库中已提交的 octos-arc-bundle.zip 需按原流程重打（enter_competition 的字节校验针对 main.py，本条未改运行时代码）。

@@ -82,11 +82,18 @@ class RoutingTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp, patch.dict('os.environ', {'OCTOS_ARC_MODEL_ROUTES': json.dumps(self.rules)}):
                 log = Path(tmp) / 'usage.jsonl'
                 proxy = LlmProxy(f'http://127.0.0.1:{upstream.server_port}/v1', 'low', log_path=log, trim=False).start()
+                client = urllib.request.build_opener(urllib.request.ProxyHandler({}))
                 try:
                     for phase in ('implement', 'repair'):
                         proxy.phase = phase
                         request = urllib.request.Request(proxy.base_url + '/chat/completions', data=self.request(), headers={'Content-Type': 'application/json'})
-                        with urllib.request.urlopen(request, timeout=5) as response:
+                        # The client must bypass the system proxy, for the same reason
+                        # llm_proxy.open_upstream does: urllib honours the macOS system
+                        # proxy settings (getproxies() returns 127.0.0.1:1082 here with no
+                        # env var set), and that proxy refuses to forward to loopback, so
+                        # this call died with RemoteDisconnected and the failure was being
+                        # written off as an unfixable environment quirk.
+                        with client.open(request, timeout=5) as response:
                             self.assertEqual(response.status, 200)
                 finally:
                     proxy.stop()
@@ -146,3 +153,81 @@ class RoutingStartupTests(unittest.TestCase):
             with patch.dict('os.environ', env), patch('main.LlmProxy', side_effect=OSError('bind failed')):
                 with self.assertRaises(OSError):
                     flow.start_llm_proxy()
+
+
+class ShippedEscalationRouteTests(unittest.TestCase):
+    """`arc/model-routes-glm-escalate.json` is staged for the submission after D.
+
+    The design is cheap-first: the submission's own model (glm-5.3-flash) does
+    every implement, verify and design turn, and only a *repair* -- a turn that
+    exists because the cheap model already failed -- escalates to glm-5.3. Always
+    using the stronger model would spend more on the turns that did not need it.
+
+    Locked by a test because a staged config that nobody runs is exactly the kind
+    of thing that rots: both model IDs answer on the coding-plan endpoint today,
+    and `phases` has to stay `["repair"]` for the escalation to mean anything.
+    """
+
+    def _rules(self):
+        from pathlib import Path
+        raw = (Path(__file__).resolve().parent.parent / 'model-routes-glm-escalate.json').read_text(encoding='utf-8')
+        return model_routes(raw)
+
+    def _model_for(self, rules, phase, tools=False):
+        body = {'model': 'glm-5.3-flash', 'messages': [{'role': 'user', 'content': 'x'}]}
+        if tools:
+            body['tools'] = [{'type': 'function', 'function': {'name': 'f'}}]
+        return json.loads(route_request(json.dumps(body).encode(), rules, phase))['model']
+
+    def test_should_escalate_only_repairs(self):
+        rules = self._rules()
+        self.assertEqual(self._model_for(rules, 'repair'), 'glm-5.3')
+        for phase in ('implement', 'verify', 'design'):
+            self.assertEqual(self._model_for(rules, phase), 'glm-5.3-flash', phase)
+
+    def test_should_escalate_a_repair_that_needs_tools(self):
+        """Tool-mode repairs are the ones most likely to need the stronger model,
+        so the rule must not be skipped by the tools check."""
+        self.assertEqual(self._model_for(self._rules(), 'repair', tools=True), 'glm-5.3')
+
+
+class PhaseForLabelTests(unittest.TestCase):
+    """What feeds the routing rules, on the labels the flow really emits.
+
+    A rule saying `"phases": ["repair"]` is worth exactly as much as this
+    function's agreement about what counts as a repair. keep's failures in
+    submission D are logged as `acceptance specs still failing after repair
+    rounds`, so the escalation only helps if those turns really land on
+    `repair`.
+    """
+
+    def test_should_classify_the_labels_the_flow_emits(self):
+        from main import phase_for_label
+        cases = {
+            'REQ-3.2 implement': 'implement',
+            'REQ-3.2 implement (tiny)': 'implement',
+            'REQ-3.2 repair 1/5': 'repair',
+            'REQ-3.2 rewrite (repair 1)': 'repair',
+            'full-suite repair 1/3': 'repair',
+            'final check': 'verify',
+            'design': 'design',
+        }
+        for label, phase in cases.items():
+            self.assertEqual(phase_for_label(label), phase, label)
+
+    def test_should_send_every_repair_label_to_the_escalated_model(self):
+        """End to end against the shipped config: the labels that fail in D must
+        select glm-5.3, and implement must stay on the submission's own model."""
+        from pathlib import Path
+        from main import phase_for_label
+        rules = model_routes((Path(__file__).resolve().parent.parent
+                              / 'model-routes-glm-escalate.json').read_text(encoding='utf-8'))
+        body = json.dumps({'model': 'glm-5.3-flash',
+                           'messages': [{'role': 'user', 'content': 'x'}]}).encode()
+
+        def model_for(label):
+            return json.loads(route_request(body, rules, phase_for_label(label)))['model']
+
+        for label in ('REQ-3.2 repair 1/5', 'REQ-3.2 rewrite (repair 1)', 'full-suite repair 1/3'):
+            self.assertEqual(model_for(label), 'glm-5.3', label)
+        self.assertEqual(model_for('REQ-3.2 implement'), 'glm-5.3-flash')

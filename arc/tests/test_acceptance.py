@@ -1032,3 +1032,72 @@ class StallDetectionTests(unittest.TestCase):
         from acceptance import failure_signature
         a = self._summary({"REQ-a"})
         self.assertEqual(failure_signature(a), failure_signature(a, frozenset()))
+
+
+class StartupErrorDigestTests(unittest.TestCase):
+    """A start failure must hand the repair turn the line that names the cause.
+
+    Sample is the real capture from local TB REQ-1 round 0 (2026-09-17): npm's
+    preamble plus Node's misleading ES-module warning filled the head slice, so the
+    repair turn never saw `Identifier '__dirname' has already been declared`.
+    """
+
+    SAMPLE = (
+        "backend `npm start` exited early (rc=1):\n"
+        "\n"
+        "> start\n"
+        "> node server.js\n"
+        "\n"
+        "(node:77941) Warning: Failed to load the ES module: "
+        "/Users/mac/Desktop/code/octos-org/octos-arc-0917/arc/arc-output/tb-glm-0917/backend/server.js. "
+        'Make sure to set "type": "module" in the nearest package.json file or use the .mjs extension.\n'
+        "(Use `node --trace-warnings ...` to show where the warning was created)\n"
+        "/Users/mac/Desktop/code/octos-org/octos-arc-0917/arc/arc-output/tb-glm-0917/backend/server.js:11\n"
+        "const __dirname = path.resolve(__dirname);\n"
+        "      ^\n"
+        "\n"
+        "SyntaxError: Identifier '__dirname' has already been declared\n"
+        "    at wrapSafe (node:internal/modules/cjs/loader:1861:18)\n"
+    )
+
+    def test_should_keep_the_real_error(self):
+        from acceptance import startup_error_digest
+        out = startup_error_digest(self.SAMPLE, 600)
+        self.assertIn("Identifier '__dirname' has already been declared", out)
+
+    def test_should_drop_the_misleading_esm_warning(self):
+        from acceptance import startup_error_digest
+        out = startup_error_digest(self.SAMPLE, 600)
+        self.assertNotIn("Failed to load the ES module", out)
+        self.assertNotIn("--trace-warnings", out)
+
+    def test_should_keep_the_harness_header(self):
+        from acceptance import startup_error_digest
+        self.assertTrue(startup_error_digest(self.SAMPLE, 600).startswith("backend `npm start` exited early"))
+
+    def test_should_free_most_of_the_budget_for_the_stack(self):
+        """Pins why this helper exists: the warning is a wrong lead, not a lost error.
+
+        A 600-character head slice of this capture does still reach the SyntaxError
+        (measured at character 530), so the gain is budget and a correct lead, not
+        recovering something that was cut off.
+        """
+        from acceptance import startup_error_digest
+        self.assertIn("SyntaxError", self.SAMPLE[:600])
+        self.assertLess(len(startup_error_digest(self.SAMPLE, 600)),
+                        len(self.SAMPLE[:600]) - 180)
+
+    def test_should_fall_back_to_the_tail_when_no_marker_matches(self):
+        from acceptance import startup_error_digest
+        text = "backend `npm start` exited early (rc=1):\n" + "\n".join(f"noise line {i}" for i in range(200))
+        out = startup_error_digest(text, 120)
+        self.assertIn("noise line 199", out)
+        self.assertLessEqual(len(out), 120)
+
+    def test_should_respect_the_limit(self):
+        from acceptance import startup_error_digest
+        self.assertLessEqual(len(startup_error_digest(self.SAMPLE, 80)), 80)
+
+    def test_should_survive_empty_output(self):
+        from acceptance import startup_error_digest
+        self.assertEqual(startup_error_digest("", 600), "")

@@ -96,6 +96,13 @@ slow_ms = 3000                   # OCTOS_ARC_SLOW_MS — slower tests are report
 workers = 2                      # OCTOS_ARC_TEST_WORKERS — per-node runs
 final_workers = 4                # OCTOS_ARC_FINAL_WORKERS — full parallel suite
 regression_checkpoint_nodes = 4 # OCTOS_ARC_REGRESSION_CHECKPOINT — check after 4, 8, 16, 24... nodes; gaps capped at twice this value; 0 disables
+checkpoint_repairs = 2          # OCTOS_ARC_CHECKPOINT_REPAIRS — repair rounds at a checkpoint that
+                                # found a regression, each re-verified before the next. Was 1, and
+                                # was missing from this file entirely: the Python adapter reads it
+                                # from the environment, and a cloud run cannot be given environment
+                                # variables, so the knob was unreachable where it matters. Cloud keep
+                                # 4e18c76637ae: one round cleared 2 of 5 regressions and left 2
+                                # broken for 97 minutes and three checkpoints until the final suite.
 memory_per_worker_mib = 700      # container memory per Chromium worker (cgroup limit / this = workers)
 final_memory_per_worker_mib = 450   # full suite: the platform grades with 4 workers in 2 GiB
 fully_parallel = false           # OCTOS_ARC_FULLY_PARALLEL — parallelism inside a spec file too
@@ -118,14 +125,20 @@ inline_specs = true          # OCTOS_ARC_INLINE_SPECS — quote the node's specs
 inline_spec_chars = 24000    # OCTOS_ARC_INLINE_SPEC_CHARS
 inline_source_chars = 40000  # OCTOS_ARC_INLINE_SOURCE_CHARS — sources quoted into repair/rewrite prompts (0 = off)
 codegen_context_chars = 90000  # OCTOS_ARC_CODEGEN_CONTEXT_CHARS — codegen prompt budget: spec must fit 60% of it; existing sources ranked by spec-term overlap fill the rest (≈26k tokens)
-perf_contract = true         # OCTOS_PERF_CONTRACT
-guard = true                 # OCTOS_GUARD — inject guard corrections into the next prompt
-# Requirement keywords (case-insensitive substrings of the tree text) that
-# switch optional contract blocks on: session/performance rules only for
-# trees that talk about accounts, fixture-data rules only when the tree
-# lists concrete options or seed records.
-session_keywords = ["login", "log in", "sign in", "password", "session", "register", "注册", "登录", "密码", "会话"]
-data_keywords = ["seed", "published", "fixture", "option", "select", "dropdown", "选项", "下拉", "预置"]
+codegen_source_fit_chars = 0    # OCTOS_ARC_CODEGEN_SOURCE_FIT_CHARS — 0 = 用 codegen_context_chars。
+                                # 这是「应用多大之后节点掉进工具模式」的闸门。2026-09-17 曾把它
+                                # 独立出来设成 400000（理由：工具模式占 stackoverflow 65% 的节点、
+                                # 90% 的墙钟，单节点慢 19.6 倍），2026-09-18 改回——它用正确性换了
+                                # 速度。同题对照（arc/postmortem.py 分类）：
+                                #   stackoverflow 97848d542ac8  65% 工具模式  66/66  回归 0
+                                #   stackoverflow 34ca94da0075 100% codegen   中途   回归 9
+                                #   12306         99196f2e802b 100% codegen   中途   回归 29
+                                # 12306 的失败全是回归，没有一个是做不出来。原因就是下面
+                                # codegen_context_fits 写的不变量：不要在源码有遗漏的情况下要求
+                                # 整文件替换——117 节点应用的后端入口远超任何预算，节点只看到一部分
+                                # 却被要求整文件返回，就会丢掉属于别人 spec 的处理逻辑。
+                                # 榜单 efficiency_eligible 是通过率 >= 80%，掉下去等于零分，
+                                # 所以工具模式的 19.6 倍单节点代价值得付。
 
 [session]
 scope = "turn"          # OCTOS_SESSION_SCOPE — turn | node | run

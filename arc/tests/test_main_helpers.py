@@ -435,19 +435,77 @@ class RelevantSourcesTests(unittest.TestCase):
             self.assertIn('--- backend/data/state.json ---', tight)
 
     def test_codegen_requires_existing_sources_to_fit(self):
+        """The gate itself, pinned against its own budget rather than the default."""
+        from pathlib import Path
+        from unittest.mock import patch
+        import argparse, tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            flow = m.Flow(argparse.Namespace(web_port=1), root, root)
+            with patch.dict("os.environ", {"OCTOS_ARC_CODEGEN_SOURCE_FIT_CHARS": "90000"}):
+                self.assertTrue(flow.codegen_context_fits("x" * 12000))
+                (root / "backend").mkdir()
+                (root / "frontend").mkdir()
+                (root / "backend/server.js").write_text("b" * 26000)
+                (root / "frontend/index.html").write_text("p" * 55000)
+                self.assertFalse(flow.codegen_context_fits("x" * 12000))
+                (root / "frontend/index.html").write_text("p" * 50000)
+                self.assertTrue(flow.codegen_context_fits("x" * 12000))
+
+    def test_an_app_past_the_budget_falls_back_to_tool_mode(self):
+        """An app whose sources no longer fit must NOT take the single-request path.
+
+        This gate was briefly raised to 400000 to escape tool mode (it is 65% of
+        stackoverflow 97848d542ac8's nodes and 90% of its wall clock, 19.6x the median per
+        node). The raise was submitted as 95da0dc11e93 and reverted on 2026-09-18, because
+        it bought that speed with correctness:
+
+            run                        path            result   regressed  never-passed
+            stackoverflow 97848d542ac8 65% tool mode   66/66    0          0
+            stackoverflow 34ca94da0075 100% codegen    mid-run  9          7
+            12306         99196f2e802b 100% codegen    mid-run  29         0
+
+        The tool-mode run finished with zero regressions; the codegen-only runs regressed
+        9 and 29 nodes, and 12306's losses were entirely regressions -- not one node it
+        could not build, only nodes it built and then broke. A node seeing part of a shared
+        file and asked to return it complete drops the handlers it never saw, and those
+        belong to other nodes' specs. So an app past the budget has to use tool mode, and
+        this test pins that.
+        """
         from pathlib import Path
         import argparse, tempfile
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             flow = m.Flow(argparse.Namespace(web_port=1), root, root)
-            self.assertTrue(flow.codegen_context_fits("x" * 12000))
-            (root / "backend").mkdir()
-            (root / "frontend").mkdir()
+            (root / "backend").mkdir(); (root / "frontend").mkdir()
             (root / "backend/server.js").write_text("b" * 26000)
-            (root / "frontend/index.html").write_text("p" * 55000)
+            (root / "frontend/index.html").write_text("p" * 55000)   # 81000 total
+            self.assertEqual(flow.codegen_source_fit_chars(), flow.codegen_context_chars())
             self.assertFalse(flow.codegen_context_fits("x" * 12000))
-            (root / "frontend/index.html").write_text("p" * 50000)
-            self.assertTrue(flow.codegen_context_fits("x" * 12000))
+            # A small app still takes the fast path -- the revert is not "always tool mode".
+            (root / "frontend/index.html").write_text("p" * 200)
+            self.assertTrue(flow.codegen_context_fits("x" * 1000))
+
+    def test_the_fit_gate_stays_overridable(self):
+        """The knob survives the revert: a gate sized by the files a node will actually
+        rewrite (rather than the whole app) should recover most of the speed without
+        breaking the invariant, and that experiment needs to be runnable."""
+        from pathlib import Path
+        import argparse, os
+        flow = m.Flow(argparse.Namespace(web_port=1), Path("."), Path("."))
+        os.environ["OCTOS_ARC_CODEGEN_SOURCE_FIT_CHARS"] = "400000"
+        try:
+            self.assertEqual(flow.codegen_source_fit_chars(), 400000)
+        finally:
+            del os.environ["OCTOS_ARC_CODEGEN_SOURCE_FIT_CHARS"]
+
+    def test_an_oversized_spec_still_falls_back(self):
+        """The spec-size half of the gate is unchanged: a spec at 60% of the output
+        budget cannot be answered as one complete-file reply whatever the source budget."""
+        from pathlib import Path
+        import argparse
+        flow = m.Flow(argparse.Namespace(web_port=1), Path("."), Path("."))
+        self.assertFalse(flow.codegen_context_fits("x" * int(flow.codegen_context_chars() * 0.6)))
 
     def test_codegen_applies_to_big_trees_unless_capped(self):
         import argparse, os
@@ -988,6 +1046,7 @@ class FailedGenerationAcceptanceTests(unittest.TestCase):
                 flow.codegen_context_fits.return_value = True
                 flow.codegen_reasoning.return_value = 'none'
                 flow.codegen_context_chars.return_value = 20000
+                flow.codegen_quote_chars.return_value = 20000   # 拆分后仍与上面同值，保持这个用例原来的行为
                 flow.codegen_ports_clause.return_value = ''
                 flow.codegen_turn.return_value = (True, 'generated')
             flow.runtime = Mock()
@@ -1489,13 +1548,33 @@ class CheckpointRepairTests(unittest.TestCase):
             flow.regression_checkpoint(2, 8)
         flow.turn.assert_not_called()
 
-    def test_should_leave_the_verdict_false_when_the_repair_does_not_take(self):
+    def test_should_leave_the_verdict_false_when_no_repair_round_takes(self):
         from unittest.mock import patch
-        flow = self._flow([1, 1])
+        flow = self._flow([1, 1, 1])
         with patch.dict("os.environ", {"OCTOS_ARC_REGRESSION_CHECKPOINT": "2"}):
             flow.regression_checkpoint(2, 8)
-        self.assertEqual(flow.turn.call_count, 1)
+        self.assertEqual(flow.turn.call_count, 2)
         self.assertFalse(flow.test_verdict["REQ-2"])
+
+    def test_should_try_a_second_round_when_the_first_does_not_take(self):
+        """Cloud keep 4e18c76637ae: one round per checkpoint cleared two of five
+        regressions; REQ-2.2 and REQ-2.4 stayed broken for 97 minutes and three
+        checkpoints until the final suite caught them. On a 125-node tree the final
+        suite has no budget left to be that backstop."""
+        from unittest.mock import patch
+        flow = self._flow([1, 1, 2])   # checkpoint finds one broken, round 1 misses, round 2 fixes
+        with patch.dict("os.environ", {"OCTOS_ARC_REGRESSION_CHECKPOINT": "2"}):
+            flow.regression_checkpoint(2, 8)
+        self.assertEqual(flow.turn.call_count, 2)
+        self.assertTrue(all(flow.test_verdict.values()))
+
+    def test_should_stop_at_one_round_when_told_to(self):
+        from unittest.mock import patch
+        flow = self._flow([1, 1])
+        with patch.dict("os.environ", {"OCTOS_ARC_REGRESSION_CHECKPOINT": "2",
+                                       "OCTOS_ARC_CHECKPOINT_REPAIRS": "1"}):
+            flow.regression_checkpoint(2, 8)
+        self.assertEqual(flow.turn.call_count, 1)
 
     def test_should_skip_the_repair_when_the_budget_is_gone(self):
         from unittest.mock import patch
@@ -2012,3 +2091,254 @@ class CodegenOverflowMessageTests(unittest.TestCase):
         from pathlib import Path as P
         with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual(m.app_source_chars(P(tmp)), 0)
+class UnseenRewriteGuardTests(unittest.TestCase):
+    """A codegen turn must not rewrite a file it was never shown.
+
+    It is asked to return every file it changes, complete. When the source budget omitted
+    a file, what it returns for that file is written from nothing, and writing that
+    deletes behaviour other requirements depend on. Cloud 12306 99196f2e802b lost 29
+    nodes to regressions and not one to a spec it could not build; the prompt had told it
+    those files were "unchanged unless the requirement needs them", which invites exactly
+    that. The prompt now forbids it and this guard enforces it.
+    """
+
+    def _app(self, root):
+        (root / "backend").mkdir()
+        (root / "frontend").mkdir()
+        (root / "backend/server.js").write_text("b" * 9000, encoding="utf-8")
+        (root / "frontend/a.html").write_text("a" * 9000, encoding="utf-8")
+        (root / "frontend/b.html").write_text("c" * 9000, encoding="utf-8")
+
+    def test_quoted_set_matches_what_the_prompt_quotes(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._app(root)
+            budget = 12000            # room for one file, not three
+            text = m.relevant_sources(root, "a.html", budget)
+            quoted = m.quoted_source_paths(root, "a.html", budget)
+            for rel in quoted:
+                self.assertIn(f"--- {rel} ---", text)
+            for rel in ("backend/server.js", "frontend/a.html", "frontend/b.html"):
+                if rel not in quoted:
+                    self.assertNotIn(f"--- {rel} ---", text)
+            self.assertTrue(0 < len(quoted) < 3)
+
+    def test_omitted_files_are_forbidden_not_invited(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._app(root)
+            text = m.relevant_sources(root, "a.html", 12000)
+            self.assertIn("do not return these", text)
+            self.assertNotIn("unchanged unless the requirement needs them", text)
+
+    def test_refuses_a_rewrite_of_an_unquoted_existing_file(self):
+        import argparse, tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._app(root)
+            flow = m.Flow(argparse.Namespace(web_port=1), root, root)
+            flow.pending_corrections = []
+            flow.codegen_quoted = {"frontend/a.html"}
+            kept = flow.drop_unseen_rewrites(
+                {"frontend/a.html": "new a", "frontend/b.html": "clobbered"}, "node")
+            self.assertEqual(set(kept), {"frontend/a.html"})
+            self.assertTrue(any("frontend/b.html" in c for c in flow.pending_corrections))
+
+    def test_allows_a_brand_new_file(self):
+        import argparse, tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._app(root)
+            flow = m.Flow(argparse.Namespace(web_port=1), root, root)
+            flow.pending_corrections = []
+            flow.codegen_quoted = {"frontend/a.html"}
+            kept = flow.drop_unseen_rewrites({"frontend/new.html": "brand new"}, "node")
+            self.assertEqual(set(kept), {"frontend/new.html"})
+            self.assertEqual(flow.pending_corrections, [])
+
+    def test_does_nothing_when_the_turn_quoted_no_sources(self):
+        """tiny tier, tool mode, skeleton turn: no quoted set, so no basis to refuse."""
+        import argparse, tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._app(root)
+            flow = m.Flow(argparse.Namespace(web_port=1), root, root)
+            flow.codegen_quoted = None
+            files = {"frontend/b.html": "whatever"}
+            self.assertEqual(flow.drop_unseen_rewrites(files, "node"), files)
+
+
+class DryRunDriverParityTests(unittest.TestCase):
+    """The dry-run driver has to answer every call the real driver answers.
+
+    #140 gave the real driver `without_tools()` and called it from every codegen turn
+    but did not add it to DryRunDriver, so OCTOS_ARC_DRYRUN=1 aborted at the first
+    codegen node with AttributeError — the free structural-parity path from round 31 was
+    broken from then until 2026-09-18. A dry run of arc-bench-web--keep now traverses
+    30+ of its 32 nodes with no abort.
+    """
+
+    def test_dry_run_driver_answers_the_real_drivers_turn_surface(self):
+        real = {n for n in ("run", "without_tools", "end_scope") }
+        missing = [n for n in real if not hasattr(m.DryRunDriver(), n)]
+        self.assertEqual(missing, [], f"DryRunDriver is missing {missing}")
+
+    def test_without_tools_is_a_usable_context_manager(self):
+        with m.DryRunDriver().without_tools():
+            pass
+
+
+class QuotedSetWiringTests(unittest.TestCase):
+    """The guard is only as good as the set it checks against.
+
+    Unit tests cover drop_unseen_rewrites() directly and a dry run covers that it does
+    not misfire across 30 nodes, but neither covers the wiring: that the prompt-building
+    path actually records which files it quoted, with the same budget the prompt used.
+    If codegen_quoted were left None the guard silently does nothing; if it were computed
+    with a different budget it would refuse files the model *was* shown.
+    """
+
+    def _flow_with_big_app(self, root):
+        import argparse
+        (root / "backend").mkdir()
+        (root / "frontend").mkdir()
+        # One file per 40k chars: with a 90k budget and a spec of a few hundred chars,
+        # two fit and the third cannot.
+        (root / "backend/server.js").write_text("b" * 40000, encoding="utf-8")
+        (root / "frontend/a.html").write_text("a" * 40000, encoding="utf-8")
+        (root / "frontend/z.html").write_text("z" * 40000, encoding="utf-8")
+        return m.Flow(argparse.Namespace(web_port=1), root, root)
+
+    def test_quoted_set_is_what_the_same_budget_would_quote(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            flow = self._flow_with_big_app(root)
+            spec = "click the button labelled Save"
+            budget = max(8000, flow.codegen_context_chars() - len(spec))
+            quoted = m.quoted_source_paths(root, spec, budget)
+            text = m.relevant_sources(root, spec, budget)
+            self.assertTrue(quoted, "nothing quoted at a 90k budget with 120k of source")
+            self.assertLess(len(quoted), 3, "all three files fit; the case under test is an omission")
+            for rel in quoted:                      # everything claimed quoted really is
+                self.assertIn(f"--- {rel} ---", text)
+            omitted = {"backend/server.js", "frontend/a.html", "frontend/z.html"} - quoted
+            for rel in omitted:                     # and everything omitted is refused by the guard
+                flow.codegen_quoted = quoted
+                flow.pending_corrections = []
+                kept = flow.drop_unseen_rewrites({rel: "rewritten from nothing"}, "node")
+                self.assertEqual(kept, {}, f"guard let through a rewrite of unquoted {rel}")
+
+    def test_a_quoted_file_is_still_writable(self):
+        """The guard must not block the file the node was given to change."""
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            flow = self._flow_with_big_app(root)
+            spec = "click the button labelled Save"
+            budget = max(8000, flow.codegen_context_chars() - len(spec))
+            quoted = m.quoted_source_paths(root, spec, budget)
+            target = sorted(quoted)[0]
+            flow.codegen_quoted = quoted
+            flow.pending_corrections = []
+            kept = flow.drop_unseen_rewrites({target: "legit edit"}, "node")
+            self.assertEqual(set(kept), {target})
+            self.assertEqual(flow.pending_corrections, [])
+
+
+class RefusalFallsBackToToolModeTests(unittest.TestCase):
+    """A refused rewrite must move the node to tool mode, not just drop the write.
+
+    Refusing alone leaves the node unable to finish: it asked for a file it genuinely
+    needs and got nothing, so it would keep failing its own spec. Tool mode reads and
+    edits in place instead of re-emitting whole files -- which is also why it never had
+    this failure mode -- so the refusal is the signal that this node belongs there.
+    """
+
+    def _flow(self, root):
+        import argparse
+        (root / "backend").mkdir()
+        (root / "frontend").mkdir()
+        (root / "frontend/seen.html").write_text("s" * 100, encoding="utf-8")
+        (root / "frontend/unseen.html").write_text("u" * 100, encoding="utf-8")
+        flow = m.Flow(argparse.Namespace(web_port=1), root, root)
+        flow.pending_corrections = []
+        flow.codegen_quoted = {"frontend/seen.html"}
+        flow.codegen_blocked = False
+        return flow
+
+    def test_refusal_blocks_codegen_for_this_node(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            flow = self._flow(root)
+            flow.drop_unseen_rewrites({"frontend/unseen.html": "clobber"}, "node")
+            self.assertTrue(flow.codegen_blocked, "a refused node must fall back to tool mode")
+
+    def test_an_accepted_write_leaves_the_fast_path_alone(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            flow = self._flow(root)
+            flow.drop_unseen_rewrites({"frontend/seen.html": "legit"}, "node")
+            self.assertFalse(flow.codegen_blocked)
+
+    def test_a_new_file_leaves_the_fast_path_alone(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            flow = self._flow(root)
+            flow.drop_unseen_rewrites({"frontend/brand-new.html": "new"}, "node")
+            self.assertFalse(flow.codegen_blocked)
+
+
+class CodegenQuoteCharsTests(unittest.TestCase):
+    """The quoting budget had to become its own knob before it can be measured.
+
+    `codegen_context_chars()` was doing four jobs at once, so the 6-run
+    experiment that moved it (9,000 -> 2/2 three times, 40,000 -> 1/2 three
+    times) moved the quoting budget, the inline budget, the whole-prompt ceiling
+    and the spec-size test together. Splitting it changes nothing by default.
+    """
+
+    def _flow(self):
+        import main
+        return main.Flow.__new__(main.Flow)
+
+    def test_should_default_to_the_context_budget(self):
+        from unittest.mock import patch
+        flow = self._flow()
+        with patch.dict('os.environ', {}, clear=False):
+            import os
+            os.environ.pop('OCTOS_ARC_CODEGEN_QUOTE_CHARS', None)
+            os.environ.pop('OCTOS_ARC_CODEGEN_CONTEXT_CHARS', None)
+            self.assertEqual(flow.codegen_quote_chars(), flow.codegen_context_chars())
+            self.assertEqual(flow.codegen_quote_chars(), 90000)
+
+    def test_should_follow_the_context_budget_when_that_is_set(self):
+        from unittest.mock import patch
+        flow = self._flow()
+        with patch.dict('os.environ', {'OCTOS_ARC_CODEGEN_CONTEXT_CHARS': '12000'}):
+            import os
+            os.environ.pop('OCTOS_ARC_CODEGEN_QUOTE_CHARS', None)
+            self.assertEqual(flow.codegen_quote_chars(), 12000)
+
+    def test_should_be_separable_from_the_context_budget(self):
+        from unittest.mock import patch
+        flow = self._flow()
+        with patch.dict('os.environ', {'OCTOS_ARC_CODEGEN_CONTEXT_CHARS': '90000',
+                                       'OCTOS_ARC_CODEGEN_QUOTE_CHARS': '9000'}):
+            self.assertEqual(flow.codegen_context_chars(), 90000)
+            self.assertEqual(flow.codegen_quote_chars(), 9000)

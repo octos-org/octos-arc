@@ -17,7 +17,18 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-FILE_BLOCK = re.compile(r"<<<FILE\s+(?P<path>[^\n>]+?)\s*>>>\r?\n(?P<body>.*?)(?:\r?\n)?<<<END FILE>>>", re.S)
+CANONICAL_FILE_BLOCK = re.compile(
+    r"<<<FILE\s+(?P<path>[^\n>]+?)\s*>>>\r?\n(?P<body>.*?)(?:\r?\n)?<<<END FILE>>>", re.S)
+
+# Weaker (cheaper) models drift on the delimiter without getting the block wrong.
+# qwen2.5-coder:7b emitted `<<<FILE frontend/src/index.html>` — a single `>` — and
+# closed with a correct `<<<END FILE>>>`; the body in between was a complete, correct
+# page. The strict pattern matched nothing, so the harness logged "reply contained no
+# file blocks" and threw away 25s and a working implementation. The path pattern
+# already excludes `>`, so accepting one-or-more closes the near miss without making
+# the marker ambiguous against code or markdown.
+FILE_BLOCK = re.compile(
+    r"<<<FILE\s+(?P<path>[^\n>]+?)\s*>+\r?\n(?P<body>.*?)(?:\r?\n)?<<<END\s+FILE\s*>+", re.S)
 
 FORMAT_INSTRUCTIONS = """\
 Format, one block per file, nothing else:
@@ -44,6 +55,49 @@ def parse_file_blocks(text: str) -> dict[str, str]:
             body = inner.rsplit("```", 1)[0]
         files["/".join(parts)] = body.rstrip("\n") + "\n"
     return files
+
+
+def delimiter_drift(text: str) -> list[str]:
+    """Paths whose block only parsed because of the tolerance above.
+
+    Worth logging rather than swallowing silently: how far a model drifts off the
+    marker protocol is a property of that model, and it is what tells us whether
+    the format instructions need to be firmer for the cheap tier."""
+    def paths(pattern: re.Pattern[str]) -> set[str]:
+        return {m.group("path").strip().strip("`'\"") for m in pattern.finditer(text or "")}
+    return sorted(paths(FILE_BLOCK) - paths(CANONICAL_FILE_BLOCK))
+
+
+def unparsed_reply_digest(text: str, limit: int = 160) -> str:
+    """Why a reply yielded no file blocks, in one bounded line.
+
+    The paid model logged 36 "reply contained no file blocks" against 571
+    successful writes across the five long submission-C runs -- about 6% of
+    codegen turns thrown away -- and the cause cannot be established after the
+    fact: the run log keeps the harness's verdict but not the reply.
+
+    The turn line above it does print a slice of the reply, but only its *tail*.
+    That is the wrong end. The local 7B's near-miss was in the *opening* marker
+    (`<<<FILE path>` instead of `>>>`) while its tail closed correctly, so the
+    tail slice looked perfectly healthy and the real defect stayed invisible.
+
+    So report what actually separates the candidate causes: whether an opening
+    marker appeared at all and exactly how it was written, how many closing
+    markers there were, and a bounded slice from *both* ends -- a truncated
+    reply loses its close at the end, a reply that opens with prose or a fence
+    fails at the start.
+    """
+    t = text or ""
+    opens = re.findall(r"<<<\s*FILE[^\n]{0,120}", t)
+    closes = len(re.findall(r"<<<\s*END\s*FILE\s*>*", t))
+    bits = [f"len={len(t)}", f"open={opens[0]!r}" if opens else "open=absent"]
+    if len(opens) > 1:
+        bits.append(f"opens={len(opens)}")
+    bits.append(f"close={closes}")
+    bits.append(f"head={t[:limit]!r}")
+    if len(t) > limit:
+        bits.append(f"tail={t[-limit:]!r}")
+    return " ".join(bits)
 
 
 CHARSET_META = '<meta charset="utf-8">'
@@ -113,6 +167,35 @@ def dedupe_nav_links(root: Path) -> list[str]:
     conditional content. Let acceptance failures drive explicit app repairs.
     """
     return []
+
+
+def unchanged_rewrites(root: Path, files: dict[str, str]) -> list[str]:
+    """Paths the model returned exactly as they already were on disk.
+
+    Measured on the deepseek batch: 282 codegen turns wrote 688 files, 2.44 per
+    turn, two thirds of turns writing 2 or more and ten of them writing 8 to 10.
+    The count alone cannot say how much of that was work. A file handed back
+    unchanged still cost a whole file's worth of output tokens, and turn time is
+    output tokens over generation rate -- ~12,800 output tokens per turn at
+    ~69 tokens/s on keep -- so this is the number that says how much of a turn
+    was spent producing nothing.
+
+    Normalised the way `write_files` will normalise, so the comparison is against
+    what would actually land rather than against the raw reply.
+    """
+    same = []
+    for rel, body in files.items():
+        dest = root / rel
+        if not dest.exists():
+            continue
+        if dest.suffix.lower() in (".html", ".htm"):
+            body = ensure_charset(body)
+        try:
+            if dest.read_text(encoding="utf-8") == body:
+                same.append(rel)
+        except (OSError, UnicodeDecodeError):
+            continue          # 读不出来就别猜，当作有变化
+    return sorted(same)
 
 
 def write_files(root: Path, files: dict[str, str]) -> list[str]:

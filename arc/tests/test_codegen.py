@@ -21,6 +21,72 @@ class ParseTests(unittest.TestCase):
     def test_should_return_empty_when_no_blocks(self):
         self.assertEqual(parse_file_blocks("just prose"), {})
 
+    def test_should_accept_a_short_opening_delimiter(self):
+        """The reply qwen2.5-coder:7b actually produced on smoke-evolution--counter:
+        a single `>` closing the opening marker, a correct `<<<END FILE>>>`, and a
+        complete page in between. The strict pattern matched nothing, so a correct
+        implementation was discarded as "reply contained no file blocks"."""
+        text = ('<<<FILE frontend/src/index.html>\n'
+                '<div data-testid="count">0</div>\n'
+                '<<<END FILE>>>To address the failing tests, we need to...')
+        files = parse_file_blocks(text)
+        self.assertEqual(sorted(files), ["frontend/src/index.html"])
+        self.assertEqual(files["frontend/src/index.html"], '<div data-testid="count">0</div>\n')
+
+    def test_should_accept_drift_on_either_marker(self):
+        text = "<<<FILE a.js>>\nconst x = 1;\n<<<END  FILE>"
+        self.assertEqual(parse_file_blocks(text)["a.js"], "const x = 1;\n")
+
+    def test_should_still_reject_a_path_containing_the_delimiter(self):
+        """Relaxing the delimiter must not let `>` leak into a path: the path
+        pattern excludes it, so such a marker still matches nothing at all."""
+        self.assertEqual(parse_file_blocks("<<<FILE a>b.js>>>\nx\n<<<END FILE>>>"), {})
+
+
+class DelimiterDriftTests(unittest.TestCase):
+    def test_should_name_only_the_blocks_that_needed_tolerance(self):
+        from codegen import delimiter_drift
+        text = ("<<<FILE ok.js>>>\nconst a = 1;\n<<<END FILE>>>\n"
+                "<<<FILE loose.js>\nconst b = 2;\n<<<END FILE>>>")
+        self.assertEqual(delimiter_drift(text), ["loose.js"])
+
+    def test_should_be_silent_on_a_canonical_reply(self):
+        from codegen import delimiter_drift
+        self.assertEqual(delimiter_drift("<<<FILE ok.js>>>\nx\n<<<END FILE>>>"), [])
+        self.assertEqual(delimiter_drift("just prose"), [])
+
+
+class UnparsedReplyDigestTests(unittest.TestCase):
+    def test_should_say_the_marker_is_absent(self):
+        from codegen import unparsed_reply_digest
+        d = unparsed_reply_digest("Sure! Here is the file you asked for.")
+        self.assertIn("open=absent", d)
+        self.assertIn("close=0", d)
+        self.assertIn("len=37", d)
+
+    def test_should_quote_the_opening_marker_it_could_not_use(self):
+        """The case that stayed invisible: the defect is in the opening marker
+        while the tail closes correctly, so a tail-only slice looks healthy."""
+        from codegen import unparsed_reply_digest
+        d = unparsed_reply_digest("<<<FILE a>b.js>>>\nx\n<<<END FILE>>>")
+        self.assertIn("open='<<<FILE a>b.js>>>'", d)
+        self.assertIn("close=1", d)
+
+    def test_should_report_a_truncated_reply_as_having_no_close(self):
+        from codegen import unparsed_reply_digest
+        d = unparsed_reply_digest("<<<FILE a.js>>>\n" + "x = 1;\n" * 200)
+        self.assertIn("close=0", d)
+        self.assertIn("head=", d)
+        self.assertIn("tail=", d)
+
+    def test_should_stay_bounded_and_single_line(self):
+        from codegen import unparsed_reply_digest
+        d = unparsed_reply_digest("prose\n" * 5000, limit=80)
+        self.assertNotIn("\n", d)
+        self.assertLess(len(d), 400)
+
+
+class WriteFilesTests(unittest.TestCase):
     def test_should_write_files_under_root(self):
         with tempfile.TemporaryDirectory() as tmp:
             written = write_files(Path(tmp), {"backend/server.js": "x\n"})
@@ -176,7 +242,8 @@ class BestRepairStateTests(unittest.TestCase):
         flow.snapshot_sources = Mock()
         flow.sources_text = lambda: ''
         flow.corrections_text = lambda: ''
-        flow.turn = Mock()  # failed repair leaves uncommitted edits; HEAD remains unchanged
+        # 真实签名是 tuple[bool, str]；桩必须同形，否则解包会炸
+        flow.turn = Mock(return_value=(True, ''))  # failed repair leaves uncommitted edits; HEAD remains unchanged
         flow.commit = Mock()
         flow.restore_app = Mock()
         failure = TestOutcome('behavior', False, 'failed', 1, message='missing control')
@@ -209,7 +276,7 @@ class VerifiedBehaviorRewriteTests(unittest.TestCase):
         flow.wound_down = flow.time_up = lambda: False
         flow.sources_text = flow.corrections_text = flow.repair_test_location = lambda *args: ''
         flow.record_tests = flow.snapshot_sources = flow.commit = Mock()
-        flow.turn = Mock()
+        flow.turn = Mock(return_value=(True, ''))
         flow.smoke_port, flow.web_port = 43219, 3000
         fail = TestOutcome('new behavior', False, 'failed', 1, message='missing control')
         flow.run_specs = Mock(side_effect=[RunSummary(passed=0, total=1, results=[fail]),
@@ -263,8 +330,8 @@ class RepairModeTransitionTests(unittest.TestCase):
                 flow.sources_text = lambda: ''
                 flow.corrections_text = lambda: ''
                 flow.spec_bodies = lambda _: 'complete-spec-and-helper-evidence'
-                flow.codegen_turn = Mock()
-                flow.turn = Mock()
+                flow.codegen_turn = Mock(return_value=(True, ''))
+                flow.turn = Mock(return_value=(True, ''))
                 flow.commit = Mock()
                 flow.restore_app = Mock()
                 summaries = [RunSummary(passed=0, total=1, results=[
@@ -470,3 +537,461 @@ class RepairFallbackReasonTests(unittest.TestCase):
             flow.codegen_context_chars = lambda: 200000
             self.assertIsNotNone(flow.codegen_repair_prompt('node', 'failure evidence'))
             self.assertEqual(flow.codegen_repair_block, '')
+class UnchangedRewriteTests(unittest.TestCase):
+    """How much of a turn produced nothing. Turn time is output tokens over
+    generation rate, so a file handed back byte-identical is pure waste."""
+
+    def test_should_name_only_the_files_that_did_not_change(self):
+        from codegen import unchanged_rewrites
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "backend").mkdir()
+            (root / "backend" / "server.js").write_text("const a = 1;\n", encoding="utf-8")
+            (root / "backend" / "db.js").write_text("const b = 2;\n", encoding="utf-8")
+            files = {"backend/server.js": "const a = 1;\n",      # 原样吐回
+                     "backend/db.js": "const b = 3;\n",          # 真的改了
+                     "backend/new.js": "const c = 4;\n"}         # 新文件
+            self.assertEqual(unchanged_rewrites(root, files), ["backend/server.js"])
+
+    def test_should_compare_html_after_the_same_charset_injection(self):
+        """write_files injects the meta tag, so comparing the raw reply would
+        report every page as changed on the turn right after it was written."""
+        from codegen import ensure_charset, unchanged_rewrites, write_files
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_files(root, {"a.html": "<html><head></head><body>x</body></html>"})
+            self.assertIn("charset", (root / "a.html").read_text(encoding="utf-8"))
+            self.assertEqual(unchanged_rewrites(root, {"a.html": "<html><head></head><body>x</body></html>"}),
+                             ["a.html"])
+            self.assertEqual(ensure_charset("<p>y</p>").count("charset"), 1)
+
+    def test_should_be_empty_when_nothing_exists_yet(self):
+        from codegen import unchanged_rewrites
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(unchanged_rewrites(Path(tmp), {"a.js": "x\n"}), [])
+
+
+class NoFilesCorrectionTests(unittest.TestCase):
+    """What the model is told after a turn that wrote nothing.
+
+    Observed on both local models: correct code, lost on the wrapper. The
+    generic correction and the repair prompt both blamed files that were never
+    written, sending the model after a logic bug that did not exist.
+    """
+
+    def test_should_name_the_wrapper_and_disown_the_missing_files(self):
+        from main import no_files_correction
+        msg = no_files_correction("codegen reply contained no <<<FILE>>> blocks")
+        self.assertIsNotNone(msg)
+        self.assertIn("<<<FILE relative/path>>>", msg)
+        self.assertIn("<<<END FILE>>>", msg)
+        self.assertIn("there", msg.lower())
+        self.assertIn("may have been correct", msg)
+
+    def test_should_leave_room_for_a_correct_no_change_answer(self):
+        """Watched on a real bundle run: the model answered "The existing
+        implementation already fully satisfies REQ-1" and returned no files,
+        which was right - the tiny tier had already written a correct page.
+        Telling it to return every changed file pushes it to rewrite a working
+        one, so the message has to name that case too."""
+        from main import no_files_correction
+        msg = no_files_correction("codegen reply contained no <<<FILE>>> blocks")
+        self.assertIn("already satisfied", msg)
+        self.assertIn("change nothing", msg)
+        self.assertIn("Do not rewrite a working file", msg)
+
+    def test_should_stay_out_of_the_way_of_other_failures(self):
+        """A timeout or a provider error still deserves the generic correction,
+        so this must return None for anything that is not the wrapper."""
+        from main import no_files_correction
+        for text in ("", "provider quota exhausted — HTTP 402",
+                     "turn ran out of time", "some other failure"):
+            self.assertIsNone(no_files_correction(text), text)
+
+
+class TruncationCorrectionTests(unittest.TestCase):
+    """截断只在 implement 轮被处理过；repair 与 rewrite 轮什么都不做。
+
+    实测：ticket-booking 上 glm-5.3-flash 的 rewrite 轮跑了 582s，返回
+    `output_truncated: Model output was truncated (max_tokens)`，
+    `completion_tokens` 恰好 32768（代理的下限）。那一轮整份作废、
+    什么都没写，REQ-1 再也没过，节点随后耗尽 1500s 预算。
+    """
+
+    def test_should_fire_only_on_a_failed_truncated_turn(self):
+        from main import truncation_correction
+        msg = truncation_correction(False, "output_truncated: Model output was truncated (max_tokens)")
+        self.assertIsNotNone(msg)
+        self.assertIn("ONE file per response", msg)
+        self.assertIn("nothing was saved", msg)
+
+    def test_should_stay_out_of_the_way_otherwise(self):
+        """成功的轮次、以及别的失败原因，都不该被安上这条更正——
+        否则模型会为了一个不存在的问题改变写法。"""
+        from main import truncation_correction
+        self.assertIsNone(truncation_correction(True, "output_truncated"))   # 成功就不提
+        self.assertIsNone(truncation_correction(False, "octos turn timed out"))
+        self.assertIsNone(truncation_correction(False, "provider quota exhausted"))
+        self.assertIsNone(truncation_correction(False, ""))
+
+
+class UnchangedCorrectionTests(unittest.TestCase):
+    """回复「一个字节都没变」是三种无进展回复里最安静的一种。
+
+    另外两种早就有话说了：整份没有文件块 → no_files_correction；
+    中途被截断 → truncation_correction。而「原样吐回」只留下一行日志，
+    `codegen_turn` 照样返回成功，于是外层要再花一整轮 spec 才发现应用没变，
+    并把同样的证据递给下一轮——很可能换回同样的回复。
+    """
+
+    def test_should_fire_only_when_every_file_is_identical(self):
+        from main import unchanged_correction
+        files = {"a.js": "x", "b.js": "y"}
+        msg = unchanged_correction(files, ["a.js", "b.js"])
+        self.assertIsNotNone(msg)
+        self.assertIn("byte-for-byte identical", msg)
+        self.assertIn("a.js", msg)
+
+    def test_should_stay_quiet_when_part_of_the_reply_moved(self):
+        """改了一个、原样吐回三个，是**有**进展。这种情况已有
+        `(N unchanged: ...)` 那行日志，足够了；再加一条更正会把
+        一个正在推进的节点推去怀疑自己。"""
+        from main import unchanged_correction
+        self.assertIsNone(unchanged_correction({"a.js": "x", "b.js": "y"}, ["a.js"]))
+        self.assertIsNone(unchanged_correction({"a.js": "x"}, []))
+        self.assertIsNone(unchanged_correction({}, []))
+
+    def test_should_offer_the_already_correct_path_too(self):
+        """这条是从 no_files_correction 上学到的教训：把一个「正确地什么都没改」
+        的模型逼去重写一个能用的文件，只会更糟。所以消息必须同时给出
+        「本来就对」这条路，并且要它说出失败可能来自哪里——那是重复一遍给不了的东西。"""
+        from main import unchanged_correction
+        msg = unchanged_correction({"a.js": "x"}, ["a.js"])
+        self.assertIn("already correct", msg)
+        self.assertIn("do", msg.lower())
+        self.assertNotIn("return every file", msg)
+
+    def test_should_summarize_instead_of_listing_everything(self):
+        from main import unchanged_correction
+        files = {f"f{i}.js": "x" for i in range(9)}
+        msg = unchanged_correction(files, sorted(files))
+        self.assertIn("9 file(s)", msg)
+        self.assertIn("and 5 more", msg)
+
+
+# `IdenticalFailureAfterEmptyRepairTests` 已删除并由 tests/test_identical_failure_gate.py 取代。
+# 原因不是重复，是那一版**没有测试价值**：它在测试里把 acceptance_loop 的那段分支
+# 重新实现了一遍再断言，验的是我的复刻。实测证据——把 main.py 里的门槛拆掉之后：
+#     新的行为测试  → 变红
+#     旧的复刻测试  → 仍然全绿
+# 一条拆掉被测逻辑仍然通过的测试，比没有测试更糟：它会让人以为这里有保护。
+
+class RepairWroteNothingCorrectionTests(unittest.TestCase):
+    """修复轮整份丢在外壳上时，之前**什么都不会说**。
+
+    `truncation_correction` 的 docstring 早就写明「repair 与 rewrite 轮什么都不做」，
+    并补上了截断那一半；没有文件块这一半被落下了——`no_files_correction` 只挂在
+    implement 路径上。本机 ticket-booking 直接观察到后果：修复轮回复是个 ```json 围栏、
+    没有分隔符，什么都没落盘，下一轮报出完全相同的失败。
+    """
+
+    def test_should_fire_on_a_failed_repair_with_no_blocks(self):
+        from main import repair_wrote_nothing_correction
+        msg = repair_wrote_nothing_correction(False, "codegen reply contained no <<<FILE>>> blocks")
+        self.assertIsNotNone(msg)
+        self.assertIn("<<<FILE relative/path>>>", msg)
+        self.assertIn("still exactly the code that just failed", msg)
+
+    def test_should_not_claim_there_were_no_previous_files(self):
+        """这是它不能直接复用 `no_files_correction` 的唯一原因：那条消息结尾是
+        「Ignore any suggestion that your previous files failed; there were none.」
+        在 implement 路径上成立，在修复轮上是**假的**——implement 轮写过文件，而且它们确实失败了。
+        照搬会把模型引向错误结论。"""
+        from main import no_files_correction, repair_wrote_nothing_correction
+        implement = no_files_correction("codegen reply contained no <<<FILE>>> blocks")
+        self.assertIn("there were none", implement)
+        repair = repair_wrote_nothing_correction(False, "codegen reply contained no <<<FILE>>> blocks")
+        self.assertNotIn("there were none", repair)
+        # 反过来，它必须明确保住「失败仍然成立」这个上下文
+        self.assertIn("still stand", repair)
+
+    def test_should_stay_out_of_the_way_otherwise(self):
+        from main import repair_wrote_nothing_correction
+        self.assertIsNone(repair_wrote_nothing_correction(True, "codegen reply contained no <<<FILE>>> blocks"))
+        self.assertIsNone(repair_wrote_nothing_correction(False, "octos turn timed out"))
+        self.assertIsNone(repair_wrote_nothing_correction(False, "Model output was truncated (max_tokens)"))
+        self.assertIsNone(repair_wrote_nothing_correction(False, ""))
+
+    def test_both_repair_paths_consult_it(self):
+        """rewrite 轮和 repair 轮是两个独立的调用点，截断那一半当年就是只补了一处才留下这个洞。
+        这条测试盯住两处都接上了。"""
+        import inspect
+        import main
+        src = inspect.getsource(main.Flow.acceptance_loop)
+        self.assertEqual(src.count("repair_wrote_nothing_correction"), 2, src.count("repair_wrote_nothing_correction"))
+        self.assertEqual(src.count("truncation_correction"), 2)
+
+
+class CheckpointRepairOutcomeTests(unittest.TestCase):
+    """回归检查点的修复轮，过去是「只为副作用」调用的——返回值整份丢掉。
+
+    于是一个被截断、或根本没跑完的检查点修复，看起来和「跑了但没修对」完全一样，
+    下一次尝试拿不到任何提示。这在别处是浪费，在这里是要害：
+    **检查点挽回正是提交 A 的 keep（32/32，8 个节点靠检查点挽回）
+    与 D（循环内通过 24，挽回 0）之间被实测出来的全部差距。**
+    """
+
+    def test_checkpoint_repair_captures_its_outcome(self):
+        import inspect
+        import main
+        src = inspect.getsource(main.Flow.repair_regressions)
+        # 返回值必须被接住，不能再是裸调用
+        self.assertIn("c_ok, c_text = self.turn(", src)
+        # 截断必须像节点级修复路径一样被转达给下一次尝试
+        self.assertIn("truncation_correction(c_ok, c_text)", src)
+        self.assertIn("pending_corrections.append(note)", src)
+
+    def test_checkpoint_repair_still_lets_the_specs_decide(self):
+        """没跑完**不**作致命处理：下面的 spec 运行仍然是判定者。
+        否则一次网络抖动就会把一个本来能挽回的检查点变成放弃。"""
+        import inspect
+        import main
+        src = inspect.getsource(main.Flow.repair_regressions)
+        body = src.split("c_ok, c_text = self.turn(")[1]
+        head = body.split("self.commit(")[0]
+        self.assertNotIn("return", head, "没跑完不应直接 return，spec 运行才是判定者")
+
+    def test_corrections_reach_the_next_checkpoint_attempt(self):
+        """append 了有用，必须确认这条路径真的会把 corrections 喂进提示。"""
+        import inspect
+        import main
+        src = inspect.getsource(main.Flow.repair_regressions)
+        self.assertIn("corrections=self.corrections_text()", src)
+
+
+class RehearsalRepairOutcomeTests(unittest.TestCase):
+    """启动排练的修复轮：接住结果，但**故意不往 corrections 里塞东西**。
+
+    这一条存在的意义是钉住那个「显而易见的修法其实有害」的判断，
+    免得日后有人为了跟另外两条修复路径「保持一致」而把泄漏引进来。
+    """
+
+    def test_captures_the_outcome(self):
+        import inspect
+        import main
+        src = inspect.getsource(main.Flow.rehearsal)
+        self.assertIn("reh_ok, reh_text = self.turn(", src)
+
+    def test_must_not_append_a_correction(self):
+        """`REHEARSAL_REPAIR_PROMPT` 只有 error / port / smoke 三个占位符，
+        **没有 corrections**，所以它永远不会去取 corrections 通道。
+        在这里 append 会做两件坏事：错过本该看到它的下一次排练尝试，
+        并且泄漏给下一个真正去取这个通道的、毫不相干的轮次。"""
+        import inspect
+        import main
+        src = inspect.getsource(main.Flow.rehearsal)
+        self.assertNotIn("pending_corrections", src)
+        # 判断的前提也要钉住：这个提示确实不含 corrections 占位符
+        self.assertNotIn("{corrections}", main.REHEARSAL_REPAIR_PROMPT)
+        self.assertIn("{error}", main.REHEARSAL_REPAIR_PROMPT)
+
+    def test_the_two_paths_that_do_append_read_the_channel(self):
+        """反过来确认：会 append 的那两条路径，它们的提示确实会取 corrections。
+        否则今天这三处修复里就藏着同一个泄漏。"""
+        import inspect
+        import main
+        self.assertIn("corrections=self.corrections_text()",
+                      inspect.getsource(main.Flow.repair_regressions))
+        self.assertIn("{corrections}", main.REPAIR_PROMPT)
+
+
+class FullSuiteRepeatedFailureTests(unittest.TestCase):
+    """全量套件那条路上的同一个缺陷——而且它本来就**已经算出了答案**。
+
+    `wrote_last = self.commit(...)`（提交真的产生了变更才为 True）原先只用来决定
+    要不要把未完成的计划带到下一轮；「观察相同」那条更正却是**无条件**追加的。
+    上一轮什么都没提交时，套件只是把同一份代码量了两遍，失败相同是必然的。
+
+    更糟的是那两句话在同一个提示里互相矛盾：`last_repair_diff()` 已经加了准确的一行
+    （「上一次修复没动 frontend/ 和 backend/，这是同一份代码量了两遍，这次请真的改一处」），
+    而「复查你修法背后的假设、改掉病因」是叫它放弃刚才的推理——
+    一个说把没做完的做完，一个说别想了换个方向。
+    """
+
+    def _decide(self, wrote_last):
+        """复刻被测的那段分支。"""
+        corrections, logs, unfinished = [], [], "half a plan"
+        if wrote_last:
+            unfinished = ""
+            logs.append("changing repair approach")
+            corrections.append("Repeated attempts produced the same observed failure.")
+        else:
+            logs.append("committed nothing -- keeping the unfinished plan")
+        return corrections, logs, unfinished
+
+    def test_no_commit_means_the_repeat_is_not_evidence(self):
+        corrections, logs, unfinished = self._decide(False)
+        self.assertEqual(corrections, [], "什么都没提交时不该追加「复查你的修法」")
+        self.assertEqual(unfinished, "half a plan", "未完成的计划必须保留，好让它接着做")
+        self.assertIn("committed nothing", logs[0])
+
+    def test_a_real_edit_still_changes_the_approach(self):
+        """原有行为必须保留：真的改了东西而失败没动，那才该叫它换方向。"""
+        corrections, logs, unfinished = self._decide(True)
+        self.assertEqual(len(corrections), 1)
+        self.assertEqual(unfinished, "", "改过东西之后，旧计划不该再带下去")
+
+    def test_the_source_gates_the_correction_on_wrote_last(self):
+        import inspect
+        import main
+        src = inspect.getsource(main.Flow.final_acceptance)
+        head = src.split("if wrote_last:")[1].split("else:")[0]
+        self.assertIn("pending_corrections.append", head,
+                      "那条更正必须落在 wrote_last 为真的分支里")
+        tail = src.split("if wrote_last:")[1].split("else:")[1][:600]
+        self.assertNotIn("pending_corrections.append", tail,
+                         "wrote_last 为假的分支不得追加那条更正")
+
+    def test_last_repair_diff_already_covers_the_no_change_case(self):
+        """不追加不等于不告知——准确的那句话由 last_repair_diff 提供，这里钉住它还在。"""
+        import inspect
+        import main
+        self.assertIn("left frontend/ and backend/ unchanged",
+                      inspect.getsource(main.Flow.last_repair_diff))
+
+
+class RepeatedFailureCorrectionSitesTests(unittest.TestCase):
+    """「观察相同」那条更正只能从**真的改过应用**的分支里发出来。
+
+    这个逻辑错误在代码里有两处实例（节点级验收循环、全量套件），两处都修过了。
+    这条测试是给**第三处**准备的：如果有人以后在别处再加一次而忘了加门槛，
+    它会红。用眼睛看守不住这种事——今天前四处就是一个一个看出来的。
+
+    （顺带纠自己一次：我曾把「检查点修复轮返回值被丢弃」也算进这一类，说成三处。
+     那是另一类缺陷——结果被丢掉，由 `audit_discarded.py` 机械看守。这一类是两处。）
+    """
+
+    CORRECTION = "Repeated attempts produced the same observed failure"
+
+    def test_exactly_two_sites_and_both_are_gated(self):
+        import main
+        from pathlib import Path
+        src = Path(main.__file__).read_text(encoding="utf-8")
+        lines = src.splitlines()
+        sites = [i for i, line in enumerate(lines) if self.CORRECTION in line]
+        self.assertEqual(len(sites), 2,
+                         f"追加这条更正的地方应为 2 处，实际 {len(sites)} 处；"
+                         f"新增的那一处必须也以「上一轮是否真的改过应用」为门槛")
+        for i in sites:
+            window = "\n".join(lines[max(0, i - 12):i])
+            gated = ("last_codegen_wrote" in window) or ("if wrote_last:" in window)
+            self.assertTrue(gated,
+                            f"main.py:{i + 1} 的这条更正没有门槛——"
+                            f"上一轮什么都没写时，失败相同是必然的，不是关于修法的证据")
+
+    def test_both_failure_signature_comparisons_are_accounted_for(self):
+        """比较失败签名的地方也只有两处；多出来的那处很可能就是没加门槛的新实例。"""
+        import main
+        from pathlib import Path
+        src = Path(main.__file__).read_text(encoding="utf-8")
+        compares = [ln for ln in src.splitlines()
+                    if "== previous_failures" in ln or "== previous_failing" in ln]
+        self.assertEqual(len(compares), 2, compares)
+
+
+class CostGuardCalibrationTests(unittest.TestCase):
+    """成本护栏的 token 限额，是在「费用会被计量、效率决定名次」的世界里校准的。
+
+    那个世界没了：平台计量的是它自己那把 access key，自带 key 的提交费用记 0，
+    而 `_cost_efficiency` 对 cost <= 0 返回 None——**花多少对名次毫无影响**。
+    而它跳闸的代价是唯一还在的那种货币：`wound_down()` 会关掉此后**全部**修复轮，
+    包括那些在提交 A 的 keep 上挽回了 8 个节点（共 32 个）的检查点修复。
+
+    旧余量是实测出来的、薄到离谱：A 的 keep 用掉 78,211,655 token，限额 80,000,000，
+    **97.8%**——只差 2.2% 没跳闸。任何比我们手上最省的那次稍微费一点的运行，
+    都会把全部修复能力交给一个已经保护不了任何东西的护栏。
+    """
+
+    def test_token_limit_leaves_real_headroom_over_the_best_measured_run(self):
+        import main
+        nodes = 32                      # A 的 keep
+        measured = 78_211_655           # A 的 keep 实际用量
+        limit = max(6_000_000, 8_000_000 * nodes)
+        self.assertGreater(limit, measured * 2,
+                           f"限额 {limit} 对实测 {measured} 的余量不足 2 倍")
+        src = __import__("inspect").getsource(main.Flow.run)
+        self.assertIn("8_000_000 * self.n_nodes", src)
+
+    def test_turn_limit_deliberately_unchanged(self):
+        """轮次是墙钟的代理、不是钱的代理，所以不动。
+        两者一起放开会把时间预算也一起放开，而那是真约束。"""
+        import inspect
+        import main
+        src = inspect.getsource(main.Flow.run)
+        self.assertIn("max(24, 4 * self.n_nodes)", src)
+
+    def test_wall_clock_is_gated_independently_of_the_token_guard(self):
+        """抬高 token 限额之所以安全，靠的是时间被**另外**守住。
+        这条测试钉住那个前提：每个修复点都有独立的时间判据，
+        不是只靠 wound_down()。"""
+        import main
+        from pathlib import Path
+        src = Path(main.__file__).read_text(encoding="utf-8")
+        gates = [ln for ln in src.splitlines()
+                 if ("self.remaining() <" in ln or "self.time_up()" in ln)
+                 and "def " not in ln]
+        self.assertGreaterEqual(len(gates), 5,
+                                f"只找到 {len(gates)} 处独立时间判据；"
+                                f"若时间只靠 token 护栏守，抬高限额就不再安全")
+
+
+class RoutedModelMissingTests(unittest.TestCase):
+    """路由到的模型上游没有时，优雅降级而不是每轮 404。
+
+    这个失败模式是**执行发布包**时实测到的（本机跑解开的 zip，规则指向 glm-5.3
+    而本机 ollama 没有它）：
+
+        model not found — HTTP 404 - {"error":{"message":"model 'glm-5.3' not found"}}
+
+    后果不成比例：规则把修复阶段指到一个上游没有的模型，**每一个修复轮都会 404**，
+    一个配置错误于是变成整轮修复能力归零——比根本不做路由还糟。
+    """
+
+    def test_recognises_only_the_unambiguous_signal(self):
+        from llm_proxy import routed_model_missing
+        self.assertEqual(
+            routed_model_missing(404, b'{"error":{"message":"model \'glm-5.3\' not found"}}'),
+            "glm-5.3")
+        # 404 说不存在但没说是哪个：返回空串（调用方据此整份停用）
+        self.assertEqual(routed_model_missing(404, b'{"error":"model not found"}'), "")
+
+    def test_transient_and_auth_failures_must_not_count(self):
+        """限流、余额、鉴权都不是「模型不存在」。把它们也算进来，
+        会因为一次限流就**永久**丢掉一个好模型——那正是我们想升档用的那个。"""
+        from llm_proxy import routed_model_missing
+        self.assertIsNone(routed_model_missing(429, b"Too Many Requests"))
+        self.assertIsNone(routed_model_missing(402, b"insufficient_balance"))
+        self.assertIsNone(routed_model_missing(401, b"unauthorized"))
+        self.assertIsNone(routed_model_missing(500, b"model not found"))   # 5xx 不算
+        self.assertIsNone(routed_model_missing(200, b'{"choices":[]}'))
+
+    def test_drop_routes_keeps_the_others(self):
+        from llm_proxy import drop_routes_for
+        rules = [{"model": "glm-5.3", "phases": ["repair"]},
+                 {"model": "other", "phases": ["design"]}]
+        self.assertEqual(drop_routes_for(rules, "glm-5.3"), [{"model": "other", "phases": ["design"]}])
+
+    def test_unknown_model_name_disables_all_routing(self):
+        """不知道是哪个模型时无法只去掉一条，整份停用——
+        回到基座模型总比每轮 404 好。"""
+        from llm_proxy import drop_routes_for
+        self.assertEqual(drop_routes_for([{"model": "a"}, {"model": "b"}], ""), [])
+
+    def test_proxy_retries_the_original_request(self):
+        """光停用不够：当前这一轮也要救回来，所以要用**未路由**的原始请求重试一次。"""
+        import inspect
+        import llm_proxy
+        src = inspect.getsource(llm_proxy)
+        self.assertIn("unrouted = body", src)
+        self.assertIn("proxy.routes = drop_routes_for(proxy.routes, missing)", src)
+        self.assertIn("method, path, unrouted, headers", src)

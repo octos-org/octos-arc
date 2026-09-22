@@ -15,15 +15,64 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from concurrent.futures import Future
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 HOP_HEADERS = {"host", "content-length", "transfer-encoding", "connection", "accept-encoding"}
+
+
+def _loopback(url: str) -> bool:
+    """Is this upstream on this machine?"""
+    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    return host in ("localhost", "127.0.0.1", "::1", "0.0.0.0") or host.endswith(".localhost")
+
+
+def upstream_opener(url: str) -> urllib.request.OpenerDirector:
+    """An opener that will actually reach `url`.
+
+    `urllib.request.urlopen` honours the system proxy, and on macOS
+    `urllib.request.getproxies()` reads the *system* settings, not just the
+    http_proxy env vars — on this machine it returns
+    {'http': 'http://127.0.0.1:1082', ...} with no env var set. A self-hosted
+    upstream then goes to that proxy, which refuses to forward to loopback and
+    closes the connection: every request came back as
+    `502 proxy: Remote end closed connection without response` while the exact
+    same body sent with curl returned 200. So OPENAI_BASE_URL pointing at a
+    local model server (ollama, llama.cpp, vLLM) could not be used at all,
+    which is the "小模型" half of the provider requirement.
+
+    Proxies are bypassed only for loopback upstreams; a remote provider keeps
+    whatever proxy the environment configures, since that is often required to
+    reach it.
+    """
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def open_upstream(req, timeout: int, url: str):
+    """Loopback goes through a proxy-bypassing opener; everything else keeps
+    `urllib.request.urlopen`.
+
+    Keeping `urlopen` on the remote path is deliberate, not incidental: a remote
+    provider often *needs* the configured proxy to be reachable at all, and
+    `llm_proxy.urllib.request.urlopen` is the seam five existing tests patch
+    (`test_proxy_pending`, upstream `http://unused/v1`). Routing everything through
+    an opener broke all five.
+    """
+    # No module-level cache for the opener: building one is cheap, and a cached
+    # instance couples tests to their run order (a test that patches
+    # `upstream_opener` would otherwise leave its mock in the cache for every later
+    # loopback call — which is exactly how this suite started failing only in the
+    # full run while the module passed alone).
+    if _loopback(url):
+        return upstream_opener(url).open(req, timeout=timeout)
+    return urllib.request.urlopen(req, timeout=timeout)
 
 
 def model_routes(raw: str) -> list[dict]:
@@ -65,6 +114,43 @@ def configured_model_routes(env=None, bundle_dir: Path | None = None) -> str:
         raw = path.read_text(encoding="utf-8") if path.exists() else ""
     model_routes(raw)  # Reject invalid configuration before any provider request.
     return raw
+
+
+def routed_model_missing(status: int, payload: bytes) -> str | None:
+    """路由到的模型在上游不存在时，返回那个模型名；否则 None。
+
+    这是一个**明确**的信号，不是猜测：HTTP 404 且响应里写着 model not found。
+    之所以要单独处理它，是因为后果不成比例——路由规则把修复阶段指到一个上游没有的
+    模型时，**每一个修复轮都会 404**，一个配置错误于是变成整轮修复能力归零，
+    比根本不做路由还糟。实测见过这一幕（本机执行发布包时，规则指向 glm-5.3
+    而本机 ollama 没有它）：
+
+        model not found — HTTP 404 - {"error":{"message":"model 'glm-5.3' not found", ...}}
+
+    只认 404 + model not found 这一种组合。限流（429）、余额（402）、鉴权（401）
+    都不算——那些是暂时的或该报错的，把它们也当成「模型不存在」会永久丢掉一个好模型。
+    """
+    if status != 404:
+        return None
+    try:
+        text = payload.decode("utf-8", "replace")
+    except Exception:  # noqa: BLE001
+        return None
+    if "model" not in text.lower() or "not found" not in text.lower():
+        return None
+    m = re.search(r"model ['\"]([^'\"]+)['\"] not found", text)
+    return m.group(1) if m else ""
+
+
+def drop_routes_for(rules: list[dict], model: str) -> list[dict]:
+    """把指向某个模型的规则全部去掉，其余原样保留。
+
+    空字符串表示「404 说模型不存在但没说是哪个」——那时无法安全地只去掉一条，
+    于是整份路由停用：回到基座模型总比每轮 404 好。
+    """
+    if not model:
+        return []
+    return [r for r in rules if r.get("model") != model]
 
 
 def route_request(body: bytes, rules: list[dict], phase: str) -> bytes:
@@ -438,6 +524,12 @@ class LlmProxy:
                  dump_dir: Path | None = None, dump_limit: int = 3, destream: bool = True, trim: bool = True,
                  extra_drop_tools: set[str] | None = None, min_max_tokens: int = 32768) -> None:
         self.upstream = upstream_base.rstrip("/")
+        # Does the upstream base already carry an API prefix of its own? By the
+        # OPENAI_BASE_URL convention it does -- clients append `/chat/completions`
+        # straight to it -- so whenever there is a path here, the `/v1` this proxy
+        # advertises locally must be dropped before forwarding. Only a bare host
+        # keeps it. See `_forward_path`.
+        self.upstream_has_prefix = bool(urllib.parse.urlsplit(self.upstream).path.strip("/"))
         self.mode = mode
         self.routes = model_routes(configured_model_routes())
         self.phase = "implement"
@@ -474,6 +566,9 @@ class LlmProxy:
                 length = int(self.headers.get("Content-Length") or 0)
                 body = self.rfile.read(length) if length else b""
                 was_streaming = False
+                # 这两个在下面的 POST 块里才会被赋值，但**在块外被读到**。
+                # 不预置的话，一个 GET 请求会 NameError，连接被直接关掉、没有任何响应。
+                unrouted, rerouted = body, False
                 if method == "POST" and self.path.rstrip("/").endswith("/chat/completions"):
                     body = inject_reasoning(body, proxy.mode)
                     body = ensure_max_tokens(body, proxy.min_max_tokens)
@@ -492,14 +587,27 @@ class LlmProxy:
                         body = replace_system_prompt(body, proxy.system_override)
                     if proxy.destream:
                         body, was_streaming = destream_request(body)
+                    unrouted = body
                     body = route_request(body, proxy.routes, proxy.phase)
+                    rerouted = body != unrouted
                     proxy._dump(body)
                 headers = {k: v for k, v in self.headers.items() if k.lower() not in HOP_HEADERS}
                 headers["Content-Length"] = str(len(body))
-                path = self.path
-                if path.startswith("/v1") and proxy.upstream.endswith("/v1"):
-                    path = path[3:]
+                path = proxy._forward_path(self.path)
                 status, payload, resp_headers = proxy._request_upstream(method, path, body, headers)
+                # 路由到的模型上游没有：停用该路由并用原始请求重试一次。
+                # 不这样做的话，指错一个模型会让**每一轮修复**都 404——
+                # 一个配置错误变成整轮修复能力归零，比不做路由更糟。
+                if rerouted and proxy.routes:
+                    missing = routed_model_missing(status, payload)
+                    if missing is not None:
+                        proxy.routes = drop_routes_for(proxy.routes, missing)
+                        print(f"[proxy] routed model {missing or '(unnamed)'} not found upstream; "
+                              f"dropping that route and retrying on the caller's model "
+                              f"({len(proxy.routes)} route(s) left)", flush=True)
+                        headers["Content-Length"] = str(len(unrouted))
+                        status, payload, resp_headers = proxy._request_upstream(
+                            method, path, unrouted, headers)
                 ctype = resp_headers.get("Content-Type", "application/json") if resp_headers else "application/json"
                 if was_streaming and status == 200:
                     payload, ctype = to_sse(payload), "text/event-stream; charset=utf-8"
@@ -524,6 +632,31 @@ class LlmProxy:
         self.base_url = f"http://{host}:{self.port}/v1"
         self._thread = threading.Thread(target=self.server.serve_forever, daemon=True)
 
+    def _forward_path(self, local_path: str) -> str:
+        """Turn the local `/v1/...` request path into the upstream path.
+
+        This proxy advertises `http://127.0.0.1:<port>/v1` to the adapter, which
+        is only a convention for the client. The upstream base already carries
+        whichever API prefix that provider uses, so the local `/v1` has to come
+        off before forwarding.
+
+        The previous rule dropped it only when the upstream base itself ended in
+        `/v1`. Every provider whose prefix is spelled differently was therefore
+        unreachable: z.ai's coding plan is `https://api.z.ai/api/coding/paas/v4`,
+        and a request arrived as `/v4/v1/chat/completions` --
+        `{"status":404,"error":"Not Found","path":"/v4/v1/chat/completions"}`.
+        Zhipu's `open.bigmodel.cn/api/paas/v4` is the same shape.
+
+        So the test is whether the base has a path at all, not how it is spelled.
+        A bare host with no path keeps the `/v1`, since then nothing else supplies
+        one.
+        """
+        if not self.upstream_has_prefix:
+            return local_path
+        if local_path == "/v1":
+            return "/"
+        return local_path[3:] if local_path.startswith("/v1/") else local_path
+
     def _request_upstream(self, method: str, path: str, body: bytes, headers: dict) -> tuple:
         # Only pending identical completions are shared. Include credentials and
         # all forwarded headers; never share across distinct requests or phases.
@@ -543,7 +676,7 @@ class LlmProxy:
                                          headers=headers, method=method)
             t0 = time.time()
             try:
-                with urllib.request.urlopen(req, timeout=600) as resp:
+                with open_upstream(req, 600, self.upstream) as resp:
                     result = resp.status, resp.read(), resp.headers
             except urllib.error.HTTPError as exc:
                 result = exc.code, exc.read(), exc.headers

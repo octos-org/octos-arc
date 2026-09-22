@@ -249,6 +249,45 @@ def _clip_lines(text: str, max_chars: int) -> str:
     return "\n".join(kept).strip()
 
 
+_STARTUP_NOISE = ("Failed to load the ES module", "--trace-warnings", "npm notice")
+_STARTUP_ERROR_MARKERS = ("SyntaxError", "ReferenceError", "TypeError", "RangeError",
+                          "Cannot find module", "MODULE_NOT_FOUND", "EADDRINUSE",
+                          "error TS", "Error:", "throw ")
+
+
+def startup_error_digest(text: str, limit: int) -> str:
+    """The slice of a build/start failure that actually names the cause.
+
+    When a CommonJS file fails to parse, Node prints `Warning: Failed to load the ES
+    module <abs path>. Make sure to set "type": "module" ...` *before* the real error,
+    and `npm start` adds its own two-line preamble. The warning is a wrong lead --
+    setting "type": "module" would break the require() calls the harness pins -- and
+    with an absolute path it spends roughly 220 of a 600-character observation budget
+    that is meant for the stack.
+
+    Measured on the local TB REQ-1 round-0 capture (2026-09-17, cause `Identifier
+    '__dirname' has already been declared`): the error line sat at character 530, so a
+    600-character head slice did still reach it -- this is not a fix for a lost error.
+    What it does is drop the misleading lead and hand the whole budget to the stack,
+    which also leaves room when the path is longer or npm prints more first.
+
+    So: drop the lines known to mislead, start at the first line that names an error,
+    and fall back to the tail (where a stack trace ends up) when nothing matches.
+    """
+    lines = [l for l in text.splitlines() if not any(n in l for n in _STARTUP_NOISE)]
+    header = lines[0] if lines and ("exited early" in lines[0] or "could not launch" in lines[0]) else None
+    body = lines[1:] if header else lines
+    start = next((i for i, l in enumerate(body) if any(m in l for m in _STARTUP_ERROR_MARKERS)), None)
+    # Budget the header first: clipping the joined result at the end would slice from
+    # the front and throw away the very tail this falls back to.
+    room = limit - (len(header) + 1) if header else limit
+    if room <= 0:
+        return (header or "")[:limit]
+    kept = "\n".join(body[start:] if start is not None else body).strip()
+    kept = kept[:room] if start is not None else kept[-room:]
+    return f"{header}\n{kept}".strip() if header else kept
+
+
 def failure_summaries(summary: RunSummary, max_steps: int = 8, max_observation: int = 900,
                       max_snapshots: int = 18000) -> str:
     """Four-field digest of every failed test — the only thing the model sees."""
