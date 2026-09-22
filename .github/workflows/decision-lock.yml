@@ -1,0 +1,198 @@
+name: Decision lock
+
+# Guards the blob-SHA pin on the upstream decision records this competition
+# baseline inherits (#70). Two deliberately separate jobs:
+#
+#   verify — every PR and every push to main. Offline: one `git ls-tree` plus
+#            decision-lock.json, no network, so it cannot flake on a GitHub API
+#            hiccup and cannot be skipped by a rate limit.
+#
+#   drift  — weekly. Reaches out to upstream to confirm the lock still
+#            describes the pinned base, and reports records that upstream main
+#            has changed, deleted or added since the pin. Moving past the pin
+#            is a deliberate act, so drift opens an issue rather than failing
+#            a build.
+#
+# Unlike arc-linux-release.yml this workflow publishes nothing; `verify` is
+# read-only and `drift` only writes issues.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # Mondays, off the hour — GitHub drops scheduled runs that pile up at :00.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  verify:
+    name: Verify the lock against this tree
+    if: github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Gate self-test
+        run: |
+          set -euo pipefail
+          python3 scripts/tests/test-check-decision-lock.py
+
+      - name: Verify decision-lock.json
+        run: |
+          set -euo pipefail
+          python3 scripts/check-decision-lock.py
+
+  drift:
+    name: Report upstream decision drift
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Compare against upstream
+        id: compare
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # --upstream exits non-zero only when the LOCK is wrong (it claims a
+          # blob upstream does not have). Upstream simply moving on is reported
+          # in the JSON, not in the exit code.
+          status=0
+          python3 scripts/check-decision-lock.py --upstream --json > drift.json || status=$?
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          d = json.load(open("drift.json"))
+          drift = d.get("drift") or {}
+          moved = sum(
+              len(drift.get(k, []))
+              for k in ("changed_since_pin", "deleted_since_pin", "added_since_pin")
+          )
+          print(f"moved={moved}")
+          print(f"invalid={'true' if d.get('problems') else 'false'}")
+          PY
+
+      - name: Build the report
+        if: steps.compare.outputs.moved != '0' || steps.compare.outputs.invalid == 'true'
+        run: |
+          set -euo pipefail
+          python3 - <<'PY' > report.md
+          import json
+
+          d = json.load(open("drift.json"))
+          drift = d.get("drift") or {}
+          out = []
+
+          if d.get("problems"):
+              out.append("## decision-lock.json does not describe the pinned base\n")
+              out.append(
+                  "`--upstream` found entries whose recorded `upstream_blob_sha` is "
+                  "not what upstream has at the pinned commit. Fix the lock before "
+                  "trusting any other line in this report.\n"
+              )
+              for p in d["problems"]:
+                  out.append(f"- {p}")
+              out.append("")
+
+          repo = drift.get("upstream", "octos-org/octos")
+          pin = drift.get("pinned_commit", "")
+          ref = drift.get("drift_ref", "main")
+          out.append(
+              f"## Upstream decision records have moved since the pin\n\n"
+              f"Baseline pin: [`{pin[:12]}`](https://github.com/{repo}/commit/{pin}) "
+              f"· compared against `{repo}@{ref}`.\n\n"
+              f"This is **advisory**. The competition baseline stays at the pin until "
+              f"someone moves it deliberately; the point of the lock is that the move "
+              f"is a decision, not a surprise. If a change below is security-relevant "
+              f"and applies to the pinned runtime, backport it as a recorded delta "
+              f"(`delta.reason` in `decision-lock.json`) rather than resyncing "
+              f"wholesale.\n"
+          )
+
+          sections = [
+              ("Changed upstream", "changed_since_pin",
+               "The baseline inherited an earlier revision of these records."),
+              ("Deleted upstream", "deleted_since_pin",
+               "Upstream removed these; the baseline still carries them."),
+              ("Added upstream", "added_since_pin",
+               "Decisions taken after the pin. Not inherited by this baseline."),
+          ]
+          for title, key, blurb in sections:
+              paths = drift.get(key) or []
+              if not paths:
+                  continue
+              out.append(f"### {title} ({len(paths)})\n\n{blurb}\n")
+              for p in paths:
+                  out.append(
+                      f"- [`{p}`](https://github.com/{repo}/blob/{ref}/{p})"
+                  )
+              out.append("")
+
+          out.append("---\n")
+          out.append(
+              "Regenerate locally with "
+              "`python3 scripts/check-decision-lock.py --upstream`. "
+              "This issue is maintained by `.github/workflows/decision-lock.yml` "
+              "and is edited in place, so it always reflects the latest run."
+          )
+          print("\n".join(out))
+          PY
+
+      - name: Open or update the drift issue
+        if: steps.compare.outputs.moved != '0' || steps.compare.outputs.invalid == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          TITLE="decision-lock: upstream decision records have moved past the baseline pin"
+          gh label create decision-drift \
+            --repo "$REPO" \
+            --color BFD4F2 \
+            --description "Raised by the weekly decision-lock drift check" \
+            2>/dev/null || true
+
+          EXISTING="$(gh issue list --repo "$REPO" --state open \
+            --label decision-drift --limit 1 --json number --jq '.[0].number // empty')"
+
+          if [ -n "$EXISTING" ]; then
+            # Edit in place rather than commenting: one live issue that always
+            # shows current state, instead of a weekly pile of near-identical
+            # comments.
+            gh issue edit "$EXISTING" --repo "$REPO" --body-file report.md
+            echo "updated issue #$EXISTING"
+          else
+            gh issue create --repo "$REPO" \
+              --title "$TITLE" \
+              --label decision-drift \
+              --body-file report.md
+          fi
+
+      - name: Close the drift issue when the tree is back in sync
+        if: steps.compare.outputs.moved == '0' && steps.compare.outputs.invalid == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          EXISTING="$(gh issue list --repo "$REPO" --state open \
+            --label decision-drift --limit 1 --json number --jq '.[0].number // empty')"
+          if [ -n "$EXISTING" ]; then
+            gh issue close "$EXISTING" --repo "$REPO" \
+              --comment "Upstream decision records match the baseline pin again. Closed by the decision-lock drift check."
+          fi
+
+      - name: Fail if the lock misstates the pinned base
+        if: steps.compare.outputs.invalid == 'true'
+        run: |
+          echo "decision-lock.json does not describe upstream@pin — see the drift issue." >&2
+          exit 1

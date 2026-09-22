@@ -10,6 +10,8 @@ their Git history; it is not a GitHub fork-network repository.
 - Octos commit: `8558a3bff41f43838130808a1fa6cf0299e0bc40`
 - Baseline tag: `arc-base-20260910`
 - Cargo.lock SHA-256: `9761e8904a0949aa0cff189cdd75b6a5f0b00daf7c968a883cdf39786bbd3088`
+- Inherited decision records: pinned by blob SHA in `decision-lock.json`
+  (see [Decision records](#decision-records))
 - `main` contains the Octos source and downstream provenance documents.
 - `legacy` preserves the existing adapter at `b0999c95f7875c8d4ff3e58e733fb2c5abc8caf7`,
   plus its original locally submitted ZIP and provenance.
@@ -41,11 +43,47 @@ Never use a `latest` release URL, a moving branch reference, or an unverified bi
 from PATH as the selected ARC runtime. If the pinned artifact is unavailable, stop.
 Changing a pin requires an explicit new version; do not silently replace an existing artifact.
 
+## Decision records
+
+The code pin above fixes what the baseline *builds*. `decision-lock.json` fixes what it
+*inherited*: the 73 spec, ADR, UPCR, contract and protocol records carried over from
+upstream, each recorded by Git blob SHA. Without it those records could be edited
+downstream, or superseded upstream, with nothing noticing — the same exposure the
+Cargo.lock SHA-256 closes for dependencies.
+
+`scripts/check-decision-lock.py` verifies the inventory:
+
+```sh
+python3 scripts/check-decision-lock.py              # offline; the CI gate
+python3 scripts/check-decision-lock.py --upstream   # + confirm against upstream, report drift
+python3 scripts/check-decision-lock.py --update     # re-pin after a deliberate change
+```
+
+The offline check fails if an inherited record was edited or deleted, if a new record
+matching an inventoried group was added without being pinned, or if UPCR numbering grew
+a collision or gap beyond the ones inherited from upstream. Numbers 022, 026 and 027 each
+carry two documents and 013 is absent; all four come from upstream at the pin and are
+recorded as known, so the gate reacts only to *new* numbering damage.
+
+Diverging from upstream is allowed, but only on the record: an entry whose `arc_blob_sha`
+differs from its `upstream_blob_sha` must carry a `delta.reason`. Prefer a narrow recorded
+delta over a wholesale resync — resyncing a document to current upstream makes it describe
+a runtime this baseline does not build.
+
+Upstream moving past the pin is reported, never enforced. Moving the baseline is a
+deliberate act; the lock exists so that it is a decision rather than a surprise.
+
 ## Repository isolation
 
-GitHub Actions is enabled only for the standalone `.github/workflows/arc-linux-release.yml`
-`workflow_dispatch` publisher. The inherited upstream workflows were removed from `main`
-and are not enabled; this workflow builds and publishes only the ARC Linux bundle.
+The inherited upstream workflows were removed from `main` and are not enabled. Two
+workflows run here:
+
+- `.github/workflows/arc-linux-release.yml` — the standalone `workflow_dispatch`
+  publisher. It builds and publishes only the ARC Linux bundle, and is the only
+  workflow that produces an artifact.
+- `.github/workflows/decision-lock.yml` — the decision-record pin. Its `verify` job is
+  read-only and offline; its weekly `drift` job reads upstream and writes an issue.
+  It publishes nothing and touches no release artifact.
 
 The `legacy` branch is historical reference only. Its old downloader and execution
 behavior have intentionally not been modernized; it is not the new competition runtime.
