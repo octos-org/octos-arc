@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "Blob-SHA pin on the upstream decision records the ARC-Bench competition baseline inherits. arc-runtime-lock.json pins the code; this pins the decisions. Verified by scripts/check-decision-lock.py (#70).",
+  "description": "Blob-SHA pin on the upstream decision records and vendored documentation the ARC-Bench competition baseline inherits. arc-runtime-lock.json pins the code; this pins the decisions (#70) and the vendored book/architecture snapshot (#215). Verified by scripts/check-decision-lock.py.",
   "upstream": {
     "repository": "octos-org/octos",
     "commit": "8558a3bff41f43838130808a1fa6cf0299e0bc40",
@@ -40,6 +40,24 @@
       "patterns": [
         "specs/*"
       ]
+    },
+    "vendored-book": {
+      "description": "The complete octos book, vendored at the pinned base. Participants read this to operate the runtime this repository builds, so it is pinned like any other inherited artifact rather than tracking upstream (#215). Note: '*' spans '/' in fnmatch, so this pattern covers the whole subtree.",
+      "patterns": [
+        "book/*"
+      ]
+    },
+    "vendored-book-zh": {
+      "description": "The Chinese octos book, vendored at the pinned base. This is the primary documentation for this repository's audience.",
+      "patterns": [
+        "book-zh/*"
+      ]
+    },
+    "vendored-architecture": {
+      "description": "The runtime architecture document, vendored at the pinned base.",
+      "patterns": [
+        "docs/ARCHITECTURE.md"
+      ]
     }
   },
   "entries": [
@@ -72,6 +90,274 @@
       "group": "protocol-spec",
       "arc_blob_sha": "888e80b172d47e032dcc73b5f7d0680bd6761454",
       "upstream_blob_sha": "888e80b172d47e032dcc73b5f7d0680bd6761454"
+    },
+    {
+      "path": "book-zh/book.toml",
+      "group": "vendored-book-zh",
+      "arc_blob_sha": "8675981ab4508651fa10b13d37a6b158d97900a8",
+      "upstream_blob_sha": "8675981ab4508651fa10b13d37a6b158d97900a8"
+    },
+    {
+      "path": "book-zh/src/SUMMARY.md",
+      "group": "vendored-book-zh",
+      "arc_blob_sha": "0f670799e773efeaa40ca347b1b86c2388f379b0",
+      "upstream_blob_sha": "0f670799e773efeaa40ca347b1b86c2388f379b0"
+    },
+    {
+      "path": "book-zh/src/advanced.md",
+      "group": "vendored-book-zh",
+      "arc_blob_sha": "bc9184627aac85253777b7a547de626fe1520a75",
+      "upstream_blob_sha": "bc9184627aac85253777b7a547de626fe1520a75"
+    },
+    {
+      "path": "book-zh/src/architecture.md",
+      "group": "vendored-book-zh",
+      "arc_blob_sha": "d71f5e32172e6580bb7e77496be12f2bef6565a9",
+      "upstream_blob_sha": "d71f5e32172e6580bb7e77496be12f2bef6565a9"
+    },
+    {
+      "path": "book-zh/src/channels.md",
+      "group": "vendored-book-zh",
+      "arc_blob_sha": "7bafa073e9d2a5299bb1c66442f22813b57c02aa",
+      "upstream_blob_sha": "7bafa073e9d2a5299bb1c66442f22813b57c02aa"
+    },
+    {
+      "path": "book-zh/src/cli-reference.md",
+      "group": "vendored-book-zh",
+      "arc_blob_sha": "7c06e8a86f5bfa3ab0e26c01daaf162592363dd4",
+      "upstream_blob_sha": "addf94d879aff18c2742e93e93dfa4087d562136",
+      "delta": {
+        "reason": "Chinese rendering of the same upstream --auth-token warning (e89e266fc). Upstream has not translated it -- book-zh/src/cli-reference.md is unchanged on upstream main -- so without this delta the readers this repository is actually written for would never receive the guidance.",
+        "upstream_commit": "e89e266fc",
+        "upstream_pr": "octos-org/octos#2381"
+      }
+    },
+    {
+      "path": "book-zh/src/configuration.md",
+      "group": "vendored-book-zh",
+      "arc_blob_sha": "43b00aaf608a4106715c13592d9974c3b7239394",
+      "upstream_blob_sha": "43b00aaf608a4106715c13592d9974c3b7239394"
+    },
+    {
+      "path": "book-zh/src/installation.md",
+      "group": "vendored-book-zh",
+      "arc_blob_sha": "174310daa34c46c25436be23e359b14fefa3e705",
+      "upstream_blob_sha": "174310daa34c46c25436be23e359b14fefa3e705"
+    },
+    {
+      "path": "book-zh/src/introduction.md",
+      "group": "vendored-book-zh",
+      "arc_blob_sha": "d3bdb2814f915319cfe748dca287780984064abd",
+      "upstream_blob_sha": "0a76bc4502773e346e57c85506574fbbf9a615d1",
+      "delta": {
+        "reason": "Added the pinned-snapshot banner, matching book/src/introduction.md (#215)."
+      }
+    },
+    {
+      "path": "book-zh/src/memory-skills.md",
+      "group": "vendored-book-zh",
+      "arc_blob_sha": "1794f05aa88258f6c40657d4963c6dfd3e10451c",
+      "upstream_blob_sha": "1794f05aa88258f6c40657d4963c6dfd3e10451c"
+    },
+    {
+      "path": "book-zh/src/multi-agent.md",
+      "group": "vendored-book-zh",
+      "arc_blob_sha": "183add1ccaa1392b610e309374139c94978ddc24",
+      "upstream_blob_sha": "183add1ccaa1392b610e309374139c94978ddc24"
+    },
+    {
+      "path": "book-zh/src/nix.md",
+      "group": "vendored-book-zh",
+      "arc_blob_sha": "770524fdd1c187bb0a92ae302af174a89d128101",
+      "upstream_blob_sha": "770524fdd1c187bb0a92ae302af174a89d128101"
+    },
+    {
+      "path": "book-zh/src/operations.md",
+      "group": "vendored-book-zh",
+      "arc_blob_sha": "1a62c561c0f645347f4cca3ec26cd1ac46a13ebd",
+      "upstream_blob_sha": "1a62c561c0f645347f4cca3ec26cd1ac46a13ebd"
+    },
+    {
+      "path": "book-zh/src/providers.md",
+      "group": "vendored-book-zh",
+      "arc_blob_sha": "125f58a187f72a45761afa3dc19afd15646bc9c6",
+      "upstream_blob_sha": "125f58a187f72a45761afa3dc19afd15646bc9c6"
+    },
+    {
+      "path": "book-zh/src/quickstart.md",
+      "group": "vendored-book-zh",
+      "arc_blob_sha": "2e0281db0dee366a186bd4e4155a28286f9919f8",
+      "upstream_blob_sha": "2e0281db0dee366a186bd4e4155a28286f9919f8"
+    },
+    {
+      "path": "book-zh/src/skill-development.md",
+      "group": "vendored-book-zh",
+      "arc_blob_sha": "179a5726c51003058c8e01a401465ca490063485",
+      "upstream_blob_sha": "179a5726c51003058c8e01a401465ca490063485"
+    },
+    {
+      "path": "book-zh/src/testing.md",
+      "group": "vendored-book-zh",
+      "arc_blob_sha": "9b668a4b6071d58334802c67e1c597623c10f851",
+      "upstream_blob_sha": "9b668a4b6071d58334802c67e1c597623c10f851"
+    },
+    {
+      "path": "book-zh/src/troubleshooting.md",
+      "group": "vendored-book-zh",
+      "arc_blob_sha": "5d66130e884116e6c0a636b95357a948a12a62d8",
+      "upstream_blob_sha": "5d66130e884116e6c0a636b95357a948a12a62d8"
+    },
+    {
+      "path": "book-zh/theme/head.hbs",
+      "group": "vendored-book-zh",
+      "arc_blob_sha": "fc2bdafc4817c213a479a586352b3e94d68ff12e",
+      "upstream_blob_sha": "fc2bdafc4817c213a479a586352b3e94d68ff12e"
+    },
+    {
+      "path": "book-zh/theme/octos.css",
+      "group": "vendored-book-zh",
+      "arc_blob_sha": "6ccc7a03ef664ea0a8e0bf5f31cde865df6e921f",
+      "upstream_blob_sha": "6ccc7a03ef664ea0a8e0bf5f31cde865df6e921f"
+    },
+    {
+      "path": "book/.gitignore",
+      "group": "vendored-book",
+      "arc_blob_sha": "e9c072897d554179f3ae02256be55c7c165b1f77",
+      "upstream_blob_sha": "e9c072897d554179f3ae02256be55c7c165b1f77"
+    },
+    {
+      "path": "book/book.toml",
+      "group": "vendored-book",
+      "arc_blob_sha": "9a4f859616ea9e282cd1d34154b49406588140f1",
+      "upstream_blob_sha": "9a4f859616ea9e282cd1d34154b49406588140f1"
+    },
+    {
+      "path": "book/src/SUMMARY.md",
+      "group": "vendored-book",
+      "arc_blob_sha": "92c028eceee6fbfdb523e4785ce59723cc404d0b",
+      "upstream_blob_sha": "92c028eceee6fbfdb523e4785ce59723cc404d0b"
+    },
+    {
+      "path": "book/src/advanced.md",
+      "group": "vendored-book",
+      "arc_blob_sha": "e3bcb230a5731d40baec944b16b6e995876b177f",
+      "upstream_blob_sha": "e3bcb230a5731d40baec944b16b6e995876b177f"
+    },
+    {
+      "path": "book/src/architecture.md",
+      "group": "vendored-book",
+      "arc_blob_sha": "bbae89b4abab72f2c275fb75bac84dd285c539f6",
+      "upstream_blob_sha": "bbae89b4abab72f2c275fb75bac84dd285c539f6"
+    },
+    {
+      "path": "book/src/channels.md",
+      "group": "vendored-book",
+      "arc_blob_sha": "8e7db35921f33602dce16a8cea2ca8a9c1d07a79",
+      "upstream_blob_sha": "8e7db35921f33602dce16a8cea2ca8a9c1d07a79"
+    },
+    {
+      "path": "book/src/cli-reference.md",
+      "group": "vendored-book",
+      "arc_blob_sha": "b61e70ab007b293af6251b347e69a9ec3a94fa8a",
+      "upstream_blob_sha": "890e7c88e686b5307cd157da2f494d92a77d8c2d",
+      "delta": {
+        "reason": "Backported the --auth-token security warning from upstream e89e266fc (octos-org/octos#2381, 2026-09-17), verbatim. The flag, the OCTOS_AUTH_TOKEN env var and the config-file path all exist at the pinned base (crates/octos-cli/src/commands/serve.rs), so the guidance is accurate for the runtime this repository builds. The rest of that commit is a code-side argv mitigation the baseline does NOT carry, which makes the documented warning more load-bearing here, not less.",
+        "upstream_commit": "e89e266fc",
+        "upstream_pr": "octos-org/octos#2381"
+      }
+    },
+    {
+      "path": "book/src/configuration.md",
+      "group": "vendored-book",
+      "arc_blob_sha": "fc5414c272741fb6771a42741d24b632d85e454c",
+      "upstream_blob_sha": "fc5414c272741fb6771a42741d24b632d85e454c"
+    },
+    {
+      "path": "book/src/installation.md",
+      "group": "vendored-book",
+      "arc_blob_sha": "4dde50630040ab131cb337f9ec7010aebf620665",
+      "upstream_blob_sha": "4dde50630040ab131cb337f9ec7010aebf620665"
+    },
+    {
+      "path": "book/src/introduction.md",
+      "group": "vendored-book",
+      "arc_blob_sha": "043387021d58b34b4d0e4ef3c97017f2886c953b",
+      "upstream_blob_sha": "b19a4d5f21fc0f3d4f1e5c38026b962c1fea1f9e",
+      "delta": {
+        "reason": "Added the pinned-snapshot banner. The vendored book had no statement that it is a snapshot, so a participant could not tell it describes the pinned base rather than current upstream (#215)."
+      }
+    },
+    {
+      "path": "book/src/memory-skills.md",
+      "group": "vendored-book",
+      "arc_blob_sha": "29673b1ec97e167e9aef7720349740f80b139f45",
+      "upstream_blob_sha": "29673b1ec97e167e9aef7720349740f80b139f45"
+    },
+    {
+      "path": "book/src/multi-agent.md",
+      "group": "vendored-book",
+      "arc_blob_sha": "b2d5c93cfae46482102adf08f742c519a2479f0a",
+      "upstream_blob_sha": "b2d5c93cfae46482102adf08f742c519a2479f0a"
+    },
+    {
+      "path": "book/src/nix.md",
+      "group": "vendored-book",
+      "arc_blob_sha": "31c30615d52a7748265f4e990443c8193abc9d57",
+      "upstream_blob_sha": "31c30615d52a7748265f4e990443c8193abc9d57"
+    },
+    {
+      "path": "book/src/operations.md",
+      "group": "vendored-book",
+      "arc_blob_sha": "4ddb5c83a7cf0984536477011c96544c9be99f20",
+      "upstream_blob_sha": "4ddb5c83a7cf0984536477011c96544c9be99f20"
+    },
+    {
+      "path": "book/src/providers.md",
+      "group": "vendored-book",
+      "arc_blob_sha": "f9bca772faefc21dca6420c77190673e4ca44386",
+      "upstream_blob_sha": "f9bca772faefc21dca6420c77190673e4ca44386"
+    },
+    {
+      "path": "book/src/quickstart.md",
+      "group": "vendored-book",
+      "arc_blob_sha": "3a96c778ced324f8289ea8d1be8a8a7ae3973202",
+      "upstream_blob_sha": "3a96c778ced324f8289ea8d1be8a8a7ae3973202"
+    },
+    {
+      "path": "book/src/skill-development.md",
+      "group": "vendored-book",
+      "arc_blob_sha": "955c490afc5024cbf314d6dfa8320c97023af5af",
+      "upstream_blob_sha": "955c490afc5024cbf314d6dfa8320c97023af5af"
+    },
+    {
+      "path": "book/src/testing.md",
+      "group": "vendored-book",
+      "arc_blob_sha": "d8afb2956860e2a68749f8765325b6c85b58d1f0",
+      "upstream_blob_sha": "d8afb2956860e2a68749f8765325b6c85b58d1f0"
+    },
+    {
+      "path": "book/src/troubleshooting.md",
+      "group": "vendored-book",
+      "arc_blob_sha": "50e8039def551bfcc774d60e4e772e4081be6b8b",
+      "upstream_blob_sha": "50e8039def551bfcc774d60e4e772e4081be6b8b"
+    },
+    {
+      "path": "book/theme/head.hbs",
+      "group": "vendored-book",
+      "arc_blob_sha": "fc2bdafc4817c213a479a586352b3e94d68ff12e",
+      "upstream_blob_sha": "fc2bdafc4817c213a479a586352b3e94d68ff12e"
+    },
+    {
+      "path": "book/theme/octos.css",
+      "group": "vendored-book",
+      "arc_blob_sha": "6ccc7a03ef664ea0a8e0bf5f31cde865df6e921f",
+      "upstream_blob_sha": "6ccc7a03ef664ea0a8e0bf5f31cde865df6e921f"
+    },
+    {
+      "path": "docs/ARCHITECTURE.md",
+      "group": "vendored-architecture",
+      "arc_blob_sha": "39aeb96834f292aaea445110f6077e1642d1cd42",
+      "upstream_blob_sha": "39aeb96834f292aaea445110f6077e1642d1cd42"
     },
     {
       "path": "docs/FLEET-KERNEL-FOUNDATION-SPEC.md",

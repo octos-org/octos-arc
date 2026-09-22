@@ -125,6 +125,9 @@ jobs:
                "Upstream removed these; the baseline still carries them."),
               ("Added upstream", "added_since_pin",
                "Decisions taken after the pin. Not inherited by this baseline."),
+              ("Already absorbed", "absorbed_since_pin",
+               "A recorded `delta` already brings these up to what upstream has. "
+               "Listed for transparency; nothing to do."),
           ]
           for title, key, blurb in sections:
               paths = drift.get(key) or []

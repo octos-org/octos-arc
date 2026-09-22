@@ -36,6 +36,10 @@ Scenarios
    18. --update preserves an existing delta               -> 0
    19. --upstream rejects a lock that misstates upstream  -> 1
    20. --upstream reports changed/deleted/added on main   -> 0 (advisory)
+   21. --upstream separates an absorbed delta from drift   -> reported apart
+
+  Diagnosis quality
+   22. An uncommitted edit is named as uncommitted, not drift
 
 Usage: python3 scripts/tests/test-check-decision-lock.py
 """
@@ -589,11 +593,94 @@ def t20(tmp):
     ok("--upstream reports movement on main without failing")
 
 
+@scenario("--upstream reports an absorbed delta separately from open drift")
+def t21(tmp):
+    root = make_repo(tmp, {"docs/adr/a.md": "backported\n", "docs/adr/b.md": "beta\n"})
+    sha_a = blob_sha(root, "docs/adr/a.md")
+    sha_b = blob_sha(root, "docs/adr/b.md")
+    write_lock(
+        root,
+        base_lock(
+            entries=[
+                {
+                    # arc carries a backport; upstream@pin had something older,
+                    # and upstream main has since landed exactly what arc has.
+                    "path": "docs/adr/a.md",
+                    "group": "adr",
+                    "arc_blob_sha": sha_a,
+                    "upstream_blob_sha": "f" * 40,
+                    "delta": {"reason": "backported security warning"},
+                },
+                {
+                    "path": "docs/adr/b.md",
+                    "group": "adr",
+                    "arc_blob_sha": sha_b,
+                    "upstream_blob_sha": sha_b,
+                },
+            ]
+        ),
+    )
+    pinned = {"docs/adr/a.md": "f" * 40, "docs/adr/b.md": sha_b}
+    # main: a.md now equals what arc already carries; b.md genuinely moved.
+    moved = {"docs/adr/a.md": sha_a, "docs/adr/b.md": "e" * 40}
+    with FakeUpstream({"0" * 40: pinned, "main": moved}):
+        _problems, report = MOD.check_upstream(
+            json.loads((root / "decision-lock.json").read_text(encoding="utf-8"))
+        )
+    assert report["absorbed_since_pin"] == ["docs/adr/a.md"], report
+    assert report["changed_since_pin"] == ["docs/adr/b.md"], report
+    ok("--upstream reports an absorbed delta separately from open drift")
+
+
+@scenario("an uncommitted edit is diagnosed as uncommitted, not as drift")
+def t22(tmp):
+    root = make_repo(tmp, {"docs/adr/a.md": "alpha\n"})
+    sha = blob_sha(root, "docs/adr/a.md")
+    write_lock(
+        root,
+        base_lock(
+            entries=[
+                {
+                    "path": "docs/adr/a.md",
+                    "group": "adr",
+                    "arc_blob_sha": sha,
+                    "upstream_blob_sha": sha,
+                }
+            ]
+        ),
+    )
+    expect(run_check(root), 0, "committed state passes")
+
+    # Edit without committing: HEAD still matches the lock, the worktree does
+    # not. The gate must say "uncommitted", not "edited downstream".
+    (root / "docs/adr/a.md").write_text("alpha changed\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+
+    lock = json.loads((root / "decision-lock.json").read_text(encoding="utf-8"))
+    tree = MOD.git_tree(root)
+    dirty = MOD.dirty_paths(root)
+    assert "docs/adr/a.md" in dirty, f"dirty detection missed the edit: {dirty}"
+
+    # Point the lock at the new content so the committed tree now mismatches.
+    lock["entries"][0]["arc_blob_sha"] = "a" * 40
+    lock["entries"][0]["upstream_blob_sha"] = "a" * 40
+    problems = MOD.check_entries(lock, tree, dirty)
+    assert len(problems) == 1, problems
+    assert "uncommitted" in problems[0], problems[0]
+
+    # The same mismatch with a clean worktree must keep the drift wording.
+    problems_clean = MOD.check_entries(lock, tree, set())
+    assert len(problems_clean) == 1, problems_clean
+    assert "uncommitted" not in problems_clean[0], problems_clean[0]
+    assert "edited downstream" in problems_clean[0], problems_clean[0]
+    ok("an uncommitted edit is diagnosed as uncommitted, not as drift")
+
+
 TESTS = [
     t01, t02, t03, t04, t05, t06, t07, t08,
     t09, t10, t11, t12,
     t13, t14, t15, t16,
-    t17, t18, t19, t20,
+    t17, t18, t19, t20, t21, t22,
 ]
 
 

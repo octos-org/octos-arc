@@ -2,6 +2,14 @@
 
 > 🌐 **[English Documentation](/octos/)**
 
+> 📌 **固定快照。** 这本文档随 `octos-org/octos-arc` 带入，取自比赛基底——上游
+> `octos-org/octos` 提交 `8558a3bf`，标签 `arc-base-20260910`——所以它描述的是本仓库
+> 实际编译出的运行时，而不是当前的上游。上游在一些地方已经往前走了；两者不一致时，
+> 以这份副本为准，它才是这里实际跑的东西。固定值、有意保留的差异清单，以及强制这些
+> 约束的漂移检查，都在
+> [`ARC_BASELINE.md`](https://github.com/octos-org/octos-arc/blob/main/ARC_BASELINE.md)。
+> 当前的上游文档见 <https://octos-org.github.io/octos/zh/>。
+
 ## Octos 是什么？
 
 Octos 是一个开源 AI 智能体平台，能将任意大语言模型变成多渠道、多用户的智能助手。你只需部署一个 Rust 编译的二进制文件，配置好 LLM API 密钥和消息渠道（Telegram、Discord、Slack、WhatsApp、Email、微信等），Octos 会处理其余一切——对话路由、工具执行、记忆管理、模型故障切换，以及多租户隔离。
