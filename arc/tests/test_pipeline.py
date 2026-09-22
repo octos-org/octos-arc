@@ -27,7 +27,7 @@ POLICY = dict(name="arc_build", repairs=5, node_timeout=1200, verify_timeout=900
               reasoning="none", max_output_tokens=65536, node_budget=600,
               min_node_seconds=120, final_reserve_seconds=600, final_repairs=2,
               context_window=0, llm_timeout=900,
-              node_max_output_tokens=32768)
+              node_max_output_tokens=32768, regression_every=4)
 
 
 def build(nodes_spec):
@@ -123,6 +123,14 @@ class PipelineDot(unittest.TestCase):
         line = next(l for l in dot.splitlines() if l.strip().startswith("impl_n_REQ_1 ["))
         self.assertIn('reasoning_effort="none"', line)
         self.assertIn('max_output_tokens="32768"', line)
+
+    def test_every_fourth_check_is_a_regression_checkpoint(self):
+        nodes = main.atomic_nodes(tree([atomic(f"REQ-{i}") for i in range(1, 10)]))
+        specs = {str(n["id"]): [] for n in nodes}
+        dot = main.build_pipeline(nodes, specs, None, "/tmp/out", POLICY, [43100], 1e10, "/tmp/map.json")
+        checks = [l for l in dot.splitlines() if l.strip().startswith("check_n_REQ_")]
+        with_regress = [l.split()[0] for l in checks if "--regress" in l]
+        self.assertEqual(with_regress, ["check_n_REQ_4", "check_n_REQ_8"])
 
     def test_workspace_is_seeded_before_the_first_requirement(self):
         dot = build([atomic("REQ-1")])
