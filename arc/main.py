@@ -47,6 +47,11 @@ _POLICY = {
     # 32k): the node's worker then trims to fit instead of overflowing into
     # empty responses.
     "context_window": ("context_window", "OCTOS_ARC_CONTEXT_WINDOW", 0),
+    # Total time for ONE non-streaming LLM request (the platform proxy rejects
+    # SSE, so streaming stays off). The kernel default, 300 s, cut off a
+    # write_file call generating a large page -- and a timed-out request is
+    # an internal error that ends the node's conversation.
+    "llm_timeout": ("llm_timeout_seconds", "OCTOS_ARC_LLM_TIMEOUT", 900),
 }
 
 
@@ -326,7 +331,8 @@ def kernel_env(pol: dict, config_dir: Path) -> dict:
         # re-dispatches it (observed: 3 concurrent runs of the same graph).
         "gateway": {"max_output_tokens": pol["max_output_tokens"],
                     "reasoning_effort": pol["reasoning"],
-                    "max_iterations": 2},
+                    "max_iterations": 2,
+                    "llm_timeout_secs": pol["llm_timeout"]},
     }
     if provider not in ("openai", "anthropic") and base_url:
         config["base_url"] = base_url
@@ -340,7 +346,10 @@ def kernel_env(pol: dict, config_dir: Path) -> dict:
     env["OCTOS_PIPELINE_ALLOW"] = pol["name"]
     env["OCTOS_PIPELINE_TIMEOUT_MAX_SECS"] = str(pol["run_timeout"] + pol["final_reserve_seconds"])
     env["OCTOS_PIPELINE_DAG"] = "1"      # the DAG scheduler: retries + critique feedback
-    env.setdefault("OCTOS_DISABLE_STREAMING", "1")
+    env.setdefault("OCTOS_DISABLE_STREAMING", "1")   # platform proxies reject SSE
+    # The profile runtime builds its provider without the gateway section, so
+    # the request timeout travels by env as well.
+    env["OCTOS_LLM_TIMEOUT_SECS"] = str(pol["llm_timeout"])
     env.setdefault("OCTOS_DANGER_FULL_ACCESS", "1")
     env.setdefault("npm_config_registry", "https://registry.npmmirror.com")
     env["_ARC"] = json.dumps({"provider": provider, "model": model, "key_env": key_env,
