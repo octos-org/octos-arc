@@ -32,12 +32,30 @@ _POLICY = {
     "name": ("name", "OCTOS_ARC_PIPELINE_NAME", "arc_build"),
     "repairs": ("repair_rounds", "OCTOS_REPAIR_ROUNDS", 5),
     "node_timeout": ("node_timeout_seconds", "OCTOS_NODE_TIMEOUT", 1200),
-    "verify_timeout": ("verify_timeout_seconds", "OCTOS_ARC_VERIFY_TIMEOUT", 900),
+    "verify_timeout": ("verify_timeout_seconds", "OCTOS_ARC_VERIFY_TIMEOUT", 1800),
     "max_iterations": ("max_iterations", "OCTOS_MAX_ITERATIONS", 40),
     "run_timeout": ("run_timeout_seconds", "OCTOS_TIME_BUDGET", 3600),
+    "node_budget": ("node_budget_seconds", "OCTOS_NODE_TIME_BUDGET", 600),
+    "min_node_seconds": ("min_node_seconds", "OCTOS_ARC_MIN_NODE_SECONDS", 120),
+    "final_reserve_seconds": ("final_reserve_seconds", "OCTOS_ARC_FINAL_RESERVE", 600),
+    "final_repairs": ("final_repair_rounds", "OCTOS_ARC_FINAL_REPAIRS", 2),
     "tools": ("node_tools", "OCTOS_ARC_NODE_TOOLS", "read_file,write_file,edit_file,glob,grep,list_dir"),
     "reasoning": ("reasoning_effort", "OCTOS_ARC_REASONING", "none"),
     "max_output_tokens": ("max_output_tokens", "OCTOS_ARC_MAX_TOKENS", 65536),
+    # 0 = trust the kernel's model catalog. Set it for an endpoint serving a
+    # smaller window than the model's nominal one (a local server loaded with
+    # 32k): the node's worker then trims to fit instead of overflowing into
+    # empty responses.
+    "context_window": ("context_window", "OCTOS_ARC_CONTEXT_WINDOW", 0),
+    # Total time for ONE non-streaming LLM request (the platform proxy rejects
+    # SSE, so streaming stays off). The kernel default, 300 s, cut off a
+    # write_file call generating a large page -- and a timed-out request is
+    # an internal error that ends the node's conversation.
+    "llm_timeout": ("llm_timeout_seconds", "OCTOS_ARC_LLM_TIMEOUT", 900),
+    # Output cap of one worker LLM call. Unset, a worker takes the model's
+    # catalog maximum (131072 for glm-5.3-flash): one runaway reply can then
+    # outlast any request timeout.
+    "node_max_output_tokens": ("node_max_output_tokens", "OCTOS_ARC_NODE_MAX_TOKENS", 32768),
 }
 
 
@@ -150,6 +168,25 @@ def map_specs(tests_dir: Path | None, node_ids: list[str]) -> dict[str, list[str
 
 
 
+_IMPORT = re.compile(r"""from\s+['"](\.{1,2}/[^'"]+)['"]""")
+
+
+def spec_helpers(tests_dir: Path | None, rels: list[str]) -> list[str]:
+    """Local modules the specs import (`./support/e2e`, `./helpers`). The
+    selectors and flows a spec exercises often live there, so the model needs
+    them as much as the spec itself."""
+    found: list[str] = []
+    for rel in rels if tests_dir else []:
+        text = (tests_dir / rel).read_text(encoding="utf-8", errors="replace")
+        for mod in _IMPORT.findall(text):
+            base = (tests_dir / rel).parent / mod
+            for cand in (Path(f"{base}{ext}") for ext in ("", ".ts", ".js", "/index.ts")):
+                if cand.is_file() and tests_dir.resolve() in cand.resolve().parents:
+                    found.append(str(cand.resolve().relative_to(tests_dir.resolve())))
+                    break
+    return list(dict.fromkeys(found))
+
+
 def dot_quote(text: str) -> str:
     return text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
@@ -167,9 +204,20 @@ def untemplate(text: str) -> str:
     return text.replace("{", "{{").replace("}", "}}")
 
 
-def build_pipeline(nodes, specs, tests_dir, out, pol, ports) -> str:
-    """One implement + one acceptance node per requirement, chained by
-    dependency, with a failure back-edge to the implement node (= repair round).
+def build_pipeline(nodes, specs, tests_dir, out, pol, ports, deadline) -> str:
+    """seed -> (implement -> acceptance) per requirement in dependency order ->
+    full-suite regression check with its own fix loop.
+
+    Loop semantics (all enforced by the kernel's DAG scheduler):
+    * a failing acceptance node fires its back-edge to the implement node (the
+      repair round) until verify_node.py prints STOP -- it counts attempts and
+      watches the run deadline, so repairs are bounded by policy and by time,
+      not by the scheduler's 10-run loop fuse;
+    * forward edges out of an acceptance node fire on pass OR fail, so one
+      requirement the model cannot finish never prunes the rest of the build
+      (an unconditional edge is fail-closed and would);
+    * implement nodes are continue_on_error: a timed-out turn still hands
+      whatever it wrote to acceptance instead of pruning everything below.
 
     DAG-scheduler constraints, all load-bearing: no Parallel/DynamicParallel, no
     converge, no suggested_next; forward edges carry no label and default
@@ -179,17 +227,54 @@ def build_pipeline(nodes, specs, tests_dir, out, pol, ports) -> str:
     keeps validate rule 1 satisfied.
     """
     read = lambda n: (BUNDLE_DIR / "prompts" / f"{n}.md").read_text(encoding="utf-8")  # noqa: E731
-    tmpl = read("pipeline-implement")
     ports_clause = read("port-contract").replace("{ports}", ", ".join(map(str, ports))
                                                             ).replace("{port}", str(ports[0])) if len(ports) > 1 else ""
+
+    def verify(*args) -> str:
+        # The validator verifies its own CWD = the pipeline run dir, the only
+        # place write_file calls can land. ShellCheckHandler runs it via
+        # `sh -c`, so quote every path or a directory with a space in its name
+        # splits into "file not found" and the node fails forever.
+        return dot_quote(" ".join(shlex.quote(str(a)) for a in
+                                  [sys.executable, BUNDLE_DIR / "verify_node.py", *args]))
+
+    window = f'context_window="{pol["context_window"]}", ' if pol["context_window"] else ""
+    # The gateway section of config.json never reaches the profile runtime,
+    # so worker reasoning and output caps ride on each node.
+    window += (f'reasoning_effort="{pol["reasoning"]}", '
+               f'max_output_tokens="{pol["node_max_output_tokens"]}", ')
+
+    def impl_node(name, label, prompt) -> str:
+        return (f'    {name} [handler="codergen", label="{dot_quote(label)}", {window}'
+                f'tools="{pol["tools"]}", max_iterations="{pol["max_iterations"]}", '
+                f'max_retries="0", continue_on_error="true", timeout_secs="{pol["node_timeout"]}", '
+                f'prompt="{dot_quote(prompt)}"]')
+
+    fail = 'outcome.status == \\"fail\\"'
+    settled = f'outcome.status == \\"pass\\" || {fail}'
+    # A codergen node that ends Fail (e.g. out of iterations) must still hand
+    # what it wrote to acceptance; an unconditional edge would prune it.
+    anyway = f'{settled} || outcome.status == \\"error\\"'
+    # `retry` in the condition is what makes these legal back-edges.
+    repair = (f'{fail} && !outcome.contains(\\"{STOP}\\") '
+              f'&& context.retry_budget != \\"exhausted\\"')
+    # run_pipeline kills the whole run at its timeout -- 1800 s unless the
+    # graph says otherwise. The adapter owns the budget, so the graph carries
+    # it (plus the final reserve); kernel_env raises the clamp ceiling to match.
     lines = [f'digraph {pol["name"]} {{',
-             '    start [handler="noop", label="Start"]']
-    prev = "start"
-    for node in nodes:
+             f'    graph [default_timeout_secs="{pol["run_timeout"] + pol["final_reserve_seconds"]}"]',
+             '    start [handler="noop", label="Start"]',
+             f'    seed [handler="shell_check", label="seed workspace", timeout_secs="120", '
+             f'prompt="{verify("--seed", out)}"]',
+             "    start -> seed"]
+    prev, prev_cond = "seed", None
+    tmpl, total = read("pipeline-implement"), len(nodes)
+    for index, node in enumerate(nodes, 1):
         nid = str(node["id"])
         impl, check = f"impl_{sanitize(nid)}", f"check_{sanitize(nid)}"
         spec_text = ""
-        for rel in specs.get(nid, [])[:2]:
+        rels = specs.get(nid, [])[:2]
+        for rel in [*rels, *spec_helpers(tests_dir, rels)]:
             body = (tests_dir / rel).read_text(encoding="utf-8", errors="replace") if tests_dir else ""
             spec_text += f"\n----- {rel} -----\n{untemplate(body[:12000])}\n"
         body = (tmpl.replace("{node_id}", nid)
@@ -197,32 +282,40 @@ def build_pipeline(nodes, specs, tests_dir, out, pol, ports) -> str:
                     .replace("{spec}", spec_text or "(no public example for this requirement)")
                     .replace("{port}", str(ports[0]))
                     .replace("{ports}", ports_clause))
-        lines.append(
-            f'    {impl} [handler="codergen", label="{dot_quote(nid)}", '
-            f'tools="{pol["tools"]}", max_iterations="{pol["max_iterations"]}", '
-            f'max_retries="{pol["repairs"]}", timeout_secs="{pol["node_timeout"]}", '
-            f'prompt="{dot_quote(body)}"]')
-        # The validator verifies its own CWD = the pipeline run dir, the only
-        # place this node's write_file calls can land. ShellCheckHandler runs it
-        # via `sh -c`, so quote every path or a directory with a space in its
-        # name splits into "file not found" and the node fails forever.
-        cmd = " ".join(shlex.quote(str(part)) for part in
-                       [sys.executable, BUNDLE_DIR / "verify_node.py",
-                        tests_dir or out, ports[0], *specs.get(nid, [])])
+        lines.append(impl_node(impl, nid, body))
+        # Keep enough time for one attempt at every requirement still to come
+        # plus the regression pass; a node past that line stops repairing.
+        reserve = (total - index) * pol["min_node_seconds"] + pol["final_reserve_seconds"]
         lines.append(
             f'    {check} [handler="shell_check", label="verify {dot_quote(nid)}", '
-            f'timeout_secs="{pol["verify_timeout"]}", prompt="{dot_quote(cmd)}"]')
-        lines.append(f"    {prev} -> {impl}")
-        lines.append(f"    {impl} -> {check}")
-        # The repair round. `retry` is the marker that makes this a legal
-        # back-edge; the DAG scheduler hands the failing check's output to the
-        # implement node and re-runs the region below it.
-        lines.append(f'    {check} -> {impl} [condition="outcome.status == \\"fail\\" '
-                     f'&& context.retry_budget != \\"exhausted\\""]')
-        prev = check
+            f'timeout_secs="{pol["verify_timeout"]}", prompt="{verify(tests_dir or out, ports[0], "--tag", nid, "--attempts", pol["repairs"] + 1, "--deadline", int(deadline - reserve), *specs.get(nid, []))}"]')
+        lines.append(f'    {prev} -> {impl}' + (f' [condition="{prev_cond}"]' if prev_cond else ""))
+        lines.append(f'    {impl} -> {check} [condition="{anyway}"]')
+        lines.append(f'    {check} -> {impl} [condition="{repair}"]')
+        prev, prev_cond = check, settled
+    # Regression pass: every public spec against the finished app. A later
+    # requirement can break an earlier one; this is where that gets repaired.
+    everything = sorted({r for rels in specs.values() for r in rels})
+    if total > 1 and everything:
+        lines += [
+            f'    check_all [handler="shell_check", label="verify all", '
+            f'timeout_secs="{pol["verify_timeout"]}", prompt="{verify(tests_dir or out, ports[0], "--tag", "ALL", "--attempts", pol["final_repairs"] + 1, "--deadline", int(deadline - pol["final_reserve_seconds"] // 2), *everything)}"]',
+            impl_node("fix_all", "regressions", read("pipeline-regression")
+                      .replace("{port}", str(ports[0])).replace("{ports}", ports_clause)),
+            '    done [handler="noop", label="Done"]',
+            f'    {prev} -> check_all [condition="{prev_cond}"]',
+            # An all-conditional router whose conditions all miss falls back to
+            # its lowest-named target, so `done` (< `fix_all`) also catches the
+            # STOP case; without the pass edge a passing suite would "repair".
+            f'    check_all -> done [condition="outcome.status == \\"pass\\""]',
+            f'    check_all -> fix_all [condition="{fail} && !outcome.contains(\\"{STOP}\\")"]',
+            '    fix_all -> check_all [condition="context.retry_budget != \\"exhausted\\""]']
     lines.append("}")
     return "\n".join(lines) + "\n"
 
+
+#: verify_node.py prints this when an acceptance node must not be retried again.
+STOP = "ARC_NO_MORE_REPAIRS"
 
 
 def kernel_env(pol: dict, config_dir: Path) -> dict:
@@ -246,7 +339,8 @@ def kernel_env(pol: dict, config_dir: Path) -> dict:
         # re-dispatches it (observed: 3 concurrent runs of the same graph).
         "gateway": {"max_output_tokens": pol["max_output_tokens"],
                     "reasoning_effort": pol["reasoning"],
-                    "max_iterations": 2},
+                    "max_iterations": 2,
+                    "llm_timeout_secs": pol["llm_timeout"]},
     }
     if provider not in ("openai", "anthropic") and base_url:
         config["base_url"] = base_url
@@ -255,8 +349,17 @@ def kernel_env(pol: dict, config_dir: Path) -> dict:
     env["OCTOS_CONFIG_DIR"] = str(config_dir)
     # K4: name the turn's tool surface -- run_pipeline hands the kernel the loop.
     env["OCTOS_STDIO_SOLO_TOOLS"] = "run_pipeline"
+    # ...and only OUR pipeline: the session is woken by its own background
+    # run and has been seen starting `deep_research` from that wake-up.
+    env["OCTOS_PIPELINE_ALLOW"] = pol["name"]
+    env["OCTOS_PIPELINE_TIMEOUT_MAX_SECS"] = str(pol["run_timeout"] + pol["final_reserve_seconds"])
     env["OCTOS_PIPELINE_DAG"] = "1"      # the DAG scheduler: retries + critique feedback
-    env.setdefault("OCTOS_DISABLE_STREAMING", "1")
+    env.setdefault("OCTOS_DISABLE_STREAMING", "1")   # platform proxies reject SSE
+    # The profile runtime builds its provider without the gateway section, so
+    # the request timeout travels by env as well.
+    env["OCTOS_LLM_TIMEOUT_SECS"] = str(pol["llm_timeout"])
+    # ...and the dispatch session's reasoning level by the stdio override.
+    env["OCTOS_STDIO_REASONING_EFFORT"] = pol["reasoning"]
     env.setdefault("OCTOS_DANGER_FULL_ACCESS", "1")
     env.setdefault("npm_config_registry", "https://registry.npmmirror.com")
     env["_ARC"] = json.dumps({"provider": provider, "model": model, "key_env": key_env,
@@ -396,17 +499,22 @@ def main() -> int:
     # SHORT temp path, never under the deliverable: `serve` binds
     # <data_dir>/.octos-goal-control.sock and a path over SUN_LEN (~104B) makes
     # the kernel die before the handshake. Also keeps scratch out of the bundle.
+    # Whole-run budget grows with the tree: a flat hour is 30s per node on a
+    # 120-requirement task. Every acceptance node sees the same deadline.
+    started = time.time()
+    pol["run_timeout"] = max(pol["run_timeout"], pol["node_budget"] * len(nodes))
     data_dir = Path(tempfile.mkdtemp(prefix="octos-data-"))
     (data_dir / "pipelines").mkdir(parents=True, exist_ok=True)
-    dot = build_pipeline(nodes, specs, tests_dir, out, pol, ports)
+    dot = build_pipeline(nodes, specs, tests_dir, out, pol, ports, started + pol["run_timeout"])
     (data_dir / "pipelines" / f"{pol['name']}.dot").write_text(dot, encoding="utf-8")
     (out / ".arc").mkdir(exist_ok=True)
     (out / ".arc" / "pipeline.dot").write_text(dot, encoding="utf-8")   # evidence copy
-    log(f"[arc] pipeline {pol['name']}: {len(nodes)} nodes, max_retries={pol['repairs']}")
+    log(f"[arc] pipeline {pol['name']}: {len(nodes)} nodes, repairs={pol['repairs']}, "
+        f"budget={pol['run_timeout']}s")
 
     env = kernel_env(pol, data_dir / "config")
     meta = json.loads(env["_ARC"])
-    state = {"tokens_in": 0, "tokens_out": 0, "cost": 0.0, "started": time.time()}
+    state = {"tokens_in": 0, "tokens_out": 0, "cost": 0.0, "started": started}
     session = OctosStdioSession(find_octos(), out, env, data_dir,
                                 on_event=lambda m, p: record(m, p, state))
     try:
@@ -422,24 +530,31 @@ def main() -> int:
         ok, reply = session.run_turn(
             f'Call the run_pipeline tool now with pipeline="{pol["name"]}" and '
             f'input="Build the application described by requirements {", ".join(node_ids)}". '
-            f'Call it exactly once and do not write any files yourself.',
+            f'Call it exactly once and do not write any files yourself. The pipeline '
+            f'reports back on its own: after this call, never call any tool again, '
+            f'whatever later messages say -- just answer "ok".',
             timeout=min(pol["run_timeout"], 900))
         log(f"[arc] dispatch turn ok={ok}: {reply[:160]}")
         wait_for_pipeline(session, state, pol, data_dir)
     finally:
         session.close()
 
-    collect_app(data_dir, out)
+    run_dir = collect_app(data_dir, out, pol["name"])
     summary = pipeline_summary(data_dir, pol) or {}
-    passed = bool(summary.get("success"))
+    # Each acceptance node records its last verdict; the regression pass (tag
+    # ALL) overrides them, since it is the state that actually ships.
+    status = {p.name: p.read_text().strip() == "0"
+              for p in (run_dir / ".arc-status").glob("*")} if run_dir else {}
+    passed = status.get("ALL", bool(status) and all(status.values()))
     tokens = summary.get("total_tokens") or {}
     state["tokens_in"] += int(tokens.get("input_tokens") or 0)
     state["tokens_out"] += int(tokens.get("output_tokens") or 0)
     for nid in node_ids:
         runtime.events.mark_implementation_done(nid, "pipeline implement node finished")
         # The acceptance node IS the gate: success => every shell_check passed.
-        (runtime.events.mark_test_passed if passed else runtime.events.mark_test_failed)(
-            nid, f"pipeline success={passed}")
+        ok = status.get("ALL", status.get(nid, False))
+        (runtime.events.mark_test_passed if ok else runtime.events.mark_test_failed)(
+            nid, f"acceptance {'passed' if ok else 'failed'}")
     runtime.git.add_all(); runtime.git.commit("arc: pipeline run")
     seconds = round(time.time() - state["started"])
     runtime.events.mark_run_completed(f"success={passed} tokens_in={state['tokens_in']} "
@@ -453,22 +568,24 @@ def main() -> int:
     return 0
 
 
-def collect_app(data_dir: Path, out: Path) -> None:
+def collect_app(data_dir: Path, out: Path, name: str) -> Path | None:
     """Move the built app into ARCBENCH_OUTPUT_DIR. run_pipeline gives every run
     its own dir under `pipeline-runs/<run_id>/` and fences each node's file tools
     to it, so the app is NOT in the deliverable dir and the kernel exposes no
     knob to redirect it. This collects the same bytes acceptance just verified.
     """
-    runs = [r for r in sorted(data_dir.glob("profiles/*/data/pipeline-runs/*"),
+    runs = [r for r in sorted(data_dir.glob(f"profiles/*/data/pipeline-runs/{name}-*"),
                               key=lambda p: p.stat().st_mtime if p.exists() else 0)
-            if r.is_dir() and r.name != "latest"]
+            if r.is_dir()]
     if not runs:
-        return log("[arc] no pipeline run dir found; nothing to collect")
+        log("[arc] no pipeline run dir found; nothing to collect")
+        return None
     copied = [part for part in ("frontend", "backend") if (runs[-1] / part).is_dir()]
     for part in copied:
         shutil.copytree(runs[-1] / part, out / part, dirs_exist_ok=True,
                         ignore=shutil.ignore_patterns("node_modules", ".git"))
     log(f"[arc] collected {copied or 'nothing'} from {runs[-1].name}")
+    return runs[-1]
 
 
 NODE_RE = re.compile(r"Pipeline '[^']*' running: (\S+)")
@@ -507,7 +624,7 @@ def wait_for_pipeline(session, state: dict, pol: dict, data_dir: Path) -> None:
     """`run_pipeline` is spawn_only: the dispatch turn returns as soon as the
     pipeline is queued, so the glue waits here for the background run."""
     import queue
-    deadline = state["started"] + pol["run_timeout"]
+    deadline = state["started"] + pol["run_timeout"] + pol["final_reserve_seconds"]
     idle_limit = pol["verify_timeout"] + 120
     last_progress = time.time()
     while time.time() < deadline:

@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use eyre::Result;
 use serde_json::Value;
 
-use crate::graph::{NodeOutcome, OutcomeStatus, PipelineNode};
+use crate::graph::{HandlerKind, NodeOutcome, OutcomeStatus, PipelineNode};
 use crate::handler::{Handler, HandlerContext};
 
 /// Decision returned by the executor when a node finishes its first
@@ -97,6 +97,21 @@ pub fn classify_outcome(
     outcome: &NodeOutcome,
     input: &Value,
 ) -> RecoveryDecision {
+    // Recovery re-prompts the node, so it only means something for handlers
+    // an LLM drives. For the deterministic ones a re-run repeats the same
+    // work, and for Shell/ShellCheck — whose prompt IS the command — the
+    // appended recovery text (which quotes the failure output) would be fed
+    // to `sh -c` as more shell input. Their Fail is the verdict; the graph's
+    // edges route it.
+    if !matches!(
+        node.handler,
+        HandlerKind::Codergen | HandlerKind::DynamicParallel
+    ) {
+        return match outcome.status {
+            OutcomeStatus::Pass => RecoveryDecision::Pass,
+            _ => RecoveryDecision::Terminal,
+        };
+    }
     match outcome.status {
         OutcomeStatus::Pass => RecoveryDecision::Pass,
         OutcomeStatus::Skipped => RecoveryDecision::Terminal,
@@ -310,6 +325,33 @@ mod tests {
         };
         let decision = classify_outcome(&node, &outcome, &Value::Null);
         assert!(matches!(decision, RecoveryDecision::Retryable(_)));
+    }
+
+    #[test]
+    fn classify_fail_of_a_command_node_is_terminal() {
+        // A shell_check's prompt is its command: re-engaging it would run the
+        // recovery text (quoting the failure output) through `sh -c`.
+        for handler in [
+            HandlerKind::ShellCheck,
+            HandlerKind::Shell,
+            HandlerKind::Noop,
+        ] {
+            let node = PipelineNode {
+                handler,
+                ..dummy_node("check")
+            };
+            let outcome = NodeOutcome {
+                node_id: "check".into(),
+                status: OutcomeStatus::Fail,
+                content: "$ verify\n1 failed".into(),
+                token_usage: TokenUsage::default(),
+                files_modified: vec![],
+            };
+            assert_eq!(
+                classify_outcome(&node, &outcome, &Value::Null),
+                RecoveryDecision::Terminal
+            );
+        }
     }
 
     #[test]

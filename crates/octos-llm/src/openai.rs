@@ -284,9 +284,10 @@ impl OpenAIProvider {
     pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         let model = model.into();
         let hints = ModelHints::detect(&model);
+        let timeout_secs = crate::provider::default_llm_timeout_secs();
         Self {
             client: crate::provider::build_http_client(
-                crate::provider::DEFAULT_LLM_TIMEOUT_SECS,
+                timeout_secs,
                 crate::provider::DEFAULT_LLM_CONNECT_TIMEOUT_SECS,
             ),
             stream_client: crate::provider::build_streaming_http_client(
@@ -299,7 +300,7 @@ impl OpenAIProvider {
             provider_label: "openai".to_string(),
             prompt_cache_affinity: true,
             prompt_cache_affinity_override: None,
-            chat_timeout: std::time::Duration::from_secs(crate::provider::DEFAULT_LLM_TIMEOUT_SECS),
+            chat_timeout: std::time::Duration::from_secs(timeout_secs),
         }
     }
 
@@ -397,6 +398,9 @@ impl OpenAIProvider {
     pub fn with_http_timeout(mut self, timeout_secs: u64, connect_timeout_secs: u64) -> Self {
         self.client = crate::provider::build_http_client(timeout_secs, connect_timeout_secs);
         self.stream_client = crate::provider::build_streaming_http_client(connect_timeout_secs);
+        // post_chat sets a per-request timeout, which overrides the client's:
+        // without this the configured llm_timeout_secs never applied to chat.
+        self.chat_timeout = std::time::Duration::from_secs(timeout_secs);
         self
     }
 
@@ -1531,6 +1535,14 @@ mod tests {
     use crate::config::ChatConfig;
     use crate::provider::LlmProvider;
     use octos_core::{Message, MessageRole};
+
+    #[test]
+    fn http_timeout_override_reaches_the_chat_request_timeout() {
+        // post_chat's per-request timeout wins over the client's, so the
+        // override must move chat_timeout too or it never applies.
+        let p = OpenAIProvider::new("k", "gpt-4o").with_http_timeout(900, 10);
+        assert_eq!(p.chat_timeout, std::time::Duration::from_secs(900));
+    }
 
     #[test]
     fn provider_normalized_manifest_proves_same_epoch_append_only_prefix() {

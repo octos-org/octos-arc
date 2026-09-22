@@ -839,6 +839,10 @@ impl Handler for CodergenHandler {
             max_timeout: node.timeout_secs.map(Duration::from_secs),
             save_episodes: false,
             chat_max_tokens: max_tokens,
+            reasoning_effort: node
+                .reasoning_effort
+                .as_deref()
+                .and_then(parse_reasoning_effort),
             // Pipeline workers don't have a channel-bound send_file tool
             // registered (deny-listed above + outer pipeline orchestration
             // handles delivery via PipelineResult.modified_files). Without
@@ -1036,6 +1040,19 @@ impl Handler for CodergenHandler {
                 files_modified: vec![],
             }),
         }
+    }
+}
+
+/// DOT `reasoning_effort` value -> the provider-agnostic level (`none`/`off`
+/// disable reasoning). Unknown values are ignored: the provider default stands.
+fn parse_reasoning_effort(raw: &str) -> Option<octos_llm::ReasoningEffort> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "none" | "off" | "disabled" => Some(octos_llm::ReasoningEffort::Disabled),
+        "low" => Some(octos_llm::ReasoningEffort::Low),
+        "medium" => Some(octos_llm::ReasoningEffort::Medium),
+        "high" => Some(octos_llm::ReasoningEffort::High),
+        "max" => Some(octos_llm::ReasoningEffort::Max),
+        _ => None,
     }
 }
 
@@ -1506,6 +1523,16 @@ mod tests {
     /// the `_ => return` arm. This is the bridge that lets per-node cost
     /// updates from inner-agent loops reach the parent SSE stream so the
     /// W1.G4 CostBreakdown panel can render them inline with the node tree.
+    #[test]
+    fn dot_reasoning_effort_maps_to_the_provider_level() {
+        use octos_llm::ReasoningEffort as E;
+        assert_eq!(parse_reasoning_effort("none"), Some(E::Disabled));
+        assert_eq!(parse_reasoning_effort(" Off "), Some(E::Disabled));
+        assert_eq!(parse_reasoning_effort("low"), Some(E::Low));
+        assert_eq!(parse_reasoning_effort("max"), Some(E::Max));
+        assert_eq!(parse_reasoning_effort("turbo"), None);
+    }
+
     #[tokio::test]
     async fn pipeline_node_reporter_forwards_cost_update_to_parent_sse() {
         let captured = Arc::new(Mutex::new(Vec::<ProgressEvent>::new()));
@@ -1677,6 +1704,7 @@ mod tests {
             model: None,
             context_window: None,
             max_output_tokens: None,
+            reasoning_effort: None,
             max_iterations: None,
             tools: vec![],
             goal_gate: false,
@@ -1751,6 +1779,7 @@ mod tests {
             model: None,
             context_window: None,
             max_output_tokens: None,
+            reasoning_effort: None,
             max_iterations: None,
             tools: vec![],
             goal_gate: false,
@@ -1809,6 +1838,7 @@ mod tests {
             model: None,
             context_window: None,
             max_output_tokens: None,
+            reasoning_effort: None,
             max_iterations: None,
             tools: vec![],
             goal_gate: false,
@@ -1877,6 +1907,7 @@ mod tests {
             model: None,
             context_window: None,
             max_output_tokens: None,
+            reasoning_effort: None,
             max_iterations: None,
             tools: vec![],
             goal_gate: false,
@@ -1945,6 +1976,7 @@ mod tests {
             model: None,
             context_window: None,
             max_output_tokens: None,
+            reasoning_effort: None,
             max_iterations: None,
             tools: vec![],
             goal_gate: false,
@@ -2011,6 +2043,7 @@ mod tests {
             model: None,
             context_window: None,
             max_output_tokens: None,
+            reasoning_effort: None,
             max_iterations: None,
             tools: vec![],
             goal_gate: false,

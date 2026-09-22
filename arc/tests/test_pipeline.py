@@ -17,20 +17,25 @@ def tree(children):
     return {"id": "ROOT", "name": "T", "type": "FOLDER", "children": children}
 
 
-def atomic(node_id, deps=()):
-    return {"id": node_id, "type": "ATOMIC", "name": node_id,
+def atomic(node_id, deps=(), with_specs=False):
+    return {"id": node_id, "type": "ATOMIC", "name": node_id, "with_specs": with_specs,
             "description": f"build {node_id}", "dependencies": list(deps)}
 
 
 POLICY = dict(name="arc_build", repairs=5, node_timeout=1200, verify_timeout=900,
               max_iterations=40, run_timeout=3600, tools="read_file,write_file",
-              reasoning="none", max_output_tokens=65536)
+              reasoning="none", max_output_tokens=65536, node_budget=600,
+              min_node_seconds=120, final_reserve_seconds=600, final_repairs=2,
+              context_window=0, llm_timeout=900,
+              node_max_output_tokens=32768)
 
 
 def build(nodes_spec):
     nodes = main.atomic_nodes(tree(nodes_spec))
     specs = {str(n["id"]): [] for n in nodes}
-    return main.build_pipeline(nodes, specs, None, "/tmp/out", POLICY, [43100])
+    if nodes_spec and nodes_spec[0].get("with_specs"):
+        specs = {nid: [f"{nid}.spec.ts"] for nid in specs}
+    return main.build_pipeline(nodes, specs, None, "/tmp/out", POLICY, [43100], 1e10)
 
 
 VALID_TOKEN = re.compile(r"[A-Za-z0-9_.:-]+")
@@ -61,24 +66,77 @@ class PipelineDot(unittest.TestCase):
         dot = build([atomic("REQ-1")])
         self.assertIn('start [handler="noop"', dot)
 
+    def edges(self, dot):
+        """(src, dst, attrs, is_back): a back-edge closes a cycle to a node
+        declared earlier in the file."""
+        order = {m.group(1): i for i, m in enumerate(re.finditer(r"^\s{4}(\w+) \[", dot, re.M))}
+        return [(s, d, a, order[d] <= order[s]) for s, d, a in EDGE.findall(dot)]
+
     def test_forward_edges_carry_no_label_and_no_weight(self):
         # A forward edge with a label or a non-default weight is routing the
         # DAG firing logic does not implement -> demotion to the legacy walk.
         dot = build([atomic("REQ-1"), atomic("REQ-2", deps=["REQ-1"])])
-        for src, dst, attrs in EDGE.findall(dot):
-            if "condition=" in (attrs or ""):
-                continue  # back-edge, checked separately
-            self.assertEqual(attrs or "", "", f"forward edge {src}->{dst} must be bare")
+        for src, dst, attrs, back in self.edges(dot):
+            self.assertNotIn("label=", attrs or "", f"{src}->{dst}")
+            self.assertNotIn("weight=", attrs or "", f"{src}->{dst}")
+            if not back:
+                self.assertNotRegex((attrs or "").lower(), r"retry|back_edge|guard_back",
+                                    f"forward edge {src}->{dst} must not look like a back-edge")
 
     def test_back_edge_condition_carries_a_retry_marker(self):
         # validate::has_back_edge_marker looks for retry/back_edge/guard_back in
         # the label or condition; without it the cycle is rejected outright.
-        dot = build([atomic("REQ-1")])
-        conds = [a for _, _, a in EDGE.findall(dot) if a and "condition=" in a]
-        self.assertTrue(conds, "expected a failure back-edge")
-        for cond in conds:
+        dot = build([atomic("REQ-1"), atomic("REQ-2", deps=["REQ-1"], with_specs=True)])
+        backs = [a for _, _, a, back in self.edges(dot) if back]
+        self.assertTrue(backs, "expected a failure back-edge")
+        for cond in backs:
             self.assertRegex(cond.lower(), r"retry|back_edge|back-edge|guard_back")
-            self.assertIn('outcome.status == \\"fail\\"', cond)
+
+    def test_repair_stops_on_the_verifier_marker(self):
+        # Repairs are bounded by verify_node.py (attempts + deadline), not by
+        # the scheduler's 10-run loop fuse.
+        dot = build([atomic("REQ-1")])
+        cond = [a for s, d, a, back in self.edges(dot) if back and d == "impl_n_REQ_1"][0]
+        self.assertIn('outcome.status == \\"fail\\"', cond)
+        self.assertIn(f'!outcome.contains(\\"{main.STOP}\\")', cond)
+        self.assertIn("--attempts 6", dot)
+
+    def test_a_failed_requirement_does_not_prune_the_rest(self):
+        # An unconditional edge out of a Fail is fail-closed: every later node
+        # would be pruned. The edge on to the next requirement fires on both.
+        dot = build([atomic("REQ-1"), atomic("REQ-2", deps=["REQ-1"])])
+        fwd = [a for s, d, a, back in self.edges(dot) if s == "check_n_REQ_1" and d == "impl_n_REQ_2"]
+        self.assertEqual(len(fwd), 1)
+        self.assertIn('outcome.status == \\"pass\\"', fwd[0])
+        self.assertIn('outcome.status == \\"fail\\"', fwd[0])
+        self.assertIn('continue_on_error="true"', dot)
+
+    def test_acceptance_runs_whatever_the_implement_node_ended_with(self):
+        dot = build([atomic("REQ-1")])
+        edge = [a for s, d, a, back in self.edges(dot) if s == "impl_n_REQ_1" and d == "check_n_REQ_1"][0]
+        for status in ("pass", "fail", "error"):
+            self.assertIn(f'outcome.status == \\"{status}\\"', edge)
+
+    def test_worker_nodes_carry_reasoning_and_output_caps(self):
+        # config.json's gateway section never reaches the profile runtime.
+        dot = build([atomic("REQ-1")])
+        line = next(l for l in dot.splitlines() if l.strip().startswith("impl_n_REQ_1 ["))
+        self.assertIn('reasoning_effort="none"', line)
+        self.assertIn('max_output_tokens="32768"', line)
+
+    def test_workspace_is_seeded_before_the_first_requirement(self):
+        dot = build([atomic("REQ-1")])
+        self.assertIn("start -> seed", dot)
+        self.assertIn("seed -> impl_n_REQ_1", dot)
+        self.assertIn("--seed", dot)
+
+    def test_regression_pass_runs_every_spec_after_the_last_requirement(self):
+        dot = build([atomic("REQ-1", with_specs=True), atomic("REQ-2", deps=["REQ-1"])])
+        self.assertIn("check_n_REQ_2 -> check_all", dot)
+        line = next(l for l in dot.splitlines() if l.strip().startswith("check_all ["))
+        self.assertIn("REQ-1.spec.ts", line)
+        self.assertIn("REQ-2.spec.ts", line)
+        self.assertIn("fix_all -> check_all", dot)
 
     def test_uses_no_handler_the_dag_scheduler_refuses(self):
         dot = build([atomic("REQ-1"), atomic("REQ-2", deps=["REQ-1"])])
@@ -89,7 +147,6 @@ class PipelineDot(unittest.TestCase):
     def test_acceptance_node_is_a_shell_check_with_the_repair_budget(self):
         dot = build([atomic("REQ-1")])
         self.assertIn('handler="shell_check"', dot)
-        self.assertIn('max_retries="5"', dot)
         self.assertIn("verify_node.py", dot)
 
     def test_nodes_are_chained_in_dependency_order(self):

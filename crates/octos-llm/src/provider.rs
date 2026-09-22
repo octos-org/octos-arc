@@ -341,6 +341,18 @@ pub(crate) fn truncate_error_body(body: &str) -> String {
 /// stream-timeout system (TTFT / inter-chunk idle / overall wall-clock cap)
 /// lives in `octos-agent`'s `streaming.rs` on the response body.
 pub const DEFAULT_LLM_TIMEOUT_SECS: u64 = 300;
+/// [`DEFAULT_LLM_TIMEOUT_SECS`] unless the process sets
+/// `OCTOS_LLM_TIMEOUT_SECS` -- for hosts whose provider is built on a path
+/// that never sees the gateway's `llm_timeout_secs` (profile runtimes) and
+/// whose non-streaming replies legitimately run long. Zero or unparsable is
+/// ignored.
+pub fn default_llm_timeout_secs() -> u64 {
+    std::env::var("OCTOS_LLM_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT_LLM_TIMEOUT_SECS)
+}
 /// Default per-read idle timeout for **streaming** clients, in seconds.
 ///
 /// Applied via reqwest's `.read_timeout()`, which **resets after every read**.

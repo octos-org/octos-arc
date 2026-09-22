@@ -46,7 +46,7 @@
 name = "arc_build"              # OCTOS_ARC_PIPELINE_NAME — the bare name run_pipeline selects
 repair_rounds = 5               # OCTOS_REPAIR_ROUNDS — per-node `max_retries` in the .dot
 node_timeout_seconds = 1200     # OCTOS_NODE_TIMEOUT — one implement node
-verify_timeout_seconds = 900    # OCTOS_ARC_VERIFY_TIMEOUT — one acceptance node
+verify_timeout_seconds = 1800   # OCTOS_ARC_VERIFY_TIMEOUT — one acceptance node; above the sum of verify_node.py's own step timeouts, since an overrun aborts the pipeline
 max_iterations = 40             # OCTOS_MAX_ITERATIONS — tool iterations inside an implement node
 run_timeout_seconds = 3600      # OCTOS_TIME_BUDGET — whole run
 node_tools = "read_file,write_file,edit_file,glob,grep,list_dir"  # OCTOS_ARC_NODE_TOOLS
