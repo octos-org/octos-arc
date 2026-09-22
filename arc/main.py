@@ -52,6 +52,10 @@ _POLICY = {
     # write_file call generating a large page -- and a timed-out request is
     # an internal error that ends the node's conversation.
     "llm_timeout": ("llm_timeout_seconds", "OCTOS_ARC_LLM_TIMEOUT", 900),
+    # Output cap of one worker LLM call. Unset, a worker takes the model's
+    # catalog maximum (131072 for glm-5.3-flash): one runaway reply can then
+    # outlast any request timeout.
+    "node_max_output_tokens": ("node_max_output_tokens", "OCTOS_ARC_NODE_MAX_TOKENS", 32768),
 }
 
 
@@ -235,6 +239,10 @@ def build_pipeline(nodes, specs, tests_dir, out, pol, ports, deadline) -> str:
                                   [sys.executable, BUNDLE_DIR / "verify_node.py", *args]))
 
     window = f'context_window="{pol["context_window"]}", ' if pol["context_window"] else ""
+    # The gateway section of config.json never reaches the profile runtime,
+    # so worker reasoning and output caps ride on each node.
+    window += (f'reasoning_effort="{pol["reasoning"]}", '
+               f'max_output_tokens="{pol["node_max_output_tokens"]}", ')
 
     def impl_node(name, label, prompt) -> str:
         return (f'    {name} [handler="codergen", label="{dot_quote(label)}", {window}'
@@ -350,6 +358,8 @@ def kernel_env(pol: dict, config_dir: Path) -> dict:
     # The profile runtime builds its provider without the gateway section, so
     # the request timeout travels by env as well.
     env["OCTOS_LLM_TIMEOUT_SECS"] = str(pol["llm_timeout"])
+    # ...and the dispatch session's reasoning level by the stdio override.
+    env["OCTOS_STDIO_REASONING_EFFORT"] = pol["reasoning"]
     env.setdefault("OCTOS_DANGER_FULL_ACCESS", "1")
     env.setdefault("npm_config_registry", "https://registry.npmmirror.com")
     env["_ARC"] = json.dumps({"provider": provider, "model": model, "key_env": key_env,

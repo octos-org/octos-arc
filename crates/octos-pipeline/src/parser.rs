@@ -617,6 +617,7 @@ fn build_node(id: &str, attrs: &HashMap<String, String>) -> PipelineNode {
         model: attrs.get("model").cloned(),
         context_window: attrs.get("context_window").and_then(|s| s.parse().ok()),
         max_output_tokens: attrs.get("max_output_tokens").and_then(|s| s.parse().ok()),
+        reasoning_effort: attrs.get("reasoning_effort").cloned(),
         max_iterations: attrs.get("max_iterations").and_then(|s| s.parse().ok()),
         tools,
         goal_gate: attrs
@@ -1296,6 +1297,20 @@ mod tests {
     /// into `PipelineGraph::default_timeout_secs` so `RunPipelineTool`
     /// can use it as the per-pipeline fallback wall-clock cap when the
     /// LLM does not supply `timeout_secs`.
+    #[test]
+    fn should_parse_node_reasoning_effort() {
+        let graph = parse_dot(
+            r#"digraph g {
+                a [handler="codergen", prompt="x", reasoning_effort="none"]
+                b [handler="codergen", prompt="y"]
+                a -> b
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(graph.nodes["a"].reasoning_effort.as_deref(), Some("none"));
+        assert_eq!(graph.nodes["b"].reasoning_effort, None);
+    }
+
     #[test]
     fn should_parse_graph_default_timeout_secs_plain_integer() {
         let dot = r#"

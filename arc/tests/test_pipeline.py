@@ -26,7 +26,8 @@ POLICY = dict(name="arc_build", repairs=5, node_timeout=1200, verify_timeout=900
               max_iterations=40, run_timeout=3600, tools="read_file,write_file",
               reasoning="none", max_output_tokens=65536, node_budget=600,
               min_node_seconds=120, final_reserve_seconds=600, final_repairs=2,
-              context_window=0)
+              context_window=0, llm_timeout=900,
+              node_max_output_tokens=32768)
 
 
 def build(nodes_spec):
@@ -115,6 +116,13 @@ class PipelineDot(unittest.TestCase):
         edge = [a for s, d, a, back in self.edges(dot) if s == "impl_n_REQ_1" and d == "check_n_REQ_1"][0]
         for status in ("pass", "fail", "error"):
             self.assertIn(f'outcome.status == \\"{status}\\"', edge)
+
+    def test_worker_nodes_carry_reasoning_and_output_caps(self):
+        # config.json's gateway section never reaches the profile runtime.
+        dot = build([atomic("REQ-1")])
+        line = next(l for l in dot.splitlines() if l.strip().startswith("impl_n_REQ_1 ["))
+        self.assertIn('reasoning_effort="none"', line)
+        self.assertIn('max_output_tokens="32768"', line)
 
     def test_workspace_is_seeded_before_the_first_requirement(self):
         dot = build([atomic("REQ-1")])

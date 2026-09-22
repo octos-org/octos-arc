@@ -131,6 +131,11 @@ pub struct PipelineNode {
     /// Override max output tokens per LLM call. Default 4096 is too low for
     /// nodes that write long outputs (e.g. synthesize writing full reports).
     pub max_output_tokens: Option<u32>,
+    /// Per-node reasoning control for LLM-driven handlers (`none`, `low`,
+    /// `medium`, `high`, `max`), from the DOT attribute `reasoning_effort`.
+    /// `None` leaves the provider default -- which, for models that think by
+    /// default, means every worker call pays for reasoning.
+    pub reasoning_effort: Option<String>,
     /// Override the agent-loop iteration budget for this node's worker.
     /// The pipeline default (30) is too low for a synthesis node that reads
     /// many findings files one at a time before producing its analysis —
@@ -198,6 +203,7 @@ impl Default for PipelineNode {
             model: None,
             context_window: None,
             max_output_tokens: None,
+            reasoning_effort: None,
             max_iterations: None,
             tools: Vec::new(),
             goal_gate: false,
