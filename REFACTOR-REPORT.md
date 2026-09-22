@@ -105,11 +105,11 @@ OpenAI 兼容端点 `http://office.liyao.space:40101/v1`（模型 `qwen3.6:35b-a
   报 "no start node found"。
 - 入口开关：`OCTOS_PIPELINE_DAG=1`（main.py 设）。只有这条路径做回边重试并把失败输出交回目标节点。
 
-`arc/tests/test_pipeline.py` 的 8 个用例就是钉住这些不变量的，防止以后改提示词时把环弄丢。
+`arc/tests/test_pipeline.py` 的 8 个用例（arc 单测共 35 个）就是钉住这些不变量的，防止以后改提示词时把环弄丢。
 
 ### 3.3 main.py 只剩四件事
 
-3,811 → **448 行**：读平台环境与路径；生成 `.dot` 并起内核；第一轮点名跑它；
+3,811 → **460 行**：读平台环境与路径；生成 `.dot` 并起内核；第一轮点名跑它；
 把内核事件收成 7 张表与 `runner-events.jsonl`。轮数/预算/模型/提示词全在
 `arc-policy.toml` 的 `[pipeline]` 段与 `prompts/pipeline-implement.md`。
 
