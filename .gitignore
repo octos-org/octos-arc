@@ -71,6 +71,7 @@ test_a2.md
 !ORG-README.md
 !CLAUDE.md
 !CHANGELOG.md
+!REFACTOR-REPORT.md
 !.octos/AGENTS.md
 !specs/task-issue-2236-fenced-peer-build-cache.spec.md
 # ARC harness prompt templates are data read at runtime (and compiled in as defaults)
