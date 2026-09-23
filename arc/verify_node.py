@@ -127,7 +127,22 @@ def check(tests: Path, port: int, specs: list[str]) -> int:
     env.pop("FORCE_COLOR", None)           # plain text for the model reading the failure
     if os.environ.get("NODE_BIN"):
         env["PATH"] = os.environ["NODE_BIN"] + ":" + env.get("PATH", "")
-    for cwd, step in ((out / "frontend", f"{INSTALL} && npm run build"), (out / "backend", INSTALL)):
+    # Verify a disposable copy: the specs create, edit and delete records, and
+    # a store they leave behind in the workspace ships with the app -- the
+    # grader then starts from test debris instead of the seeded state (keep:
+    # 15 requirements passed their own checks, 6/32 at grading).
+    app = Path(tempfile.mkdtemp(prefix="arc-app-"))
+    for part in ("frontend", "backend"):
+        if (out / part).is_dir():
+            shutil.copytree(out / part, app / part, ignore=shutil.ignore_patterns("node_modules", "dist"))
+    try:
+        return run_app(app, out, env, tests, port, specs)
+    finally:
+        shutil.rmtree(app, ignore_errors=True)
+
+
+def run_app(app: Path, out: Path, env: dict, tests: Path, port: int, specs: list[str]) -> int:
+    for cwd, step in ((app / "frontend", f"{INSTALL} && npm run build"), (app / "backend", INSTALL)):
         rc, log = sh(step, cwd, env, 240)
         if rc:
             print(f"[verify] {cwd.name}: {step!r} failed\n{log[-1500:]}")
@@ -142,7 +157,7 @@ def check(tests: Path, port: int, specs: list[str]) -> int:
         return 1
 
     server_log = out / ".arc-server.log"      # a file, not a pipe: a chatty server never blocks
-    srv = subprocess.Popen("npm run start", cwd=out / "backend", env=dict(env, PORT=str(port)),
+    srv = subprocess.Popen("npm run start", cwd=app / "backend", env=dict(env, PORT=str(port)),
                            shell=True, stdout=server_log.open("w"), stderr=subprocess.STDOUT,
                            text=True, preexec_fn=os.setsid)
     try:

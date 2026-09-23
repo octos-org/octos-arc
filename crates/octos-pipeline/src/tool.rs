@@ -567,7 +567,20 @@ const PIPELINE_TIMEOUT_DEFAULT_SECS: u64 = 1800;
 /// Extracted so the resolution policy can be unit-tested without
 /// constructing a full `RunPipelineTool` + `TOOL_CTX`.
 fn resolve_pipeline_timeout(llm_value: Option<u64>, dot_default: Option<u64>) -> u64 {
+    // An operator-fixed timeout replaces both the model's value and the
+    // graph default: the model reads "Max: 3600" in the schema and passes
+    // it, which silently cut a multi-hour operator pipeline at one hour.
+    let llm_value = operator_pipeline_timeout().or(llm_value);
     resolve_pipeline_timeout_with_ceiling(llm_value, dot_default, pipeline_timeout_ceiling())
+}
+
+/// `OCTOS_PIPELINE_TIMEOUT_SECS`: the operator's fixed run timeout (still
+/// clamped to the ceiling). Zero or unparsable is ignored.
+fn operator_pipeline_timeout() -> Option<u64> {
+    std::env::var("OCTOS_PIPELINE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v > 0)
 }
 
 fn resolve_pipeline_timeout_with_ceiling(
