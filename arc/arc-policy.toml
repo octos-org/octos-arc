@@ -50,11 +50,10 @@ verify_timeout_seconds = 1800   # OCTOS_ARC_VERIFY_TIMEOUT — one acceptance no
 max_iterations = 40             # OCTOS_MAX_ITERATIONS — tool iterations inside an implement node
 run_timeout_seconds = 3600      # OCTOS_TIME_BUDGET — whole run
 node_tools = "read_file,write_file,edit_file,glob,grep,list_dir"  # OCTOS_ARC_NODE_TOOLS
-# K1: an explicitly DISABLED reasoning effort makes the kernel emit the generic
-# `reasoning_effort: "none"` on any OpenAI-compatible endpoint. K2: the output
-# ceiling is the gateway budget. Neither needs a local proxy.
+# Put on every worker node as reasoning_effort (the kernel maps it per model:
+# thinking disabled for DeepSeek V4 on its endpoints and for GLM, reasoning_effort
+# "none" elsewhere). The dispatch session gets it via OCTOS_STDIO_REASONING_EFFORT.
 reasoning_effort = "none"       # OCTOS_ARC_REASONING — none | low | medium | high | max
-max_output_tokens = 65536       # OCTOS_ARC_MAX_TOKENS
 
 [mode]
 codegen = true              # OCTOS_ARC_CODEGEN — one-request codegen turns for small trees

@@ -243,6 +243,13 @@ def inventory(out: Path) -> str:
     return "Workspace files: " + ", ".join(rows[:80])
 
 
+def snapshot(out: Path, dest: Path) -> None:
+    shutil.rmtree(dest, ignore_errors=True)
+    for part in ("frontend", "backend"):
+        if (out / part).is_dir():
+            shutil.copytree(out / part, dest / part, ignore=shutil.ignore_patterns("node_modules", "dist"))
+
+
 def keep_best(out: Path, rc: int) -> None:
     """Snapshot the app when this full-suite check passed more tests than any
     before it. A repair that breaks more than it fixes, or a run cut off in
@@ -252,11 +259,7 @@ def keep_best(out: Path, rc: int) -> None:
     prev = json.loads(score.read_text())["passed"] if score.is_file() else -1
     if PASSED["count"] <= prev:
         return
-    shutil.rmtree(best / "app", ignore_errors=True)
-    for part in ("frontend", "backend"):
-        if (out / part).is_dir():
-            shutil.copytree(out / part, best / "app" / part,
-                            ignore=shutil.ignore_patterns("node_modules", "dist"))
+    snapshot(out, best / "app")
     score.write_text(json.dumps({"passed": PASSED["count"], "rc": rc}))
     print(f"[verify] best full-suite state so far: {PASSED['count']} passed (kept)")
 
@@ -285,6 +288,11 @@ def main(argv: list[str]) -> int:
     rc = check(Path(argv[0]).resolve(), int(argv[1]), specs)
     if "best" in opts:
         keep_best(Path.cwd(), rc)
+    if rc == 0 and "tag" in opts:
+        # Latest state a check passed: the adapter copies it into the output
+        # dir as the run goes, so a run killed from outside still delivers.
+        snapshot(Path.cwd(), Path.cwd() / ".arc-good" / "app")
+        (Path.cwd() / ".arc-good" / "stamp").write_text(str(time.time()))
     print(inventory(Path.cwd()))
     if "tag" in opts:                           # the adapter reads the last verdict
         (Path.cwd() / ".arc-status").mkdir(exist_ok=True)
