@@ -48,7 +48,6 @@ _POLICY = {
     "regression_every": ("regression_checkpoint", "OCTOS_ARC_REGRESSION_CHECKPOINT", 4),
     "tools": ("node_tools", "OCTOS_ARC_NODE_TOOLS", "read_file,write_file,edit_file,glob,grep,list_dir"),
     "reasoning": ("reasoning_effort", "OCTOS_ARC_REASONING", "none"),
-    "max_output_tokens": ("max_output_tokens", "OCTOS_ARC_MAX_TOKENS", 65536),
     # 0 = trust the kernel's model catalog. Set it for an endpoint serving a
     # smaller window than the model's nominal one (a local server loaded with
     # 32k): the node's worker then trims to fit instead of overflowing into
@@ -341,15 +340,9 @@ def kernel_env(pol: dict, config_dir: Path) -> dict:
         "provider": provider, "model": model,
         "sandbox": {"allow_network": True},
         "memory": {"refresh": {"enabled": False}},
-        # K1/K2 through the kernel's own controls (no local proxy): a disabled
-        # effort emits `reasoning_effort: "none"`; the output ceiling is the
-        # gateway budget. max_iterations bounds the DISPATCH turn -- run_pipeline
-        # is spawn_only and acks "started in background", so an unbounded loop
-        # re-dispatches it (observed: 3 concurrent runs of the same graph).
-        "gateway": {"max_output_tokens": pol["max_output_tokens"],
-                    "reasoning_effort": pol["reasoning"],
-                    "max_iterations": 2,
-                    "llm_timeout_secs": pol["llm_timeout"]},
+        # Reasoning, output caps and timeouts do NOT go here: the profile
+        # runtime never reads this file's gateway section. They ride on the
+        # graph's nodes and the env below.
     }
     if provider not in ("openai", "anthropic") and base_url:
         config["base_url"] = base_url
@@ -557,7 +550,7 @@ def main() -> int:
             f'whatever later messages say -- just answer "ok".',
             timeout=min(pol["run_timeout"], 900))
         log(f"[arc] dispatch turn ok={ok}: {reply[:160]}")
-        wait_for_pipeline(session, state, pol, data_dir)
+        wait_for_pipeline(session, state, pol, data_dir, out)
     finally:
         session.close()
 
@@ -652,14 +645,31 @@ def pipeline_summary(data_dir: Path, pol: dict) -> dict | None:
     return None
 
 
-def wait_for_pipeline(session, state: dict, pol: dict, data_dir: Path) -> None:
+def deliver_progress(data_dir: Path, out: Path, name: str, synced: dict) -> None:
+    """Copy the latest state an acceptance check passed into the output dir,
+    so a run the platform kills (or that crashes) still ships working code
+    rather than the bare template. The final collect replaces it."""
+    for good in data_dir.glob(f"profiles/*/data/pipeline-runs/{name}-*/.arc-good"):
+        stamp = (good / "stamp").read_text() if (good / "stamp").is_file() else ""
+        if stamp and stamp != synced.get("stamp"):
+            for part in ("frontend", "backend"):
+                if (good / "app" / part).is_dir():
+                    shutil.rmtree(out / part, ignore_errors=True)
+                    shutil.copytree(good / "app" / part, out / part)
+            synced["stamp"] = stamp
+
+
+def wait_for_pipeline(session, state: dict, pol: dict, data_dir: Path, out: Path) -> None:
     """`run_pipeline` is spawn_only: the dispatch turn returns as soon as the
     pipeline is queued, so the glue waits here for the background run."""
     import queue
     deadline = state["started"] + pol["run_timeout"] + pol["final_reserve_seconds"]
     idle_limit = pol["verify_timeout"] + 120
-    last_progress = time.time()
+    last_progress, last_sync, synced = time.time(), 0.0, {}
     while time.time() < deadline:
+        if time.time() - last_sync > 60:
+            deliver_progress(data_dir, out, pol["name"], synced)
+            last_sync = time.time()
         summary = pipeline_summary(data_dir, pol)
         if summary is not None:
             log(f"[arc] pipeline finished: success={summary.get('success')} "
