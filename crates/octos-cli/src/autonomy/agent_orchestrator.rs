@@ -1355,6 +1355,46 @@ impl InProcessAgentOrchestrator {
 /// `active_profile_id.or(routed_profile_id)` resolution the call sites use);
 /// `None` falls back to the session-key-derived profile inside
 /// `upsert_background_task_agent` / `background_task_session_id`.
+/// A pipeline registers one child task per node (`pipeline:<node>`), and each
+/// terminal node would wake the parent session for a turn of its own. A host
+/// whose session only dispatched the pipeline sets
+/// `OCTOS_PIPELINE_NODE_CONTINUATIONS=0`: the run's own completion still
+/// reports back once. (Measured on a 32-requirement build: 140 wake-up turns,
+/// 31% of all input tokens, each answered with "ok".)
+fn pipeline_node_continuations_suppressed(tool_name: &str) -> bool {
+    node_continuation_suppressed(
+        tool_name,
+        std::env::var("OCTOS_PIPELINE_NODE_CONTINUATIONS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn node_continuation_suppressed(tool_name: &str, setting: Option<&str>) -> bool {
+    tool_name.starts_with("pipeline:") && setting.map(str::trim) == Some("0")
+}
+
+#[cfg(test)]
+mod pipeline_node_continuation_tests {
+    use super::node_continuation_suppressed;
+
+    #[test]
+    fn only_pipeline_node_tasks_and_only_when_opted_out() {
+        assert!(node_continuation_suppressed(
+            "pipeline:impl_n_REQ_1",
+            Some("0")
+        ));
+        assert!(!node_continuation_suppressed("pipeline:impl_n_REQ_1", None));
+        assert!(!node_continuation_suppressed(
+            "pipeline:impl_n_REQ_1",
+            Some("1")
+        ));
+        // The run itself (and every other background tool) still reports back.
+        assert!(!node_continuation_suppressed("run_pipeline", Some("0")));
+        assert!(!node_continuation_suppressed("deep_search", Some("0")));
+    }
+}
+
 pub(crate) fn route_terminal_event_to_continuation_queue(
     event: &octos_agent::TerminalEvent,
     runtime_profile_id: Option<&str>,
@@ -1374,6 +1414,9 @@ impl InProcessAgentOrchestrator {
         // once-per-task dedupe would swallow the owner's failed→complete
         // correction. The goal-ledger settle rides the change feed instead —
         // see `install_goal_task_row_settle_listener`.
+        if pipeline_node_continuations_suppressed(&event.task.tool_name) {
+            return;
+        }
         match &event.outcome {
             octos_agent::TerminalOutcome::Completed => {
                 // Mirror the terminal agent record; the upsert's terminal
