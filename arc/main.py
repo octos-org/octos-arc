@@ -352,6 +352,8 @@ def kernel_env(pol: dict, config_dir: Path) -> dict:
     # ...and only OUR pipeline: the session is woken by its own background
     # run and has been seen starting `deep_research` from that wake-up.
     env["OCTOS_PIPELINE_ALLOW"] = pol["name"]
+    # ...and do not wake it for every finished node; the run reports once.
+    env["OCTOS_PIPELINE_NODE_CONTINUATIONS"] = "0"
     env["OCTOS_PIPELINE_TIMEOUT_MAX_SECS"] = str(pol["run_timeout"] + pol["final_reserve_seconds"])
     # Fixed, not a default: the dispatch model copies "Max: 3600" from the
     # tool schema into timeout_secs, and a model-supplied value would win.
