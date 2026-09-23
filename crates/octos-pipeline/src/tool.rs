@@ -623,6 +623,36 @@ fn pipeline_allowlist() -> Option<Vec<String>> {
     (!names.is_empty()).then_some(names)
 }
 
+/// Names of the allow-listed pipelines currently running in this process.
+static RUNNING: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Held for the whole run; releases the name when the run ends, however it ends.
+struct RunningGuard(String);
+
+impl RunningGuard {
+    /// One run per allow-listed pipeline at a time. A host that installed one
+    /// pipeline for a job wants that job run once; a second, concurrent run
+    /// works in its own directory and competes for the same ports and model
+    /// (observed: a local model woken by node-failure notices re-called
+    /// `run_pipeline` 8 times in 80 minutes, every copy running at once).
+    fn claim(name: &str) -> Option<Self> {
+        let mut running = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+        running
+            .insert(name.to_string())
+            .then(|| Self(name.to_string()))
+    }
+}
+
+impl Drop for RunningGuard {
+    fn drop(&mut self) {
+        RUNNING
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.0);
+    }
+}
+
 fn allowlist_rejection(allow: &[String], name: &str, using_ir: bool) -> Option<String> {
     if using_ir {
         return Some(format!(
@@ -962,6 +992,23 @@ impl Tool for RunPipelineTool {
                 ..Default::default()
             });
         }
+        let _running = match pipeline_allowlist() {
+            Some(_) => match RunningGuard::claim(input.pipeline.trim()) {
+                Some(guard) => Some(guard),
+                None => {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: format!(
+                            "pipeline '{}' is already running; it reports back on its own \
+                             when it finishes. Do not start it again.",
+                            input.pipeline.trim()
+                        ),
+                        ..Default::default()
+                    });
+                }
+            },
+            None => None,
+        };
 
         // Free-form inline DOT is no longer an agent-authorable surface. Reject
         // it up front with an actionable message (mirrors the IR compose-error
@@ -2155,6 +2202,15 @@ mod tests {
             resolve_pipeline_timeout_with_ceiling(None, Some(7200), PIPELINE_TIMEOUT_MAX_SECS),
             3600
         );
+    }
+
+    #[test]
+    fn running_guard_admits_one_run_per_name() {
+        let first = RunningGuard::claim("guard_test_pipeline").expect("first run admitted");
+        assert!(RunningGuard::claim("guard_test_pipeline").is_none());
+        assert!(RunningGuard::claim("guard_test_other").is_some());
+        drop(first);
+        assert!(RunningGuard::claim("guard_test_pipeline").is_some());
     }
 
     #[test]

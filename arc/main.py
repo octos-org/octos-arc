@@ -365,6 +365,9 @@ def kernel_env(pol: dict, config_dir: Path) -> dict:
     # The profile runtime builds its provider without the gateway section, so
     # the request timeout travels by env as well.
     env["OCTOS_LLM_TIMEOUT_SECS"] = str(pol["llm_timeout"])
+    # Ride out a minute or two of refused / reset connections (1+2+...+60s)
+    # instead of failing the node after 7s; timeouts are never retried.
+    env["OCTOS_LLM_MAX_RETRIES"] = "8"
     # ...and the dispatch session's reasoning level by the stdio override.
     env["OCTOS_STDIO_REASONING_EFFORT"] = pol["reasoning"]
     env.setdefault("OCTOS_DANGER_FULL_ACCESS", "1")

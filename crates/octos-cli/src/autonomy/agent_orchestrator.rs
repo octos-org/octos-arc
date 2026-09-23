@@ -1360,8 +1360,11 @@ impl InProcessAgentOrchestrator {
 /// whose session only dispatched the pipeline sets
 /// `OCTOS_PIPELINE_NODE_CONTINUATIONS=0`: the run's own completion still
 /// reports back once. (Measured on a 32-requirement build: 140 wake-up turns,
-/// 31% of all input tokens, each answered with "ok".)
-fn pipeline_node_continuations_suppressed(tool_name: &str) -> bool {
+/// 31% of all input tokens, each answered with "ok".) Node *failures* are
+/// covered too: a failed node is the pipeline's own business (its fail edge
+/// routes it), and a failure notice read as "the job failed" made a local
+/// model start the whole pipeline again.
+pub(crate) fn pipeline_node_continuations_suppressed(tool_name: &str) -> bool {
     node_continuation_suppressed(
         tool_name,
         std::env::var("OCTOS_PIPELINE_NODE_CONTINUATIONS")

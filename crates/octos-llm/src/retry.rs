@@ -26,10 +26,22 @@ pub struct RetryConfig {
     pub backoff_multiplier: f64,
 }
 
+/// Retries per call unless the process sets `OCTOS_LLM_MAX_RETRIES`. Only
+/// errors `is_retryable_error` admits are retried (refused / reset
+/// connections, 429, 5xx -- never a timeout), so a host on a flaky link can
+/// ride out an outage of a minute or two instead of failing the call after
+/// 1+2+4 seconds.
+pub fn default_llm_max_retries() -> u32 {
+    std::env::var("OCTOS_LLM_MAX_RETRIES")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .map_or(3, |v| v.min(12))
+}
+
 impl Default for RetryConfig {
     fn default() -> Self {
         Self {
-            max_retries: 3,
+            max_retries: default_llm_max_retries(),
             initial_delay: Duration::from_secs(1),
             max_delay: Duration::from_secs(60),
             backoff_multiplier: 2.0,
