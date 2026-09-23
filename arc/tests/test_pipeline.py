@@ -182,3 +182,22 @@ class PipelineDot(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CollectApp(unittest.TestCase):
+    def test_delivers_the_best_full_suite_state_over_a_worse_final_one(self):
+        import json, tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            data, out = Path(tmp) / "data", Path(tmp) / "out"
+            run = data / "profiles" / "p" / "data" / "pipeline-runs" / "arc_build-1"
+            for base, text in ((run, "broken"), (run / ".arc-best" / "app", "best")):
+                (base / "frontend" / "src").mkdir(parents=True)
+                (base / "frontend" / "src" / "index.html").write_text(text)
+                (base / "backend").mkdir(parents=True)
+            (run / ".arc-best" / "score.json").write_text(json.dumps({"passed": 6, "rc": 1}))
+            (out / "frontend" / "src").mkdir(parents=True)
+            (out / "frontend" / "src" / "stale.html").write_text("template")
+            self.assertEqual(main.collect_app(data, out, "arc_build"), run)
+            self.assertEqual((out / "frontend" / "src" / "index.html").read_text(), "best")
+            self.assertFalse((out / "frontend" / "src" / "stale.html").exists())
