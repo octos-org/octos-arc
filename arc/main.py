@@ -39,6 +39,10 @@ _POLICY = {
     "min_node_seconds": ("min_node_seconds", "OCTOS_ARC_MIN_NODE_SECONDS", 120),
     "final_reserve_seconds": ("final_reserve_seconds", "OCTOS_ARC_FINAL_RESERVE", 600),
     "final_repairs": ("final_repair_rounds", "OCTOS_ARC_FINAL_REPAIRS", 2),
+    # Every Nth acceptance node also re-runs the specs of earlier requirements
+    # that passed, so a regression is repaired while its cause is fresh
+    # rather than all at once at the end. 0 = off.
+    "regression_every": ("regression_checkpoint", "OCTOS_ARC_REGRESSION_CHECKPOINT", 4),
     "tools": ("node_tools", "OCTOS_ARC_NODE_TOOLS", "read_file,write_file,edit_file,glob,grep,list_dir"),
     "reasoning": ("reasoning_effort", "OCTOS_ARC_REASONING", "none"),
     "max_output_tokens": ("max_output_tokens", "OCTOS_ARC_MAX_TOKENS", 65536),
@@ -204,7 +208,7 @@ def untemplate(text: str) -> str:
     return text.replace("{", "{{").replace("}", "}}")
 
 
-def build_pipeline(nodes, specs, tests_dir, out, pol, ports, deadline) -> str:
+def build_pipeline(nodes, specs, tests_dir, out, pol, ports, deadline, spec_map=None) -> str:
     """seed -> (implement -> acceptance) per requirement in dependency order ->
     full-suite regression check with its own fix loop.
 
@@ -267,6 +271,8 @@ def build_pipeline(nodes, specs, tests_dir, out, pol, ports, deadline) -> str:
              f'    seed [handler="shell_check", label="seed workspace", timeout_secs="120", '
              f'prompt="{verify("--seed", out)}"]',
              "    start -> seed"]
+    every = pol["regression_every"]
+    regress = lambda i: ["--regress", spec_map] if spec_map and every and i % every == 0 and i < len(nodes) else []  # noqa: E731
     prev, prev_cond = "seed", None
     tmpl, total = read("pipeline-implement"), len(nodes)
     for index, node in enumerate(nodes, 1):
@@ -288,7 +294,7 @@ def build_pipeline(nodes, specs, tests_dir, out, pol, ports, deadline) -> str:
         reserve = (total - index) * pol["min_node_seconds"] + pol["final_reserve_seconds"]
         lines.append(
             f'    {check} [handler="shell_check", label="verify {dot_quote(nid)}", '
-            f'timeout_secs="{pol["verify_timeout"]}", prompt="{verify(tests_dir or out, ports[0], "--tag", nid, "--attempts", pol["repairs"] + 1, "--deadline", int(deadline - reserve), *specs.get(nid, []))}"]')
+            f'timeout_secs="{pol["verify_timeout"]}", prompt="{verify(tests_dir or out, ports[0], "--tag", nid, "--attempts", pol["repairs"] + 1, "--deadline", int(deadline - reserve), *regress(index), *specs.get(nid, []))}"]')
         lines.append(f'    {prev} -> {impl}' + (f' [condition="{prev_cond}"]' if prev_cond else ""))
         lines.append(f'    {impl} -> {check} [condition="{anyway}"]')
         lines.append(f'    {check} -> {impl} [condition="{repair}"]')
@@ -516,7 +522,9 @@ def main() -> int:
     pol["run_timeout"] = max(pol["run_timeout"], pol["node_budget"] * len(nodes))
     data_dir = Path(tempfile.mkdtemp(prefix="octos-data-"))
     (data_dir / "pipelines").mkdir(parents=True, exist_ok=True)
-    dot = build_pipeline(nodes, specs, tests_dir, out, pol, ports, started + pol["run_timeout"])
+    spec_map = data_dir / "arc-specs.json"     # requirement -> specs, for regression checkpoints
+    spec_map.write_text(json.dumps(specs), encoding="utf-8")
+    dot = build_pipeline(nodes, specs, tests_dir, out, pol, ports, started + pol["run_timeout"], spec_map)
     (data_dir / "pipelines" / f"{pol['name']}.dot").write_text(dot, encoding="utf-8")
     (out / ".arc").mkdir(exist_ok=True)
     (out / ".arc" / "pipeline.dot").write_text(dot, encoding="utf-8")   # evidence copy

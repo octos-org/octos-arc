@@ -249,6 +249,18 @@ def main(argv: list[str]) -> int:
             opts[arg[2:]] = next(it)
         else:
             specs.append(arg)
+    if "regress" in opts:
+        # Regression checkpoint: also re-run the specs of earlier requirements
+        # whose last verdict was a pass.
+        status = Path.cwd() / ".arc-status"
+        earlier = [rel for tag, rels in json.loads(Path(opts["regress"]).read_text()).items()
+                   if tag != opts.get("tag") and (status / tag).is_file()
+                   and (status / tag).read_text().strip() == "0" for rel in rels]
+        extra = [rel for rel in dict.fromkeys(earlier) if rel not in specs]
+        if extra:
+            print(f"[verify] regression checkpoint: also re-running {len(extra)} spec(s) of earlier "
+                  "requirements that passed; a failure there is a regression to fix now")
+            specs = [*specs, *extra]
     rc = check(Path(argv[0]).resolve(), int(argv[1]), specs)
     print(inventory(Path.cwd()))
     if "tag" in opts:                           # the adapter reads the last verdict
