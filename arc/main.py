@@ -308,7 +308,7 @@ def build_pipeline(nodes, specs, tests_dir, out, pol, ports, deadline, spec_map=
     if total > 1 and everything:
         lines += [
             f'    check_all [handler="shell_check", label="verify all", '
-            f'timeout_secs="{pol["verify_timeout"]}", prompt="{verify(tests_dir or out, ports[0], "--tag", "ALL", "--attempts", pol["final_repairs"] + 1, "--deadline", int(deadline - pol["final_reserve_seconds"] // 2), *everything)}"]',
+            f'timeout_secs="{pol["verify_timeout"]}", prompt="{verify(tests_dir or out, ports[0], "--tag", "ALL", "--best", 1, "--attempts", pol["final_repairs"] + 1, "--deadline", int(deadline - pol["final_reserve_seconds"] // 2), *everything)}"]',
             impl_node("fix_all", "regressions", read("pipeline-regression")
                       .replace("{port}", str(ports[0])).replace("{ports}", ports_clause)),
             '    done [handler="noop", label="Done"]',
@@ -567,6 +567,8 @@ def main() -> int:
     # ALL) overrides them, since it is the state that actually ships.
     status = {p.name: p.read_text().strip() == "0"
               for p in (run_dir / ".arc-status").glob("*")} if run_dir else {}
+    if run_dir and (run_dir / ".arc-best" / "score.json").is_file():   # what ships is the best state
+        status["ALL"] = json.loads((run_dir / ".arc-best" / "score.json").read_text())["rc"] == 0
     passed = status.get("ALL", bool(status) and all(status.values()))
     tokens = summary.get("total_tokens") or {}
     state["tokens_in"] += int(tokens.get("input_tokens") or 0)
@@ -602,11 +604,19 @@ def collect_app(data_dir: Path, out: Path, name: str) -> Path | None:
     if not runs:
         log("[arc] no pipeline run dir found; nothing to collect")
         return None
-    copied = [part for part in ("frontend", "backend") if (runs[-1] / part).is_dir()]
+    # The full-suite check keeps the best state it measured; the final state
+    # can be worse (a repair that broke more than it fixed, or a run cut off
+    # mid-edit).
+    best = runs[-1] / ".arc-best"
+    source = best / "app" if (best / "app" / "frontend").is_dir() else runs[-1]
+    copied = [part for part in ("frontend", "backend") if (source / part).is_dir()]
     for part in copied:
-        shutil.copytree(runs[-1] / part, out / part, dirs_exist_ok=True,
+        shutil.rmtree(out / part, ignore_errors=True)
+        shutil.copytree(source / part, out / part,
                         ignore=shutil.ignore_patterns("node_modules", ".git"))
-    log(f"[arc] collected {copied or 'nothing'} from {runs[-1].name}")
+    log(f"[arc] collected {copied or 'nothing'} from {runs[-1].name}"
+        + (f" (best full-suite state: {json.loads((best / 'score.json').read_text())['passed']} passed)"
+           if source != runs[-1] else ""))
     return runs[-1]
 
 

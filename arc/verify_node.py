@@ -9,7 +9,7 @@ on retry. Playwright's exit code IS the verdict; nothing re-derives it.
 The app dir is the CWD = the pipeline run dir, the only place this node's
 write_file calls land (its file tools are fenced there).
 
-usage: verify_node.py <tests_dir> <port> [--tag ID --attempts N --deadline EPOCH --repair-window S] [spec.ts ...]
+usage: verify_node.py <tests_dir> <port> [--tag ID --attempts N --deadline EPOCH --repair-window S --best 1] [spec.ts ...]
        verify_node.py --seed <deliverable_dir>
 
 A failing run prints STOP when this tag has used its N attempts, has been
@@ -18,10 +18,11 @@ pipeline moves on instead of spending the budget of the requirements to come.
 Every step has its own timeout below the node's, because a shell_check that
 overruns its node timeout is an ERROR that aborts the whole pipeline.
 """
-import json, os, shutil, signal, socket, subprocess, sys, tempfile, time
+import json, os, re, shutil, signal, socket, subprocess, sys, tempfile, time
 from pathlib import Path
 
 STOP = "ARC_NO_MORE_REPAIRS"
+PASSED = {"count": 0}               # tests the last check passed (for --best)
 INSTALL = "npm install --no-audit --no-fund --no-package-lock"
 
 # The harness owns the two manifests so the model never spends a turn on them
@@ -217,6 +218,8 @@ def run_app(app: Path, out: Path, env: dict, tests: Path, port: int, specs: list
     # Playwright's exit code IS the verdict and its list reporter already names
     # every failing assertion; print that verbatim for the repair round.
     print(log[-6000:])
+    counts = re.findall(r"(\d+) passed", log)
+    PASSED["count"] = int(counts[-1]) if counts else 0
     if rc:
         # What the page actually showed when each test failed (Playwright's
         # ARIA snapshot): the difference between "not found" and why.
@@ -238,6 +241,24 @@ def inventory(out: Path) -> str:
             if f.is_file() and not {"node_modules", "dist"} & set(rel.parts) and f.stat().st_size < 1_000_000:
                 rows.append(f"{rel} ({len(f.read_bytes().splitlines())} lines)")
     return "Workspace files: " + ", ".join(rows[:80])
+
+
+def keep_best(out: Path, rc: int) -> None:
+    """Snapshot the app when this full-suite check passed more tests than any
+    before it. A repair that breaks more than it fixes, or a run cut off in
+    the middle of one, must not ship: the adapter delivers the snapshot."""
+    best = out / ".arc-best"
+    score = best / "score.json"
+    prev = json.loads(score.read_text())["passed"] if score.is_file() else -1
+    if PASSED["count"] <= prev:
+        return
+    shutil.rmtree(best / "app", ignore_errors=True)
+    for part in ("frontend", "backend"):
+        if (out / part).is_dir():
+            shutil.copytree(out / part, best / "app" / part,
+                            ignore=shutil.ignore_patterns("node_modules", "dist"))
+    score.write_text(json.dumps({"passed": PASSED["count"], "rc": rc}))
+    print(f"[verify] best full-suite state so far: {PASSED['count']} passed (kept)")
 
 
 def main(argv: list[str]) -> int:
@@ -262,6 +283,8 @@ def main(argv: list[str]) -> int:
                   "requirements that passed; a failure there is a regression to fix now")
             specs = [*specs, *extra]
     rc = check(Path(argv[0]).resolve(), int(argv[1]), specs)
+    if "best" in opts:
+        keep_best(Path.cwd(), rc)
     print(inventory(Path.cwd()))
     if "tag" in opts:                           # the adapter reads the last verdict
         (Path.cwd() / ".arc-status").mkdir(exist_ok=True)
