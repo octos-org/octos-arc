@@ -33222,6 +33222,11 @@ async fn run_standalone_turn(
             .or_else(|| routed_profile_id.clone())
             .unwrap_or_else(|| MAIN_PROFILE_ID.to_owned());
         task_supervisor.set_on_failure_signal(move |signal| {
+            if crate::autonomy::agent_orchestrator::pipeline_node_continuations_suppressed(
+                &signal.tool_name,
+            ) {
+                return;
+            }
             let outcome = default_agent_orchestrator().enqueue_spawn_only_failure_continuation(
                 &failure_session_id,
                 &failure_profile_id,

@@ -206,10 +206,7 @@ pub enum Command {
 /// Every other command keeps its historical stdout console routing untouched.
 pub fn reserve_stdout(command: &Command) -> bool {
     match command {
-        Command::Acp(_)
-        | Command::Profile(_)
-        | Command::McpServe(_)
-        | Command::Chat(_) => true,
+        Command::Acp(_) | Command::Profile(_) | Command::McpServe(_) | Command::Chat(_) => true,
         // `inbox path` is a machine-readable single path.
         Command::Inbox(_) => true,
         Command::Doctor(cmd) => cmd.json,

@@ -3410,6 +3410,11 @@ impl ActorFactory {
             .unwrap_or(MAIN_PROFILE_ID)
             .to_owned();
         supervisor.set_on_failure_signal(move |signal| {
+            if crate::autonomy::agent_orchestrator::pipeline_node_continuations_suppressed(
+                &signal.tool_name,
+            ) {
+                return;
+            }
             let outcome = crate::autonomy::agent_orchestrator::default_agent_orchestrator()
                 .enqueue_spawn_only_failure_continuation(
                     &failure_session_key,
