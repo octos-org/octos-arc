@@ -115,6 +115,22 @@ def playwright_root(env: dict) -> tuple[Path | None, dict]:
     return (private, browsers) if rc == 0 else (None, {})
 
 
+NO_BROWSER = "Executable doesn't exist"
+
+
+def install_browser(pw: str, root: Path, env: dict) -> bool:
+    """A Playwright whose browser build is missing (a wiped cache, a version
+    bump) fails every spec in the same way -- a local run once burned 670
+    nodes on that. Fetch chromium once, upstream then through the mirror."""
+    for extra in ({}, {"PLAYWRIGHT_DOWNLOAD_HOST": "https://npmmirror.com/mirrors/playwright"}):
+        rc, log = sh([pw, "install", "chromium"], root, dict(env, **extra), 600)
+        if rc == 0:
+            print("[verify] installed the missing Playwright browser")
+            return True
+    print(f"[verify] Playwright browser install failed:\n{log[-800:]}")
+    return False
+
+
 def check(tests: Path, port: int, specs: list[str]) -> int:
     out = Path.cwd()
     for rel, data in MANIFESTS.items():
@@ -208,13 +224,21 @@ def run_app(app: Path, out: Path, env: dict, tests: Path, port: int, specs: list
             "export default defineConfig({ testDir: './tests', outputDir: './test-results', timeout: %s, retries: 0, workers: 4, "
             "reporter: [['list']], use: { headless: true, baseURL: process.env.E2E_BASE_URL } });\n"
             % os.environ.get("OCTOS_ARC_TEST_TIMEOUT_MS", "10000"))
-        rc, log = sh([str(root / "node_modules" / ".bin" / "playwright"), "test", "-c",
-                      str(work / "playwright.config.ts")], work,
-                     dict(env, E2E_BASE_URL=f"http://127.0.0.1:{port}", CI="1",
-                          NODE_PATH=str(root / "node_modules"), **pw_env),
-                     int(os.environ.get("OCTOS_ARC_PLAYWRIGHT_TIMEOUT", "600")))
+        pw = str(root / "node_modules" / ".bin" / "playwright")
+        run_env = dict(env, E2E_BASE_URL=f"http://127.0.0.1:{port}", CI="1",
+                       NODE_PATH=str(root / "node_modules"), **pw_env)
+        run = lambda: sh([pw, "test", "-c", str(work / "playwright.config.ts")], work, run_env,  # noqa: E731
+                         int(os.environ.get("OCTOS_ARC_PLAYWRIGHT_TIMEOUT", "600")))
+        rc, log = run()
+        if rc and NO_BROWSER in log and install_browser(pw, root, run_env):
+            rc, log = run()
     finally:
         stop(srv)
+    if rc and NO_BROWSER in log:
+        # The runner has no browser and none could be installed: nothing the
+        # model can fix, so do not spend repair rounds on it.
+        print(f"[verify] Playwright has no browser to run the specs\n{log[-800:]}\n{STOP}: no browser")
+        return 1
     # Playwright's exit code IS the verdict and its list reporter already names
     # every failing assertion; print that verbatim for the repair round.
     print(log[-6000:])
