@@ -387,7 +387,7 @@ def kernel_env(pol: dict, config_dir: Path) -> dict:
 #: surface, so the pipeline is never triggered. Published from the refactor
 #: branch as a Linux x86_64 bundle; override with OCTOS_RELEASE_URL.
 OCTOS_RELEASE_URL = (
-    "https://github.com/octos-org/octos-arc/releases/download/v2.0.3-rc.11-arc.15/"
+    "https://github.com/octos-org/octos-arc/releases/download/v2.0.3-rc.11-arc.16/"
     "octos-bundle-x86_64-unknown-linux-gnu.tar.gz"
 )
 
