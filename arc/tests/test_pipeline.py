@@ -22,7 +22,7 @@ def atomic(node_id, deps=(), with_specs=False):
             "description": f"build {node_id}", "dependencies": list(deps)}
 
 
-POLICY = dict(name="arc_build", repairs=5, node_timeout=1200, verify_timeout=900,
+POLICY = dict(name="arc_build", repairs=5, repair_window=1800, node_timeout=1200, verify_timeout=900,
               max_iterations=40, run_timeout=3600, tools="read_file,write_file",
               reasoning="none", max_output_tokens=65536, node_budget=600,
               min_node_seconds=120, final_reserve_seconds=600, final_repairs=2,
@@ -100,6 +100,7 @@ class PipelineDot(unittest.TestCase):
         self.assertIn('outcome.status == \\"fail\\"', cond)
         self.assertIn(f'!outcome.contains(\\"{main.STOP}\\")', cond)
         self.assertIn("--attempts 6", dot)
+        self.assertIn("--repair-window 1800", dot)
 
     def test_a_failed_requirement_does_not_prune_the_rest(self):
         # An unconditional edge out of a Fail is fail-closed: every later node

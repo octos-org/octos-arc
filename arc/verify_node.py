@@ -9,11 +9,11 @@ on retry. Playwright's exit code IS the verdict; nothing re-derives it.
 The app dir is the CWD = the pipeline run dir, the only place this node's
 write_file calls land (its file tools are fenced there).
 
-usage: verify_node.py <tests_dir> <port> [--tag ID --attempts N --deadline EPOCH] [spec.ts ...]
+usage: verify_node.py <tests_dir> <port> [--tag ID --attempts N --deadline EPOCH --repair-window S] [spec.ts ...]
        verify_node.py --seed <deliverable_dir>
 
-A failing run prints STOP when this tag has used its N attempts or the
-deadline has passed; the repair back-edge does not fire on that marker, so the
+A failing run prints STOP when this tag has used its N attempts, has been
+repairing for longer than its window, or the deadline has passed; the repair back-edge does not fire on that marker, so the
 pipeline moves on instead of spending the budget of the requirements to come.
 Every step has its own timeout below the node's, because a shell_check that
 overruns its node timeout is an ERROR that aborts the whole pipeline.
@@ -271,7 +271,12 @@ def main(argv: list[str]) -> int:
         counter.parent.mkdir(exist_ok=True)
         attempts = int(counter.read_text() or 0) + 1 if counter.is_file() else 1
         counter.write_text(str(attempts))
-        if attempts >= int(opts.get("attempts", 6)) or time.time() >= float(opts.get("deadline", "inf")):
+        first = counter.with_suffix(".first")          # when this requirement first failed
+        if not first.is_file():
+            first.write_text(str(time.time()))
+        spent = time.time() - float(first.read_text())
+        if (attempts >= int(opts.get("attempts", 6)) or time.time() >= float(opts.get("deadline", "inf"))
+                or spent >= float(opts.get("repair-window", "inf"))):
             print(f"{STOP}: attempt {attempts} for {opts['tag']}; moving on")
     return rc
 

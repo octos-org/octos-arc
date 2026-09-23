@@ -31,6 +31,9 @@ log = functools.partial(print, flush=True)
 _POLICY = {
     "name": ("name", "OCTOS_ARC_PIPELINE_NAME", "arc_build"),
     "repairs": ("repair_rounds", "OCTOS_REPAIR_ROUNDS", 5),
+    # Wall clock one requirement may spend repairing after its first failed
+    # check; past it the requirement is left as is and the build moves on.
+    "repair_window": ("repair_window_seconds", "OCTOS_ARC_REPAIR_WINDOW", 1800),
     "node_timeout": ("node_timeout_seconds", "OCTOS_NODE_TIMEOUT", 1200),
     "verify_timeout": ("verify_timeout_seconds", "OCTOS_ARC_VERIFY_TIMEOUT", 1800),
     "max_iterations": ("max_iterations", "OCTOS_MAX_ITERATIONS", 40),
@@ -294,7 +297,7 @@ def build_pipeline(nodes, specs, tests_dir, out, pol, ports, deadline, spec_map=
         reserve = (total - index) * pol["min_node_seconds"] + pol["final_reserve_seconds"]
         lines.append(
             f'    {check} [handler="shell_check", label="verify {dot_quote(nid)}", '
-            f'timeout_secs="{pol["verify_timeout"]}", prompt="{verify(tests_dir or out, ports[0], "--tag", nid, "--attempts", pol["repairs"] + 1, "--deadline", int(deadline - reserve), *regress(index), *specs.get(nid, []))}"]')
+            f'timeout_secs="{pol["verify_timeout"]}", prompt="{verify(tests_dir or out, ports[0], "--tag", nid, "--attempts", pol["repairs"] + 1, "--deadline", int(deadline - reserve), "--repair-window", pol["repair_window"], *regress(index), *specs.get(nid, []))}"]')
         lines.append(f'    {prev} -> {impl}' + (f' [condition="{prev_cond}"]' if prev_cond else ""))
         lines.append(f'    {impl} -> {check} [condition="{anyway}"]')
         lines.append(f'    {check} -> {impl} [condition="{repair}"]')
