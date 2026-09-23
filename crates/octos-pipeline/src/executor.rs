@@ -3879,8 +3879,11 @@ impl PipelineExecutor {
                 "node": node.id,
                 "input": ctx.input,
             });
-            let recovery_decision =
-                crate::recovery::classify_outcome(&node_with_prompt, &outcome, &recovery_input);
+            let recovery_decision = if node_budget_spent(node, node_start) {
+                crate::recovery::RecoveryDecision::Terminal
+            } else {
+                crate::recovery::classify_outcome(&node_with_prompt, &outcome, &recovery_input)
+            };
             if let crate::recovery::RecoveryDecision::Retryable(signal) = recovery_decision {
                 if let Some(handler) = handlers.get(&node.handler) {
                     match crate::recovery::recover_node(
@@ -4788,9 +4791,10 @@ impl PipelineExecutor {
         // first failure before the outcome is allowed to prune/abort. Skipped/
         // Pass outcomes short-circuit inside `classify_outcome`.
         let recovery_input = serde_json::json!({ "node": node.id, "input": ctx.input });
-        if let crate::recovery::RecoveryDecision::Retryable(signal) =
-            crate::recovery::classify_outcome(&node_with_prompt, &outcome, &recovery_input)
-        {
+        if let (false, crate::recovery::RecoveryDecision::Retryable(signal)) = (
+            node_budget_spent(node, node_start),
+            crate::recovery::classify_outcome(&node_with_prompt, &outcome, &recovery_input),
+        ) {
             match crate::recovery::recover_node(
                 handler,
                 &node_with_prompt,
@@ -5175,6 +5179,16 @@ fn dag_scheduler_enabled() -> bool {
         std::env::var("OCTOS_PIPELINE_DAG").ok().as_deref(),
         Some("1") | Some("true") | Some("TRUE")
     )
+}
+
+/// True once a node has used its whole `timeout_secs`. M8.9 recovery is for a
+/// first attempt that failed early; re-engaging a node that ran out of time
+/// silently doubles its budget (a 20-minute implement node ran 40 minutes)
+/// and starts the conversation over, so a spent budget ends the attempt and
+/// the graph's edges take it from there.
+fn node_budget_spent(node: &PipelineNode, started: Instant) -> bool {
+    node.timeout_secs
+        .is_some_and(|secs| secs > 0 && started.elapsed() >= Duration::from_secs(secs))
 }
 
 /// A graph is DAG-schedulable when it uses none of the routing features the
@@ -5589,3 +5603,22 @@ fn dag_build_result(
 #[cfg(test)]
 #[path = "executor_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod node_budget_tests {
+    use super::*;
+
+    #[test]
+    fn budget_is_spent_only_after_the_node_timeout() {
+        let node = PipelineNode {
+            timeout_secs: Some(2),
+            ..Default::default()
+        };
+        let now = Instant::now();
+        assert!(!node_budget_spent(&node, now));
+        let earlier = now.checked_sub(Duration::from_secs(3)).unwrap();
+        assert!(node_budget_spent(&node, earlier));
+        let unbounded = PipelineNode::default();
+        assert!(!node_budget_spent(&unbounded, earlier));
+    }
+}
