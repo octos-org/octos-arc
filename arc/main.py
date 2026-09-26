@@ -237,10 +237,9 @@ def build_pipeline(nodes, specs, tests_dir, out, pol, ports, deadline, spec_map=
                                                             ).replace("{port}", str(ports[0])) if len(ports) > 1 else ""
 
     def verify(*args) -> str:
-        # The validator verifies its own CWD = the pipeline run dir, the only
-        # place write_file calls can land. ShellCheckHandler runs it via
-        # `sh -c`, so quote every path or a directory with a space in its name
-        # splits into "file not found" and the node fails forever.
+        # The validator's CWD is the pipeline run dir, the only place file
+        # writes can land. ShellCheckHandler runs it via `sh -c`: quote every
+        # path, or a space in a dir name splits into "file not found" forever.
         return dot_quote(" ".join(shlex.quote(str(a)) for a in
                                   [sys.executable, BUNDLE_DIR / "verify_node.py", *args]))
 
@@ -379,9 +378,8 @@ def kernel_env(pol: dict, config_dir: Path) -> dict:
 
 #: The container ships no octos, and it must be OUR kernel: K4's policy-driven
 #: tool surface and the `shell_check` DOT spelling are kernel changes the stock
-#: release does not have. Without them `run_pipeline` never appears in the tool
-#: surface, so the pipeline is never triggered. Published from the refactor
-#: branch as a Linux x86_64 bundle; override with OCTOS_RELEASE_URL.
+#: release lacks; without them `run_pipeline` never appears. Published as a
+#: Linux x86_64 bundle; override with OCTOS_RELEASE_URL.
 OCTOS_RELEASE_URL = (
     "https://github.com/octos-org/octos-arc/releases/download/v2.0.3-rc.11-arc.17/"
     "octos-bundle-x86_64-unknown-linux-gnu.tar.gz"
@@ -398,8 +396,7 @@ def _runtime_lock() -> dict | None:
     if override:
         path = Path(override)
         if not path.is_file():
-            # An explicit lock path is an operator statement about which
-            # environment this is; silently falling back could pin another.
+            # An explicit lock path pins this environment; never fall back silently.
             raise RuntimeError(f"OCTOS_LOCK={override} not found; refusing to fall back to a different lock")
         return json.loads(path.read_text(encoding="utf-8"))
     for path in (BUNDLE_DIR / "arc-runtime-lock.json",
@@ -421,9 +418,8 @@ def _sha256(path: Path) -> str:
 
 
 def _verify_against_lock(tarball: Path, url: str) -> None:
-    """ARC_BASELINE.md: verify downloads before executing them; refuse on
-    mismatch. No downgrade path -- a wrong engine never runs beside live keys,
-    and an OCTOS_RELEASE_URL override cannot dodge the pin."""
+    """ARC_BASELINE.md: verify downloads before executing them; no downgrade
+    path -- a wrong engine never runs, and URL overrides cannot dodge the pin."""
     lock = _runtime_lock()
     if lock is None:
         raise RuntimeError("arc-runtime-lock.json not found; refusing to run an unverified engine download")
@@ -649,9 +645,9 @@ def main() -> int:
 
 def collect_app(data_dir: Path, out: Path, name: str) -> Path | None:
     """Move the built app into ARCBENCH_OUTPUT_DIR. run_pipeline gives every run
-    its own dir under `pipeline-runs/<run_id>/` and fences each node's file tools
-    to it, so the app is NOT in the deliverable dir and the kernel exposes no
-    knob to redirect it. This collects the same bytes acceptance just verified.
+    its own fenced dir under `pipeline-runs/<run_id>/`; the app is NOT in the
+    deliverable dir and the kernel exposes no redirect knob. This collects the
+    same bytes acceptance just verified.
     """
     runs = [r for r in sorted(data_dir.glob(f"profiles/*/data/pipeline-runs/{name}-*"),
                               key=lambda p: p.stat().st_mtime if p.exists() else 0)
