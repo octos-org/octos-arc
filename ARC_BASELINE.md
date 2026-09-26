@@ -19,9 +19,10 @@ their Git history; it is not a GitHub fork-network repository.
 
 The upstream README describes upstream capabilities, not completed ARC modifications.
 The initial source checkpoint contained no behavior changes. The second phase
-adds the native `octos arc` workflow in `crates/octos-arc`, reusing the existing
-Octos coding runtime. A verified Linux x86_64 downstream Release now exists;
-there are still no new ARC submissions or new evaluation scores.
+adds the native `octos arc` workflow in `arc/`, reusing the existing Octos
+coding runtime. A verified Linux x86_64 downstream Release now exists; cloud
+keeps exist as recorded runs (arc-policy.toml cites keep `2224a9013528` as its
+calibration input), and this repository claims no official leaderboard score.
 
 ## Release and submission policy
 
@@ -130,7 +131,7 @@ behavior have intentionally not been modernized; it is not the new competition r
 
 The Rust workflow now supports explicit create/evolve modes, requirement deltas,
 fixed binary verification and honest local execution evidence. See
-`crates/octos-arc/README.md` for limitations and validation commands. The B5
+`arc/README.md` for limitations and validation commands. The B5
 container smoke was executed on an Ubuntu Actions runner; official ARC scoring
 and cloud submissions remain separate from these checks.
 

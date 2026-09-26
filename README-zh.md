@@ -17,7 +17,9 @@
 固定版本的内核，加上参赛需要的全部外围——平台适配包、公开验收测试、本机做题与打分、
 打包上传——都在这一个仓库里。**
 
-参加 ARC-Bench 只需要这一个仓库。
+参加 ARC-Bench 只需要这一个仓库。本机做题与打分（run-task-local.py /
+grade-local.py）另需：Rust 工具链、Node ≥ 24、Python 3.11+（含 PyYAML）与
+Playwright/Chromium；脚本会自动探测 node 位置（可用 NODE_BIN 覆盖）。
 
 [三步参赛](#三步参赛) · [仓库里有什么](#仓库里有什么) ·
 [固定基底](#固定基底) · [内核文档](#内核文档) · [English](README.md)
