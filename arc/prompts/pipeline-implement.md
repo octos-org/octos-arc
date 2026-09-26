@@ -23,6 +23,8 @@ Rules:
 - Use the exact labels, accessible names and test ids the requirement names.
 - For persistent data, seed only a brand-new store; later startups must keep
   user edits and deletions.
+- Write only the app's own files under frontend/ and backend/. No reports,
+  notes, summaries or other .md files: nobody reads them and they cost output.
 - Prefer zero runtime dependencies; if you must install, the registry is
   already pointed at npmmirror.
 {ports}
