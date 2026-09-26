@@ -11,7 +11,7 @@ acceptance runner. That policy lives in arc-policy.toml and prompts/.
 """
 from __future__ import annotations
 
-import argparse, functools, json, os, re, shlex, shutil, subprocess, sys, tempfile, time, tomllib
+import argparse, functools, hashlib, json, os, re, shlex, shutil, subprocess, sys, tempfile, time, tomllib
 from pathlib import Path
 
 import yaml
@@ -392,10 +392,62 @@ def _octos_url() -> str:
     return os.environ.get("OCTOS_RELEASE_URL", OCTOS_RELEASE_URL)
 
 
+def _runtime_lock() -> dict | None:
+    """The pinned runtime release (url + sha256) we are allowed to execute."""
+    override = os.environ.get("OCTOS_LOCK")
+    if override:
+        path = Path(override)
+        if not path.is_file():
+            # An explicit lock path is an operator statement about which
+            # environment this is; silently falling back could pin another.
+            raise RuntimeError(f"OCTOS_LOCK={override} not found; refusing to fall back to a different lock")
+        return json.loads(path.read_text(encoding="utf-8"))
+    for path in (BUNDLE_DIR / "arc-runtime-lock.json",
+                 BUNDLE_DIR.parent / "arc-runtime-lock.json"):
+        try:
+            if path.is_file():
+                return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
+    return None
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _verify_against_lock(tarball: Path, url: str) -> None:
+    """ARC_BASELINE.md: verify downloads before executing them; refuse on
+    mismatch. No downgrade path -- a wrong engine never runs beside live keys,
+    and an OCTOS_RELEASE_URL override cannot dodge the pin."""
+    lock = _runtime_lock()
+    if lock is None:
+        raise RuntimeError("arc-runtime-lock.json not found; refusing to run an unverified engine download")
+    release = lock.get("runtime_release") or {}
+    pinned_url = release.get("url")
+    if pinned_url and url != pinned_url:
+        raise RuntimeError(f"octos release url {url} != pinned {pinned_url}; refusing to run it")
+    expected = release.get("archive_sha256")
+    if not expected:
+        raise RuntimeError("runtime lock has no archive_sha256; refusing to run an unverified engine download")
+    got = _sha256(tarball)
+    if got != expected:
+        raise RuntimeError(f"downloaded octos bundle sha256 {got} != pinned {expected}; refusing to run it")
+
+
 def _cached_octos(cache_dir: Path) -> str | None:
-    """The cached binary, but only if it came from the URL in force now."""
+    """The cached binary, but only if it matches the pinned hash and came from
+    the URL in force now."""
     try:
         if (cache_dir / "octos").is_file() and (cache_dir / "source-url.txt").read_text() == _octos_url():
+            expected = (_runtime_lock() or {}).get("runtime_release", {}).get("binary_sha256")
+            if expected and _sha256(cache_dir / "octos") != expected:
+                log("[octos] cached binary hash != arc-runtime-lock.json; re-downloading")
+                return None
             return str(cache_dir / "octos")
     except OSError:
         pass
@@ -440,6 +492,7 @@ def _download_octos(cache_dir: Path) -> str:
                 log(f"[octos] download error: {exc}")
     if not _tarball_ok(tarball):
         raise RuntimeError(f"failed to download our octos release after 12 attempts: {url}")
+    _verify_against_lock(tarball, url)
     with tarfile.open(tarball) as tf:
         for member in ("octos", "octos-sandbox"):
             try:
@@ -449,6 +502,12 @@ def _download_octos(cache_dir: Path) -> str:
     for name in ("octos", "octos-sandbox"):
         if (cache_dir / name).is_file():
             (cache_dir / name).chmod(0o755)
+    binary = cache_dir / "octos"
+    expected_bin = (_runtime_lock() or {}).get("runtime_release", {}).get("binary_sha256")
+    if expected_bin and _sha256(binary) != expected_bin:
+        binary.unlink(missing_ok=True)
+        (cache_dir / "octos-sandbox").unlink(missing_ok=True)
+        raise RuntimeError("extracted octos binary hash != arc-runtime-lock.json; deleted, refusing to run it")
     (cache_dir / "source-url.txt").write_text(url)
     return str(cache_dir / "octos")
 

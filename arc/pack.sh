@@ -39,7 +39,10 @@ PKG="$STAGE/octos-arc-bundle"
 mkdir -p "$PKG"
 
 # Runtime: the glue, the stdio driver, the acceptance command, the policy.
+# The repo-root arc-runtime-lock.json ships too: main.py refuses to download or
+# run the engine unless it can verify it against this lock.
 cp main.py octos_stdio.py verify_node.py arc-policy.toml requirements.txt "$PKG/"
+cp ../arc-runtime-lock.json "$PKG/"
 cp -R prompts "$PKG/prompts"
 cp -R template "$PKG/template"
 
