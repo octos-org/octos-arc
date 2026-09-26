@@ -46,7 +46,10 @@ def main(argv: list[str]) -> int:
     root = Path(__file__).resolve().parent
     specs = root / "public-tests" / req
     grader = root / "local-grader"
-    env = os.environ.copy(); env["PATH"] = os.environ.get("NODE_BIN", "/opt/homebrew/opt/node@24/bin") + ":" + env["PATH"]
+    env = os.environ.copy()
+    _node_dir = os.environ.get("NODE_BIN") or (str(Path(shutil.which("node")).parent) if shutil.which("node") else "")
+    if _node_dir and Path(_node_dir).is_dir():
+        env["PATH"] = _node_dir + ":" + env["PATH"]
     if not (grader / "node_modules" / "@playwright").exists():
         grader.mkdir(exist_ok=True)
         subprocess.run("npm init -y >/dev/null && npm install --no-audit --no-fund @playwright/test && npx playwright install chromium", cwd=grader, env=env, shell=True, check=True)

@@ -21,7 +21,12 @@ if binary is None:
     sys.exit("找不到 octos 二进制：设 OCTOS_BIN，或先 cargo build --release -p octos-cli --no-default-features --features api")
 python = Path(sys.executable)
 task = Path(arguments.task).resolve() if arguments.task else root / "arc-counter-task"
-key = os.environ.get("ARCBENCH_API_KEY") or os.environ.get("OPENAI_API_KEY")
+# An OpenAI key must never silently become an ARC platform credential: only
+# accept it when the caller also pinned OPENAI_BASE_URL to their own endpoint,
+# otherwise the key would be sent to api.arc-bench.com.
+key = os.environ.get("ARCBENCH_API_KEY")
+if key is None and os.environ.get("OPENAI_BASE_URL"):
+    key = os.environ.get("OPENAI_API_KEY")
 if not key:
     sys.exit("请设置 ARCBENCH_API_KEY（ARC 平台个人页的 API key）。")
 config = {"base_url": os.environ.get("OPENAI_BASE_URL", "https://api.arc-bench.com/v1"), "model": os.environ.get("MODEL", "deepseek-v4-flash")}
@@ -43,12 +48,17 @@ environment.update(
     MODEL=config["model"],
     OCTOS_MODEL=config["model"],
     OCTOS_PROVIDER="custom",
-    OCTOS_MAX_ITERATIONS=os.environ.get("OCTOS_MAX_ITERATIONS", "60"),
-    OCTOS_NODE_TIMEOUT=os.environ.get("OCTOS_NODE_TIMEOUT", "1200"),
-    OCTOS_TIME_BUDGET=os.environ.get("OCTOS_TIME_BUDGET", "3600"),
+    # No OCTOS_MAX_ITERATIONS / OCTOS_NODE_TIMEOUT / OCTOS_TIME_BUDGET here:
+    # local practice must run under the same arc-policy.toml limits as the
+    # real competition, otherwise practice scores are optimistic and tuning
+    # targets the wrong conditions.
     OCTOS_SMOKE_PORT=str(arguments.smoke_port or arguments.port + 1),
 )
-environment["PATH"] = os.environ.get("NODE_BIN", "/opt/homebrew/opt/node@24/bin") + ":" + environment.get("PATH", "")
+_node_dir = os.environ.get("NODE_BIN") or (str(Path(shutil.which("node")).parent) if shutil.which("node") else "")
+if _node_dir and Path(_node_dir).is_dir():
+    environment["PATH"] = _node_dir + ":" + environment["PATH"]
+else:
+    print("警告：未找到 node（按当前 PATH 继续）；需要时用 NODE_BIN 指定", flush=True)
 print(f"运行时：{binary}", flush=True)
 print(f"需求：{task / 'requirements.yaml'}", flush=True)
 print(f"模型：{config['model']}；密钥：已读取（不显示）", flush=True)
