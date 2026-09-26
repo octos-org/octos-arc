@@ -90,7 +90,10 @@ def playwright_root(env: dict) -> tuple[Path | None, dict]:
     rc, npm_root = sh(["npm", "root", "-g"], "/", env, 20)
     if rc == 0 and npm_root.strip():
         cands.append(str(Path(npm_root.strip().splitlines()[-1]).parent))
-    has = lambda root: (Path(root) / "node_modules" / "@playwright" / "test").is_dir()  # noqa: E731
+    # The CLI file, not the package dir: a wiped cache once left an empty
+    # @playwright/test behind, and every check then died on the dangling
+    # .bin/playwright link -- a whole local keep run was verified by nothing.
+    has = lambda root: (Path(root) / "node_modules" / "@playwright" / "test" / "cli.js").is_file()  # noqa: E731
     for cand in filter(None, cands):
         if has(cand):
             return Path(cand), {}
@@ -100,7 +103,8 @@ def playwright_root(env: dict) -> tuple[Path | None, dict]:
     rc, hits = sh(["find", "/", "-maxdepth", "6", "-type", "d", "-path", "*/node_modules/@playwright/test",
                    "-not", "-path", "/proc/*", "-not", "-path", "/sys/*"], "/", env, 25)
     for hit in sorted(hits.split(), key=len):
-        if hit.startswith("/") and has(Path(hit).parents[2]):
+        # find's own "Permission denied" lines land here too; only real hits count.
+        if hit.endswith("/node_modules/@playwright/test") and has(Path(hit).parents[2]):
             return Path(hit).parents[2], {}
     if os.environ.get("OCTOS_ARC_INSTALL_PLAYWRIGHT", "1") != "1":
         return None, {}
