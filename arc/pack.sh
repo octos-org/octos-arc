@@ -13,9 +13,11 @@
 # construction rather than by zip patterns.
 #
 # Deliberately NOT shipped:
-#   * public-tests/ and tasks/ -- platform test + task DATA. The runner mounts
-#     the public specs at /workspace/tests, which main.py reads from there.
-#     Shipping them would put task data in the submission.
+#   * tasks/ -- platform task DATA; the runner hands main.py the requirement.
+#     public-tests/ DOES ship (2026-09-26): the runner used to mount the public
+#     specs at /workspace/tests, but all six runs of submission 4224afbed824
+#     logged `tests at None`, and without specs a local keep run scored 4/32
+#     against 22/32 with them. main.py still prefers a runner mount when present.
 #   * local-only instruments: path_split.py, postmortem.py, scoreboard.py,
 #     metrics.py, integration/, action_errors.cjs, page_errors.ts,
 #     grade-local.py, run-task-local.py, tests/. They analyse runs on a
@@ -45,6 +47,7 @@ cp main.py octos_stdio.py verify_node.py arc-policy.toml requirements.txt "$PKG/
 cp ../arc-runtime-lock.json "$PKG/"
 cp -R prompts "$PKG/prompts"
 cp -R template "$PKG/template"
+cp -R public-tests "$PKG/public-tests"
 
 find "$PKG" -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
 find "$PKG" \( -name '*.pyc' -o -name .DS_Store \) -delete
@@ -56,7 +59,7 @@ for required in main.py requirements.txt template; do
 done
 for banned in llm_proxy.py acceptance.py rust_engine.py verify_app.py path_split.py \
               postmortem.py scoreboard.py metrics.py integration action_errors.cjs \
-              page_errors.ts public-tests tasks tests arcbench_agent_runtime; do
+              page_errors.ts tasks tests arcbench_agent_runtime; do
     [ ! -e "$PKG/$banned" ] || { echo "pack: $banned must not be in the bundle" >&2; exit 1; }
 done
 # 800 with the runtime fetch inlined; the container has no octos of its own and
@@ -68,7 +71,9 @@ done
 # runtime ignores in config.json moved onto the graph and the env (#230).
 # 1300 for progressive delivery: verified states reach the output dir during
 # the run, so a run killed from outside still ships working code.
-LIMIT_PY=1300
+# 1320 for the bundled-spec fallback in locate_tests and the /workspace probe
+# that tells us where (or whether) the runner mounts specs now.
+LIMIT_PY=1320
 PYLINES=$(find "$PKG" -name '*.py' -exec cat {} + | wc -l | tr -d ' ')
 echo "打包内容：$(find "$PKG" -maxdepth 1 -mindepth 1 -printf '%f ' 2>/dev/null || ls "$PKG" | tr '\n' ' ')"
 echo "包内 Python 行数：$PYLINES"
