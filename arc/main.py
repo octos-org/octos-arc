@@ -199,6 +199,32 @@ def spec_helpers(tests_dir: Path | None, rels: list[str]) -> list[str]:
     return list(dict.fromkeys(found))
 
 
+_DECL = re.compile(r"^(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function\*?|const|let|var|type|interface|class|enum)\s+([A-Za-z_$][\w$]*)")
+
+
+def slice_module(text: str, uses: str, limit: int = 12000) -> str:
+    """A helper module cut to the top-level declarations `uses` reaches,
+    directly or through other kept declarations. Over the limit a whole module
+    lost its tail: ctrip/12306 helpers are ~25k chars, so every node saw only
+    the first half of the selectors its spec calls."""
+    if len(text) <= limit:
+        return text
+    chunks: list[list[str]] = [[]]
+    for line in text.splitlines():
+        if line[:1].strip() and (_DECL.match(line) or line.startswith("import ")):
+            chunks.append([])
+        chunks[-1].append(line)
+    named = {m.group(1): "\n".join(c) for c in chunks if c and (m := _DECL.match(c[0]))}
+    keep, todo = set(), uses
+    while todo:
+        new = {n for n in named if n not in keep and re.search(rf"\b{re.escape(n)}\b", todo)}
+        keep |= new
+        todo = "\n".join(named[n] for n in new)
+    out = [c for c in chunks if c and ((m := _DECL.match(c[0])) is None or m.group(1) in keep)]
+    kept = "\n".join("\n".join(c) for c in out)
+    return f"// (declarations this spec does not reach are omitted)\n{kept}"[:limit * 2]
+
+
 def dot_quote(text: str) -> str:
     return text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
@@ -287,9 +313,11 @@ def build_pipeline(nodes, specs, tests_dir, out, pol, ports, deadline, spec_map=
         impl, check = f"impl_{sanitize(nid)}", f"check_{sanitize(nid)}"
         spec_text = ""
         rels = specs.get(nid, [])[:2]
+        read_spec = lambda r: (tests_dir / r).read_text(encoding="utf-8", errors="replace") if tests_dir else ""  # noqa: E731
+        uses = "\n".join(read_spec(r) for r in rels)
         for rel in [*rels, *spec_helpers(tests_dir, rels)]:
-            body = (tests_dir / rel).read_text(encoding="utf-8", errors="replace") if tests_dir else ""
-            spec_text += f"\n----- {rel} -----\n{untemplate(body[:12000])}\n"
+            body = read_spec(rel) if rel in rels else slice_module(read_spec(rel), uses)
+            spec_text += f"\n----- {rel} -----\n{untemplate(body[:12000] if rel in rels else body)}\n"
         body = (tmpl.replace("{node_id}", nid)
                     .replace("{description}", untemplate(describe(node)))
                     .replace("{spec}", spec_text or "(no public example for this requirement)")
@@ -609,14 +637,26 @@ def main() -> int:
             log(f"[arc] kernel stderr:\n{session.stderr_tail(30)}")
             raise
         session.open()
-        ok, reply = session.run_turn(
-            f'Call the run_pipeline tool now with pipeline="{pol["name"]}" and '
-            f'input="Build the application described by requirements {", ".join(node_ids)}". '
-            f'Call it exactly once and do not write any files yourself. The pipeline '
-            f'reports back on its own: after this call, never call any tool again, '
-            f'whatever later messages say -- just answer "ok".',
-            timeout=min(pol["run_timeout"], 900))
-        log(f"[arc] dispatch turn ok={ok}: {reply[:160]}")
+        ask = (f'Call the run_pipeline tool now with pipeline="{pol["name"]}" and '
+               f'input="Build the application described by requirements {", ".join(node_ids)}". '
+               f'Call it exactly once and do not write any files yourself. The pipeline '
+               f'reports back on its own: after this call, never call any tool again, '
+               f'whatever later messages say -- just answer "ok".')
+        # The turn's success says nothing about the tool call: on ctrip (125 ids)
+        # glm-5.3-flash once answered a bare "ok" and the run idled. A started
+        # run leaves its dir; without one, ask again.
+        started_run = lambda: any(data_dir.glob(f"profiles/*/data/pipeline-runs/{pol['name']}-*"))  # noqa: E731
+        for attempt in range(3):
+            ok, reply = session.run_turn(ask if attempt == 0 else
+                                         f'You did not call run_pipeline; nothing is running. {ask}',
+                                         timeout=min(pol["run_timeout"], 900))
+            log(f"[arc] dispatch turn {attempt + 1} ok={ok}: {reply[:160]}")
+            for _ in range(30):
+                if started_run():
+                    break
+                time.sleep(1)
+            if started_run():
+                break
         wait_for_pipeline(session, state, pol, data_dir, out)
     finally:
         session.close()

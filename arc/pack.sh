@@ -73,7 +73,11 @@ done
 # the run, so a run killed from outside still ships working code.
 # 1320 for the bundled-spec fallback in locate_tests and the /workspace probe
 # that tells us where (or whether) the runner mounts specs now.
-LIMIT_PY=1320
+# 1345 for slice_module: helper modules past the inline limit are cut to the
+# declarations the spec reaches instead of losing their tail.
+# 1360: the dispatch turn checks that the run actually started and asks again
+# when the model answered without calling run_pipeline.
+LIMIT_PY=1360
 PYLINES=$(find "$PKG" -name '*.py' -exec cat {} + | wc -l | tr -d ' ')
 echo "打包内容：$(find "$PKG" -maxdepth 1 -mindepth 1 -printf '%f ' 2>/dev/null || ls "$PKG" | tr '\n' ' ')"
 echo "包内 Python 行数：$PYLINES"
