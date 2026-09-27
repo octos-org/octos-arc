@@ -77,7 +77,8 @@ done
 # declarations the spec reaches instead of losing their tail.
 # 1360: the dispatch turn checks that the run actually started and asks again
 # when the model answered without calling run_pipeline.
-LIMIT_PY=1360
+# 1380: a requirement given up on is rolled back to the last passing state.
+LIMIT_PY=1380
 PYLINES=$(find "$PKG" -name '*.py' -exec cat {} + | wc -l | tr -d ' ')
 echo "打包内容：$(find "$PKG" -maxdepth 1 -mindepth 1 -printf '%f ' 2>/dev/null || ls "$PKG" | tr '\n' ' ')"
 echo "包内 Python 行数：$PYLINES"

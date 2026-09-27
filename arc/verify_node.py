@@ -292,6 +292,24 @@ def keep_best(out: Path, rc: int) -> None:
     print(f"[verify] best full-suite state so far: {PASSED['count']} passed (kept)")
 
 
+def restore_good(out: Path, tag: str) -> None:
+    """A requirement given up on leaves its half-done edits behind, and the
+    requirements built after it inherit them: a local stackoverflow run passed
+    34 requirements one by one yet ended at 18/66 on the full suite, login
+    broken. Going back to the last state a check passed costs only this
+    requirement, which failed anyway. The final full-suite pass keeps its own
+    best-state snapshot instead."""
+    good = out / ".arc-good" / "app"
+    if tag == "ALL" or not good.is_dir():
+        return
+    for part in ("frontend", "backend"):
+        if (good / part).is_dir():
+            shutil.rmtree(out / part, ignore_errors=True)
+            shutil.copytree(good / part, out / part)
+    print(f"[verify] {tag} given up: restored the last state a check passed, so its partial edits "
+          "cannot break the requirements already built")
+
+
 def main(argv: list[str]) -> int:
     if argv[:1] == ["--seed"]:
         return seed(Path(argv[1]))
@@ -337,6 +355,7 @@ def main(argv: list[str]) -> int:
         if (attempts >= int(opts.get("attempts", 6)) or time.time() >= float(opts.get("deadline", "inf"))
                 or spent >= float(opts.get("repair-window", "inf"))):
             print(f"{STOP}: attempt {attempts} for {opts['tag']}; moving on")
+            restore_good(Path.cwd(), opts["tag"])
     return rc
 
 
