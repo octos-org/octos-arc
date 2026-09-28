@@ -70,8 +70,12 @@
     {
       "path": "api/OCTOS_APP_FEATURE_REQUIREMENTS.md",
       "group": "protocol-spec",
-      "arc_blob_sha": "68f5c9a41be86db3db21d5a7737ca396daae3a6b",
-      "upstream_blob_sha": "68f5c9a41be86db3db21d5a7737ca396daae3a6b"
+      "arc_blob_sha": "aa50fce60da5e5c39e9f4a1f967e522f4f56ad9b",
+      "upstream_blob_sha": "68f5c9a41be86db3db21d5a7737ca396daae3a6b",
+      "delta": {
+        "reason": "Personal details removed downstream (octos-org/octos-arc#251, mirroring octos-org/octos#2583): home-directory paths, personal/work email addresses and host addresses replaced with placeholders; the tunnel relay documented as a required input. No other content change.",
+        "upstream_pr": "octos-org/octos#2583"
+      }
     },
     {
       "path": "api/OCTOS_SERVER_FEATURE_REQUIREMENTS.md",
@@ -82,8 +86,12 @@
     {
       "path": "api/OCTOS_UI_PROTOCOL_V1_SPEC_2026-04-24.md",
       "group": "protocol-spec",
-      "arc_blob_sha": "e6c75e0b1355b887d08579e1863a7e094a8fe0a7",
-      "upstream_blob_sha": "e6c75e0b1355b887d08579e1863a7e094a8fe0a7"
+      "arc_blob_sha": "b35250b1634c1b642cfacf68f7d624c9cdadf8f2",
+      "upstream_blob_sha": "e6c75e0b1355b887d08579e1863a7e094a8fe0a7",
+      "delta": {
+        "reason": "Personal details removed downstream (octos-org/octos-arc#251, mirroring octos-org/octos#2583): home-directory paths, personal/work email addresses and host addresses replaced with placeholders; the tunnel relay documented as a required input. No other content change.",
+        "upstream_pr": "octos-org/octos#2583"
+      }
     },
     {
       "path": "api/OCTOS_UI_PROTOCOL_WIRE_INVENTORY_2026-05-24.md",
@@ -94,8 +102,12 @@
     {
       "path": "book-zh/book.toml",
       "group": "vendored-book-zh",
-      "arc_blob_sha": "8675981ab4508651fa10b13d37a6b158d97900a8",
-      "upstream_blob_sha": "8675981ab4508651fa10b13d37a6b158d97900a8"
+      "arc_blob_sha": "5a26a9678439ed85913fcaf77bb59570dbaa520b",
+      "upstream_blob_sha": "8675981ab4508651fa10b13d37a6b158d97900a8",
+      "delta": {
+        "reason": "Personal details removed downstream (octos-org/octos-arc#251, mirroring octos-org/octos#2583): home-directory paths, personal/work email addresses and host addresses replaced with placeholders; the tunnel relay documented as a required input. No other content change.",
+        "upstream_pr": "octos-org/octos#2583"
+      }
     },
     {
       "path": "book-zh/src/SUMMARY.md",
@@ -141,8 +153,12 @@
     {
       "path": "book-zh/src/installation.md",
       "group": "vendored-book-zh",
-      "arc_blob_sha": "174310daa34c46c25436be23e359b14fefa3e705",
-      "upstream_blob_sha": "174310daa34c46c25436be23e359b14fefa3e705"
+      "arc_blob_sha": "6f1b96f77c5b4018006f753bcdb69c1b147a1fe4",
+      "upstream_blob_sha": "174310daa34c46c25436be23e359b14fefa3e705",
+      "delta": {
+        "reason": "Personal details removed downstream (octos-org/octos-arc#251, mirroring octos-org/octos#2583): home-directory paths, personal/work email addresses and host addresses replaced with placeholders; the tunnel relay documented as a required input. No other content change.",
+        "upstream_pr": "octos-org/octos#2583"
+      }
     },
     {
       "path": "book-zh/src/introduction.md",
@@ -156,8 +172,12 @@
     {
       "path": "book-zh/src/memory-skills.md",
       "group": "vendored-book-zh",
-      "arc_blob_sha": "1794f05aa88258f6c40657d4963c6dfd3e10451c",
-      "upstream_blob_sha": "1794f05aa88258f6c40657d4963c6dfd3e10451c"
+      "arc_blob_sha": "92eeb620e6bc84ca696015982733a61974496790",
+      "upstream_blob_sha": "1794f05aa88258f6c40657d4963c6dfd3e10451c",
+      "delta": {
+        "reason": "Personal details removed downstream (octos-org/octos-arc#251, mirroring octos-org/octos#2583): home-directory paths, personal/work email addresses and host addresses replaced with placeholders; the tunnel relay documented as a required input. No other content change.",
+        "upstream_pr": "octos-org/octos#2583"
+      }
     },
     {
       "path": "book-zh/src/multi-agent.md",
@@ -228,8 +248,12 @@
     {
       "path": "book/book.toml",
       "group": "vendored-book",
-      "arc_blob_sha": "9a4f859616ea9e282cd1d34154b49406588140f1",
-      "upstream_blob_sha": "9a4f859616ea9e282cd1d34154b49406588140f1"
+      "arc_blob_sha": "b4df55dafe772469eb3c93f6874d0da3b56ed97d",
+      "upstream_blob_sha": "9a4f859616ea9e282cd1d34154b49406588140f1",
+      "delta": {
+        "reason": "Personal details removed downstream (octos-org/octos-arc#251, mirroring octos-org/octos#2583): home-directory paths, personal/work email addresses and host addresses replaced with placeholders; the tunnel relay documented as a required input. No other content change.",
+        "upstream_pr": "octos-org/octos#2583"
+      }
     },
     {
       "path": "book/src/SUMMARY.md",
@@ -275,8 +299,12 @@
     {
       "path": "book/src/installation.md",
       "group": "vendored-book",
-      "arc_blob_sha": "4dde50630040ab131cb337f9ec7010aebf620665",
-      "upstream_blob_sha": "4dde50630040ab131cb337f9ec7010aebf620665"
+      "arc_blob_sha": "3c70a32f99e4747f78508d44dd3d8465394ef55d",
+      "upstream_blob_sha": "4dde50630040ab131cb337f9ec7010aebf620665",
+      "delta": {
+        "reason": "Personal details removed downstream (octos-org/octos-arc#251, mirroring octos-org/octos#2583): home-directory paths, personal/work email addresses and host addresses replaced with placeholders; the tunnel relay documented as a required input. No other content change.",
+        "upstream_pr": "octos-org/octos#2583"
+      }
     },
     {
       "path": "book/src/introduction.md",
@@ -290,8 +318,12 @@
     {
       "path": "book/src/memory-skills.md",
       "group": "vendored-book",
-      "arc_blob_sha": "29673b1ec97e167e9aef7720349740f80b139f45",
-      "upstream_blob_sha": "29673b1ec97e167e9aef7720349740f80b139f45"
+      "arc_blob_sha": "ffc8c010dfc5136e8d8950fe69634dcd12b1503a",
+      "upstream_blob_sha": "29673b1ec97e167e9aef7720349740f80b139f45",
+      "delta": {
+        "reason": "Personal details removed downstream (octos-org/octos-arc#251, mirroring octos-org/octos#2583): home-directory paths, personal/work email addresses and host addresses replaced with placeholders; the tunnel relay documented as a required input. No other content change.",
+        "upstream_pr": "octos-org/octos#2583"
+      }
     },
     {
       "path": "book/src/multi-agent.md",
@@ -392,8 +424,12 @@
     {
       "path": "docs/M18_APPUI_STDIO_TRANSPORT_PARITY_CONTRACT.txt",
       "group": "contracts",
-      "arc_blob_sha": "2f71220c595b1c7e8b263a7034c96354091ca76c",
-      "upstream_blob_sha": "2f71220c595b1c7e8b263a7034c96354091ca76c"
+      "arc_blob_sha": "772b47263c4f3d071be7b1bdb2050b37abd62504",
+      "upstream_blob_sha": "2f71220c595b1c7e8b263a7034c96354091ca76c",
+      "delta": {
+        "reason": "Personal details removed downstream (octos-org/octos-arc#251, mirroring octos-org/octos#2583): home-directory paths, personal/work email addresses and host addresses replaced with placeholders; the tunnel relay documented as a required input. No other content change.",
+        "upstream_pr": "octos-org/octos#2583"
+      }
     },
     {
       "path": "docs/M9-ALPHA-SOLE-TRANSPORT-ADR.md",
@@ -542,8 +578,12 @@
     {
       "path": "docs/OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_2026_019_AGENT_SUPERVISION.md",
       "group": "upcr",
-      "arc_blob_sha": "86de3fa505dccf83cefc37f4374f3d8ace656532",
-      "upstream_blob_sha": "86de3fa505dccf83cefc37f4374f3d8ace656532"
+      "arc_blob_sha": "6f2cb710b8a0d8101de885fc7c93984ba04db88c",
+      "upstream_blob_sha": "86de3fa505dccf83cefc37f4374f3d8ace656532",
+      "delta": {
+        "reason": "Personal details removed downstream (octos-org/octos-arc#251, mirroring octos-org/octos#2583): home-directory paths, personal/work email addresses and host addresses replaced with placeholders; the tunnel relay documented as a required input. No other content change.",
+        "upstream_pr": "octos-org/octos#2583"
+      }
     },
     {
       "path": "docs/OCTOS_UI_PROTOCOL_CHANGE_REQUEST_UPCR_2026_020_CODEX_TOOL_PARITY.md",
@@ -632,8 +672,12 @@
     {
       "path": "docs/STREAMING-TRANSACTIONAL-BOUNDARY-ADR.md",
       "group": "adr",
-      "arc_blob_sha": "d48df11f6edb9be0d34557adfe56681260a5d605",
-      "upstream_blob_sha": "d48df11f6edb9be0d34557adfe56681260a5d605"
+      "arc_blob_sha": "37df8466ae0d192cd407a81657a1416e642d0fa2",
+      "upstream_blob_sha": "d48df11f6edb9be0d34557adfe56681260a5d605",
+      "delta": {
+        "reason": "Personal details removed downstream (octos-org/octos-arc#251, mirroring octos-org/octos#2583): home-directory paths, personal/work email addresses and host addresses replaced with placeholders; the tunnel relay documented as a required input. No other content change.",
+        "upstream_pr": "octos-org/octos#2583"
+      }
     },
     {
       "path": "docs/adr/m12-phase-d-auxiliary-rest-to-ws.md",
@@ -656,8 +700,12 @@
     {
       "path": "docs/adr/oup-semantic-boundary-context-cache.md",
       "group": "adr",
-      "arc_blob_sha": "bf9ba9c7af473cc0d966a9c4758fd104e6532c68",
-      "upstream_blob_sha": "bf9ba9c7af473cc0d966a9c4758fd104e6532c68"
+      "arc_blob_sha": "17a893cb3620a97d84924359ea8ffb859a331280",
+      "upstream_blob_sha": "bf9ba9c7af473cc0d966a9c4758fd104e6532c68",
+      "delta": {
+        "reason": "Personal details removed downstream (octos-org/octos-arc#251, mirroring octos-org/octos#2583): home-directory paths, personal/work email addresses and host addresses replaced with placeholders; the tunnel relay documented as a required input. No other content change.",
+        "upstream_pr": "octos-org/octos#2583"
+      }
     },
     {
       "path": "specs/arc-agent-task-v1-mcp.spec.md",
