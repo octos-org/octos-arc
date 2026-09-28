@@ -48,6 +48,16 @@ jobs:
           echo "SOURCE_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           echo "RUSTC_VERSION=$(rustc --version)" >> "$GITHUB_ENV"
 
+      - name: Remap build paths
+        shell: bash
+        run: |
+          # Keep build-machine paths (home dir, cargo registry, checkout) out
+          # of the shipped binaries' panic messages and file!() strings.
+          home_dir="$HOME"; cargo_dir="${CARGO_HOME:-$HOME/.cargo}"; ws_dir="$GITHUB_WORKSPACE"
+          if command -v cygpath >/dev/null 2>&1; then
+            home_dir=$(cygpath -w "$home_dir"); cargo_dir=$(cygpath -w "$cargo_dir"); ws_dir=$(cygpath -w "$ws_dir")
+          fi
+          echo "RUSTFLAGS=${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=${home_dir}=~ --remap-path-prefix=${cargo_dir}=/cargo --remap-path-prefix=${ws_dir}=." >> "$GITHUB_ENV"
       - name: Build runtime and bundled tools
         run: |
           set -euo pipefail
