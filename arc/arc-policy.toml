@@ -56,7 +56,11 @@ verify_timeout_seconds = 600    # OCTOS_ARC_VERIFY_TIMEOUT — one acceptance no
                                  # 的上限从未被用到；收紧到 600s 仍有 8 倍余量，只是给真正卡死的验收
                                  # 一个更快的止损点。
 max_iterations = 40             # OCTOS_MAX_ITERATIONS — tool iterations inside an implement node
-run_timeout_seconds = 2400      # OCTOS_TIME_BUDGET — whole run; +final_reserve 后图上限 3000s，单轮生成压到 50 分钟内
+run_timeout_seconds = 3600      # OCTOS_TIME_BUDGET — TEMPORARY diagnostic widening (was 2400, +final_reserve
+                                 # 图上限变成 4200s/70min); 6 个 replica（修复/合并后两轮各 3 份）全部撞在旧的
+                                 # 3000s 硬顶上被砍断，分数 0-17/30 的巨大波动看不出哪个改动真的有效。先放宽到
+                                 # 能跑完整条链，拿一组"完整跑完"的真实分数/耗时做基线，再回头压这个数——交付前
+                                 # 改回收紧值,不要把这次放宽当成最终配置。
 node_tools = "read_file,write_file,edit_file,glob,grep,list_dir"  # OCTOS_ARC_NODE_TOOLS
 # Put on every worker node as reasoning_effort (the kernel maps it per model:
 # thinking disabled for DeepSeek V4 on its endpoints and for GLM, reasoning_effort
