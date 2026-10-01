@@ -44,7 +44,8 @@
 # Requires OCTOS_PIPELINE_DAG=1 (main.py sets it): only the DAG scheduler does
 # back-edge retries and hands the failing node's output back to its target.
 name = "arc_build"              # OCTOS_ARC_PIPELINE_NAME — the bare name run_pipeline selects
-repair_rounds = 2               # OCTOS_REPAIR_ROUNDS — 链内快速重试；剩余修复交给全部需求实现完后的逐条 sweep（时间预算分层：先实现、后修复）
+repair_rounds = 2               # OCTOS_REPAIR_ROUNDS — 链内快速重试；剩余预算交给终检修复环（时间预算分层：先实现、后修复）
+final_repair_rounds = 4         # OCTOS_ARC_FINAL_REPAIRS — 终检修复环轮数
 node_budget_seconds = 200        # OCTOS_NODE_TIME_BUDGET — per-node `max_retries` in the .dot; 12 节点约 40 分钟一轮
 node_timeout_seconds = 900      # OCTOS_NODE_TIMEOUT — one implement node; 超时的轮次仍把已写出的文件交给验收（continue_on_error）
 verify_timeout_seconds = 1800   # OCTOS_ARC_VERIFY_TIMEOUT — one acceptance node; above the sum of verify_node.py's own step timeouts, since an overrun aborts the pipeline
