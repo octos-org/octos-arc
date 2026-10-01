@@ -47,8 +47,14 @@ name = "arc_build"              # OCTOS_ARC_PIPELINE_NAME — the bare name run_
 repair_rounds = 2               # OCTOS_REPAIR_ROUNDS — 链内快速重试；剩余预算交给终检修复环（时间预算分层：先实现、后修复）
 final_repair_rounds = 4         # OCTOS_ARC_FINAL_REPAIRS — 终检修复环轮数
 node_budget_seconds = 200        # OCTOS_NODE_TIME_BUDGET — per-node `max_retries` in the .dot; 12 节点约 40 分钟一轮
-node_timeout_seconds = 900      # OCTOS_NODE_TIMEOUT — one implement node; 超时的轮次仍把已写出的文件交给验收（continue_on_error）
-verify_timeout_seconds = 1800   # OCTOS_ARC_VERIFY_TIMEOUT — one acceptance node; above the sum of verify_node.py's own step timeouts, since an overrun aborts the pipeline
+node_timeout_seconds = 600      # OCTOS_NODE_TIMEOUT — one implement node; 超时的轮次仍把已写出的文件交给验收（continue_on_error）。
+                                 # 900s 时实测过一次卡死重试吃满整段超时却没有产出；3 个 run 36904796425
+                                 # 的 replica（修复后的真实云端数据，12 需求 × 若干轮）里观测到的单次
+                                 # implement 最长只有 565s，600s 留出约 6% 余量,只收紧"卡住"的尾部。
+verify_timeout_seconds = 600    # OCTOS_ARC_VERIFY_TIMEOUT — one acceptance node; above the sum of verify_node.py's own step timeouts, since an overrun aborts the pipeline。
+                                 # 同一批真实数据里最长的一次验收（含终检 check_all）只有 70s，1800s
+                                 # 的上限从未被用到；收紧到 600s 仍有 8 倍余量，只是给真正卡死的验收
+                                 # 一个更快的止损点。
 max_iterations = 40             # OCTOS_MAX_ITERATIONS — tool iterations inside an implement node
 run_timeout_seconds = 2400      # OCTOS_TIME_BUDGET — whole run; +final_reserve 后图上限 3000s，单轮生成压到 50 分钟内
 node_tools = "read_file,write_file,edit_file,glob,grep,list_dir"  # OCTOS_ARC_NODE_TOOLS
