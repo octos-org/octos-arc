@@ -76,9 +76,8 @@ sh arc/pack.sh                          # 得到 octos-arc-bundle.zip
 
 | 路径 | 是什么 |
 | --- | --- |
-| [`arc/`](arc/README.md) | **从这里开始。** 适配包、编排器、公开验收测试、本机做题/打分/打包脚本 |
+| [`arc/`](arc/README.md) | **从这里开始。** 适配包、流水线胶水、打包脚本 |
 | `arc/tasks/` | 各题需求文件的离线副本（smoke、订票题、六道 web 题） |
-| `arc/public-tests/` | 平台公开的 Playwright 验收测试 |
 | `crates/` | Octos 内核源码，从固定的上游基底分出 |
 | `book/`、`docs/` | 内核文档，按固定基底随仓库带入——见[内核文档](#内核文档) |
 | `arc-runtime-lock.json` | 发布与提交的版本约束：源码提交、目标平台、必须记录的 SHA-256 |

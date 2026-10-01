@@ -42,10 +42,6 @@ _POLICY = {
     "min_node_seconds": ("min_node_seconds", "OCTOS_ARC_MIN_NODE_SECONDS", 120),
     "final_reserve_seconds": ("final_reserve_seconds", "OCTOS_ARC_FINAL_RESERVE", 600),
     "final_repairs": ("final_repair_rounds", "OCTOS_ARC_FINAL_REPAIRS", 2),
-    # Every Nth acceptance node also re-runs the specs of earlier requirements
-    # that passed, so a regression is repaired while its cause is fresh
-    # rather than all at once at the end. 0 = off.
-    "regression_every": ("regression_checkpoint", "OCTOS_ARC_REGRESSION_CHECKPOINT", 4),
     "tools": ("node_tools", "OCTOS_ARC_NODE_TOOLS", "read_file,write_file,edit_file,glob,grep,list_dir"),
     "reasoning": ("reasoning_effort", "OCTOS_ARC_REASONING", "none"),
     # 0 = trust the kernel's model catalog. Set it for an endpoint serving a
@@ -133,98 +129,6 @@ def describe(node: dict) -> str:
     return "\n".join(lines)
 
 
-def locate_tests(tree: dict) -> Path | None:
-    """ARCBENCH_TESTS_DIR, the runner mounts, then the public specs the bundle
-    ships (public-tests/<task>/, picked by overlap with this tree's node ids).
-    Since 2026-09-26 the runner mounts nothing: all six official runs logged
-    `tests at None`, and a blind local keep scored 4/32 against 22/32 with specs."""
-    for cand in filter(None, [os.environ.get("ARCBENCH_TESTS_DIR"), "/workspace/tests", "/workspace/public-tests", "/app/tests"]):
-        p = Path(cand)
-        if p.is_dir() and any(p.rglob("*.spec.ts")):
-            return p.resolve()
-    local = os.environ.get("OCTOS_ARC_LOCAL_TESTS")
-    if local and Path(local).is_dir():
-        return Path(local).resolve()
-    ids = {str(n["id"]) for n in atomic_nodes(tree)}
-    hits = [(len(ids & {m.group(1).rstrip(".") for f in d.glob("*.spec.ts") if (m := _SPEC_ID.match(f.name))}), d)
-            for d in sorted((BUNDLE_DIR / "public-tests").glob("*/"))] if os.environ.get("OCTOS_ARC_BUNDLED_TESTS", "1") != "0" else []
-    best = max(hits, default=(0, None), key=lambda h: h[0])
-    return best[1].resolve() if ids and best[0] * 2 >= len(ids) else None
-
-
-_SPEC_ID = re.compile(r"^([A-Za-z]+-[\d.]+)")
-
-
-def map_specs(tests_dir: Path | None, node_ids: list[str]) -> dict[str, list[str]]:
-    """`REQ-1.2-login.spec.ts` -> node `REQ-1.2`; equal counts pair in order."""
-    mapping: dict[str, list[str]] = {nid: [] for nid in node_ids}
-    if tests_dir is None:
-        return mapping
-    by_id: dict[str, list[str]] = {}
-    for path in sorted(tests_dir.rglob("*.spec.ts")):
-        m = _SPEC_ID.match(path.name)
-        by_id.setdefault(m.group(1) if m else path.name, []).append(
-            str(path.relative_to(tests_dir)))
-    key = lambda s: tuple(int(p) for p in re.findall(r"\d+", s))  # noqa: E731
-    unmatched = []
-    for sid in sorted(by_id, key=key):
-        if sid in mapping:
-            mapping[sid].extend(by_id[sid])
-        else:
-            unmatched.append(sid)
-    free = [nid for nid in node_ids if not mapping[nid]]
-    if unmatched and len(unmatched) == len(free):
-        for sid, nid in zip(unmatched, free):
-            mapping[nid].extend(by_id[sid])
-    return mapping
-
-
-
-_IMPORT = re.compile(r"""from\s+['"](\.{1,2}/[^'"]+)['"]""")
-
-
-def spec_helpers(tests_dir: Path | None, rels: list[str]) -> list[str]:
-    """Local modules the specs import (`./support/e2e`, `./helpers`). The
-    selectors and flows a spec exercises often live there, so the model needs
-    them as much as the spec itself."""
-    found: list[str] = []
-    for rel in rels if tests_dir else []:
-        text = (tests_dir / rel).read_text(encoding="utf-8", errors="replace")
-        for mod in _IMPORT.findall(text):
-            base = (tests_dir / rel).parent / mod
-            for cand in (Path(f"{base}{ext}") for ext in ("", ".ts", ".js", "/index.ts")):
-                if cand.is_file() and tests_dir.resolve() in cand.resolve().parents:
-                    found.append(str(cand.resolve().relative_to(tests_dir.resolve())))
-                    break
-    return list(dict.fromkeys(found))
-
-
-_DECL = re.compile(r"^(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function\*?|const|let|var|type|interface|class|enum)\s+([A-Za-z_$][\w$]*)")
-
-
-def slice_module(text: str, uses: str, limit: int = 12000) -> str:
-    """A helper module cut to the top-level declarations `uses` reaches,
-    directly or through other kept declarations. Over the limit a whole module
-    lost its tail: ctrip/12306 helpers are ~25k chars, so every node saw only
-    the first half of the selectors its spec calls."""
-    if len(text) <= limit:
-        return text
-    chunks: list[list[str]] = [[]]
-    for line in text.splitlines():
-        if line[:1].strip() and (_DECL.match(line) or line.startswith("import ")):
-            chunks.append([])
-        chunks[-1].append(line)
-    named = {m.group(1): "\n".join(c) for c in chunks if c and (m := _DECL.match(c[0]))}
-    keep, todo = set(), uses
-    while todo:
-        new = {n for n in named if n not in keep and re.search(rf"\b{re.escape(n)}\b", todo)}
-        keep |= new
-        todo = "\n".join(named[n] for n in new)
-    out = [c for c in chunks if c and ((m := _DECL.match(c[0])) is None or m.group(1) in keep)]
-    kept = "\n".join("\n".join(c) for c in out)
-    return f"// (declarations this spec does not reach are omitted)\n{kept}"[:limit * 2]
-
-
 def dot_quote(text: str) -> str:
     return text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
@@ -242,9 +146,13 @@ def untemplate(text: str) -> str:
     return text.replace("{", "{{").replace("}", "}}")
 
 
-def build_pipeline(nodes, specs, tests_dir, out, pol, ports, deadline, spec_map=None) -> str:
+def build_pipeline(nodes, out, pol, ports, deadline) -> str:
     """seed -> (implement -> acceptance) per requirement in dependency order ->
-    full-suite regression check with its own fix loop.
+    a final smoke check with its own fix loop.
+
+    Acceptance is requirement-text-driven only: verify_node.py builds the app,
+    boots it and smokes GET /. The agent never sees the evaluation's test
+    files -- no evaluation-test probing, no spec mapping, no helpers.
 
     Loop semantics (all enforced by the kernel's DAG scheduler):
     * a failing acceptance node fires its back-edge to the implement node (the
@@ -304,43 +212,33 @@ def build_pipeline(nodes, specs, tests_dir, out, pol, ports, deadline, spec_map=
              f'    seed [handler="shell_check", label="seed workspace", timeout_secs="120", '
              f'prompt="{verify("--seed", out)}"]',
              "    start -> seed"]
-    every = pol["regression_every"]
-    regress = lambda i: ["--regress", spec_map] if spec_map and every and i % every == 0 and i < len(nodes) else []  # noqa: E731
     prev, prev_cond = "seed", None
     tmpl, total = read("pipeline-implement"), len(nodes)
     for index, node in enumerate(nodes, 1):
         nid = str(node["id"])
         impl, check = f"impl_{sanitize(nid)}", f"check_{sanitize(nid)}"
-        spec_text = ""
-        rels = specs.get(nid, [])[:2]
-        read_spec = lambda r: (tests_dir / r).read_text(encoding="utf-8", errors="replace") if tests_dir else ""  # noqa: E731
-        uses = "\n".join(read_spec(r) for r in rels)
-        for rel in [*rels, *spec_helpers(tests_dir, rels)]:
-            body = read_spec(rel) if rel in rels else slice_module(read_spec(rel), uses)
-            spec_text += f"\n----- {rel} -----\n{untemplate(body[:12000] if rel in rels else body)}\n"
         body = (tmpl.replace("{node_id}", nid)
                     .replace("{description}", untemplate(describe(node)))
-                    .replace("{spec}", spec_text or "(no public example for this requirement)")
+                    .replace("{spec}", "(no public example for this requirement)")
                     .replace("{port}", str(ports[0]))
                     .replace("{ports}", ports_clause))
         lines.append(impl_node(impl, nid, body))
         # Keep enough time for one attempt at every requirement still to come
-        # plus the regression pass; a node past that line stops repairing.
+        # plus the final pass; a node past that line stops repairing.
         reserve = (total - index) * pol["min_node_seconds"] + pol["final_reserve_seconds"]
         lines.append(
             f'    {check} [handler="shell_check", label="verify {dot_quote(nid)}", '
-            f'timeout_secs="{pol["verify_timeout"]}", prompt="{verify(tests_dir or out, ports[0], "--tag", nid, "--attempts", pol["repairs"] + 1, "--deadline", int(deadline - reserve), "--repair-window", pol["repair_window"], *regress(index), *specs.get(nid, []))}"]')
+            f'timeout_secs="{pol["verify_timeout"]}", prompt="{verify(ports[0], "--tag", nid, "--attempts", pol["repairs"] + 1, "--deadline", int(deadline - reserve), "--repair-window", pol["repair_window"])}"]')
         lines.append(f'    {prev} -> {impl}' + (f' [condition="{prev_cond}"]' if prev_cond else ""))
         lines.append(f'    {impl} -> {check} [condition="{anyway}"]')
         lines.append(f'    {check} -> {impl} [condition="{repair}"]')
         prev, prev_cond = check, settled
-    # Regression pass: every public spec against the finished app. A later
-    # requirement can break an earlier one; this is where that gets repaired.
-    everything = sorted({r for rels in specs.values() for r in rels})
-    if total > 1 and everything:
+    # Final pass: the finished app must still build, boot and serve GET /.
+    # A later requirement can break an earlier one; this is where that shows.
+    if total > 1:
         lines += [
             f'    check_all [handler="shell_check", label="verify all", '
-            f'timeout_secs="{pol["verify_timeout"]}", prompt="{verify(tests_dir or out, ports[0], "--tag", "ALL", "--best", 1, "--attempts", pol["final_repairs"] + 1, "--deadline", int(deadline - pol["final_reserve_seconds"] // 2), *everything)}"]',
+            f'timeout_secs="{pol["verify_timeout"]}", prompt="{verify(ports[0], "--tag", "ALL", "--attempts", pol["final_repairs"] + 1, "--deadline", int(deadline - pol["final_reserve_seconds"] // 2))}"]',
             impl_node("fix_all", "regressions", read("pipeline-regression")
                       .replace("{port}", str(ports[0])).replace("{ports}", ports_clause)),
             '    done [handler="noop", label="Done"]',
@@ -494,30 +392,30 @@ def _tarball_ok(tarball: Path) -> bool:
 
 
 def _download_octos(cache_dir: Path) -> str:
-    """gh-proxy mirrors first: the runner's own path to GitHub stalls HTTP/2.
-    12 rotating attempts plus a member check, so a truncated file is never run."""
+    """Only the pinned official release URL, then sha256 verification against
+    arc-runtime-lock.json. No third-party mirrors: an undeclared mirror is a
+    supply-chain path the submission never disclosed. Up to 12 resumable
+    attempts plus a member check, so a truncated file is never run."""
     import tarfile, urllib.request
     cache_dir.mkdir(parents=True, exist_ok=True)
     tarball, url = cache_dir / "octos-bundle.tar.gz", _octos_url()
     if _cached_octos(cache_dir) is None:
         tarball.unlink(missing_ok=True)     # an older URL's archive is stale
-    mirrors = [f"{prefix}/{url}" for prefix in ("https://ghfast.top", "https://gh-proxy.com")] + [url]
     for attempt in range(1, 13):
         if _tarball_ok(tarball):
             break
-        mirror = mirrors[(attempt - 1) % len(mirrors)]
-        log(f"[octos] download attempt {attempt} ({mirror}) ...")
+        log(f"[octos] download attempt {attempt} ({url}) ...")
         if shutil.which("curl"):
             cmd = ["curl", "-fsSL", "--http1.1", "-C", "-", "--connect-timeout", "30",
                    "--speed-limit", "10240", "--speed-time", "60", "--retry", "2",
-                   "-o", str(tarball), mirror]
+                   "-o", str(tarball), url]
             try:
                 subprocess.run(cmd, check=False, timeout=600)
             except subprocess.TimeoutExpired:
-                log(f"[octos] attempt {attempt} stalled 600s; rotating mirror")
+                log(f"[octos] attempt {attempt} stalled 600s; retrying")
         else:
             try:
-                urllib.request.urlretrieve(mirror, tarball)
+                urllib.request.urlretrieve(url, tarball)
             except Exception as exc:  # noqa: BLE001
                 log(f"[octos] download error: {exc}")
     if not _tarball_ok(tarball):
@@ -584,25 +482,7 @@ def main() -> int:
     runtime.git.ensure_repo()
     runtime.traceability.init_store()                      # all 7 tables exist
     runtime.traceability.store_requirement_tree(tree)      # requirements + scenarios
-    tests_dir = locate_tests(tree)
-    specs = map_specs(tests_dir, node_ids)
-    log(f"[arc] tests at {tests_dir}; mapping { {k: v for k, v in specs.items() if v} }")
-    ws = Path("/workspace")                                # where would the runner put specs now?
-    log(f"[arc] env {sorted(k for k in os.environ if 'TEST' in k or 'ARCBENCH' in k)}; "
-        f"/workspace: {sorted(p.name for p in ws.iterdir()) if ws.is_dir() else None}")
-    for nid, rels in specs.items():
-        for rel in rels:                                   # tests table
-            runtime.traceability.upsert_test(test_id=rel, req_id=nid, type="e2e",
-                                             file_path=rel, passed=None)
-
-    # Some specs hardcode a port the grader does not start the app on; the app
-    # must answer on both. The grading port always comes first.
-    spec_text = "".join((tests_dir / r).read_text(errors="replace")
-                        for rels in specs.values() for r in rels
-                        if tests_dir and (tests_dir / r).is_file())
-    ports = [args.web_port] + sorted(
-        {int(p) for p in re.findall(r"(?:localhost|127\.0\.0\.1):(\d{4,5})", spec_text)}
-        - {args.web_port})
+    ports = [args.web_port]
 
     # SHORT temp path, never under the deliverable: `serve` binds
     # <data_dir>/.octos-goal-control.sock and a path over SUN_LEN (~104B) makes
@@ -613,9 +493,7 @@ def main() -> int:
     pol["run_timeout"] = max(pol["run_timeout"], pol["node_budget"] * len(nodes))
     data_dir = Path(tempfile.mkdtemp(prefix="octos-data-"))
     (data_dir / "pipelines").mkdir(parents=True, exist_ok=True)
-    spec_map = data_dir / "arc-specs.json"     # requirement -> specs, for regression checkpoints
-    spec_map.write_text(json.dumps(specs), encoding="utf-8")
-    dot = build_pipeline(nodes, specs, tests_dir, out, pol, ports, started + pol["run_timeout"], spec_map)
+    dot = build_pipeline(nodes, out, pol, ports, started + pol["run_timeout"])
     (data_dir / "pipelines" / f"{pol['name']}.dot").write_text(dot, encoding="utf-8")
     (out / ".arc").mkdir(exist_ok=True)
     (out / ".arc" / "pipeline.dot").write_text(dot, encoding="utf-8")   # evidence copy
@@ -642,7 +520,7 @@ def main() -> int:
                f'Call it exactly once and do not write any files yourself. The pipeline '
                f'reports back on its own: after this call, never call any tool again, '
                f'whatever later messages say -- just answer "ok".')
-        # The turn's success says nothing about the tool call: on ctrip (125 ids)
+        # The turn's success says nothing about the tool call: on a 125-id task
         # glm-5.3-flash once answered a bare "ok" and the run idled. A started
         # run leaves its dir; without one, ask again.
         started_run = lambda: any(data_dir.glob(f"profiles/*/data/pipeline-runs/{pol['name']}-*"))  # noqa: E731
@@ -663,12 +541,10 @@ def main() -> int:
 
     run_dir = collect_app(data_dir, out, pol["name"])
     summary = pipeline_summary(data_dir, pol) or {}
-    # Each acceptance node records its last verdict; the regression pass (tag
+    # Each acceptance node records its last verdict; the final pass (tag
     # ALL) overrides them, since it is the state that actually ships.
     status = {p.name: p.read_text().strip() == "0"
               for p in (run_dir / ".arc-status").glob("*")} if run_dir else {}
-    if run_dir and (run_dir / ".arc-best" / "score.json").is_file():   # what ships is the best state
-        status["ALL"] = json.loads((run_dir / ".arc-best" / "score.json").read_text())["rc"] == 0
     passed = status.get("ALL", bool(status) and all(status.values()))
     tokens = summary.get("total_tokens") or {}
     state["tokens_in"] += int(tokens.get("input_tokens") or 0)
@@ -704,19 +580,14 @@ def collect_app(data_dir: Path, out: Path, name: str) -> Path | None:
     if not runs:
         log("[arc] no pipeline run dir found; nothing to collect")
         return None
-    # The full-suite check keeps the best state it measured; the final state
-    # can be worse (a repair that broke more than it fixed, or a run cut off
-    # mid-edit).
-    best = runs[-1] / ".arc-best"
-    source = best / "app" if (best / "app" / "frontend").is_dir() else runs[-1]
+    # The full-suite smoke check's verdict (tag ALL) is just another status row.
+    source = runs[-1]
     copied = [part for part in ("frontend", "backend") if (source / part).is_dir()]
     for part in copied:
         shutil.rmtree(out / part, ignore_errors=True)
         shutil.copytree(source / part, out / part,
                         ignore=shutil.ignore_patterns("node_modules", ".git"))
-    log(f"[arc] collected {copied or 'nothing'} from {runs[-1].name}"
-        + (f" (best full-suite state: {json.loads((best / 'score.json').read_text())['passed']} passed)"
-           if source != runs[-1] else ""))
+    log(f"[arc] collected {copied or 'nothing'} from {runs[-1].name}")
     return runs[-1]
 
 

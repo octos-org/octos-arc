@@ -45,14 +45,13 @@ sh arc/pack.sh                               # 得到 octos-arc-bundle.zip
 | 文件 | 作用 |
 |---|---|
 | `main.py` | 平台入口（胶水）：读平台环境、按需求树生成本题的 pipeline（`.dot`）、起内核并点名运行、收集产物与 7 张表 |
-| `verify_node.py` | 验收节点跑的命令：构建、起服务、跑该节点的公开 Playwright spec；失败时打印报错和出错时的页面快照；按次数和截止时间决定是否停止修复（打印 `ARC_NO_MORE_REPAIRS`）；`--seed` 模式把现有应用铺进运行目录 |
+| `verify_node.py` | 验收节点跑的命令：构建、起服务、GET / 冒烟（只依据需求文本，不读评测测试）；按次数和截止时间决定是否停止修复（打印 `ARC_NO_MORE_REPAIRS`）；`--seed` 模式把现有应用铺进运行目录 |
 | `octos_stdio.py` | 通过 `octos serve --stdio` 驱动内核 |
 | `arc-policy.toml` | 全部可调参数（`[pipeline]` 段），每项都有 `OCTOS_*` 环境变量覆盖 |
-| `prompts/pipeline-implement.md` / `pipeline-regression.md` / `port-contract.md` | 实现节点、全量回归修复节点、双端口约定的提示词 |
-| `public-tests/<题目>/` | 平台公开的 Playwright 验收测试 |
+| `prompts/pipeline-implement.md` / `pipeline-regression.md` / `port-contract.md` | 实现节点、终检修复节点、双端口约定的提示词 |
 | `tasks/<题目>/` | 各题需求文件的离线副本 |
 | `template/` | 平台初始工作区模板：pack.sh 打进 zip 根 |
-| `run-task-local.py` / `grade-local.py` / `pack.sh` | 本机做题、按平台口径打分（单测 10 秒超时）、打包 |
+| `pack.sh` | 打包 |
 
 ## 流程（内核的 DAG 调度器执行，胶水不做编排）
 
