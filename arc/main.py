@@ -30,33 +30,24 @@ log = functools.partial(print, flush=True)
 #: policy key -> (arc-policy.toml key, env override, default)
 _POLICY = {
     "name": ("name", "OCTOS_ARC_PIPELINE_NAME", "arc_build"),
-    "repairs": ("repair_rounds", "OCTOS_REPAIR_ROUNDS", 5),
-    # Wall clock one requirement may spend repairing after its first failed
-    # check; past it the requirement is left as is and the build moves on.
+    "repairs": ("repair_rounds", "OCTOS_REPAIR_ROUNDS", 2),
+    # Wall clock one requirement may spend repairing after its first failed check.
     "repair_window": ("repair_window_seconds", "OCTOS_ARC_REPAIR_WINDOW", 1800),
-    "node_timeout": ("node_timeout_seconds", "OCTOS_NODE_TIMEOUT", 1200),
+    "node_timeout": ("node_timeout_seconds", "OCTOS_NODE_TIMEOUT", 900),
     "verify_timeout": ("verify_timeout_seconds", "OCTOS_ARC_VERIFY_TIMEOUT", 1800),
     "max_iterations": ("max_iterations", "OCTOS_MAX_ITERATIONS", 40),
-    "run_timeout": ("run_timeout_seconds", "OCTOS_TIME_BUDGET", 3600),
-    "node_budget": ("node_budget_seconds", "OCTOS_NODE_TIME_BUDGET", 600),
+    "run_timeout": ("run_timeout_seconds", "OCTOS_TIME_BUDGET", 2400),
+    "node_budget": ("node_budget_seconds", "OCTOS_NODE_TIME_BUDGET", 200),
     "min_node_seconds": ("min_node_seconds", "OCTOS_ARC_MIN_NODE_SECONDS", 120),
     "final_reserve_seconds": ("final_reserve_seconds", "OCTOS_ARC_FINAL_RESERVE", 600),
     "final_repairs": ("final_repair_rounds", "OCTOS_ARC_FINAL_REPAIRS", 2),
     "tools": ("node_tools", "OCTOS_ARC_NODE_TOOLS", "read_file,write_file,edit_file,glob,grep,list_dir"),
     "reasoning": ("reasoning_effort", "OCTOS_ARC_REASONING", "none"),
-    # 0 = trust the kernel's model catalog. Set it for an endpoint serving a
-    # smaller window than the model's nominal one (a local server loaded with
-    # 32k): the node's worker then trims to fit instead of overflowing into
-    # empty responses.
+    # 0 = trust the kernel's model catalog; set it for an endpoint with a smaller window.
     "context_window": ("context_window", "OCTOS_ARC_CONTEXT_WINDOW", 0),
-    # Total time for ONE non-streaming LLM request (the platform proxy rejects
-    # SSE, so streaming stays off). The kernel default, 300 s, cut off a
-    # write_file call generating a large page -- and a timed-out request is
-    # an internal error that ends the node's conversation.
+    # One non-streaming LLM request's ceiling (platform proxies reject SSE).
     "llm_timeout": ("llm_timeout_seconds", "OCTOS_ARC_LLM_TIMEOUT", 900),
-    # Output cap of one worker LLM call. Unset, a worker takes the model's
-    # catalog maximum (131072 for glm-5.3-flash): one runaway reply can then
-    # outlast any request timeout.
+    # Output cap of one worker LLM call; unset, a runaway reply outlasts any timeout.
     "node_max_output_tokens": ("node_max_output_tokens", "OCTOS_ARC_NODE_MAX_TOKENS", 32768),
 }
 
@@ -156,14 +147,11 @@ def build_pipeline(nodes, out, pol, ports, deadline) -> str:
 
     Loop semantics (all enforced by the kernel's DAG scheduler):
     * a failing acceptance node fires its back-edge to the implement node (the
-      repair round) until verify_node.py prints STOP -- it counts attempts and
-      watches the run deadline, so repairs are bounded by policy and by time,
-      not by the scheduler's 10-run loop fuse;
-    * forward edges out of an acceptance node fire on pass OR fail, so one
-      requirement the model cannot finish never prunes the rest of the build
-      (an unconditional edge is fail-closed and would);
-    * implement nodes are continue_on_error: a timed-out turn still hands
-      whatever it wrote to acceptance instead of pruning everything below.
+      repair round) until verify_node.py prints STOP (attempts/window/deadline);
+    * forward edges fire on pass OR fail: one stuck requirement never prunes
+      the rest of the build;
+    * implement nodes are continue_on_error: a timed-out turn still hands what
+      it wrote to acceptance.
 
     DAG-scheduler constraints, all load-bearing: no Parallel/DynamicParallel, no
     converge, no suggested_next; forward edges carry no label and default
@@ -214,15 +202,18 @@ def build_pipeline(nodes, out, pol, ports, deadline) -> str:
              "    start -> seed"]
     prev, prev_cond = "seed", None
     tmpl, total = read("pipeline-implement"), len(nodes)
-    for index, node in enumerate(nodes, 1):
-        nid = str(node["id"])
-        impl, check = f"impl_{sanitize(nid)}", f"check_{sanitize(nid)}"
-        body = (tmpl.replace("{node_id}", nid)
+
+    def node_body(nid, node):
+        return (tmpl.replace("{node_id}", nid)
                     .replace("{description}", untemplate(describe(node)))
                     .replace("{spec}", "(no public example for this requirement)")
                     .replace("{port}", str(ports[0]))
                     .replace("{ports}", ports_clause))
-        lines.append(impl_node(impl, nid, body))
+
+    for index, node in enumerate(nodes, 1):
+        nid = str(node["id"])
+        impl, check = f"impl_{sanitize(nid)}", f"check_{sanitize(nid)}"
+        lines.append(impl_node(impl, nid, node_body(nid, node)))
         # Keep enough time for one attempt at every requirement still to come
         # plus the final pass; a node past that line stops repairing.
         reserve = (total - index) * pol["min_node_seconds"] + pol["final_reserve_seconds"]
@@ -233,6 +224,23 @@ def build_pipeline(nodes, out, pol, ports, deadline) -> str:
         lines.append(f'    {impl} -> {check} [condition="{anyway}"]')
         lines.append(f'    {check} -> {impl} [condition="{repair}"]')
         prev, prev_cond = check, settled
+    # Budget layering: the chain above buys one implementation per requirement
+    # first; whatever time remains is spent sweeping them in the same order.
+    # An accepted node costs a status-file read (--skip-if-passed); a failed
+    # one gets a bounded fix+verify loop with fresh attempts and window.
+    sweep_fwd = f'{fail} && !outcome.contains(\"{STOP}\")'
+    sweep_on = f'outcome.status == \"pass\" || outcome.status == \"error\" || outcome.contains(\"{STOP}\")'
+    for node in nodes:
+        nid = str(node["id"])
+        fix, check = f"sweepimpl_{sanitize(nid)}", f"sweepcheck_{sanitize(nid)}"
+        lines.append(
+            f'    {check} [handler="shell_check", label="sweep verify {dot_quote(nid)}", '
+            f'timeout_secs="{pol["verify_timeout"]}", prompt="{verify(ports[0], "--tag", nid, "--skip-if-passed", 1, "--attempts", pol["repairs"] + 4, "--deadline", int(deadline - pol["final_reserve_seconds"]), "--repair-window", pol["run_timeout"], "--e2e", f"checks/{nid}.mjs")}"]')
+        lines.append(impl_node(fix, f"sweep {nid}", node_body(nid, node)))
+        lines.append(f'    {prev} -> {check} [condition="{prev_cond}"]')
+        lines.append(f'    {check} -> {fix} [condition="{sweep_fwd}"]')
+        lines.append(f'    {fix} -> {check} [condition="context.retry_budget != \"exhausted\""]')
+        prev, prev_cond = check, sweep_on
     # Final pass: the finished app must still build, boot and serve GET /.
     # A later requirement can break an earlier one; this is where that shows.
     if total > 1:
@@ -271,35 +279,26 @@ def kernel_env(pol: dict, config_dir: Path) -> dict:
         "provider": provider, "model": model,
         "sandbox": {"allow_network": True},
         "memory": {"refresh": {"enabled": False}},
-        # Reasoning, output caps and timeouts do NOT go here: the profile
-        # runtime never reads this file's gateway section. They ride on the
-        # graph's nodes and the env below.
+        # The profile runtime never reads this file's gateway section;
+        # reasoning/caps/timeouts ride on the graph nodes and the env below.
     }
     if provider not in ("openai", "anthropic") and base_url:
         config["base_url"] = base_url
     config_dir.mkdir(parents=True, exist_ok=True)
     (config_dir / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
     env["OCTOS_CONFIG_DIR"] = str(config_dir)
-    # K4: name the turn's tool surface -- run_pipeline hands the kernel the loop.
     env["OCTOS_STDIO_SOLO_TOOLS"] = "run_pipeline"
-    # ...and only OUR pipeline: the session is woken by its own background
-    # run and has been seen starting `deep_research` from that wake-up.
+    # Only OUR pipeline, and do not wake the session for every finished node.
     env["OCTOS_PIPELINE_ALLOW"] = pol["name"]
-    # ...and do not wake it for every finished node; the run reports once.
     env["OCTOS_PIPELINE_NODE_CONTINUATIONS"] = "0"
     env["OCTOS_PIPELINE_TIMEOUT_MAX_SECS"] = str(pol["run_timeout"] + pol["final_reserve_seconds"])
-    # Fixed, not a default: the dispatch model copies "Max: 3600" from the
-    # tool schema into timeout_secs, and a model-supplied value would win.
+    # Fixed, not a default: a model-supplied timeout_secs would win otherwise.
     env["OCTOS_PIPELINE_TIMEOUT_SECS"] = env["OCTOS_PIPELINE_TIMEOUT_MAX_SECS"]
     env["OCTOS_PIPELINE_DAG"] = "1"      # the DAG scheduler: retries + critique feedback
     env.setdefault("OCTOS_DISABLE_STREAMING", "1")   # platform proxies reject SSE
-    # The profile runtime builds its provider without the gateway section, so
-    # the request timeout travels by env as well.
     env["OCTOS_LLM_TIMEOUT_SECS"] = str(pol["llm_timeout"])
-    # Ride out a minute or two of refused / reset connections (1+2+...+60s)
-    # instead of failing the node after 7s; timeouts are never retried.
+    # Ride out refused / reset connections (1+2+...+60s); timeouts never retry.
     env["OCTOS_LLM_MAX_RETRIES"] = "8"
-    # ...and the dispatch session's reasoning level by the stdio override.
     env["OCTOS_STDIO_REASONING_EFFORT"] = pol["reasoning"]
     env.setdefault("OCTOS_DANGER_FULL_ACCESS", "1")
     env.setdefault("npm_config_registry", "https://registry.npmmirror.com")
@@ -484,11 +483,8 @@ def main() -> int:
     runtime.traceability.store_requirement_tree(tree)      # requirements + scenarios
     ports = [args.web_port]
 
-    # SHORT temp path, never under the deliverable: `serve` binds
-    # <data_dir>/.octos-goal-control.sock and a path over SUN_LEN (~104B) makes
-    # the kernel die before the handshake. Also keeps scratch out of the bundle.
-    # Whole-run budget grows with the tree: a flat hour is 30s per node on a
-    # 120-requirement task. Every acceptance node sees the same deadline.
+    # SHORT temp path, never under the deliverable (control socket paths are
+    # length-limited). Budget grows with the tree; all checks share one deadline.
     started = time.time()
     pol["run_timeout"] = max(pol["run_timeout"], pol["node_budget"] * len(nodes))
     data_dir = Path(tempfile.mkdtemp(prefix="octos-data-"))
@@ -569,11 +565,8 @@ def main() -> int:
 
 
 def collect_app(data_dir: Path, out: Path, name: str) -> Path | None:
-    """Move the built app into ARCBENCH_OUTPUT_DIR. run_pipeline gives every run
-    its own fenced dir under `pipeline-runs/<run_id>/`; the app is NOT in the
-    deliverable dir and the kernel exposes no redirect knob. This collects the
-    same bytes acceptance just verified.
-    """
+    """Move the built app into ARCBENCH_OUTPUT_DIR from the pipeline run dir
+    (the app is not in the deliverable dir; collect the bytes acceptance saw)."""
     runs = [r for r in sorted(data_dir.glob(f"profiles/*/data/pipeline-runs/{name}-*"),
                               key=lambda p: p.stat().st_mtime if p.exists() else 0)
             if r.is_dir()]
@@ -610,9 +603,7 @@ def record(method: str, params: dict, state: dict) -> None:
 
 
 def pipeline_summary(data_dir: Path, pol: dict) -> dict | None:
-    """`.octos/runs/<run_id>/summary.json`, written when a run ends, is the
-    authoritative completion signal: run_pipeline is spawn_only, so the dispatch
-    turn only acks "started in background" and no tool result follows."""
+    """`.octos/runs/<run_id>/summary.json`: the run's completion signal."""
     for path in data_dir.glob(f"profiles/*/data/.octos/runs/{pol['name']}-*/summary.json"):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
@@ -624,9 +615,8 @@ def pipeline_summary(data_dir: Path, pol: dict) -> dict | None:
 
 
 def deliver_progress(data_dir: Path, out: Path, name: str, synced: dict) -> None:
-    """Copy the latest state an acceptance check passed into the output dir,
-    so a run the platform kills (or that crashes) still ships working code
-    rather than the bare template. The final collect replaces it."""
+    """Copy the latest accepted state into the output dir, so a killed run
+    still ships working code; the final collect replaces it."""
     for good in data_dir.glob(f"profiles/*/data/pipeline-runs/{name}-*/.arc-good"):
         stamp = (good / "stamp").read_text() if (good / "stamp").is_file() else ""
         if stamp and stamp != synced.get("stamp"):
