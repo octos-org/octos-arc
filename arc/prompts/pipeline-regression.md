@@ -1,6 +1,7 @@
-The finished web application failed its acceptance check (build, boot, or the
-GET / smoke). The failure output is shown below. Fix the application so the
-check passes, without breaking what already works.
+The finished web application failed its acceptance check (build, boot, the
+GET / smoke, a page audit, or one of the requirement-derived browser
+self-checks under checks/). The failure output is shown below. Fix the
+application so the check passes, without breaking what already works.
 
 You are editing an existing workspace (`frontend/src/*.html`, `backend/server.js`
 serving on `process.env.PORT || {port}`). Read the files a failure points at

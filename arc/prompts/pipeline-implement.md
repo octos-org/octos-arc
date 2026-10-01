@@ -21,6 +21,9 @@ Rules:
 - Implement for general valid inputs and preserve behaviour already built by
   earlier requirements. Never hardcode the values the acceptance example uses.
 - Use the exact labels, accessible names and test ids the requirement names.
+- One primary entry per action name per page: two links or buttons with the
+  same accessible name on one page are rejected. Every form control needs a
+  visible label; every button and link needs an accessible name.
 - For persistent data, seed only a brand-new store; later startups must keep
   user edits and deletions.
 - Write only the app's own files under frontend/ and backend/. No reports,
@@ -28,6 +31,16 @@ Rules:
 - Prefer zero runtime dependencies; if you must install, the registry is
   already pointed at npmmirror.
 {ports}
+Then write your own acceptance check as `checks/{node_id}.mjs`: a Node script
+that derives its steps from THIS requirement's text above (never from any
+external test file), launches chromium from '@playwright/test'
+(`import { chromium } from '@playwright/test'`), opens
+`process.env.E2E_BASE_URL`, walks the requirement's scenario (open the page,
+click, fill, assert the expected visible result with `expect`), prints one
+`SELF-CHECK OK` line and exits 0; any failed expectation must exit non-zero.
+Keep it under 60 lines and under 60 seconds. The pipeline runs it against your
+freshly built app right after this turn and shows you its output on failure.
+
 If a previous acceptance failure is shown to you below, fix exactly what it
 reports — do not rewrite working code around it.
 

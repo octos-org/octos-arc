@@ -228,7 +228,7 @@ def build_pipeline(nodes, out, pol, ports, deadline) -> str:
         reserve = (total - index) * pol["min_node_seconds"] + pol["final_reserve_seconds"]
         lines.append(
             f'    {check} [handler="shell_check", label="verify {dot_quote(nid)}", '
-            f'timeout_secs="{pol["verify_timeout"]}", prompt="{verify(ports[0], "--tag", nid, "--attempts", pol["repairs"] + 1, "--deadline", int(deadline - reserve), "--repair-window", pol["repair_window"])}"]')
+            f'timeout_secs="{pol["verify_timeout"]}", prompt="{verify(ports[0], "--tag", nid, "--attempts", pol["repairs"] + 1, "--deadline", int(deadline - reserve), "--repair-window", pol["repair_window"], "--e2e", f"checks/{nid}.mjs")}"]')
         lines.append(f'    {prev} -> {impl}' + (f' [condition="{prev_cond}"]' if prev_cond else ""))
         lines.append(f'    {impl} -> {check} [condition="{anyway}"]')
         lines.append(f'    {check} -> {impl} [condition="{repair}"]')
@@ -238,7 +238,7 @@ def build_pipeline(nodes, out, pol, ports, deadline) -> str:
     if total > 1:
         lines += [
             f'    check_all [handler="shell_check", label="verify all", '
-            f'timeout_secs="{pol["verify_timeout"]}", prompt="{verify(ports[0], "--tag", "ALL", "--attempts", pol["final_repairs"] + 1, "--deadline", int(deadline - pol["final_reserve_seconds"] // 2))}"]',
+            f'timeout_secs="{pol["verify_timeout"]}", prompt="{verify(ports[0], "--tag", "ALL", "--attempts", pol["final_repairs"] + 1, "--deadline", int(deadline - pol["final_reserve_seconds"] // 2), "--e2e-dir", "checks")}"]',
             impl_node("fix_all", "regressions", read("pipeline-regression")
                       .replace("{port}", str(ports[0])).replace("{ports}", ports_clause)),
             '    done [handler="noop", label="Done"]',
