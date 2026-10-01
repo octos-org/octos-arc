@@ -50,5 +50,25 @@ class CrashPattern(unittest.TestCase):
         self.assertFalse(verify_node.CRASH_RE.search("backend listening on port 3000"))
 
 
+class E2eFileList(unittest.TestCase):
+    """A grouped implement node's several self-checks run against ONE shared
+    boot via --e2e-list; a single (ungrouped) node still uses --e2e alone."""
+
+    def test_e2e_list_wins_and_splits_on_comma(self):
+        self.assertEqual(
+            verify_node.parse_e2e_files("checks/ignored.mjs", "checks/a.mjs,checks/b.mjs"),
+            ["checks/a.mjs", "checks/b.mjs"])
+
+    def test_single_e2e_used_when_no_list(self):
+        self.assertEqual(verify_node.parse_e2e_files("checks/a.mjs", None), ["checks/a.mjs"])
+
+    def test_neither_given_is_empty(self):
+        self.assertEqual(verify_node.parse_e2e_files(None, None), [])
+
+    def test_e2e_list_drops_blanks_from_stray_commas(self):
+        self.assertEqual(verify_node.parse_e2e_files(None, "checks/a.mjs,,checks/b.mjs,"),
+                         ["checks/a.mjs", "checks/b.mjs"])
+
+
 if __name__ == "__main__":
     unittest.main()

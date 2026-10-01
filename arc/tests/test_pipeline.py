@@ -27,7 +27,11 @@ POLICY = dict(name="arc_build", repairs=5, repair_window=1800, node_timeout=1200
               reasoning="none", max_output_tokens=65536, node_budget=600,
               min_node_seconds=120, final_reserve_seconds=600, final_repairs=2,
               context_window=0, llm_timeout=900,
-              node_max_output_tokens=32768)
+              node_max_output_tokens=32768,
+              # Off here: these tests pin the one-node-per-requirement DAG
+              # invariants. test_pipeline_grouping.py covers group_nodes() and
+              # the merged-node graph shape with its own policy variant.
+              group_requirements=0, group_max_chars=2600, group_max_members=3)
 
 
 def build(nodes_spec):
