@@ -44,13 +44,15 @@ Then write your own acceptance check as `checks/{node_id}.mjs`: a Node script
 that derives its steps from THIS requirement's text above (never from any
 external test file), launches chromium from '@playwright/test'
 (`import { chromium } from '@playwright/test'`), opens
-`process.env.E2E_BASE_URL`, walks the requirement's scenario (open the page,
-click, fill, assert the expected visible result with `expect`), and — when the
-requirement names seeded accounts or entry points — signs in as each named
+`process.env.E2E_BASE_URL`, and walks EVERY scenario the requirement lists,
+in order: for each GIVEN/WHEN/THEN it opens the named page, clicks, fills,
+and asserts the expected visible result with `expect` — when the requirement
+names seeded accounts or entry points, the script signs in as each named
 account and opens each named entry to prove they exist and work. Print one
-`SELF-CHECK OK` line and exit 0; any failed expectation must exit non-zero.
-Keep it under 60 lines and under 60 seconds. The pipeline runs it against your
-freshly built app right after this turn and shows you its output on failure.
+`SELF-CHECK OK` line per scenario and exit 0; any failed expectation must
+exit non-zero. Keep the whole script under 120 lines and under 4 minutes.
+The pipeline runs it against your freshly built app right after this turn and
+shows you its output on failure.
 
 If a previous acceptance failure is shown to you below, fix exactly what it
 reports — do not rewrite working code around it.

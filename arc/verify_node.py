@@ -21,7 +21,7 @@ from pathlib import Path
 
 STOP = "ARC_NO_MORE_REPAIRS"
 INSTALL = "npm install --no-audit --no-fund --no-package-lock"
-E2E_TIMEOUT = int(os.environ.get("OCTOS_ARC_SELF_CHECK_TIMEOUT", "180"))
+E2E_TIMEOUT = int(os.environ.get("OCTOS_ARC_SELF_CHECK_TIMEOUT", "300"))
 CHECK_JOBS = int(os.environ.get("OCTOS_ARC_CHECK_JOBS", "2"))
 
 # The harness owns the two manifests so the model never spends a turn on them
