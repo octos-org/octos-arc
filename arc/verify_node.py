@@ -341,7 +341,15 @@ def main(argv: list[str]) -> int:
         else:
             print(f"[verify] unexpected positional argument: {arg}")
             return 2
-    rc = check(int(argv[0]), opts.get("e2e"), opts.get("e2e-dir"))
+    rc = 0
+    if opts.get("skip-if-passed") and "tag" in opts:
+        stamp = Path.cwd() / ".arc-status" / opts["tag"]
+        if stamp.is_file() and stamp.read_text().strip() == "0":
+            print(f"[verify] {opts['tag']}: already accepted, sweep skips")
+        else:
+            rc = check(int(argv[0]), opts.get("e2e"), opts.get("e2e-dir"))
+    else:
+        rc = check(int(argv[0]), opts.get("e2e"), opts.get("e2e-dir"))
     if rc == 0 and "tag" in opts:
         # Latest state a check passed: the adapter copies it into the output
         # dir as the run goes, so a run killed from outside still delivers.

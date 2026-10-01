@@ -18,6 +18,8 @@ Layout (already scaffolded, keep it):
   start runs server.js). Update them only if a dependency or build step changes.
 
 Rules:
+- Build ONLY what this requirement needs: the smallest app that satisfies it.
+  Later requirements extend the same files; do not build their features early.
 - Implement for general valid inputs and preserve behaviour already built by
   earlier requirements. Never hardcode the values the acceptance example uses.
 - Use the exact labels, accessible names and test ids the requirement names.
