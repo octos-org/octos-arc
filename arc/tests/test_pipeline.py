@@ -181,6 +181,25 @@ class PipelineDot(unittest.TestCase):
         self.assertIn("impl_n_REQ_1_2", dot)
         self.assertNotIn("impl_n_REQ-1.2", dot)
 
+    def test_condition_attribute_values_have_properly_escaped_quotes(self):
+        # A condition value with a bare `"` (instead of `\"`) ends the DOT
+        # attribute string early for a real parser ("expected '=' in
+        # attribute"), even though plain Python string ops never notice.
+        # Regression: the sweep loop once built its conditions with `\"`
+        # (a Python-escaped quote, i.e. a literal `"`) instead of `\\"` (a
+        # literal backslash + quote) and broke every run.
+        dot = build([atomic("REQ-1"), atomic("REQ-2", deps=["REQ-1"])])
+        checked = 0
+        for src, dst, attrs, _ in self.edges(dot):
+            m = re.search(r'condition="(.*)"$', attrs or "")
+            if not m:
+                continue
+            checked += 1
+            value = m.group(1)
+            self.assertNotIn('"', value.replace('\\"', ''),
+                             f"{src}->{dst} condition has an unescaped quote: {value!r}")
+        self.assertGreater(checked, 0, "expected at least one condition= edge")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -228,8 +228,8 @@ def build_pipeline(nodes, out, pol, ports, deadline) -> str:
     # first; whatever time remains is spent sweeping them in the same order.
     # An accepted node costs a status-file read (--skip-if-passed); a failed
     # one gets a bounded fix+verify loop with fresh attempts and window.
-    sweep_fwd = f'{fail} && !outcome.contains(\"{STOP}\")'
-    sweep_on = f'outcome.status == \"pass\" || outcome.status == \"error\" || outcome.contains(\"{STOP}\")'
+    sweep_fwd = f'{fail} && !outcome.contains(\\"{STOP}\\")'
+    sweep_on = f'outcome.status == \\"pass\\" || outcome.status == \\"error\\" || outcome.contains(\\"{STOP}\\")'
     for node in nodes:
         nid = str(node["id"])
         fix, check = f"sweepimpl_{sanitize(nid)}", f"sweepcheck_{sanitize(nid)}"
@@ -239,7 +239,7 @@ def build_pipeline(nodes, out, pol, ports, deadline) -> str:
         lines.append(impl_node(fix, f"sweep {nid}", node_body(nid, node)))
         lines.append(f'    {prev} -> {check} [condition="{prev_cond}"]')
         lines.append(f'    {check} -> {fix} [condition="{sweep_fwd}"]')
-        lines.append(f'    {fix} -> {check} [condition="context.retry_budget != \"exhausted\""]')
+        lines.append(f'    {fix} -> {check} [condition="context.retry_budget != \\"exhausted\\""]')
         prev, prev_cond = check, sweep_on
     # Final pass: the finished app must still build, boot and serve GET /.
     # A later requirement can break an earlier one; this is where that shows.
