@@ -588,19 +588,19 @@ def collect_app(data_dir: Path, out: Path, name: str) -> Path | None:
 NODE_RE = re.compile(r"Pipeline '[^']*' running: (\S+)")
 
 
-def record(method: str, params: dict, state: dict) -> None:
+def record(method: str, params: dict, state: dict) -> None:  # TEMPORARY: verbose, this branch only
     """K3: token/cost accounting rides the kernel's own events."""
     if method == "progress/updated":
         cost = (params.get("metadata") or {}).get("token_cost") or {}
         state["cost"] = max(state["cost"], float(cost.get("session_cost") or 0.0))
     elif method == "turn/completed":
-        state["tokens_in"] += int(params.get("tokens_in") or 0)
-        state["tokens_out"] += int(params.get("tokens_out") or 0)
+        tin, tout = int(params.get("tokens_in") or 0), int(params.get("tokens_out") or 0)
+        state["tokens_in"] += tin; state["tokens_out"] += tout
+        log(f"[turn] tokens_in={tin} tokens_out={tout} node={state.get('last')}")
     elif method == "tool/progress":
         hit = NODE_RE.search(str(params.get("message") or ""))
-        if hit and state.get("last") != hit.group(1):
-            state["last"] = hit.group(1)
-            log(f"[pipeline] node {hit.group(1)}")
+        state["last"] = hit.group(1) if hit else state.get("last")
+        log(f"[pipeline] node {hit.group(1)}" if hit else f"[progress] {params.get('message')}")
 
 
 def pipeline_summary(data_dir: Path, pol: dict) -> dict | None:
