@@ -14,10 +14,10 @@
 #
 # Deliberately NOT shipped:
 #   * tasks/ -- platform task DATA; the runner hands main.py the requirement.
-#     public-tests/ DOES ship (2026-09-26): the runner used to mount the public
-#     specs at /workspace/tests, but all six runs of submission 4224afbed824
-#     logged `tests at None`, and without specs a local keep run scored 4/32
-#     against 22/32 with them. main.py still prefers a runner mount when present.
+#   * public-tests/ -- evaluation test copies. Gone from the repo, and never
+#     shipped (参赛须知: 不得打包测试): the agent no longer reads tests at
+#     runtime at all -- no test-dir probing, no spec mapping, no helpers in
+#     prompts; acceptance is a requirement-text build+boot+GET / smoke.
 #   * local-only instruments: path_split.py, postmortem.py, scoreboard.py,
 #     metrics.py, integration/, action_errors.cjs, page_errors.ts,
 #     grade-local.py, run-task-local.py, tests/. They analyse runs on a
@@ -47,8 +47,8 @@ cp main.py octos_stdio.py verify_node.py arc-policy.toml requirements.txt "$PKG/
 cp ../arc-runtime-lock.json "$PKG/"
 cp -R prompts "$PKG/prompts"
 cp -R template "$PKG/template"
-# HACKATHON: public-tests/ must NOT ship (参赛须知: 不得打包测试). main.py still
-# prefers ARCBENCH_TESTS_DIR / /workspace/tests when the runner mounts them.
+# HACKATHON: no test files in the bundle (参赛须知: 不得打包测试), and the
+# runtime no longer reads any.
 
 find "$PKG" -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
 find "$PKG" \( -name '*.pyc' -o -name .DS_Store \) -delete
@@ -72,13 +72,9 @@ done
 # runtime ignores in config.json moved onto the graph and the env (#230).
 # 1300 for progressive delivery: verified states reach the output dir during
 # the run, so a run killed from outside still ships working code.
-# 1320 for the bundled-spec fallback in locate_tests and the /workspace probe
-# that tells us where (or whether) the runner mounts specs now.
-# 1345 for slice_module: helper modules past the inline limit are cut to the
-# declarations the spec reaches instead of losing their tail.
-# 1360: the dispatch turn checks that the run actually started and asks again
-# when the model answered without calling run_pipeline.
-LIMIT_PY=1360
+# Down again once runtime test reading was removed (no locate_tests, no spec
+# mapping/slicing, smoke-only acceptance): the glue should stay well under it.
+LIMIT_PY=1250
 PYLINES=$(find "$PKG" -name '*.py' -exec cat {} + | wc -l | tr -d ' ')
 echo "打包内容：$(find "$PKG" -maxdepth 1 -mindepth 1 -printf '%f ' 2>/dev/null || ls "$PKG" | tr '\n' ' ')"
 echo "包内 Python 行数：$PYLINES"

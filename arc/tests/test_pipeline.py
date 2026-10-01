@@ -17,8 +17,8 @@ def tree(children):
     return {"id": "ROOT", "name": "T", "type": "FOLDER", "children": children}
 
 
-def atomic(node_id, deps=(), with_specs=False):
-    return {"id": node_id, "type": "ATOMIC", "name": node_id, "with_specs": with_specs,
+def atomic(node_id, deps=()):
+    return {"id": node_id, "type": "ATOMIC", "name": node_id,
             "description": f"build {node_id}", "dependencies": list(deps)}
 
 
@@ -27,15 +27,12 @@ POLICY = dict(name="arc_build", repairs=5, repair_window=1800, node_timeout=1200
               reasoning="none", max_output_tokens=65536, node_budget=600,
               min_node_seconds=120, final_reserve_seconds=600, final_repairs=2,
               context_window=0, llm_timeout=900,
-              node_max_output_tokens=32768, regression_every=4)
+              node_max_output_tokens=32768)
 
 
 def build(nodes_spec):
     nodes = main.atomic_nodes(tree(nodes_spec))
-    specs = {str(n["id"]): [] for n in nodes}
-    if nodes_spec and nodes_spec[0].get("with_specs"):
-        specs = {nid: [f"{nid}.spec.ts"] for nid in specs}
-    return main.build_pipeline(nodes, specs, None, "/tmp/out", POLICY, [43100], 1e10)
+    return main.build_pipeline(nodes, "/tmp/out", POLICY, [43100], 1e10)
 
 
 VALID_TOKEN = re.compile(r"[A-Za-z0-9_.:-]+")
@@ -86,7 +83,7 @@ class PipelineDot(unittest.TestCase):
     def test_back_edge_condition_carries_a_retry_marker(self):
         # validate::has_back_edge_marker looks for retry/back_edge/guard_back in
         # the label or condition; without it the cycle is rejected outright.
-        dot = build([atomic("REQ-1"), atomic("REQ-2", deps=["REQ-1"], with_specs=True)])
+        dot = build([atomic("REQ-1"), atomic("REQ-2", deps=["REQ-1"])])
         backs = [a for _, _, a, back in self.edges(dot) if back]
         self.assertTrue(backs, "expected a failure back-edge")
         for cond in backs:
@@ -125,27 +122,26 @@ class PipelineDot(unittest.TestCase):
         self.assertIn('reasoning_effort="none"', line)
         self.assertIn('max_output_tokens="32768"', line)
 
-    def test_every_fourth_check_is_a_regression_checkpoint(self):
-        nodes = main.atomic_nodes(tree([atomic(f"REQ-{i}") for i in range(1, 10)]))
-        specs = {str(n["id"]): [] for n in nodes}
-        dot = main.build_pipeline(nodes, specs, None, "/tmp/out", POLICY, [43100], 1e10, "/tmp/map.json")
-        checks = [l for l in dot.splitlines() if l.strip().startswith("check_n_REQ_")]
-        with_regress = [l.split()[0] for l in checks if "--regress" in l]
-        self.assertEqual(with_regress, ["check_n_REQ_4", "check_n_REQ_8"])
-
     def test_workspace_is_seeded_before_the_first_requirement(self):
         dot = build([atomic("REQ-1")])
         self.assertIn("start -> seed", dot)
         self.assertIn("seed -> impl_n_REQ_1", dot)
         self.assertIn("--seed", dot)
 
-    def test_regression_pass_runs_every_spec_after_the_last_requirement(self):
-        dot = build([atomic("REQ-1", with_specs=True), atomic("REQ-2", deps=["REQ-1"])])
+    def test_final_smoke_pass_runs_after_the_last_requirement(self):
+        dot = build([atomic("REQ-1"), atomic("REQ-2", deps=["REQ-1"])])
         self.assertIn("check_n_REQ_2 -> check_all", dot)
         line = next(l for l in dot.splitlines() if l.strip().startswith("check_all ["))
-        self.assertIn("REQ-1.spec.ts", line)
-        self.assertIn("REQ-2.spec.ts", line)
+        self.assertIn('--tag ALL', line)
         self.assertIn("fix_all -> check_all", dot)
+
+    def test_no_evaluation_test_reading_anywhere_in_the_graph(self):
+        # Compliance pin: the pipeline must never reference the evaluation's
+        # test files, helper modules, or runner test mounts.
+        dot = build([atomic("REQ-1"), atomic("REQ-2", deps=["REQ-1"])])
+        for banned in (".spec.ts", "e2e.ts", "helpers.ts", "public-tests",
+                       "workspace/tests", "TESTS_DIR", "--regress", "--best"):
+            self.assertNotIn(banned, dot)
 
     def test_uses_no_handler_the_dag_scheduler_refuses(self):
         dot = build([atomic("REQ-1"), atomic("REQ-2", deps=["REQ-1"])])
@@ -185,19 +181,17 @@ if __name__ == "__main__":
 
 
 class CollectApp(unittest.TestCase):
-    def test_delivers_the_best_full_suite_state_over_a_worse_final_one(self):
-        import json, tempfile
+    def test_delivers_the_final_pipeline_state(self):
+        import tempfile
         from pathlib import Path
         with tempfile.TemporaryDirectory() as tmp:
             data, out = Path(tmp) / "data", Path(tmp) / "out"
             run = data / "profiles" / "p" / "data" / "pipeline-runs" / "arc_build-1"
-            for base, text in ((run, "broken"), (run / ".arc-best" / "app", "best")):
-                (base / "frontend" / "src").mkdir(parents=True)
-                (base / "frontend" / "src" / "index.html").write_text(text)
-                (base / "backend").mkdir(parents=True)
-            (run / ".arc-best" / "score.json").write_text(json.dumps({"passed": 6, "rc": 1}))
+            (run / "frontend" / "src").mkdir(parents=True)
+            (run / "frontend" / "src" / "index.html").write_text("final")
+            (run / "backend").mkdir(parents=True)
             (out / "frontend" / "src").mkdir(parents=True)
             (out / "frontend" / "src" / "stale.html").write_text("template")
             self.assertEqual(main.collect_app(data, out, "arc_build"), run)
-            self.assertEqual((out / "frontend" / "src" / "index.html").read_text(), "best")
+            self.assertEqual((out / "frontend" / "src" / "index.html").read_text(), "final")
             self.assertFalse((out / "frontend" / "src" / "stale.html").exists())

@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """Acceptance command for ONE requirement node -- the `command validator` a
-pipeline `shell_check` node runs: build the app, serve it, run that node's
-public Playwright specs, exit 0 (pass) / non-zero (fail). The DAG scheduler
-turns that status into Pass/Fail and hands stdout+stderr to the implement node
-over the failure back-edge, so everything printed here is what the model sees
-on retry. Playwright's exit code IS the verdict; nothing re-derives it.
+pipeline `shell_check` node runs: build the app, serve it, smoke GET /, exit 0
+(pass) / non-zero (fail). The DAG scheduler turns that status into Pass/Fail
+and hands stdout+stderr to the implement node over the failure back-edge, so
+everything printed here is what the model sees on retry.
+
+The check is driven by the requirement text only. This command never sees the
+evaluation's test files: no specs are located, copied or executed here, and
+the adapter passes none in. (A requirement-driven checker beyond the boot
+smoke is future work; this version deliberately does not build one.)
 
 The app dir is the CWD = the pipeline run dir, the only place this node's
 write_file calls land (its file tools are fenced there).
 
-usage: verify_node.py <tests_dir> <port> [--tag ID --attempts N --deadline EPOCH --repair-window S --best 1] [spec.ts ...]
+usage: verify_node.py <port> [--tag ID --attempts N --deadline EPOCH --repair-window S]
        verify_node.py --seed <deliverable_dir>
 
 A failing run prints STOP when this tag has used its N attempts, has been
@@ -18,11 +22,10 @@ pipeline moves on instead of spending the budget of the requirements to come.
 Every step has its own timeout below the node's, because a shell_check that
 overruns its node timeout is an ERROR that aborts the whole pipeline.
 """
-import json, os, re, shutil, signal, socket, subprocess, sys, tempfile, time
+import json, os, shutil, signal, socket, subprocess, sys, tempfile, time
 from pathlib import Path
 
 STOP = "ARC_NO_MORE_REPAIRS"
-PASSED = {"count": 0}               # tests the last check passed (for --best)
 INSTALL = "npm install --no-audit --no-fund --no-package-lock"
 
 # The harness owns the two manifests so the model never spends a turn on them
@@ -77,65 +80,7 @@ def sh(cmd, cwd, env, timeout):
         return 124, (out.decode(errors="replace") if isinstance(out, bytes) else out) + f"\n[timed out after {timeout}s]"
 
 
-PLAYWRIGHT_VERSION = "1.63.0"   # never `latest`: an unpinned install broke cloud grading once
-
-
-def playwright_root(env: dict) -> tuple[Path | None, dict]:
-    """A directory holding node_modules/@playwright/test, plus the env its
-    browsers need. The runner image ships one (/opt/arcbench on the platform,
-    seen in every cloud run); a private pinned install through the mirrors is
-    the fallback, cached for every later check."""
-    private = Path(os.environ.get("TMPDIR", "/tmp")) / "arc-playwright"
-    cands = [os.environ.get("OCTOS_ARC_PLAYWRIGHT_ROOT"), "/opt/arcbench", "/workspace", "/workspace/tests"]
-    rc, npm_root = sh(["npm", "root", "-g"], "/", env, 20)
-    if rc == 0 and npm_root.strip():
-        cands.append(str(Path(npm_root.strip().splitlines()[-1]).parent))
-    # The CLI file, not the package dir: a wiped cache once left an empty
-    # @playwright/test behind, and every check then died on the dangling
-    # .bin/playwright link -- a whole local run was verified by nothing.
-    has = lambda root: (Path(root) / "node_modules" / "@playwright" / "test" / "cli.js").is_file()  # noqa: E731
-    for cand in filter(None, cands):
-        if has(cand):
-            return Path(cand), {}
-    browsers = {"PLAYWRIGHT_BROWSERS_PATH": str(private / "browsers")}
-    if has(private):
-        return private, browsers if (private / "browsers").is_dir() else {}
-    rc, hits = sh(["find", "/", "-maxdepth", "6", "-type", "d", "-path", "*/node_modules/@playwright/test",
-                   "-not", "-path", "/proc/*", "-not", "-path", "/sys/*"], "/", env, 25)
-    for hit in sorted(hits.split(), key=len):
-        # find's own "Permission denied" lines land here too; only real hits count.
-        if hit.endswith("/node_modules/@playwright/test") and has(Path(hit).parents[2]):
-            return Path(hit).parents[2], {}
-    if os.environ.get("OCTOS_ARC_INSTALL_PLAYWRIGHT", "1") != "1":
-        return None, {}
-    private.mkdir(parents=True, exist_ok=True)
-    (private / "package.json").write_text('{"name": "arc-verify", "private": true}')
-    mirror = dict(env, npm_config_registry="https://registry.npmmirror.com",
-                  PLAYWRIGHT_DOWNLOAD_HOST="https://npmmirror.com/mirrors/playwright", **browsers)
-    rc, log = sh(f"{INSTALL} @playwright/test@{PLAYWRIGHT_VERSION} && "
-                 "./node_modules/.bin/playwright install chromium", private, mirror, 600)
-    if rc:
-        print(f"[verify] private Playwright install failed:\n{log[-800:]}")
-    return (private, browsers) if rc == 0 else (None, {})
-
-
-NO_BROWSER = "Executable doesn't exist"
-
-
-def install_browser(pw: str, root: Path, env: dict) -> bool:
-    """A Playwright whose browser build is missing (a wiped cache, a version
-    bump) fails every spec in the same way -- a local run once burned 670
-    nodes on that. Fetch chromium once, upstream then through the mirror."""
-    for extra in ({}, {"PLAYWRIGHT_DOWNLOAD_HOST": "https://npmmirror.com/mirrors/playwright"}):
-        rc, log = sh([pw, "install", "chromium"], root, dict(env, **extra), 600)
-        if rc == 0:
-            print("[verify] installed the missing Playwright browser")
-            return True
-    print(f"[verify] Playwright browser install failed:\n{log[-800:]}")
-    return False
-
-
-def check(tests: Path, port: int, specs: list[str]) -> int:
+def check(port: int) -> int:
     out = Path.cwd()
     for rel, data in MANIFESTS.items():
         if not (out / rel).exists():
@@ -148,21 +93,20 @@ def check(tests: Path, port: int, specs: list[str]) -> int:
     env.pop("FORCE_COLOR", None)           # plain text for the model reading the failure
     if os.environ.get("NODE_BIN"):
         env["PATH"] = os.environ["NODE_BIN"] + ":" + env.get("PATH", "")
-    # Verify a disposable copy: the specs create, edit and delete records, and
-    # a store they leave behind in the workspace ships with the app -- the
-    # grader then starts from test debris instead of the seeded state (one task:
-    # 15 requirements passed their own checks, 6/32 at grading).
+    # Verify a disposable copy: even a smoke run can leave a store behind in
+    # the workspace, and that debris would ship with the app -- the grader
+    # then starts from test debris instead of the seeded state.
     app = Path(tempfile.mkdtemp(prefix="arc-app-"))
     for part in ("frontend", "backend"):
         if (out / part).is_dir():
             shutil.copytree(out / part, app / part, ignore=shutil.ignore_patterns("node_modules", "dist"))
     try:
-        return run_app(app, out, env, tests, port, specs)
+        return run_app(app, out, env, port)
     finally:
         shutil.rmtree(app, ignore_errors=True)
 
 
-def run_app(app: Path, out: Path, env: dict, tests: Path, port: int, specs: list[str]) -> int:
+def run_app(app: Path, out: Path, env: dict, port: int) -> int:
     for cwd, step in ((app / "frontend", f"{INSTALL} && npm run build"), (app / "backend", INSTALL)):
         rc, log = sh(step, cwd, env, 240)
         if rc:
@@ -170,11 +114,6 @@ def run_app(app: Path, out: Path, env: dict, tests: Path, port: int, specs: list
             return 1
     if not free(port):
         print(f"[verify] port {port} already serving; refusing to score another process")
-        return 1
-    root, pw_env = playwright_root(env) if specs else (None, {})
-    if specs and root is None:
-        # Nothing the model can fix: stop, do not spend repair rounds on it.
-        print(f"[verify] Playwright unavailable; cannot run the acceptance specs\n{STOP}: no test runner")
         return 1
 
     server_log = out / ".arc-server.log"      # a file, not a pipe: a chatty server never blocks
@@ -190,72 +129,18 @@ def run_app(app: Path, out: Path, env: dict, tests: Path, port: int, specs: list
             stop(srv)
             print(f"[verify] backend never bound port {port}\n{server_log.read_text(errors='replace')[-1500:]}")
             return 1
-        if not specs:
-            # No public example for this requirement: the app must still build,
-            # boot and serve its home page.
-            import urllib.request
-            try:
-                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-                code = opener.open(f"http://127.0.0.1:{port}/", timeout=30).status
-            except Exception as exc:  # noqa: BLE001 -- any failure is the verdict
-                code = exc
-            print(f"[verify] no public spec; GET / -> {code}")
-            return 0 if code == 200 else 1
-        # Specs `import '@playwright/test'` and Node resolves that upward from
-        # the spec, so the copy sits under the install when it is writable
-        # (NODE_PATH covers the temp-dir fallback).
-        work = root / ".octos-acceptance" / "run"
+        # Requirement-text-only acceptance: the app must build, boot and serve
+        # its home page.
+        import urllib.request
         try:
-            if work.exists():
-                shutil.rmtree(work)
-            (work / "tests").mkdir(parents=True)
-        except OSError:
-            work = Path(tempfile.mkdtemp(prefix="arc-verify-")) / "run"
-            (work / "tests").mkdir(parents=True)
-        # The node's specs plus the helpers they import (support/*.ts), at the
-        # same relative paths so `../support/e2e` still resolves.
-        helpers = [p.relative_to(tests) for p in tests.rglob("*")
-                   if p.is_file() and "node_modules" not in p.parts and not p.name.endswith(".spec.ts")
-                   and p.suffix in (".ts", ".js", ".mjs", ".cjs", ".json")]
-        for rel in [*specs, *helpers]:
-            if (tests / rel).is_file():
-                (work / "tests" / rel).parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(tests / rel, work / "tests" / rel)
-        # The platform grades with a 10 s per-test timeout; verify under the
-        # same limit so a slow app fails here, where it can still be repaired.
-        (work / "playwright.config.ts").write_text(
-            "import { defineConfig } from '@playwright/test';\n"
-            "export default defineConfig({ testDir: './tests', outputDir: './test-results', timeout: %s, retries: 0, workers: 4, "
-            "reporter: [['list']], use: { headless: true, baseURL: process.env.E2E_BASE_URL } });\n"
-            % os.environ.get("OCTOS_ARC_TEST_TIMEOUT_MS", "10000"))
-        pw = str(root / "node_modules" / ".bin" / "playwright")
-        run_env = dict(env, E2E_BASE_URL=f"http://127.0.0.1:{port}", CI="1",
-                       NODE_PATH=str(root / "node_modules"), **pw_env)
-        run = lambda: sh([pw, "test", "-c", str(work / "playwright.config.ts")], work, run_env,  # noqa: E731
-                         int(os.environ.get("OCTOS_ARC_PLAYWRIGHT_TIMEOUT", "600")))
-        rc, log = run()
-        if rc and NO_BROWSER in log and install_browser(pw, root, run_env):
-            rc, log = run()
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            code = opener.open(f"http://127.0.0.1:{port}/", timeout=30).status
+        except Exception as exc:  # noqa: BLE001 -- any failure is the verdict
+            code = exc
+        print(f"[verify] smoke; GET / -> {code}")
+        return 0 if code == 200 else 1
     finally:
         stop(srv)
-    if rc and NO_BROWSER in log:
-        # The runner has no browser and none could be installed: nothing the
-        # model can fix, so do not spend repair rounds on it.
-        print(f"[verify] Playwright has no browser to run the specs\n{log[-800:]}\n{STOP}: no browser")
-        return 1
-    # Playwright's exit code IS the verdict and its list reporter already names
-    # every failing assertion; print that verbatim for the repair round.
-    print(log[-6000:])
-    counts = re.findall(r"(\d+) passed", log)
-    PASSED["count"] = int(counts[-1]) if counts else 0
-    if rc:
-        # What the page actually showed when each test failed (Playwright's
-        # ARIA snapshot): the difference between "not found" and why.
-        for ctx in sorted((work / "test-results").rglob("error-context.md"))[:3]:
-            page = ctx.read_text(errors="replace").partition("```yaml")[2].split("```")[0]
-            if page.strip():
-                print(f"\n----- page at failure: {ctx.parent.name} -----\n{page.strip()[:1500]}")
-    return rc
 
 
 def inventory(out: Path) -> str:
@@ -278,44 +163,17 @@ def snapshot(out: Path, dest: Path) -> None:
             shutil.copytree(out / part, dest / part, ignore=shutil.ignore_patterns("node_modules", "dist"))
 
 
-def keep_best(out: Path, rc: int) -> None:
-    """Snapshot the app when this full-suite check passed more tests than any
-    before it. A repair that breaks more than it fixes, or a run cut off in
-    the middle of one, must not ship: the adapter delivers the snapshot."""
-    best = out / ".arc-best"
-    score = best / "score.json"
-    prev = json.loads(score.read_text())["passed"] if score.is_file() else -1
-    if PASSED["count"] <= prev:
-        return
-    snapshot(out, best / "app")
-    score.write_text(json.dumps({"passed": PASSED["count"], "rc": rc}))
-    print(f"[verify] best full-suite state so far: {PASSED['count']} passed (kept)")
-
-
 def main(argv: list[str]) -> int:
     if argv[:1] == ["--seed"]:
         return seed(Path(argv[1]))
-    opts, specs, it = {}, [], iter(argv[2:])
+    opts, it = {}, iter(argv[1:])
     for arg in it:
         if arg.startswith("--"):
             opts[arg[2:]] = next(it)
         else:
-            specs.append(arg)
-    if "regress" in opts:
-        # Regression checkpoint: also re-run the specs of earlier requirements
-        # whose last verdict was a pass.
-        status = Path.cwd() / ".arc-status"
-        earlier = [rel for tag, rels in json.loads(Path(opts["regress"]).read_text()).items()
-                   if tag != opts.get("tag") and (status / tag).is_file()
-                   and (status / tag).read_text().strip() == "0" for rel in rels]
-        extra = [rel for rel in dict.fromkeys(earlier) if rel not in specs]
-        if extra:
-            print(f"[verify] regression checkpoint: also re-running {len(extra)} spec(s) of earlier "
-                  "requirements that passed; a failure there is a regression to fix now")
-            specs = [*specs, *extra]
-    rc = check(Path(argv[0]).resolve(), int(argv[1]), specs)
-    if "best" in opts:
-        keep_best(Path.cwd(), rc)
+            print(f"[verify] unexpected positional argument: {arg}")
+            return 2
+    rc = check(int(argv[0]))
     if rc == 0 and "tag" in opts:
         # Latest state a check passed: the adapter copies it into the output
         # dir as the run goes, so a run killed from outside still delivers.

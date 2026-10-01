@@ -76,9 +76,8 @@ Upload it on the competition page at arc-bench.com under **New submission**.
 
 | Path | What it is |
 | --- | --- |
-| [`arc/`](arc/README.md) | **Start here.** Adapter, orchestrator, public acceptance tests, local solve/grade/pack scripts |
+| [`arc/`](arc/README.md) | **Start here.** Adapter, pipeline glue, pack script |
 | `arc/tasks/` | Offline copies of the task requirement files (smoke, ticket-booking, six web tasks) |
-| `arc/public-tests/` | The platform's published Playwright acceptance tests |
 | `crates/` | The Octos kernel source, forked from the pinned upstream base |
 | `book/`, `docs/` | Kernel documentation, vendored at the pinned base — see [Kernel documentation](#kernel-documentation) |
 | `arc-runtime-lock.json` | The release/submission pin: source commit, target, and required SHA-256 values |
