@@ -31,7 +31,7 @@ Rules:
 - Write only the app's own files under frontend/ and backend/. No reports,
   notes, summaries or other .md files: nobody reads them and they cost output.
 - Prefer zero runtime dependencies; if you must install, the registry is
-  already pointed at npmmirror.
+  already pointed at the official npm registry.
 {ports}
 Then write your own acceptance check as `checks/{node_id}.mjs`: a Node script
 that derives its steps from THIS requirement's text above (never from any

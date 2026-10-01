@@ -301,7 +301,7 @@ def kernel_env(pol: dict, config_dir: Path) -> dict:
     env["OCTOS_LLM_MAX_RETRIES"] = "8"
     env["OCTOS_STDIO_REASONING_EFFORT"] = pol["reasoning"]
     env.setdefault("OCTOS_DANGER_FULL_ACCESS", "1")
-    env.setdefault("npm_config_registry", "https://registry.npmmirror.com")
+    env.setdefault("npm_config_registry", "https://registry.npmjs.org")
     env["_ARC"] = json.dumps({"provider": provider, "model": model, "key_env": key_env,
                               "base_url": base_url})
     return env
