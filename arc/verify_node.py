@@ -1,37 +1,28 @@
 #!/usr/bin/env python3
-"""Acceptance command for ONE requirement node -- the `command validator` a
-pipeline `shell_check` node runs: build the app, boot it the way the grader
-does (fresh dir, PORT), smoke GET /, audit the served pages, and run the
-self-check the implement node wrote from the requirement text. Exit 0 (pass)
-/ non-zero (fail). The DAG scheduler turns that status into Pass/Fail and
-hands stdout+stderr to the implement node over the failure back-edge, so
-everything printed here is what the model sees on retry.
-
-Every check derives from the requirement text. This command never sees the
-evaluation's test files: none are located, copied or executed here, and the
-adapter passes none in. The per-node browser check is written by the model
-itself, from the requirement, at implement time.
-
-The app dir is the CWD = the pipeline run dir, the only place this node's
-write_file calls land (its file tools are fenced there).
+"""Acceptance command for ONE requirement node (a pipeline `shell_check`):
+build, boot the way the grader does (fresh dir, PORT), smoke GET /, audit the
+served pages, run the self-check the implement node wrote FROM THE REQUIREMENT
+TEXT; exit 0/1. Output goes back to the implement node on the repair back-edge.
+Never touches the evaluation's test files.
 
 usage: verify_node.py <port> [--tag ID --attempts N --deadline EPOCH --repair-window S]
                               [--e2e FILE | --e2e-dir DIR]
        verify_node.py --seed <deliverable_dir>
 
-A failing run prints STOP when this tag has used its N attempts, has been
-repairing for longer than its window, or the deadline has passed; the repair back-edge does not fire on that marker, so the
-pipeline moves on instead of spending the budget of the requirements to come.
-Every step has its own timeout below the node's, because a shell_check that
-overruns its node timeout is an ERROR that aborts the whole pipeline.
+--e2e runs one self-check against the booted app; --e2e-dir runs every *.mjs
+in the dir, each against its OWN app instance+port, OCTOS_ARC_CHECK_JOBS at a
+time (default 2: one node+chromium lane is ~600MB, safe under the grader's
+2g/1cpu). STOP on a failure means: attempts/window/deadline spent, move on.
 """
 import json, os, re, shutil, signal, socket, subprocess, sys, tempfile, time
+from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
 from pathlib import Path
 
 STOP = "ARC_NO_MORE_REPAIRS"
 INSTALL = "npm install --no-audit --no-fund --no-package-lock"
 E2E_TIMEOUT = int(os.environ.get("OCTOS_ARC_SELF_CHECK_TIMEOUT", "180"))
+CHECK_JOBS = int(os.environ.get("OCTOS_ARC_CHECK_JOBS", "2"))
 
 # The harness owns the two manifests so the model never spends a turn on them
 # (build copies src/* to dist; start runs server.js).
@@ -42,16 +33,13 @@ MANIFESTS = {
                              "scripts": {"start": "node server.js"}},
 }
 
-# Server-log lines that mean the process is one request away from dying (the
+# Server-log lines meaning the process is one request from dying (the
 # ERR_HTTP_HEADERS_SENT class: an unhandled exception after a partial reply).
 CRASH_RE = re.compile(r"Traceback \(most recent|Uncaught |unhandledRejection|ERR_HTTP_HEADERS_SENT"
                       r"|ReferenceError|TypeError|SyntaxError")
 
-
 def seed(src: Path) -> int:
-    """Start the run dir from the existing app (evolution tasks, the platform
-    template), else the bundle's own template: the model extends real files
-    instead of rebuilding from nothing, and nothing stale survives collection."""
+    """Start the run dir from the existing app, else the bundle's template."""
     out = Path.cwd()
     for base in (src, Path(__file__).resolve().parent / "template"):
         if (base / "frontend").is_dir() and not (out / "frontend").exists():
@@ -69,8 +57,7 @@ def free(port: int) -> bool:
 
 
 def stop(proc) -> None:
-    """Tolerant teardown: never die here and leave the app listening, or the
-    next node's check would score this node's server."""
+    """Tolerant teardown: never leave an app listening for the next node."""
     if proc is None or proc.poll() is not None:
         return
     for attempt in (lambda: os.killpg(os.getpgid(proc.pid), signal.SIGTERM), proc.terminate, proc.kill):
@@ -91,9 +78,8 @@ def sh(cmd, cwd, env, timeout):
 
 
 class PageAudit(HTMLParser):
-    """One served page, checked against the generic UI rules the requirements
-    imply: one primary entry per action name per page, every form control
-    labeled, every button named."""
+    """One served page vs the rules requirements imply: one primary entry per
+    action name, every control labeled, every button named."""
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -150,24 +136,21 @@ def audit_pages(dist: Path) -> list[str]:
         for name, count in seen.items():
             if count > 1:
                 problems.append(f"{page.name}: {count} links named {name!r} (one primary entry per action)")
-        for b in audit.buttons:
-            if not b.strip():
-                problems.append(f"{page.name}: a button has no accessible name")
+        if any(not b.strip() for b in audit.buttons):
+            problems.append(f"{page.name}: a button has no accessible name")
         for a, wrapped in audit.inputs:
             t = (a.get("type") or "text").lower()
             if t in ("hidden", "submit", "button", "reset", "image", "file"):
                 continue
-            labeled = (wrapped or a.get("aria-label") or a.get("aria-labelledby")
-                       or (a.get("id") and a["id"] in audit.label_for))
-            if not labeled:
+            if not (wrapped or a.get("aria-label") or a.get("aria-labelledby")
+                    or (a.get("id") and a["id"] in audit.label_for)):
                 problems.append(f"{page.name}: {t} input has no visible label")
     return problems[:8]
 
 
 def playwright_env(env: dict) -> dict | None:
-    """The runner image ships @playwright/test plus a chromium build; use that
-    library for our own requirement-derived checks. Absent here means absent
-    for the whole run: STOP rather than spend repair rounds."""
+    """The runner image ships @playwright/test + chromium; absent here means
+    absent all run: STOP rather than spend repair rounds."""
     for root in (os.environ.get("OCTOS_ARC_PLAYWRIGHT_ROOT"), "/opt/arcbench"):
         if root and (Path(root) / "node_modules" / "@playwright" / "test" / "package.json").is_file():
             out = dict(env, NODE_PATH=str(Path(root) / "node_modules"))
@@ -177,7 +160,61 @@ def playwright_env(env: dict) -> dict | None:
     return None
 
 
-def run_self_checks(files: list[Path], env: dict, port: int) -> int:
+def copy_app(out: Path, prefix: str) -> Path:
+    """A disposable copy, so a check's boot writes no store debris that would
+    ship with the app (the grader would then start dirty)."""
+    app = Path(tempfile.mkdtemp(prefix=prefix))
+    for part in ("frontend", "backend"):
+        if (out / part).is_dir():
+            shutil.copytree(out / part, app / part, ignore=shutil.ignore_patterns("node_modules", "dist"))
+    return app
+
+
+def prepare(app: Path, env: dict) -> bool:
+    """Install+build; an untouched (zero-dep) manifest skips npm install."""
+    for part, step in (("frontend", True), ("backend", False)):
+        pj = app / part / "package.json"
+        data = MANIFESTS.get(f"{part}/package.json")
+        if not (pj.is_file() and data and pj.read_text() == json.dumps(data, indent=2) + "\n"):
+            rc, log = sh(INSTALL, app / part, env, 240)
+            if rc:
+                print(f"[verify] {part}: npm install failed\n{log[-1200:]}")
+                return False
+        if step:
+            rc, log = sh("npm run build", app / part, env, 240)
+            if rc:
+                print(f"[verify] frontend: npm run build failed\n{log[-1200:]}")
+                return False
+    return True
+
+
+def boot(app: Path, env: dict, port: int, log_path: Path):
+    """Serve the app; the process once it owns the port, else None."""
+    srv = subprocess.Popen("npm run start", cwd=app / "backend", env=dict(env, PORT=str(port)),
+                           shell=True, stdout=log_path.open("w"), stderr=subprocess.STDOUT,
+                           text=True, preexec_fn=os.setsid)
+    for _ in range(60):
+        if not free(port) or srv.poll() is not None:
+            break
+        time.sleep(0.5)
+    if free(port):
+        stop(srv)
+        print(f"[verify] backend never bound port {port}\n{log_path.read_text(errors='replace')[-1200:]}")
+        return None
+    return srv
+
+
+def smoke(port: int):
+    """The grader boots the app exactly like this; a failure here fails grading."""
+    import urllib.request
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        return opener.open(f"http://127.0.0.1:{port}/", timeout=30).status
+    except Exception as exc:  # noqa: BLE001 -- any failure is the verdict
+        return exc
+
+
+def playwright_run(files: list[Path], env: dict, port: int) -> int:
     pw_env = playwright_env(env)
     if pw_env is None:
         print(f"[verify] no Playwright library available for self-checks\n{STOP}: no test runner")
@@ -189,6 +226,32 @@ def run_self_checks(files: list[Path], env: dict, port: int) -> int:
         print(f"[verify] self-check {f.name}: {'ok' if rc == 0 else 'FAILED'}\n{log[-2500:]}")
         rc_all = rc_all or rc
     return rc_all
+
+
+def isolated_checks(out: Path, env: dict, files: list[Path], port: int) -> int:
+    """Final pass: every script against its OWN app instance+port, CHECK_JOBS
+    at a time, so scripts may register/edit state without interfering."""
+
+    def one(index_file):
+        i, f = index_file
+        app = copy_app(out, prefix=f"arc-iso{i}-")
+        lane_port = port + 1 + i
+        try:
+            if not prepare(app, env):
+                return 1
+            srv = boot(app, env, lane_port, app / ".arc-server.log")
+            if srv is None:
+                return 1
+            try:
+                return playwright_run([f], env, lane_port)
+            finally:
+                stop(srv)
+        finally:
+            shutil.rmtree(app, ignore_errors=True)
+
+    with ThreadPoolExecutor(max_workers=max(1, CHECK_JOBS)) as pool:
+        results = pool.map(one, enumerate(files))
+    return 1 if any(results) else 0
 
 
 def check(port: int, e2e: str | None, e2e_dir: str | None) -> int:
@@ -208,77 +271,50 @@ def check(port: int, e2e: str | None, e2e_dir: str | None) -> int:
     env.pop("FORCE_COLOR", None)           # plain text for the model reading the failure
     if os.environ.get("NODE_BIN"):
         env["PATH"] = os.environ["NODE_BIN"] + ":" + env.get("PATH", "")
-    # Verify a disposable copy: even a smoke run can leave a store behind in
-    # the workspace, and that debris would ship with the app -- the grader
-    # then starts from test debris instead of the seeded state.
-    app = Path(tempfile.mkdtemp(prefix="arc-app-"))
-    for part in ("frontend", "backend"):
-        if (out / part).is_dir():
-            shutil.copytree(out / part, app / part, ignore=shutil.ignore_patterns("node_modules", "dist"))
-    checks = [(out / e2e)] if e2e else sorted((out / e2e_dir).glob("*.mjs")) if e2e_dir and (out / e2e_dir).is_dir() else []
+
+    app = copy_app(out, "arc-app-")
     try:
-        return run_app(app, out, env, port, checks)
-    finally:
-        shutil.rmtree(app, ignore_errors=True)
-
-
-def run_app(app: Path, out: Path, env: dict, port: int, checks: list[Path]) -> int:
-    for cwd, step in ((app / "frontend", f"{INSTALL} && npm run build"), (app / "backend", INSTALL)):
-        rc, log = sh(step, cwd, env, 240)
-        if rc:
-            print(f"[verify] {cwd.name}: {step!r} failed\n{log[-1500:]}")
+        if not prepare(app, env):
             return 1
-    if not free(port):
-        print(f"[verify] port {port} already serving; refusing to score another process")
-        return 1
-    problems = audit_pages(app / "frontend" / "dist")
-
-    server_log = out / ".arc-server.log"      # a file, not a pipe: a chatty server never blocks
-    srv = subprocess.Popen("npm run start", cwd=app / "backend", env=dict(env, PORT=str(port)),
-                           shell=True, stdout=server_log.open("w"), stderr=subprocess.STDOUT,
-                           text=True, preexec_fn=os.setsid)
-    try:
-        for _ in range(60):
-            if not free(port) or srv.poll() is not None:
-                break
-            time.sleep(0.5)
-        if free(port):
-            stop(srv)
-            print(f"[verify] backend never bound port {port}\n{server_log.read_text(errors='replace')[-1500:]}")
+        if not free(port):
+            print(f"[verify] port {port} already serving; refusing to score another process")
             return 1
-        # Boot smoke: the grader starts the app exactly this way, so a crash
-        # here is a crash at grading time.
-        import urllib.request
+        problems = audit_pages(app / "frontend" / "dist")
+        server_log = out / ".arc-server.log"   # a file, not a pipe: a chatty server never blocks
+        srv = boot(app, env, port, server_log)
+        if srv is None:
+            return 1
         try:
-            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-            code = opener.open(f"http://127.0.0.1:{port}/", timeout=30).status
-        except Exception as exc:  # noqa: BLE001 -- any failure is the verdict
-            code = exc
-        print(f"[verify] smoke; GET / -> {code}")
-        rc = 0 if code == 200 else 1
-        if checks and rc == 0:
-            rc = run_self_checks(checks, env, port)
-        # A reply can succeed while the process is already doomed: dead server
-        # or an unhandled exception in its log fails the node either way.
-        time.sleep(0.5)
-        log_text = server_log.read_text(errors="replace")[-3000:] if server_log.is_file() else ""
-        crash = CRASH_RE.search(log_text)
-        if srv.poll() is not None or crash:
-            print(f"[verify] server unhealthy after checks (exit={srv.poll()}); log tail:\n{log_text[-1500:]}")
-            rc = 1
-        elif rc and log_text.strip():
-            print(f"[verify] server log tail:\n{log_text[-800:]}")
+            code = smoke(port)
+            print(f"[verify] smoke; GET / -> {code}")
+            rc = 0 if code == 200 else 1
+            if e2e and rc == 0:
+                rc = playwright_run([out / e2e], env, port)
+            # A reply can succeed while the process is already doomed: a dead
+            # server or an unhandled exception in its log fails the node too.
+            time.sleep(0.5)
+            log_text = server_log.read_text(errors="replace")[-3000:] if server_log.is_file() else ""
+            if srv.poll() is not None or CRASH_RE.search(log_text):
+                print(f"[verify] server unhealthy after checks (exit={srv.poll()}); log tail:\n{log_text[-1500:]}")
+                rc = 1
+            elif rc and log_text.strip():
+                print(f"[verify] server log tail:\n{log_text[-800:]}")
+        finally:
+            stop(srv)
+        if e2e_dir and (out / e2e_dir).is_dir():
+            files = sorted((out / e2e_dir).glob("*.mjs"))
+            if files:
+                print(f"[verify] final pass: {len(files)} self-checks, {max(1, CHECK_JOBS)} lanes")
+                rc = isolated_checks(out, env, files, port) or rc
         for p in problems:
             print(f"[verify] ui: {p}")
         return 1 if problems else rc
     finally:
-        stop(srv)
+        shutil.rmtree(app, ignore_errors=True)
 
 
 def inventory(out: Path) -> str:
-    """The app's source files with line counts. This output is the next
-    implement node's input, so it starts oriented instead of spending its
-    first turns on list_dir/glob."""
+    """App source files with line counts: the next implement node's orientation."""
     rows = []
     for part in ("frontend", "backend"):
         for f in sorted((out / part).rglob("*")) if (out / part).is_dir() else []:

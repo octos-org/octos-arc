@@ -133,7 +133,13 @@ class PipelineDot(unittest.TestCase):
         self.assertIn("check_n_REQ_2 -> check_all", dot)
         line = next(l for l in dot.splitlines() if l.strip().startswith("check_all ["))
         self.assertIn('--tag ALL', line)
+        self.assertIn("--e2e-dir checks", line)
         self.assertIn("fix_all -> check_all", dot)
+
+    def test_each_check_runs_the_nodes_own_self_check_script(self):
+        dot = build([atomic("REQ-1"), atomic("REQ-2", deps=["REQ-1"])])
+        line = next(l for l in dot.splitlines() if l.strip().startswith("check_n_REQ_1 ["))
+        self.assertIn("--e2e checks/REQ-1.mjs", line)
 
     def test_no_evaluation_test_reading_anywhere_in_the_graph(self):
         # Compliance pin: the pipeline must never reference the evaluation's
