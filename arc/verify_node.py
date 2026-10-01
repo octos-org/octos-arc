@@ -92,7 +92,7 @@ def playwright_root(env: dict) -> tuple[Path | None, dict]:
         cands.append(str(Path(npm_root.strip().splitlines()[-1]).parent))
     # The CLI file, not the package dir: a wiped cache once left an empty
     # @playwright/test behind, and every check then died on the dangling
-    # .bin/playwright link -- a whole local keep run was verified by nothing.
+    # .bin/playwright link -- a whole local run was verified by nothing.
     has = lambda root: (Path(root) / "node_modules" / "@playwright" / "test" / "cli.js").is_file()  # noqa: E731
     for cand in filter(None, cands):
         if has(cand):
@@ -150,7 +150,7 @@ def check(tests: Path, port: int, specs: list[str]) -> int:
         env["PATH"] = os.environ["NODE_BIN"] + ":" + env.get("PATH", "")
     # Verify a disposable copy: the specs create, edit and delete records, and
     # a store they leave behind in the workspace ships with the app -- the
-    # grader then starts from test debris instead of the seeded state (keep:
+    # grader then starts from test debris instead of the seeded state (one task:
     # 15 requirements passed their own checks, 6/32 at grading).
     app = Path(tempfile.mkdtemp(prefix="arc-app-"))
     for part in ("frontend", "backend"):

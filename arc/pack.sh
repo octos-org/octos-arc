@@ -47,7 +47,8 @@ cp main.py octos_stdio.py verify_node.py arc-policy.toml requirements.txt "$PKG/
 cp ../arc-runtime-lock.json "$PKG/"
 cp -R prompts "$PKG/prompts"
 cp -R template "$PKG/template"
-cp -R public-tests "$PKG/public-tests"
+# HACKATHON: public-tests/ must NOT ship (参赛须知: 不得打包测试). main.py still
+# prefers ARCBENCH_TESTS_DIR / /workspace/tests when the runner mounts them.
 
 find "$PKG" -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
 find "$PKG" \( -name '*.pyc' -o -name .DS_Store \) -delete
@@ -59,7 +60,7 @@ for required in main.py requirements.txt template; do
 done
 for banned in llm_proxy.py acceptance.py rust_engine.py verify_app.py path_split.py \
               postmortem.py scoreboard.py metrics.py integration action_errors.cjs \
-              page_errors.ts tasks tests arcbench_agent_runtime; do
+              page_errors.ts public-tests tasks tests arcbench_agent_runtime; do
     [ ! -e "$PKG/$banned" ] || { echo "pack: $banned must not be in the bundle" >&2; exit 1; }
 done
 # 800 with the runtime fetch inlined; the container has no octos of its own and

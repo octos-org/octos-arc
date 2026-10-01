@@ -44,7 +44,8 @@
 # Requires OCTOS_PIPELINE_DAG=1 (main.py sets it): only the DAG scheduler does
 # back-edge retries and hands the failing node's output back to its target.
 name = "arc_build"              # OCTOS_ARC_PIPELINE_NAME — the bare name run_pipeline selects
-repair_rounds = 5               # OCTOS_REPAIR_ROUNDS — per-node `max_retries` in the .dot
+repair_rounds = 5               # OCTOS_REPAIR_ROUNDS
+node_budget_seconds = 300        # OCTOS_NODE_TIME_BUDGET — 黑客松 23:59 截止:github 47节点×300=3.9h,sheet 24×300=2h — per-node `max_retries` in the .dot
 node_timeout_seconds = 1200     # OCTOS_NODE_TIMEOUT — one implement node
 verify_timeout_seconds = 1800   # OCTOS_ARC_VERIFY_TIMEOUT — one acceptance node; above the sum of verify_node.py's own step timeouts, since an overrun aborts the pipeline
 max_iterations = 40             # OCTOS_MAX_ITERATIONS — tool iterations inside an implement node
@@ -82,7 +83,7 @@ design_timeout_seconds = 420     # OCTOS_DESIGN_TIMEOUT
 implement_fraction = 0.6         # OCTOS_IMPLEMENT_FRACTION — implement turn ≤ this share of the node budget
 min_repair_seconds = 300         # OCTOS_MIN_REPAIR_SECONDS — no repair turn with less left
 max_iterations = 500             # OCTOS_MAX_ITERATIONS — tool-mode iterations per turn
-# Run-wide cost guard (wf-adapter-30, calibrated on cloud keep 2224a9013528: 32 nodes, 26M platform
+# Run-wide cost guard (wf-adapter-30, calibrated on a 32-node cloud run: 26M platform
 # tokens, ~1.1 turns per node): once the run has spent its token or turn allowance, no repair turn
 # starts, remaining nodes get one implement turn each and the final suite runs once. -1 = derived once
 # the tree is known (tokens max(6M, 2.5M × nodes), turns max(24, 4 × nodes), ≈3× a healthy run); 0 = off.
@@ -92,7 +93,7 @@ max_total_tokens_abs = 0    # OCTOS_ARC_MAX_TOTAL_TOKENS_ABS — absolute ceilin
 
 [repair]
 rounds = 5              # OCTOS_REPAIR_ROUNDS — K, acceptance repair rounds per node
-rounds_large_tree = 3   # trees with more than large_tree_nodes ATOMIC nodes (keep barely repaired; an explicit OCTOS_REPAIR_ROUNDS applies everywhere)
+rounds_large_tree = 3   # trees with more than large_tree_nodes ATOMIC nodes (a 32-node tree barely repaired; an explicit OCTOS_REPAIR_ROUNDS applies everywhere)
 large_tree_nodes = 2
 codegen_repairs = 2     # OCTOS_ARC_CODEGEN_REPAIRS — codegen repairs before falling back to tool mode
 rewrite_on_zero = true  # OCTOS_ARC_REWRITE_ON_ZERO — one full rewrite on zero passes, only before any behavior is verified
@@ -130,8 +131,8 @@ checkpoint_repairs = 2          # OCTOS_ARC_CHECKPOINT_REPAIRS — repair rounds
                                 # found a regression, each re-verified before the next. Was 1, and
                                 # was missing from this file entirely: the Python adapter reads it
                                 # from the environment, and a cloud run cannot be given environment
-                                # variables, so the knob was unreachable where it matters. Cloud keep
-                                # 4e18c76637ae: one round cleared 2 of 5 regressions and left 2
+                                # variables, so the knob was unreachable where it matters. One cloud run
+                                # cleared 2 of 5 regressions and left 2
                                 # broken for 97 minutes and three checkpoints until the final suite.
 memory_per_worker_mib = 700      # container memory per Chromium worker (cgroup limit / this = workers)
 final_memory_per_worker_mib = 450   # full suite: the platform grades with 4 workers in 2 GiB
@@ -157,13 +158,13 @@ inline_source_chars = 40000  # OCTOS_ARC_INLINE_SOURCE_CHARS — sources quoted 
 codegen_context_chars = 90000  # OCTOS_ARC_CODEGEN_CONTEXT_CHARS — codegen prompt budget: spec must fit 60% of it; existing sources ranked by spec-term overlap fill the rest (≈26k tokens)
 codegen_source_fit_chars = 0    # OCTOS_ARC_CODEGEN_SOURCE_FIT_CHARS — 0 = 用 codegen_context_chars。
                                 # 这是「应用多大之后节点掉进工具模式」的闸门。2026-09-17 曾把它
-                                # 独立出来设成 400000（理由：工具模式占 stackoverflow 65% 的节点、
+                                # 独立出来设成 400000（理由：工具模式占一道 66 节点题 65% 的节点、
                                 # 90% 的墙钟，单节点慢 19.6 倍），2026-09-18 改回——它用正确性换了
                                 # 速度。同题对照（arc/postmortem.py 分类）：
-                                #   stackoverflow 97848d542ac8  65% 工具模式  66/66  回归 0
-                                #   stackoverflow 34ca94da0075 100% codegen   中途   回归 9
-                                #   12306         99196f2e802b 100% codegen   中途   回归 29
-                                # 12306 的失败全是回归，没有一个是做不出来。原因就是下面
+                                #   66 节点题 run-A  65% 工具模式  66/66  回归 0
+                                #   66 节点题 run-B  100% codegen   中途   回归 9
+                                #   117 节点题 run-C 100% codegen   中途   回归 29
+                                # 117 节点题的失败全是回归，没有一个是做不出来。原因就是下面
                                 # codegen_context_fits 写的不变量：不要在源码有遗漏的情况下要求
                                 # 整文件替换——117 节点应用的后端入口远超任何预算，节点只看到一部分
                                 # 却被要求整文件返回，就会丢掉属于别人 spec 的处理逻辑。

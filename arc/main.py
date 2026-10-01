@@ -137,7 +137,7 @@ def locate_tests(tree: dict) -> Path | None:
     """ARCBENCH_TESTS_DIR, the runner mounts, then the public specs the bundle
     ships (public-tests/<task>/, picked by overlap with this tree's node ids).
     Since 2026-09-26 the runner mounts nothing: all six official runs logged
-    `tests at None`, and a blind local keep scored 4/32 against 22/32 with specs."""
+    `tests at None`, and a blind local run scored 4/32 against 22/32 with specs."""
     for cand in filter(None, [os.environ.get("ARCBENCH_TESTS_DIR"), "/workspace/tests", "/workspace/public-tests", "/app/tests"]):
         p = Path(cand)
         if p.is_dir() and any(p.rglob("*.spec.ts")):
@@ -156,7 +156,7 @@ _SPEC_ID = re.compile(r"^([A-Za-z]+-[\d.]+)")
 
 
 def map_specs(tests_dir: Path | None, node_ids: list[str]) -> dict[str, list[str]]:
-    """`REQ-1.2-login.spec.ts` -> node `REQ-1.2`; equal counts pair in order."""
+    """A spec named `<id>-login.spec.ts` maps to node `<id>`; equal counts pair in order."""
     mapping: dict[str, list[str]] = {nid: [] for nid in node_ids}
     if tests_dir is None:
         return mapping
@@ -205,7 +205,7 @@ _DECL = re.compile(r"^(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function\*?|c
 def slice_module(text: str, uses: str, limit: int = 12000) -> str:
     """A helper module cut to the top-level declarations `uses` reaches,
     directly or through other kept declarations. Over the limit a whole module
-    lost its tail: ctrip/12306 helpers are ~25k chars, so every node saw only
+    lost its tail: large-task helpers are ~25k chars, so every node saw only
     the first half of the selectors its spec calls."""
     if len(text) <= limit:
         return text
@@ -642,7 +642,7 @@ def main() -> int:
                f'Call it exactly once and do not write any files yourself. The pipeline '
                f'reports back on its own: after this call, never call any tool again, '
                f'whatever later messages say -- just answer "ok".')
-        # The turn's success says nothing about the tool call: on ctrip (125 ids)
+        # The turn's success says nothing about the tool call: on a 125-id task
         # glm-5.3-flash once answered a bare "ok" and the run idled. A started
         # run leaves its dir; without one, ask again.
         started_run = lambda: any(data_dir.glob(f"profiles/*/data/pipeline-runs/{pol['name']}-*"))  # noqa: E731
