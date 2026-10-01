@@ -261,7 +261,7 @@ def parse_e2e_files(e2e: str | None, e2e_list: str | None) -> list[str]:
     return [e2e] if e2e else []
 
 
-def check(port: int, e2e: str | None, e2e_dir: str | None, e2e_list: str | None = None) -> int:
+def check(port: int, e2e: str | None, e2e_dir: str | None, e2e_list: str | None = None, soak: int = 0) -> int:
     out = Path.cwd()
     for rel, data in MANIFESTS.items():
         if not (out / rel).exists():
@@ -299,9 +299,15 @@ def check(port: int, e2e: str | None, e2e_dir: str | None, e2e_list: str | None 
             rc = 0 if code == 200 else 1
             if e2e_files and rc == 0:
                 rc = playwright_run([out / f for f in e2e_files], env, port)
-            # A reply can succeed while the process is already doomed: a dead
-            # server or an unhandled exception in its log fails the node too.
-            time.sleep(0.5)
+            # Soak the boot (soak seconds on the delivery gate, one 0.5s
+            # probe mid-pipeline): a reply can succeed while the process is doomed.
+            end = time.time() + (soak or 0.5)
+            while time.time() < end and rc == 0:
+                time.sleep(min(5, max(0.5, end - time.time())))
+                again = smoke(port)
+                if again != 200 or srv.poll() is not None:
+                    print(f"[verify] soak: GET / -> {again}, server exit={srv.poll()}")
+                    rc = 1
             log_text = server_log.read_text(errors="replace")[-3000:] if server_log.is_file() else ""
             if srv.poll() is not None or CRASH_RE.search(log_text):
                 print(f"[verify] server unhealthy after checks (exit={srv.poll()}); log tail:\n{log_text[-1500:]}")
@@ -350,7 +356,7 @@ def main(argv: list[str]) -> int:
         else:
             print(f"[verify] unexpected positional argument: {arg}")
             return 2
-    rc = check(int(argv[0]), opts.get("e2e"), opts.get("e2e-dir"), opts.get("e2e-list"))
+    rc = check(int(argv[0]), opts.get("e2e"), opts.get("e2e-dir"), opts.get("e2e-list"), int(opts.get("soak") or 0))
     if rc == 0 and "tag" in opts:
         # Latest state a check passed: the adapter copies it into the output
         # dir as the run goes, so a run killed from outside still delivers.

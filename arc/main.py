@@ -1,14 +1,7 @@
 #!/usr/bin/env python3
-"""ARC-Bench adapter — glue only. Four jobs, nothing else:
-  1. read the platform's env vars and paths;
-  2. emit this task's pipeline into the dir the kernel scans, start the kernel;
-  3. name that pipeline on the first turn so the KERNEL runs the
-     implement -> acceptance -> repair loop (octos-pipeline's DAG scheduler);
-  4. collect the kernel's events into the 7 tables and runner-events.jsonl.
-
-No orchestration here: no rounds, no budget arithmetic, no model routing, no
-acceptance runner. That policy lives in arc-policy.toml and prompts/.
-"""
+"""ARC-Bench adapter — glue only: read env/paths, emit this task's pipeline
+for the kernel, name it on the first turn, collect events into the 7 tables.
+Policy lives in arc-policy.toml and prompts/."""
 from __future__ import annotations
 
 import argparse, functools, hashlib, json, os, re, shlex, shutil, subprocess, sys, tempfile, time, tomllib
@@ -205,9 +198,7 @@ def build_pipeline(nodes, out, pol, ports, deadline) -> str:
     # `retry` in the condition is what makes these legal back-edges.
     repair = (f'{fail} && !outcome.contains(\\"{STOP}\\") '
               f'&& context.retry_budget != \\"exhausted\\"')
-    # run_pipeline kills the whole run at its timeout -- 1800 s unless the
-    # graph says otherwise. The adapter owns the budget, so the graph carries
-    # it (plus the final reserve); kernel_env raises the clamp ceiling to match.
+    # The adapter owns the budget: the graph carries run_timeout + reserve.
     lines = [f'digraph {pol["name"]} {{',
              f'    graph [default_timeout_secs="{pol["run_timeout"] + pol["final_reserve_seconds"]}"]',
              '    start [handler="noop", label="Start"]',
@@ -276,12 +267,12 @@ def kernel_env(pol: dict, config_dir: Path) -> dict:
     if provider not in ("openai", "anthropic") and api_key:
         key_env = f"{provider.upper()}_API_KEY"
         env.setdefault(key_env, api_key)
+    # The profile runtime never reads config.json's gateway section;
+    # reasoning/caps/timeouts ride on the graph nodes and the env below.
     config = {
         "provider": provider, "model": model,
         "sandbox": {"allow_network": True},
         "memory": {"refresh": {"enabled": False}},
-        # The profile runtime never reads this file's gateway section;
-        # reasoning/caps/timeouts ride on the graph nodes and the env below.
     }
     if provider not in ("openai", "anthropic") and base_url:
         config["base_url"] = base_url
@@ -289,7 +280,6 @@ def kernel_env(pol: dict, config_dir: Path) -> dict:
     (config_dir / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
     env["OCTOS_CONFIG_DIR"] = str(config_dir)
     env["OCTOS_STDIO_SOLO_TOOLS"] = "run_pipeline"
-    # Only OUR pipeline, and do not wake the session for every finished node.
     env["OCTOS_PIPELINE_ALLOW"] = pol["name"]
     env["OCTOS_PIPELINE_NODE_CONTINUATIONS"] = "0"
     env["OCTOS_PIPELINE_TIMEOUT_MAX_SECS"] = str(pol["run_timeout"] + pol["final_reserve_seconds"])
@@ -350,8 +340,7 @@ def _sha256(path: Path) -> str:
 
 
 def _verify_against_lock(tarball: Path, url: str) -> None:
-    """ARC_BASELINE.md: verify downloads before executing them; no downgrade
-    path -- a wrong engine never runs, and URL overrides cannot dodge the pin."""
+    """Verify downloads before executing them; no downgrade path (ARC_BASELINE)."""
     lock = _runtime_lock()
     if lock is None:
         raise RuntimeError("arc-runtime-lock.json not found; refusing to run an unverified engine download")
@@ -368,8 +357,7 @@ def _verify_against_lock(tarball: Path, url: str) -> None:
 
 
 def _cached_octos(cache_dir: Path) -> str | None:
-    """The cached binary, but only if it matches the pinned hash and came from
-    the URL in force now."""
+    """The cached binary, only if hash-pinned and from the current URL."""
     try:
         if (cache_dir / "octos").is_file() and (cache_dir / "source-url.txt").read_text() == _octos_url():
             expected = (_runtime_lock() or {}).get("runtime_release", {}).get("binary_sha256")
@@ -392,10 +380,7 @@ def _tarball_ok(tarball: Path) -> bool:
 
 
 def _download_octos(cache_dir: Path) -> str:
-    """Only the pinned official release URL, then sha256 verification against
-    arc-runtime-lock.json. No third-party mirrors: an undeclared mirror is a
-    supply-chain path the submission never disclosed. Up to 12 resumable
-    attempts plus a member check, so a truncated file is never run."""
+    """Only the pinned official release URL + sha256 verify; 12 resumable attempts."""
     import tarfile, urllib.request
     cache_dir.mkdir(parents=True, exist_ok=True)
     tarball, url = cache_dir / "octos-bundle.tar.gz", _octos_url()
@@ -441,7 +426,6 @@ def _download_octos(cache_dir: Path) -> str:
 
 
 def find_octos() -> str:
-    """OCTOS_BIN, bundled bin/octos, PATH, a local build -- then the release."""
     cache_dir = Path(os.environ.get("OCTOS_CACHE_DIR", "/tmp/octos-bin"))
     for cand in (os.environ.get("OCTOS_BIN"), BUNDLE_DIR / "bin" / "octos",
                  shutil.which("octos"), BUNDLE_DIR.parent / "target" / "release" / "octos"):
@@ -537,6 +521,22 @@ def main() -> int:
         session.close()
 
     run_dir = collect_app(data_dir, out, pol["name"])
+    # Delivery gate: never ship an app that dies at boot (grader-style soak);
+    # on failure roll back to the last accepted state and gate that too.
+    gate = [sys.executable, str(BUNDLE_DIR / "verify_node.py"), str(ports[0]), "--soak", "30"]
+    good = run_dir / ".arc-good" / "app" if run_dir else None
+    booted = False
+    for _ in range(2):
+        booted = subprocess.run(gate, cwd=out, capture_output=True, text=True, timeout=480).returncode == 0
+        if booted or not (good and (good / "frontend").is_dir()):
+            break
+        log("[arc] deliverable failed the boot gate; rolling back to the last accepted state")
+        for part in ("frontend", "backend"):
+            if (good / part).is_dir():
+                shutil.rmtree(out / part, ignore_errors=True)
+                shutil.copytree(good / part, out / part)
+    (out / ".arc-server.log").unlink(missing_ok=True)
+    log(f"[arc] boot gate: {'ok' if booted else 'FAILED (shipped best available)'}")
     summary = pipeline_summary(data_dir, pol) or {}
     # Each acceptance node records its last verdict; the final pass (tag
     # ALL) overrides them, since it is the state that actually ships.
@@ -566,15 +566,13 @@ def main() -> int:
 
 
 def collect_app(data_dir: Path, out: Path, name: str) -> Path | None:
-    """Move the built app into ARCBENCH_OUTPUT_DIR from the pipeline run dir
-    (the app is not in the deliverable dir; collect the bytes acceptance saw)."""
+    """Move the built app into ARCBENCH_OUTPUT_DIR from the pipeline run dir."""
     runs = [r for r in sorted(data_dir.glob(f"profiles/*/data/pipeline-runs/{name}-*"),
                               key=lambda p: p.stat().st_mtime if p.exists() else 0)
             if r.is_dir()]
     if not runs:
         log("[arc] no pipeline run dir found; nothing to collect")
         return None
-    # The full-suite smoke check's verdict (tag ALL) is just another status row.
     source = runs[-1]
     copied = [part for part in ("frontend", "backend") if (source / part).is_dir()]
     for part in copied:
@@ -589,7 +587,7 @@ NODE_RE = re.compile(r"Pipeline '[^']*' running: (\S+)")
 
 
 def record(method: str, params: dict, state: dict) -> None:
-    """K3: token/cost accounting rides the kernel's own events."""
+    """Token/cost accounting rides the kernel's own events."""
     if method == "progress/updated":
         cost = (params.get("metadata") or {}).get("token_cost") or {}
         state["cost"] = max(state["cost"], float(cost.get("session_cost") or 0.0))
@@ -616,8 +614,7 @@ def pipeline_summary(data_dir: Path, pol: dict) -> dict | None:
 
 
 def deliver_progress(data_dir: Path, out: Path, name: str, synced: dict) -> None:
-    """Copy the latest accepted state into the output dir, so a killed run
-    still ships working code; the final collect replaces it."""
+    """Copy the latest accepted state into the output dir (killed-run delivery)."""
     for good in data_dir.glob(f"profiles/*/data/pipeline-runs/{name}-*/.arc-good"):
         stamp = (good / "stamp").read_text() if (good / "stamp").is_file() else ""
         if stamp and stamp != synced.get("stamp"):
@@ -629,8 +626,6 @@ def deliver_progress(data_dir: Path, out: Path, name: str, synced: dict) -> None
 
 
 def wait_for_pipeline(session, state: dict, pol: dict, data_dir: Path, out: Path) -> None:
-    """`run_pipeline` is spawn_only: the dispatch turn returns as soon as the
-    pipeline is queued, so the glue waits here for the background run."""
     import queue
     deadline = state["started"] + pol["run_timeout"] + pol["final_reserve_seconds"]
     idle_limit = pol["verify_timeout"] + 120
@@ -655,9 +650,8 @@ def wait_for_pipeline(session, state: dict, pol: dict, data_dir: Path, out: Path
                 log(f"[arc] no pipeline progress for {idle_limit}s; stopping the wait")
                 return
             continue
-        method = frame.get("method", "")
-        session.on_event(method, frame.get("params") or {})
-        if method == "tool/progress":
+        session.on_event(frame.get("method", ""), frame.get("params") or {})
+        if frame.get("method") == "tool/progress":
             last_progress = time.time()
     log("[arc] run budget exhausted; keeping whatever the pipeline produced")
 
