@@ -141,6 +141,14 @@ class PipelineDot(unittest.TestCase):
         line = next(l for l in dot.splitlines() if l.strip().startswith("check_n_REQ_1 ["))
         self.assertIn("--e2e checks/REQ-1.mjs", line)
 
+    def test_graph_stays_under_the_kernel_node_cap(self):
+        # The kernel profile rejects graphs over 40 nodes (profile.rs l2_default):
+        # a 12-requirement tree + start/seed/check_all/fix_all/done leaves
+        # headroom for exactly nothing extra per node.
+        dot = build([atomic(f"REQ-{i}") for i in range(1, 13)])
+        import re as _re
+        self.assertLessEqual(len(_re.findall(r"^    \w+ \[", dot, _re.M)), 40)
+
     def test_no_evaluation_test_reading_anywhere_in_the_graph(self):
         # Compliance pin: the pipeline must never reference the evaluation's
         # test files, helper modules, or runner test mounts.

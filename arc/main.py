@@ -225,22 +225,10 @@ def build_pipeline(nodes, out, pol, ports, deadline) -> str:
         lines.append(f'    {check} -> {impl} [condition="{repair}"]')
         prev, prev_cond = check, settled
     # Budget layering: the chain above buys one implementation per requirement
-    # first; whatever time remains is spent sweeping them in the same order.
-    # An accepted node costs a status-file read (--skip-if-passed); a failed
-    # one gets a bounded fix+verify loop with fresh attempts and window.
-    sweep_fwd = f'{fail} && !outcome.contains(\\"{STOP}\\")'
-    sweep_on = f'outcome.status == \\"pass\\" || outcome.status == \\"error\\" || outcome.contains(\\"{STOP}\\")'
-    for node in nodes:
-        nid = str(node["id"])
-        fix, check = f"sweepimpl_{sanitize(nid)}", f"sweepcheck_{sanitize(nid)}"
-        lines.append(
-            f'    {check} [handler="shell_check", label="sweep verify {dot_quote(nid)}", '
-            f'timeout_secs="{pol["verify_timeout"]}", prompt="{verify(ports[0], "--tag", nid, "--skip-if-passed", 1, "--attempts", pol["repairs"] + 4, "--deadline", int(deadline - pol["final_reserve_seconds"]), "--repair-window", pol["run_timeout"], "--e2e", f"checks/{nid}.mjs")}"]')
-        lines.append(impl_node(fix, f"sweep {nid}", node_body(nid, node)))
-        lines.append(f'    {prev} -> {check} [condition="{prev_cond}"]')
-        lines.append(f'    {check} -> {fix} [condition="{sweep_fwd}"]')
-        lines.append(f'    {fix} -> {check} [condition="context.retry_budget != \\"exhausted\\""]')
-        prev, prev_cond = check, sweep_on
+    # first (repairs=2 caps quick retries); everything left over goes to the
+    # final loop below, which verifies all self-checks and repairs the
+    # failures it reports, final_repairs times. (Per-requirement sweep nodes
+    # would need 2 graph nodes each and the kernel caps graphs at 40 nodes.)
     # Final pass: the finished app must still build, boot and serve GET /.
     # A later requirement can break an earlier one; this is where that shows.
     if total > 1:
