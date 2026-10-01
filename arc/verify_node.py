@@ -254,7 +254,14 @@ def isolated_checks(out: Path, env: dict, files: list[Path], port: int) -> int:
     return 1 if any(results) else 0
 
 
-def check(port: int, e2e: str | None, e2e_dir: str | None) -> int:
+def parse_e2e_files(e2e: str | None, e2e_list: str | None) -> list[str]:
+    # --e2e-list (grouped node, one shared boot) wins over single --e2e.
+    if e2e_list:
+        return [p.strip() for p in e2e_list.split(",") if p.strip()]
+    return [e2e] if e2e else []
+
+
+def check(port: int, e2e: str | None, e2e_dir: str | None, e2e_list: str | None = None) -> int:
     out = Path.cwd()
     for rel, data in MANIFESTS.items():
         if not (out / rel).exists():
@@ -263,9 +270,11 @@ def check(port: int, e2e: str | None, e2e_dir: str | None) -> int:
     if not (out / "frontend" / "src").is_dir():
         print("[verify] no frontend/src: the implement node wrote nothing to verify")
         return 1
-    if e2e and not (out / e2e).is_file():
-        print(f"[verify] {e2e} missing: the implement node must write this self-check "
-              "from the requirement text (open pages, click, fill, assert the result)")
+    e2e_files = parse_e2e_files(e2e, e2e_list)
+    missing = [f for f in e2e_files if not (out / f).is_file()]
+    if missing:
+        print(f"[verify] {', '.join(missing)} missing: the implement node must write each "
+              "requirement's own self-check from its text")
         return 1
     env = os.environ.copy()
     env.pop("FORCE_COLOR", None)           # plain text for the model reading the failure
@@ -288,8 +297,8 @@ def check(port: int, e2e: str | None, e2e_dir: str | None) -> int:
             code = smoke(port)
             print(f"[verify] smoke; GET / -> {code}")
             rc = 0 if code == 200 else 1
-            if e2e and rc == 0:
-                rc = playwright_run([out / e2e], env, port)
+            if e2e_files and rc == 0:
+                rc = playwright_run([out / f for f in e2e_files], env, port)
             # A reply can succeed while the process is already doomed: a dead
             # server or an unhandled exception in its log fails the node too.
             time.sleep(0.5)
@@ -341,15 +350,7 @@ def main(argv: list[str]) -> int:
         else:
             print(f"[verify] unexpected positional argument: {arg}")
             return 2
-    rc = 0
-    if opts.get("skip-if-passed") and "tag" in opts:
-        stamp = Path.cwd() / ".arc-status" / opts["tag"]
-        if stamp.is_file() and stamp.read_text().strip() == "0":
-            print(f"[verify] {opts['tag']}: already accepted, sweep skips")
-        else:
-            rc = check(int(argv[0]), opts.get("e2e"), opts.get("e2e-dir"))
-    else:
-        rc = check(int(argv[0]), opts.get("e2e"), opts.get("e2e-dir"))
+    rc = check(int(argv[0]), opts.get("e2e"), opts.get("e2e-dir"), opts.get("e2e-list"))
     if rc == 0 and "tag" in opts:
         # Latest state a check passed: the adapter copies it into the output
         # dir as the run goes, so a run killed from outside still delivers.

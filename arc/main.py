@@ -49,6 +49,7 @@ _POLICY = {
     "llm_timeout": ("llm_timeout_seconds", "OCTOS_ARC_LLM_TIMEOUT", 900),
     # Output cap of one worker LLM call; unset, a runaway reply outlasts any timeout.
     "node_max_output_tokens": ("node_max_output_tokens", "OCTOS_ARC_NODE_MAX_TOKENS", 32768),
+    "group_requirements": ("group_requirements", "OCTOS_ARC_GROUP_REQUIREMENTS", 1), "group_max_chars": ("group_max_chars", "OCTOS_ARC_GROUP_MAX_CHARS", 6000),  # see arc-policy.toml
 }
 
 
@@ -106,6 +107,19 @@ def atomic_nodes(tree: dict) -> list[dict]:
     for nid in flat:
         visit(nid, set())
     return ordered
+
+
+def group_nodes(nodes: list[dict], max_chars: int, max_members: int) -> list[list[dict]]:
+    # Cluster independent siblings (deps met by an earlier CLOSED group) -- see arc-policy.toml.
+    groups, current, chars, closed = [], [], 0, set()
+    for node in nodes:
+        deps, n = {str(d) for d in (node.get("dependencies") or [])}, len(describe(node))
+        if current and deps <= closed and len(current) < max_members and chars + n <= max_chars:
+            current, chars = current + [node], chars + n; continue
+        if current:
+            groups.append(current); closed.update(str(x["id"]) for x in current)
+        current, chars = [node], n
+    return groups + [current] if current else groups
 
 
 def describe(node: dict) -> str:
@@ -201,7 +215,9 @@ def build_pipeline(nodes, out, pol, ports, deadline) -> str:
              f'prompt="{verify("--seed", out)}"]',
              "    start -> seed"]
     prev, prev_cond = "seed", None
-    tmpl, total = read("pipeline-implement"), len(nodes)
+    tmpl = read("pipeline-implement")
+    groups = group_nodes(nodes, pol["group_max_chars"] if pol["group_requirements"] else 0, 3)
+    total = len(groups)
 
     def node_body(nid, node):
         return (tmpl.replace("{node_id}", nid)
@@ -210,25 +226,22 @@ def build_pipeline(nodes, out, pol, ports, deadline) -> str:
                     .replace("{port}", str(ports[0]))
                     .replace("{ports}", ports_clause))
 
-    for index, node in enumerate(nodes, 1):
-        nid = str(node["id"])
-        impl, check = f"impl_{sanitize(nid)}", f"check_{sanitize(nid)}"
-        lines.append(impl_node(impl, nid, node_body(nid, node)))
-        # Keep enough time for one attempt at every requirement still to come
-        # plus the final pass; a node past that line stops repairing.
-        reserve = (total - index) * pol["min_node_seconds"] + pol["final_reserve_seconds"]
+    for index, members in enumerate(groups, 1):
+        ids = [str(n["id"]) for n in members]; tag = "+".join(ids)
+        impl, check = f"impl_{sanitize(tag)}", f"check_{sanitize(tag)}"
+        body = node_body(ids[0], members[0]) if len(ids) == 1 else "Implement ALL together, then stop:\n\n" + "\n\n".join(node_body(i, n) for i, n in zip(ids, members))
+        lines.append(impl_node(impl, tag, body)); reserve = (total - index) * pol["min_node_seconds"] + pol["final_reserve_seconds"]
         lines.append(
-            f'    {check} [handler="shell_check", label="verify {dot_quote(nid)}", '
-            f'timeout_secs="{pol["verify_timeout"]}", prompt="{verify(ports[0], "--tag", nid, "--attempts", pol["repairs"] + 1, "--deadline", int(deadline - reserve), "--repair-window", pol["repair_window"], "--e2e", f"checks/{nid}.mjs")}"]')
+            f'    {check} [handler="shell_check", label="verify {dot_quote(tag)}", '
+            f'timeout_secs="{pol["verify_timeout"]}", prompt="{verify(ports[0], "--tag", tag, "--attempts", pol["repairs"] + 1, "--deadline", int(deadline - reserve), "--repair-window", pol["repair_window"], *(["--e2e", f"checks/{ids[0]}.mjs"] if len(ids) == 1 else ["--e2e-list", ",".join(f"checks/{i}.mjs" for i in ids)]))}"]')
         lines.append(f'    {prev} -> {impl}' + (f' [condition="{prev_cond}"]' if prev_cond else ""))
         lines.append(f'    {impl} -> {check} [condition="{anyway}"]')
         lines.append(f'    {check} -> {impl} [condition="{repair}"]')
         prev, prev_cond = check, settled
     # Budget layering: the chain above buys one implementation per requirement
-    # first (repairs=2 caps quick retries); everything left over goes to the
-    # final loop below, which verifies all self-checks and repairs the
-    # failures it reports, final_repairs times. (Per-requirement sweep nodes
-    # would need 2 graph nodes each and the kernel caps graphs at 40 nodes.)
+    # (or small sibling group) first (repairs=2 caps quick retries); everything
+    # left over goes to the final loop below, final_repairs times. (Per-req
+    # sweep nodes would need 2 graph nodes each; the kernel caps graphs at 40.)
     # Final pass: the finished app must still build, boot and serve GET /.
     # A later requirement can break an earlier one; this is where that shows.
     if total > 1:
