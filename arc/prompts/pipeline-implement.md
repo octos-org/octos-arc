@@ -39,6 +39,10 @@ Rules:
   notes, summaries or other .md files: nobody reads them and they cost output.
 - Prefer zero runtime dependencies; if you must install, the registry is
   already pointed at the official npm registry.
+- The server must start offline and be serving within a few seconds: never
+  install packages, run npm/npx, or spawn child processes from backend code.
+  The self-check tooling (Playwright, chromium) is already provided; never
+  make the app install or configure it.
 {ports}
 Then write your own acceptance check as `checks/{node_id}.mjs`: a Node script
 that derives its steps from THIS requirement's text above (never from any
