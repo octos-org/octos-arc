@@ -73,8 +73,8 @@ group_requirements = 1          # OCTOS_ARC_GROUP_REQUIREMENTS — 0 关闭，�
 # REQ-1-1-1（6334 字，describe() 全文，不是裸 description 字段）之下，不会让任何一组
 # 比"这条流水线今天已经证明能一轮搞定"的最大单节点还大。成员数上限（防着字数小但篇数多
 # 的树）定死在 group_nodes() 里的 3，字数上限在这题上先封顶，没单独开一个 toml 项。
-group_max_chars = 12000         # OCTOS_ARC_GROUP_MAX_CHARS
-group_max_members = 6           # OCTOS_ARC_GROUP_MAX_MEMBERS — 广度优先：先把全部需求写一遍，修复留给终检环
+group_max_chars = 24000         # OCTOS_ARC_GROUP_MAX_CHARS
+group_max_members = 12          # OCTOS_ARC_GROUP_MAX_MEMBERS — 广度优先：先把全部需求写一遍，修复留给终检环
 
 [mode]
 codegen = true              # OCTOS_ARC_CODEGEN — one-request codegen turns for small trees
