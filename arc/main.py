@@ -42,7 +42,7 @@ _POLICY = {
     "llm_timeout": ("llm_timeout_seconds", "OCTOS_ARC_LLM_TIMEOUT", 900),
     # Output cap of one worker LLM call; unset, a runaway reply outlasts any timeout.
     "node_max_output_tokens": ("node_max_output_tokens", "OCTOS_ARC_NODE_MAX_TOKENS", 32768),
-    "group_requirements": ("group_requirements", "OCTOS_ARC_GROUP_REQUIREMENTS", 1), "group_max_chars": ("group_max_chars", "OCTOS_ARC_GROUP_MAX_CHARS", 6000),  # see arc-policy.toml
+    "group_requirements": ("group_requirements", "OCTOS_ARC_GROUP_REQUIREMENTS", 1), "group_max_chars": ("group_max_chars", "OCTOS_ARC_GROUP_MAX_CHARS", 6000), "group_max_members": ("group_max_members", "OCTOS_ARC_GROUP_MAX_MEMBERS", 3),  # see arc-policy.toml
 }
 
 
@@ -207,7 +207,7 @@ def build_pipeline(nodes, out, pol, ports, deadline) -> str:
              "    start -> seed"]
     prev, prev_cond = "seed", None
     tmpl = read("pipeline-implement")
-    groups = group_nodes(nodes, pol["group_max_chars"] if pol["group_requirements"] else 0, 3)
+    groups = group_nodes(nodes, pol["group_max_chars"] if pol["group_requirements"] else 0, pol["group_max_members"])
     total = len(groups)
 
     def node_body(nid, node):

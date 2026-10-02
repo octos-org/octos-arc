@@ -44,7 +44,7 @@
 # Requires OCTOS_PIPELINE_DAG=1 (main.py sets it): only the DAG scheduler does
 # back-edge retries and hands the failing node's output back to its target.
 name = "arc_build"              # OCTOS_ARC_PIPELINE_NAME — the bare name run_pipeline selects
-repair_rounds = 2               # OCTOS_REPAIR_ROUNDS — 链内快速重试；剩余预算交给终检修复环（时间预算分层：先实现、后修复）
+repair_rounds = 0               # OCTOS_REPAIR_ROUNDS — 链内快速重试；剩余预算交给终检修复环（时间预算分层：先实现、后修复）
 final_repair_rounds = 4         # OCTOS_ARC_FINAL_REPAIRS — 终检修复环轮数
 node_budget_seconds = 200        # OCTOS_NODE_TIME_BUDGET — per-node `max_retries` in the .dot; 12 节点约 40 分钟一轮
 node_timeout_seconds = 600      # OCTOS_NODE_TIMEOUT — one implement node; 超时的轮次仍把已写出的文件交给验收（continue_on_error）。
@@ -73,7 +73,8 @@ group_requirements = 1          # OCTOS_ARC_GROUP_REQUIREMENTS — 0 关闭，�
 # REQ-1-1-1（6334 字，describe() 全文，不是裸 description 字段）之下，不会让任何一组
 # 比"这条流水线今天已经证明能一轮搞定"的最大单节点还大。成员数上限（防着字数小但篇数多
 # 的树）定死在 group_nodes() 里的 3，字数上限在这题上先封顶，没单独开一个 toml 项。
-group_max_chars = 6000          # OCTOS_ARC_GROUP_MAX_CHARS
+group_max_chars = 12000         # OCTOS_ARC_GROUP_MAX_CHARS
+group_max_members = 6           # OCTOS_ARC_GROUP_MAX_MEMBERS — 广度优先：先把全部需求写一遍，修复留给终检环
 
 [mode]
 codegen = true              # OCTOS_ARC_CODEGEN — one-request codegen turns for small trees
