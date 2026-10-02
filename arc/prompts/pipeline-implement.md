@@ -8,7 +8,8 @@ Public acceptance example (implement the FULL requirement, not just this case):
 You are editing an existing workspace. Write files with the write_file tool —
 nothing you put in chat is saved, only tool calls change the app.
 
-Layout (already scaffolded, keep it):
+Layout (already scaffolded, keep it — this list is complete, there is nothing
+else in the workspace worth listing or searching for):
 - `frontend/src/index.html` — the UI, plus one .html per further route.
 - `backend/server.js` — CommonJS (`require`) Node http server on
   `process.env.PORT || {port}`, serving `../frontend/dist` (index.html for `/`,
@@ -16,6 +17,13 @@ Layout (already scaffolded, keep it):
   requirement needs, 404 otherwise.
 - The two package.json manifests already exist (build copies src/* to dist,
   start runs server.js). Update them only if a dependency or build step changes.
+
+Work in as few tool calls as you can. Plan each file in your head first, then
+write it complete in one call. Read an existing file ONLY when you must
+extend it without losing what is already there (e.g. add a route to
+server.js without deleting earlier ones); never read a file to double-check a
+write you just made, and never explore the tree — the layout above already
+names every file that exists.
 
 Rules:
 - Build ONLY what this requirement needs: the smallest app that satisfies it.
