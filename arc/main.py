@@ -524,7 +524,12 @@ def main() -> int:
     # Delivery gate: never ship an app that dies at boot (grader-style soak);
     # on failure roll back to the last accepted state and gate that too.
     gate = [sys.executable, str(BUNDLE_DIR / "verify_node.py"), str(ports[0]), "--soak", "30"]
-    good = run_dir / ".arc-good" / "app" if run_dir else None
+    good = None
+    if run_dir:
+        # Newest of: last state whose checks passed, last state that booted.
+        cands = [d for d in (run_dir / ".arc-good", run_dir / ".arc-boots") if (d / "stamp").is_file()]
+        if cands:
+            good = max(cands, key=lambda d: float((d / "stamp").read_text() or 0)) / "app"
     booted = False
     for _ in range(2):
         booted = subprocess.run(gate, cwd=out, capture_output=True, text=True, timeout=480).returncode == 0

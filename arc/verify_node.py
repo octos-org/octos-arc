@@ -261,6 +261,10 @@ def parse_e2e_files(e2e: str | None, e2e_list: str | None) -> list[str]:
     return [e2e] if e2e else []
 
 
+#: set by check() when the app booted and served GET / (self-checks may still fail)
+BOOTED: list = []
+
+
 def check(port: int, e2e: str | None, e2e_dir: str | None, e2e_list: str | None = None, soak: int = 0) -> int:
     out = Path.cwd()
     for rel, data in MANIFESTS.items():
@@ -296,6 +300,8 @@ def check(port: int, e2e: str | None, e2e_dir: str | None, e2e_list: str | None 
         try:
             code = smoke(port)
             print(f"[verify] smoke; GET / -> {code}")
+            if code == 200:
+                BOOTED.append(True)
             rc = 0 if code == 200 else 1
             if e2e_files and rc == 0:
                 rc = playwright_run([out / f for f in e2e_files], env, port)
@@ -362,6 +368,11 @@ def main(argv: list[str]) -> int:
         # dir as the run goes, so a run killed from outside still delivers.
         snapshot(Path.cwd(), Path.cwd() / ".arc-good" / "app")
         (Path.cwd() / ".arc-good" / "stamp").write_text(str(time.time()))
+    if BOOTED and "tag" in opts:
+        # Latest state that at least boots: the delivery gate's fallback when no
+        # requirement check ever fully passed (breadth-first runs repair late).
+        snapshot(Path.cwd(), Path.cwd() / ".arc-boots" / "app")
+        (Path.cwd() / ".arc-boots" / "stamp").write_text(str(time.time()))
     print(inventory(Path.cwd()))
     if "tag" in opts:                           # the adapter reads the last verdict
         (Path.cwd() / ".arc-status").mkdir(exist_ok=True)
