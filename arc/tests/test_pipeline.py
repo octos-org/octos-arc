@@ -97,7 +97,7 @@ class PipelineDot(unittest.TestCase):
         # Repairs are bounded by verify_node.py (attempts + deadline), not by
         # the scheduler's 10-run loop fuse.
         dot = build([atomic("REQ-1")])
-        cond = [a for s, d, a, back in self.edges(dot) if back and d == "impl_n_REQ_1"][0]
+        cond = [a for s, d, a, back in self.edges(dot) if back and d == "impl_task_n_REQ_1"][0]
         self.assertIn('outcome.status == \\"fail\\"', cond)
         self.assertIn(f'!outcome.contains(\\"{main.STOP}\\")', cond)
         self.assertIn("--attempts 6", dot)
@@ -107,7 +107,7 @@ class PipelineDot(unittest.TestCase):
         # An unconditional edge out of a Fail is fail-closed: every later node
         # would be pruned. The edge on to the next requirement fires on both.
         dot = build([atomic("REQ-1"), atomic("REQ-2", deps=["REQ-1"])])
-        fwd = [a for s, d, a, back in self.edges(dot) if s == "check_n_REQ_1" and d == "impl_n_REQ_2"]
+        fwd = [a for s, d, a, back in self.edges(dot) if s == "check_n_REQ_1" and d == "impl_task_n_REQ_2"]
         self.assertEqual(len(fwd), 1)
         self.assertIn('outcome.status == \\"pass\\"', fwd[0])
         self.assertIn('outcome.status == \\"fail\\"', fwd[0])
@@ -115,21 +115,21 @@ class PipelineDot(unittest.TestCase):
 
     def test_acceptance_runs_whatever_the_implement_node_ended_with(self):
         dot = build([atomic("REQ-1")])
-        edge = [a for s, d, a, back in self.edges(dot) if s == "impl_n_REQ_1" and d == "check_n_REQ_1"][0]
+        edge = [a for s, d, a, back in self.edges(dot) if s == "impl_task_n_REQ_1" and d == "check_n_REQ_1"][0]
         for status in ("pass", "fail", "error"):
             self.assertIn(f'outcome.status == \\"{status}\\"', edge)
 
     def test_worker_nodes_carry_reasoning_and_output_caps(self):
         # config.json's gateway section never reaches the profile runtime.
         dot = build([atomic("REQ-1")])
-        line = next(l for l in dot.splitlines() if l.strip().startswith("impl_n_REQ_1 ["))
+        line = next(l for l in dot.splitlines() if l.strip().startswith("impl_task_n_REQ_1 ["))
         self.assertIn('reasoning_effort="none"', line)
         self.assertIn('max_output_tokens="32768"', line)
 
     def test_workspace_is_seeded_before_the_first_requirement(self):
         dot = build([atomic("REQ-1")])
         self.assertIn("start -> seed", dot)
-        self.assertIn("seed -> impl_n_REQ_1", dot)
+        self.assertIn("seed -> impl_task_n_REQ_1", dot)
         self.assertIn("--seed", dot)
 
     def test_final_smoke_pass_runs_after_the_last_requirement(self):
@@ -138,7 +138,7 @@ class PipelineDot(unittest.TestCase):
         line = next(l for l in dot.splitlines() if l.strip().startswith("check_all ["))
         self.assertIn('--tag ALL', line)
         self.assertIn("--e2e-dir checks", line)
-        self.assertIn("fix_all -> check_all", dot)
+        self.assertIn("fix_task_all -> check_all", dot)
 
     def test_each_check_runs_the_nodes_own_self_check_script(self):
         dot = build([atomic("REQ-1"), atomic("REQ-2", deps=["REQ-1"])])
@@ -147,7 +147,7 @@ class PipelineDot(unittest.TestCase):
 
     def test_graph_stays_under_the_kernel_node_cap(self):
         # The kernel profile rejects graphs over 40 nodes (profile.rs l2_default):
-        # a 12-requirement tree + start/seed/check_all/fix_all/done leaves
+        # a 12-requirement tree + start/seed/check_all/fix_task_all/done leaves
         # headroom for exactly nothing extra per node.
         dot = build([atomic(f"REQ-{i}") for i in range(1, 13)])
         import re as _re
@@ -174,9 +174,9 @@ class PipelineDot(unittest.TestCase):
 
     def test_nodes_are_chained_in_dependency_order(self):
         dot = build([atomic("REQ-2", deps=["REQ-1"]), atomic("REQ-1")])
-        self.assertLess(dot.index("impl_n_REQ_1 "), dot.index("impl_n_REQ_2 "))
+        self.assertLess(dot.index("impl_task_n_REQ_1 "), dot.index("impl_task_n_REQ_2 "))
         # REQ-2's implement node hangs off REQ-1's acceptance node.
-        self.assertIn("check_n_REQ_1 -> impl_n_REQ_2", dot)
+        self.assertIn("check_n_REQ_1 -> impl_task_n_REQ_2", dot)
 
     def test_quoted_spec_braces_are_not_parsed_as_template_variables(self):
         # A Playwright excerpt contains `async ({ page }) => {`. validate.rs
@@ -190,8 +190,8 @@ class PipelineDot(unittest.TestCase):
 
     def test_node_ids_are_sanitised_into_legal_dot_identifiers(self):
         dot = build([atomic("REQ-1.2")])
-        self.assertIn("impl_n_REQ_1_2", dot)
-        self.assertNotIn("impl_n_REQ-1.2", dot)
+        self.assertIn("impl_task_n_REQ_1_2", dot)
+        self.assertNotIn("impl_task_n_REQ-1.2", dot)
 
     def test_condition_attribute_values_have_properly_escaped_quotes(self):
         # A condition value with a bare `"` (instead of `\"`) ends the DOT

@@ -60,7 +60,10 @@ account and opens each named entry to prove they exist and work. Print one
 Keep it under 60 lines and under 60 seconds. The pipeline runs it against your
 freshly built app right after this turn and shows you its output on failure.
 
-If a previous acceptance failure is shown to you below, fix exactly what it
-reports — do not rewrite working code around it.
+If a previous acceptance failure is shown to you below: this is a repair, not
+a rewrite. Use edit_file for the smallest change that fixes exactly what the
+failure reports; only use write_file on a file you have not touched before.
+Do not regenerate a file you already wrote just because it is easiest — read
+it first, then edit the specific lines the failure points at.
 
 Finish by writing the files. Reply with one short sentence when done.

@@ -228,7 +228,7 @@ def build_pipeline(nodes, out, pol, ports, deadline) -> str:
 
     for index, members in enumerate(groups, 1):
         ids = [str(n["id"]) for n in members]; tag = "+".join(ids)
-        impl, check = f"impl_{sanitize(tag)}", f"check_{sanitize(tag)}"
+        impl, check = f"impl_task_{sanitize(tag)}", f"check_{sanitize(tag)}"
         body = node_body(ids[0], members[0]) if len(ids) == 1 else "Implement ALL together, then stop:\n\n" + "\n\n".join(node_body(i, n) for i, n in zip(ids, members))
         lines.append(impl_node(impl, tag, body)); reserve = (total - index) * pol["min_node_seconds"] + pol["final_reserve_seconds"]
         lines.append(
@@ -248,16 +248,16 @@ def build_pipeline(nodes, out, pol, ports, deadline) -> str:
         lines += [
             f'    check_all [handler="shell_check", label="verify all", '
             f'timeout_secs="{pol["verify_timeout"]}", prompt="{verify(ports[0], "--tag", "ALL", "--attempts", pol["final_repairs"] + 1, "--deadline", int(deadline - pol["final_reserve_seconds"] // 2), "--e2e-dir", "checks")}"]',
-            impl_node("fix_all", "regressions", read("pipeline-regression")
+            impl_node("fix_task_all", "regressions", read("pipeline-regression")
                       .replace("{port}", str(ports[0])).replace("{ports}", ports_clause)),
             '    done [handler="noop", label="Done"]',
             f'    {prev} -> check_all [condition="{prev_cond}"]',
             # An all-conditional router whose conditions all miss falls back to
-            # its lowest-named target, so `done` (< `fix_all`) also catches the
+            # its lowest-named target, so `done` (< `fix_task_all`) also catches the
             # STOP case; without the pass edge a passing suite would "repair".
             f'    check_all -> done [condition="outcome.status == \\"pass\\""]',
-            f'    check_all -> fix_all [condition="{fail} && !outcome.contains(\\"{STOP}\\")"]',
-            '    fix_all -> check_all [condition="context.retry_budget != \\"exhausted\\""]']
+            f'    check_all -> fix_task_all [condition="{fail} && !outcome.contains(\\"{STOP}\\")"]',
+            '    fix_task_all -> check_all [condition="context.retry_budget != \\"exhausted\\""]']
     lines.append("}")
     return "\n".join(lines) + "\n"
 

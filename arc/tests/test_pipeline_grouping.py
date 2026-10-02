@@ -85,10 +85,10 @@ class GroupedPipelineDot(unittest.TestCase):
     def test_sibling_group_produces_one_impl_and_one_check_node(self):
         dot = build([atomic("A"), atomic("B", deps=["A"]), atomic("C", deps=["A"])])
         # tag "B+C" -> sanitize() turns "+" into "_", giving one combined node.
-        self.assertIn('    impl_n_B_C [', dot)
+        self.assertIn('    impl_task_n_B_C [', dot)
         self.assertIn('    check_n_B_C [', dot)
-        self.assertNotIn("impl_n_B [", dot)
-        self.assertNotIn("impl_n_C [", dot)
+        self.assertNotIn("impl_task_n_B [", dot)
+        self.assertNotIn("impl_task_n_C [", dot)
 
     def test_grouped_check_uses_e2e_list_not_e2e(self):
         dot = build([atomic("A"), atomic("B", deps=["A"]), atomic("C", deps=["A"])])
