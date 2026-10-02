@@ -148,6 +148,23 @@ def audit_pages(dist: Path) -> list[str]:
     return problems[:8]
 
 
+BOOT_SIDE_EFFECTS = re.compile(r"npm (?:install|i|ci)\b|npx |playwright install|execSync\(|spawnSync\(")
+
+
+def audit_backend(backend: Path) -> list[str]:
+    """The grader boots the app offline with a short readiness window: a
+    server that installs packages or shells out at startup never comes up."""
+    problems = []
+    for f in sorted(backend.rglob("*.js")) if backend.is_dir() else []:
+        if "node_modules" in f.parts:
+            continue
+        hit = BOOT_SIDE_EFFECTS.search(f.read_text(errors="replace"))
+        if hit:
+            problems.append(f"{f.relative_to(backend.parent)} runs `{hit.group(0)}`: the app must start "
+                            "offline in seconds; remove package installs and child processes from the server")
+    return problems
+
+
 def playwright_env(env: dict) -> dict | None:
     """The runner image ships @playwright/test + chromium; absent here means
     absent all run: STOP rather than spend repair rounds."""
@@ -220,7 +237,16 @@ def playwright_run(files: list[Path], env: dict, port: int) -> int:
         print(f"[verify] no Playwright library available for self-checks\n{STOP}: no test runner")
         return 1
     rc_all = 0
+    root_nm = Path(pw_env["NODE_PATH"])
     for f in files:
+        # ESM ignores NODE_PATH: a sibling node_modules link is what lets
+        # `import ... from "@playwright/test"` resolve in a .mjs self-check.
+        link = f.parent / "node_modules"
+        if not link.exists():
+            try:
+                link.symlink_to(root_nm, target_is_directory=True)
+            except OSError:
+                pass
         rc, log = sh(["node", str(f)], f.parent, dict(pw_env, E2E_BASE_URL=f"http://127.0.0.1:{port}", CI="1"),
                      E2E_TIMEOUT)
         print(f"[verify] self-check {f.name}: {'ok' if rc == 0 else 'FAILED'}\n{log[-2500:]}")
@@ -292,7 +318,7 @@ def check(port: int, e2e: str | None, e2e_dir: str | None, e2e_list: str | None 
         if not free(port):
             print(f"[verify] port {port} already serving; refusing to score another process")
             return 1
-        problems = audit_pages(app / "frontend" / "dist")
+        problems = audit_pages(app / "frontend" / "dist") + audit_backend(app / "backend")
         server_log = out / ".arc-server.log"   # a file, not a pipe: a chatty server never blocks
         srv = boot(app, env, port, server_log)
         if srv is None:
