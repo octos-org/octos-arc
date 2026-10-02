@@ -68,7 +68,7 @@ reasoning_effort = "none"       # OCTOS_ARC_REASONING — none | low | medium | 
 # 砍到 10 轮。group_nodes()：一个节点只有在它依赖的东西都已经在更早、已关闭的组里实现过
 # 才会加入当前组，绝不会把一个节点和它依赖的东西分进同一组（不要求模型在一轮里把 A 建好
 # 又在没验证过 A 的情况下接着建依赖 A 的 B）。
-group_requirements = 1          # OCTOS_ARC_GROUP_REQUIREMENTS — 0 关闭，退回一需求一节点，和分组前逐字节一致
+group_requirements = 0          # OCTOS_ARC_GROUP_REQUIREMENTS — 0 关闭，退回一需求一节点，和分组前逐字节一致
 # 一组需求的 describe() 合计字数上限——定在 github-stage1 树上观测到的最大单节点
 # REQ-1-1-1（6334 字，describe() 全文，不是裸 description 字段）之下，不会让任何一组
 # 比"这条流水线今天已经证明能一轮搞定"的最大单节点还大。成员数上限（防着字数小但篇数多
