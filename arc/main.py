@@ -42,7 +42,7 @@ _POLICY = {
     "llm_timeout": ("llm_timeout_seconds", "OCTOS_ARC_LLM_TIMEOUT", 900),
     # Output cap of one worker LLM call; unset, a runaway reply outlasts any timeout.
     "node_max_output_tokens": ("node_max_output_tokens", "OCTOS_ARC_NODE_MAX_TOKENS", 32768),
-    "group_requirements": ("group_requirements", "OCTOS_ARC_GROUP_REQUIREMENTS", 1), "group_max_chars": ("group_max_chars", "OCTOS_ARC_GROUP_MAX_CHARS", 6000),  # see arc-policy.toml
+    "group_requirements": ("group_requirements", "OCTOS_ARC_GROUP_REQUIREMENTS", 1), "group_max_chars": ("group_max_chars", "OCTOS_ARC_GROUP_MAX_CHARS", 6000), "fast_checks": ("fast_checks", "OCTOS_ARC_FAST_CHECKS", 0),  # see arc-policy.toml
 }
 
 
@@ -224,7 +224,7 @@ def build_pipeline(nodes, out, pol, ports, deadline) -> str:
         lines.append(impl_node(impl, tag, body)); reserve = (total - index) * pol["min_node_seconds"] + pol["final_reserve_seconds"]
         lines.append(
             f'    {check} [handler="shell_check", label="verify {dot_quote(tag)}", '
-            f'timeout_secs="{pol["verify_timeout"]}", prompt="{verify(ports[0], "--tag", tag, "--attempts", pol["repairs"] + 1, "--deadline", int(deadline - reserve), "--repair-window", pol["repair_window"], *(["--e2e", f"checks/{ids[0]}.mjs"] if len(ids) == 1 else ["--e2e-list", ",".join(f"checks/{i}.mjs" for i in ids)]))}"]')
+            f'timeout_secs="{pol["verify_timeout"]}", prompt="{verify(ports[0], "--tag", tag, "--attempts", pol["repairs"] + 1, "--deadline", int(deadline - reserve), "--repair-window", pol["repair_window"], *(([] if pol["fast_checks"] else (["--e2e", f"checks/{ids[0]}.mjs"] if len(ids) == 1 else ["--e2e-list", ",".join(f"checks/{i}.mjs" for i in ids)]))))}"]')
         lines.append(f'    {prev} -> {impl}' + (f' [condition="{prev_cond}"]' if prev_cond else ""))
         lines.append(f'    {impl} -> {check} [condition="{anyway}"]')
         lines.append(f'    {check} -> {impl} [condition="{repair}"]')
