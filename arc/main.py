@@ -78,13 +78,19 @@ def atomic_nodes(tree: dict) -> list[dict]:
     """Atomic requirements in dependency order (FOLDERs are grouping only)."""
     flat: dict[str, dict] = {}
 
-    def walk(node: dict) -> None:
-        if str(node.get("type", "")).upper() != "FOLDER":
+    def walk(node: dict, ctx: tuple) -> None:
+        # Folder descriptions carry product-wide rules (seed data, naming,
+        # roles); every atomic node below inherits them as context.
+        if str(node.get("type", "")).upper() == "FOLDER":
+            if str(node.get("description") or "").strip():
+                ctx = ctx + (f"{node.get('name', '')}: {str(node['description']).strip()}",)
+        else:
+            node["_context"] = ctx
             flat[str(node["id"])] = node
         for child in node.get("children") or []:
-            walk(child)
+            walk(child, ctx)
 
-    walk(tree)
+    walk(tree, ())
     ordered: list[dict] = []
     seen: set[str] = set()
 
@@ -207,6 +213,8 @@ def build_pipeline(nodes, out, pol, ports, deadline) -> str:
              "    start -> seed"]
     prev, prev_cond = "seed", None
     tmpl = read("pipeline-implement")
+    pre = REQ_DIR / "prerequisites.md" if REQ_DIR else out / "requirements" / "prerequisites.md"
+    prereq = pre.read_text(encoding="utf-8").strip()[:6000] if pre.is_file() else ""
     groups = group_nodes(nodes, pol["group_max_chars"] if pol["group_requirements"] else 0, 3)
     total = len(groups)
 
@@ -221,6 +229,10 @@ def build_pipeline(nodes, out, pol, ports, deadline) -> str:
         ids = [str(n["id"]) for n in members]; tag = "+".join(ids)
         impl, check = f"impl_{sanitize(tag)}", f"check_{sanitize(tag)}"
         body = node_body(ids[0], members[0]) if len(ids) == 1 else "Implement ALL together, then stop:\n\n" + "\n\n".join(node_body(i, n) for i, n in zip(ids, members))
+        ctx = members[0].get("_context") or ()
+        if ctx or prereq:
+            body = ("Product-wide rules (apply to every requirement; seed data named here must exist):\n"
+                    + untemplate("\n\n".join(ctx + ((prereq,) if prereq else ()))) + "\n\n---\n\n" + body)
         lines.append(impl_node(impl, tag, body)); reserve = (total - index) * pol["min_node_seconds"] + pol["final_reserve_seconds"]
         lines.append(
             f'    {check} [handler="shell_check", label="verify {dot_quote(tag)}", '
@@ -255,6 +267,7 @@ def build_pipeline(nodes, out, pol, ports, deadline) -> str:
 
 #: verify_node.py prints this when an acceptance node must not be retried again.
 STOP = "ARC_NO_MORE_REPAIRS"
+REQ_DIR = None
 
 
 def kernel_env(pol: dict, config_dir: Path) -> dict:
@@ -456,6 +469,7 @@ def main() -> int:
     if template and Path(template).is_dir() and not (out / "frontend").is_dir():
         shutil.copytree(template, out, dirs_exist_ok=True)
 
+    global REQ_DIR; REQ_DIR = req_dir
     tree = load_tree(req_dir)
     nodes = atomic_nodes(tree)
     node_ids = [str(n["id"]) for n in nodes]
