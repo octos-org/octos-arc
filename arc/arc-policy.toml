@@ -45,7 +45,7 @@
 # back-edge retries and hands the failing node's output back to its target.
 name = "arc_build"              # OCTOS_ARC_PIPELINE_NAME — the bare name run_pipeline selects
 repair_rounds = 2               # OCTOS_REPAIR_ROUNDS — 链内快速重试；剩余预算交给终检修复环（时间预算分层：先实现、后修复）
-final_repair_rounds = 8         # OCTOS_ARC_FINAL_REPAIRS — 终检修复环轮数
+final_repair_rounds = 12        # OCTOS_ARC_FINAL_REPAIRS — 终检修复环轮数
 node_budget_seconds = 200        # OCTOS_NODE_TIME_BUDGET — per-node `max_retries` in the .dot; 12 节点约 40 分钟一轮
 node_timeout_seconds = 600      # OCTOS_NODE_TIMEOUT — one implement node; 超时的轮次仍把已写出的文件交给验收（continue_on_error）。
                                  # 900s 时实测过一次卡死重试吃满整段超时却没有产出；3 个 run 36904796425
