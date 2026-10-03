@@ -184,10 +184,11 @@ def build_pipeline(nodes, out, pol, ports, deadline) -> str:
     window += (f'reasoning_effort="{pol["reasoning"]}", '
                f'max_output_tokens="{pol["node_max_output_tokens"]}", ')
 
-    def impl_node(name, label, prompt) -> str:
+    def impl_node(name, label, prompt, timeout_secs=None) -> str:
         return (f'    {name} [handler="codergen", label="{dot_quote(label)}", {window}'
                 f'tools="{pol["tools"]}", max_iterations="{pol["max_iterations"]}", '
-                f'max_retries="0", continue_on_error="true", timeout_secs="{pol["node_timeout"]}", '
+                f'max_retries="0", continue_on_error="true", '
+                f'timeout_secs="{timeout_secs if timeout_secs is not None else pol["node_timeout"]}", '
                 f'prompt="{dot_quote(prompt)}"]')
 
     fail = 'outcome.status == \\"fail\\"'
@@ -209,6 +210,16 @@ def build_pipeline(nodes, out, pol, ports, deadline) -> str:
     tmpl = read("pipeline-implement")
     groups = group_nodes(nodes, pol["group_max_chars"] if pol["group_requirements"] else 0, 3)
     total = len(groups)
+    # node_timeout is one flat constant from policy; on a tree with many small
+    # requirements it lets the first few implementation nodes each claim the
+    # whole per-node ceiling and starve everything after them -- the repair
+    # reserve below only protects the *verify* step, never the codergen step
+    # that precedes it. Give each implementation node a fair share of what's
+    # actually left in the run budget instead, floored so a single requirement
+    # never gets squeezed below min_node_seconds and capped at node_timeout so
+    # small trees keep today's behavior.
+    impl_timeout = min(pol["node_timeout"], max(pol["min_node_seconds"],
+                        (pol["run_timeout"] - pol["final_reserve_seconds"]) // total)) if total else pol["node_timeout"]
 
     def node_body(nid, node):
         return (tmpl.replace("{node_id}", nid)
@@ -221,7 +232,7 @@ def build_pipeline(nodes, out, pol, ports, deadline) -> str:
         ids = [str(n["id"]) for n in members]; tag = "+".join(ids)
         impl, check = f"impl_{sanitize(tag)}", f"check_{sanitize(tag)}"
         body = node_body(ids[0], members[0]) if len(ids) == 1 else "Implement ALL together, then stop:\n\n" + "\n\n".join(node_body(i, n) for i, n in zip(ids, members))
-        lines.append(impl_node(impl, tag, body)); reserve = (total - index) * pol["min_node_seconds"] + pol["final_reserve_seconds"]
+        lines.append(impl_node(impl, tag, body, impl_timeout)); reserve = (total - index) * pol["min_node_seconds"] + pol["final_reserve_seconds"]
         lines.append(
             f'    {check} [handler="shell_check", label="verify {dot_quote(tag)}", '
             f'timeout_secs="{pol["verify_timeout"]}", prompt="{verify(ports[0], "--tag", tag, "--attempts", pol["repairs"] + 1, "--deadline", int(deadline - reserve), "--repair-window", pol["repair_window"], *(["--e2e", f"checks/{ids[0]}.mjs"] if len(ids) == 1 else ["--e2e-list", ",".join(f"checks/{i}.mjs" for i in ids)]))}"]')
