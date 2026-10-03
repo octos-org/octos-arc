@@ -184,10 +184,10 @@ def build_pipeline(nodes, out, pol, ports, deadline) -> str:
     window += (f'reasoning_effort="{pol["reasoning"]}", '
                f'max_output_tokens="{pol["node_max_output_tokens"]}", ')
 
-    def impl_node(name, label, prompt) -> str:
+    def impl_node(name, label, prompt, timeout_secs=None) -> str:
         return (f'    {name} [handler="codergen", label="{dot_quote(label)}", {window}'
                 f'tools="{pol["tools"]}", max_iterations="{pol["max_iterations"]}", '
-                f'max_retries="0", continue_on_error="true", timeout_secs="{pol["node_timeout"]}", '
+                f'max_retries="0", continue_on_error="true", timeout_secs="{timeout_secs or pol["node_timeout"]}", '
                 f'prompt="{dot_quote(prompt)}"]')
 
     fail = 'outcome.status == \\"fail\\"'
@@ -208,7 +208,7 @@ def build_pipeline(nodes, out, pol, ports, deadline) -> str:
     prev, prev_cond = "seed", None
     tmpl = read("pipeline-implement")
     groups = group_nodes(nodes, pol["group_max_chars"] if pol["group_requirements"] else 0, 3)
-    total = len(groups)
+    total = len(groups); impl_timeout = min(pol["node_timeout"], max(pol["min_node_seconds"], (pol["run_timeout"] - pol["final_reserve_seconds"]) // total)) if total else pol["node_timeout"]  # fair share per impl node
 
     def node_body(nid, node):
         return (tmpl.replace("{node_id}", nid)
@@ -221,7 +221,7 @@ def build_pipeline(nodes, out, pol, ports, deadline) -> str:
         ids = [str(n["id"]) for n in members]; tag = "+".join(ids)
         impl, check = f"impl_{sanitize(tag)}", f"check_{sanitize(tag)}"
         body = node_body(ids[0], members[0]) if len(ids) == 1 else "Implement ALL together, then stop:\n\n" + "\n\n".join(node_body(i, n) for i, n in zip(ids, members))
-        lines.append(impl_node(impl, tag, body)); reserve = (total - index) * pol["min_node_seconds"] + pol["final_reserve_seconds"]
+        lines.append(impl_node(impl, tag, body, impl_timeout)); reserve = (total - index) * impl_timeout + pol["final_reserve_seconds"]
         lines.append(
             f'    {check} [handler="shell_check", label="verify {dot_quote(tag)}", '
             f'timeout_secs="{pol["verify_timeout"]}", prompt="{verify(ports[0], "--tag", tag, "--attempts", pol["repairs"] + 1, "--deadline", int(deadline - reserve), "--repair-window", pol["repair_window"], *(["--e2e", f"checks/{ids[0]}.mjs"] if len(ids) == 1 else ["--e2e-list", ",".join(f"checks/{i}.mjs" for i in ids)]))}"]')
