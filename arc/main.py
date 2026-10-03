@@ -232,7 +232,19 @@ def build_pipeline(nodes, out, pol, ports, deadline) -> str:
         ids = [str(n["id"]) for n in members]; tag = "+".join(ids)
         impl, check = f"impl_{sanitize(tag)}", f"check_{sanitize(tag)}"
         body = node_body(ids[0], members[0]) if len(ids) == 1 else "Implement ALL together, then stop:\n\n" + "\n\n".join(node_body(i, n) for i, n in zip(ids, members))
-        lines.append(impl_node(impl, tag, body, impl_timeout)); reserve = (total - index) * pol["min_node_seconds"] + pol["final_reserve_seconds"]
+        lines.append(impl_node(impl, tag, body, impl_timeout))
+        # Reserve enough for every requirement still to come to get its own
+        # fair share (impl_timeout), not just the min_node_seconds floor:
+        # min_node_seconds (120s) is far below the ~300-600s a real
+        # implement node takes (see node_timeout_seconds comment above), so
+        # the old `(total - index) * min_node_seconds` reserve let an early
+        # requirement's repair loop eat almost the whole run budget and left
+        # later requirements (the harder, later-phase ones) deadline-skipped
+        # before their first attempt -- the actual cause of phase-3 scoring
+        # 0. Reserving impl_timeout per remaining requirement instead makes
+        # each earlier requirement's repair loop give up its slot early
+        # enough that every requirement still gets at least one real attempt.
+        reserve = (total - index) * impl_timeout + pol["final_reserve_seconds"]
         lines.append(
             f'    {check} [handler="shell_check", label="verify {dot_quote(tag)}", '
             f'timeout_secs="{pol["verify_timeout"]}", prompt="{verify(ports[0], "--tag", tag, "--attempts", pol["repairs"] + 1, "--deadline", int(deadline - reserve), "--repair-window", pol["repair_window"], *(["--e2e", f"checks/{ids[0]}.mjs"] if len(ids) == 1 else ["--e2e-list", ",".join(f"checks/{i}.mjs" for i in ids)]))}"]')
