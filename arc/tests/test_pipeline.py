@@ -146,6 +146,23 @@ class PipelineDot(unittest.TestCase):
             line = next(l for l in dot.splitlines() if l.strip().startswith(f"impl_n_REQ_{i} ["))
             self.assertIn(f'timeout_secs="{expected}"', line)
 
+    def test_later_requirements_reserve_a_full_fair_share_not_just_the_floor(self):
+        # Regression for the phase-3-scores-0 bug: the per-check --deadline
+        # used to shrink by only min_node_seconds (120s) per requirement
+        # still to come, far below a real implement node's ~300-600s, so an
+        # early requirement's repair loop could run past the point where
+        # later requirements had any real time left. The reserve must now
+        # shrink by the same impl_timeout every requirement actually gets.
+        nodes = [atomic(f"REQ-{i}") for i in range(1, 11)]  # 10 reqs, no deps
+        deadline = 1_000_000
+        dot = main.build_pipeline(main.atomic_nodes(tree(nodes)), "/tmp/out", POLICY, [43100], deadline)
+        impl_timeout = max(POLICY["min_node_seconds"],
+                            (POLICY["run_timeout"] - POLICY["final_reserve_seconds"]) // len(nodes))
+        for i in range(1, 11):
+            line = next(l for l in dot.splitlines() if l.strip().startswith(f"check_n_REQ_{i} ["))
+            reserve = (10 - i) * impl_timeout + POLICY["final_reserve_seconds"]
+            self.assertIn(f"--deadline {int(deadline - reserve)}", line)
+
     def test_implement_node_timeout_never_exceeds_the_configured_ceiling(self):
         # A small tree must keep today's behavior: one or two requirements
         # should never be squeezed just because the fair-share math applies.
