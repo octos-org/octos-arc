@@ -35,6 +35,11 @@ Rules:
   be able to sign in with the stated credential.
 - For persistent data, seed only a brand-new store; later startups must keep
   user edits and deletions.
+- When a computed value and its error/sentinel share a representation (e.g.
+  both are plain strings), tag or wrap them so chained computations can tell
+  a real value from an error marker — never detect "is this an error" by
+  checking typeof alone, or a valid downstream value gets mistaken for an
+  upstream failure.
 - Write only the app's own files under frontend/ and backend/. No reports,
   notes, summaries or other .md files: nobody reads them and they cost output.
 - Prefer zero runtime dependencies; if you must install, the registry is
