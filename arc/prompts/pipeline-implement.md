@@ -17,6 +17,9 @@ Layout (already scaffolded, keep it):
 Rules:
 - Build ONLY what this requirement needs: the smallest app that satisfies it.
   Later requirements extend the same files; do not build their features early.
+- Keep every page, route, label and accessible name that already exists (see
+  the application context) exactly as it is: extend, never rename — e.g. do
+  not add an aria-label that changes an existing control's accessible name.
 - Implement for general valid inputs and preserve behaviour already built by
   earlier requirements. Never hardcode the values the acceptance example uses.
 - Use the exact labels, accessible names and test ids the requirement names.

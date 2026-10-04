@@ -76,11 +76,13 @@ def atomic_nodes(tree: dict) -> list[dict]:
     """Atomic requirements in dependency order (FOLDERs are grouping only)."""
     flat: dict[str, dict] = {}
 
-    def walk(node: dict) -> None:
+    def walk(node: dict, ctx: tuple = ()) -> None:   # ctx: the enclosing FOLDERs' descriptions
         if str(node.get("type", "")).upper() != "FOLDER":
-            flat[str(node["id"])] = node
+            flat[str(node["id"])] = dict(node, _ctx=ctx)
+        elif node.get("description"):
+            ctx += (f"{node.get('name', '')}: {str(node['description']).strip()}",)
         for child in node.get("children") or []:
-            walk(child)
+            walk(child, ctx)
 
     walk(tree)
     ordered: list[dict] = []
@@ -166,8 +168,7 @@ def build_pipeline(nodes, out, pol, ports, deadline) -> str:
     keeps validate rule 1 satisfied.
     """
     def read(name, **fields) -> str:
-        # Literal braces are escaped (`import { x }` reads as an unbound variable
-        # and the kernel rejects the whole graph); only named fields are filled.
+        # Literal braces escaped (`import { x }` is an unbound variable to the kernel); named fields filled.
         text = untemplate((BUNDLE_DIR / "prompts" / f"{name}.md").read_text(encoding="utf-8"))
         for key, value in {"port": ports[0], **fields}.items():
             text = text.replace("{{" + key + "}}", str(value))
@@ -218,6 +219,8 @@ def build_pipeline(nodes, out, pol, ports, deadline) -> str:
         ids = [str(n["id"]) for n in members]; tag = "+".join(ids)
         impl, check = f"impl_{sanitize(tag)}", f"check_{sanitize(tag)}"
         body = node_body(ids[0], members[0]) if len(ids) == 1 else "Implement ALL together, then stop:\n\n" + "\n\n".join(node_body(i, n) for i, n in zip(ids, members))
+        ctx = dict.fromkeys(c for n in members for c in n.get("_ctx", ()))   # once per group, not per member
+        body = (untemplate("Application context (keep every page, name and behaviour it says already exists):\n" + "\n".join(ctx)) + "\n\n" + body) if ctx else body
         lines.append(impl_node(impl, tag, body)); reserve = (total - index) * pol["min_node_seconds"] + pol["final_reserve_seconds"]
         lines.append(
             f'    {check} [handler="shell_check", label="verify {dot_quote(tag)}", '
@@ -494,8 +497,7 @@ def main() -> int:
         ask = (f'Your only job: call the run_pipeline tool with pipeline="{pol["name"]}" and '
                f'input="Build the application described by requirements {", ".join(node_ids)}". '
                f'Call no other tool and write no files. After the tool has answered, reply "ok".')
-        # The turn's success says nothing about the tool call: glm-5.3-flash
-        # sometimes answers a bare "ok". A started run leaves its dir; without one, ask again.
+        # A bare "ok" turn may not have called the tool: a started run leaves its dir; else ask again.
         started_run = lambda: any(data_dir.glob(f"profiles/*/data/pipeline-runs/{pol['name']}-*"))  # noqa: E731
         for attempt in range(4):
             ok, reply = session.run_turn(ask if attempt == 0 else f'No pipeline is running: run_pipeline '
@@ -575,8 +577,7 @@ def collect_app(data_dir: Path, out: Path, name: str) -> Path | None:
     return runs[-1]
 
 
-def keep_checks(run: Path, out: Path) -> None:
-    """Passed self-checks -> <out>/.arc/checks: the next stage's final pass reruns them."""
+def keep_checks(run: Path, out: Path) -> None:   # passed self-checks -> <out>/.arc/checks, rerun next stage
     status = {p.name: p.read_text().strip() == "0" for p in (run / ".arc-status").glob("*")}
     keep = [f for f in (run / "checks").glob("*.mjs")
             if status.get("ALL") or any(ok and f.stem in tag.split("+") for tag, ok in status.items())]

@@ -106,10 +106,8 @@ class OctosStdioSession:
 
     def bootstrap_profile(self, provider: str, model: str, base_url: str | None,
                           api_key_env: str | None, timeout: float = 60.0) -> None:
-        """Create a solo profile and select its LLM (serve mode has no
-        config-file default profile). The id must be unique per call: the
-        profile store persists across runs, so a fixed id collides with
-        "local profile 'arc-2' already exists with different email"."""
+        """Create a solo profile and select its LLM (serve mode has no default
+        profile). Unique id per call: the store persists, a fixed id collides."""
         import os
         unique = f"arc-{os.getpid()}-{int(time.time() * 1000) % 10_000_000}"
         res = self._send("profile/local/create", {
