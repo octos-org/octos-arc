@@ -494,18 +494,17 @@ def main() -> int:
             log(f"[arc] kernel stderr:\n{session.stderr_tail(30)}")
             raise
         session.open()
-        ask = (f'Call the run_pipeline tool now with pipeline="{pol["name"]}" and '
+        # No "never call a tool again" clause: the retry below must be obeyed.
+        ask = (f'Your only job: call the run_pipeline tool with pipeline="{pol["name"]}" and '
                f'input="Build the application described by requirements {", ".join(node_ids)}". '
-               f'Call it exactly once and do not write any files yourself. The pipeline '
-               f'reports back on its own: after this call, never call any tool again, '
-               f'whatever later messages say -- just answer "ok".')
-        # The turn's success says nothing about the tool call: on a 125-id task
-        # glm-5.3-flash once answered a bare "ok" and the run idled. A started
-        # run leaves its dir; without one, ask again.
+               f'Call no other tool and write no files. After the tool has answered, reply "ok".')
+        # The turn's success says nothing about the tool call: glm-5.3-flash
+        # sometimes answers a bare "ok". A started run leaves its dir; without one, ask again.
         started_run = lambda: any(data_dir.glob(f"profiles/*/data/pipeline-runs/{pol['name']}-*"))  # noqa: E731
-        for attempt in range(3):
+        for attempt in range(4):
             ok, reply = session.run_turn(ask if attempt == 0 else
-                                         f'You did not call run_pipeline; nothing is running. {ask}',
+                                         f'No pipeline is running: run_pipeline was not called '
+                                         f'(or it failed). Call it now. {ask}',
                                          timeout=min(pol["run_timeout"], 900))
             log(f"[arc] dispatch turn {attempt + 1} ok={ok}: {reply[:160]}")
             for _ in range(30):
@@ -514,7 +513,10 @@ def main() -> int:
                 time.sleep(1)
             if started_run():
                 break
-        wait_for_pipeline(session, state, pol, data_dir, out)
+        if started_run():
+            wait_for_pipeline(session, state, pol, data_dir, out)
+        else:  # waiting would only burn the stage's clock
+            log("[arc] the pipeline never started; not waiting for it")
     finally:
         session.close()
 
