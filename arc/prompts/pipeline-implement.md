@@ -40,6 +40,9 @@ Rules:
   a real value from an error marker — never detect "is this an error" by
   checking typeof alone, or a valid downstream value gets mistaken for an
   upstream failure.
+- File contents shown to you may hold a `[...-redacted]` placeholder where a
+  value (a hash, a key, a long id) was masked: never write one back. Do not
+  hand-edit runtime data files (e.g. a JSON store); seed data lives in code.
 - Write only the app's own files under frontend/ and backend/. No reports,
   notes, summaries or other .md files: nobody reads them and they cost output.
 - Prefer zero runtime dependencies; if you must install, the registry is
