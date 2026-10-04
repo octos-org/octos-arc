@@ -531,6 +531,9 @@ def main() -> int:
     status = {p.name: p.read_text().strip() == "0"
               for p in (run_dir / ".arc-status").glob("*")} if run_dir else {}
     passed = status.get("ALL", bool(status) and all(status.values()))
+    log(f"[arc] self-check verdicts: {status}")   # ARC_DEBUG: the scripts too, to compare with real tests offline
+    for f in sorted((run_dir / "checks").glob("*.mjs")) if run_dir and os.environ.get("ARC_DEBUG") else []:
+        log(f"[arc] self-check script {f.name}:\n{f.read_text(errors='replace')[:6000]}")
     tokens = summary.get("total_tokens") or {}
     state["tokens_in"] += int(tokens.get("input_tokens") or 0)
     state["tokens_out"] += int(tokens.get("output_tokens") or 0)
