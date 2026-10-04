@@ -232,7 +232,7 @@ def build_pipeline(nodes, out, pol, ports, deadline) -> str:
     # sweep nodes would need 2 graph nodes each; the kernel caps graphs at 40.)
     # Final pass: the finished app must still build, boot and serve GET /.
     # A later requirement can break an earlier one; this is where that shows.
-    if total > 1:
+    if total > 1 or any((Path(out) / ".arc" / "checks").glob("*.mjs")):  # also rerun earlier stages' checks
         lines += [
             f'    check_all [handler="shell_check", label="verify all", '
             f'timeout_secs="{pol["verify_timeout"]}", prompt="{verify(ports[0], "--tag", "ALL", "--attempts", pol["final_repairs"] + 1, "--deadline", int(deadline - pol["final_reserve_seconds"] // 2), "--e2e-dir", "checks")}"]',
@@ -491,7 +491,6 @@ def main() -> int:
             log(f"[arc] kernel stderr:\n{session.stderr_tail(30)}")
             raise
         session.open()
-        # No "never call a tool again" clause: the retry below must be obeyed.
         ask = (f'Your only job: call the run_pipeline tool with pipeline="{pol["name"]}" and '
                f'input="Build the application described by requirements {", ".join(node_ids)}". '
                f'Call no other tool and write no files. After the tool has answered, reply "ok".')
@@ -499,21 +498,13 @@ def main() -> int:
         # sometimes answers a bare "ok". A started run leaves its dir; without one, ask again.
         started_run = lambda: any(data_dir.glob(f"profiles/*/data/pipeline-runs/{pol['name']}-*"))  # noqa: E731
         for attempt in range(4):
-            ok, reply = session.run_turn(ask if attempt == 0 else
-                                         f'No pipeline is running: run_pipeline was not called '
-                                         f'(or it failed). Call it now. {ask}',
-                                         timeout=min(pol["run_timeout"], 900))
+            ok, reply = session.run_turn(ask if attempt == 0 else f'No pipeline is running: run_pipeline '
+                                         f'was not called (or it failed). Call it now. {ask}', timeout=min(pol["run_timeout"], 900))
             log(f"[arc] dispatch turn {attempt + 1} ok={ok}: {reply[:160]}")
-            for _ in range(30):
-                if started_run():
-                    break
-                time.sleep(1)
-            if started_run():
+            if any(started_run() or time.sleep(1) for _ in range(30)):   # poll up to 30 s
                 break
-        if started_run():
-            wait_for_pipeline(session, state, pol, data_dir, out)
-        else:  # waiting would only burn the stage's clock
-            log("[arc] the pipeline never started; not waiting for it")
+        (wait_for_pipeline(session, state, pol, data_dir, out) if started_run()   # else waiting only burns the clock
+         else log("[arc] the pipeline never started; not waiting for it"))
     finally:
         session.close()
 
@@ -577,7 +568,18 @@ def collect_app(data_dir: Path, out: Path, name: str) -> Path | None:
         shutil.copytree(source / part, out / part,
                         ignore=shutil.ignore_patterns("node_modules", ".git"))
     log(f"[arc] collected {copied or 'nothing'} from {runs[-1].name}")
+    keep_checks(source, out)
     return runs[-1]
+
+
+def keep_checks(run: Path, out: Path) -> None:
+    """Passed self-checks -> <out>/.arc/checks: the next stage's final pass reruns them."""
+    status = {p.name: p.read_text().strip() == "0" for p in (run / ".arc-status").glob("*")}
+    keep = [f for f in (run / "checks").glob("*.mjs")
+            if status.get("ALL") or any(ok and f.stem in tag.split("+") for tag, ok in status.items())]
+    shutil.rmtree(dest := out / ".arc" / "checks", ignore_errors=True); dest.mkdir(parents=True)
+    for f in keep:
+        shutil.copy2(f, dest / f.name)
 
 
 NODE_RE = re.compile(r"Pipeline '[^']*' running: (\S+)")
@@ -620,6 +622,7 @@ def deliver_progress(data_dir: Path, out: Path, name: str, synced: dict) -> None
                     shutil.rmtree(out / part, ignore_errors=True)
                     shutil.copytree(good / "app" / part, out / part)
             synced["stamp"] = stamp
+            keep_checks(good.parent, out)
 
 
 def wait_for_pipeline(session, state: dict, pol: dict, data_dir: Path, out: Path) -> None:

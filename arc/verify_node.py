@@ -48,6 +48,8 @@ def seed(src: Path) -> int:
                     shutil.copytree(base / part, out / part, dirs_exist_ok=True,
                                     ignore=shutil.ignore_patterns("node_modules", "dist", ".git"))
             print(f"[seed] workspace seeded from {base}")
+            if (base / ".arc" / "checks").is_dir():   # earlier stages' passing self-checks
+                shutil.copytree(base / ".arc" / "checks", out / "checks", dirs_exist_ok=True)
     return 0
 
 
