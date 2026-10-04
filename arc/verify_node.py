@@ -222,6 +222,8 @@ def playwright_run(files: list[Path], env: dict, port: int) -> int:
         print(f"[verify] no Playwright library available for self-checks\n{STOP}: no test runner")
         return 1
     rc_all = 0
+    if files and not (files[0].parent / "node_modules").exists():   # ESM `import` ignores NODE_PATH
+        (files[0].parent / "node_modules").symlink_to(pw_env["NODE_PATH"])
     for f in files:
         rc, log = sh(["node", str(f)], f.parent, dict(pw_env, E2E_BASE_URL=f"http://127.0.0.1:{port}", CI="1"),
                      E2E_TIMEOUT)

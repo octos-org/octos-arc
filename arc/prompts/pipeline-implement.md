@@ -46,15 +46,30 @@ Rules:
   already pointed at the official npm registry.
 Then write your own acceptance check as `checks/{node_id}.mjs`: a Node script
 that derives its steps from THIS requirement's text above (never from any
-external test file), launches chromium from '@playwright/test'
-(`import { chromium } from '@playwright/test'`), opens
-`process.env.E2E_BASE_URL`, and walks EVERY scenario the requirement lists,
-in order: for each GIVEN/WHEN/THEN it opens the named page, clicks, fills,
-and asserts the expected visible result with `expect` — when the requirement
-names seeded accounts or entry points, the script signs in as each named
-account and opens each named entry to prove they exist and work. Print one
-`SELF-CHECK OK` line per scenario and exit 0; any failed expectation must
-exit non-zero. Keep the whole script under 120 lines and under 4 minutes.
+external test file). Start it with
+`import { chromium, expect } from '@playwright/test'` — that import resolves
+as-is and the browser is installed, so write no module-resolution or
+browser-discovery code. It opens `process.env.E2E_BASE_URL` and walks EVERY
+scenario the requirement lists, in order: for each GIVEN/WHEN/THEN it opens
+the named page, clicks, fills, and asserts the expected visible result with
+`expect`. Rules for the check:
+- Assert exactly what the requirement states: the headings, labels, button and
+  link names and texts it quotes, found by role and exact name
+  (`getByRole(role, { name, exact: true })`, `getByLabel`, `getByText`), the
+  routes it names, the redirects and error messages it describes. Assert
+  nothing it does not state (page structure, element counts, styling), and
+  never compare a whole list item's text for equality — it also holds
+  buttons and other text; check that it contains the expected text.
+- Stored data survives between runs of the check: create your own records
+  with a unique suffix (e.g. `Date.now()`), never assume an empty store or an
+  exact global count; compare before and after instead.
+- When the requirement names seeded accounts or entry points, sign in as each
+  named account and open each named entry to prove they exist and work.
+- Also re-check briefly the earlier behaviour this requirement relies on or
+  touches, as the application context states it (same pages, same names).
+Print one `SELF-CHECK OK` line per scenario and exit 0; any failed
+expectation must exit non-zero. Keep the whole script under 120 lines and
+under 4 minutes.
 The pipeline runs it against your freshly built app right after this turn and
 shows you its output on failure.
 
