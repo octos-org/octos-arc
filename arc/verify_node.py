@@ -377,10 +377,7 @@ def main(argv: list[str]) -> int:
         if not first.is_file():
             first.write_text(str(time.time()))
         spent = time.time() - float(first.read_text())
-        # Breadth before depth: no repair round once the groups still ahead need the rest of the clock at the pace so far.
-        done = max(1, sum(p.name != "ALL" for p in (Path.cwd() / ".arc-status").iterdir()))
-        pace = max(float(opts.get("min-node", 0)), (time.time() - float(opts.get("started", time.time()))) / done)
-        if (attempts >= int(opts.get("attempts", 6)) or time.time() + int(opts.get("left", 0)) * pace >= float(opts.get("deadline", "inf"))
+        if (attempts >= int(opts.get("attempts", 6)) or time.time() >= float(opts.get("deadline", "inf"))
                 or spent >= float(opts.get("repair-window", "inf"))):
             print(f"{STOP}: attempt {attempts} for {opts['tag']}; moving on")
     return rc
