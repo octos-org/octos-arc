@@ -218,10 +218,10 @@ def build_pipeline(nodes, out, pol, ports, deadline) -> str:
         ids = [str(n["id"]) for n in members]; tag = "+".join(ids)
         impl, check = f"impl_{sanitize(tag)}", f"check_{sanitize(tag)}"
         body = node_body(ids[0], members[0]) if len(ids) == 1 else "Implement ALL together, then stop:\n\n" + "\n\n".join(node_body(i, n) for i, n in zip(ids, members))
-        lines.append(impl_node(impl, tag, body)); reserve = (total - index) * pol["min_node_seconds"] + pol["final_reserve_seconds"]
+        lines.append(impl_node(impl, tag, body))
         lines.append(
             f'    {check} [handler="shell_check", label="verify {dot_quote(tag)}", '
-            f'timeout_secs="{pol["verify_timeout"]}", prompt="{verify(ports[0], "--tag", tag, "--attempts", pol["repairs"] + 1, "--deadline", int(deadline - reserve), "--repair-window", pol["repair_window"], *(["--e2e", f"checks/{ids[0]}.mjs"] if len(ids) == 1 else ["--e2e-list", ",".join(f"checks/{i}.mjs" for i in ids)]))}"]')
+            f'timeout_secs="{pol["verify_timeout"]}", prompt="{verify(ports[0], "--tag", tag, "--attempts", pol["repairs"] + 1, "--deadline", int(deadline - pol["final_reserve_seconds"]), "--left", total - index, "--started", int(deadline - pol["run_timeout"]), "--min-node", pol["min_node_seconds"], "--repair-window", pol["repair_window"], *(["--e2e", f"checks/{ids[0]}.mjs"] if len(ids) == 1 else ["--e2e-list", ",".join(f"checks/{i}.mjs" for i in ids)]))}"]')
         lines.append(f'    {prev} -> {impl}' + (f' [condition="{prev_cond}"]' if prev_cond else ""))
         lines.append(f'    {impl} -> {check} [condition="{anyway}"]')
         lines.append(f'    {check} -> {impl} [condition="{repair}"]')
