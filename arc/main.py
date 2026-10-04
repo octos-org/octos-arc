@@ -136,11 +136,8 @@ def sanitize(node_id: str) -> str:
 
 
 def untemplate(text: str) -> str:
-    """Neutralise `{...}` in quoted task content: the validator reads any
-    `{token}` of [A-Za-z0-9_-.:] as a template variable and REJECTS the graph
-    when it is unbound, so a Playwright excerpt with `async ({ page }) =>` kills
-    the run. Doubling puts a `{` inside the candidate, which the same check then
-    refuses as a variable name, and reads as the usual escape to a model."""
+    """Neutralise `{...}`: the validator REJECTS a graph with an unbound `{token}`
+    (e.g. `async ({ page }) =>`); doubling makes it no variable name, and reads as an escape."""
     return text.replace("{", "{{").replace("}", "}}")
 
 
@@ -456,6 +453,11 @@ def main() -> int:
 
     tree = load_tree(req_dir)
     nodes = atomic_nodes(tree)
+    hist, key = out / ".arc" / "requirements", hashlib.sha256(json.dumps(tree, sort_keys=True).encode()).hexdigest()[:12]  # every stage's requirements, kept in force
+    earlier = "\n".join(f"- {n.get('name', '')}: {str(n.get('description') or '').strip()}" for d in sorted(hist.glob("*"))
+                        if not d.name.endswith(key) for n in atomic_nodes(load_tree(d)))[-12000:]
+    shutil.copytree(req_dir, hist / f"{int(time.time())}-{key}") if not any(hist.glob(f"*-{key}")) else None
+    for n in nodes if earlier else []: n["_ctx"] += (f"Requirements of earlier stages, still in force (keep them working exactly as written):\n{earlier}",)
     node_ids = [str(n["id"]) for n in nodes]
     log(f"[arc] {len(nodes)} atomic nodes: {node_ids}")
 
@@ -505,8 +507,7 @@ def main() -> int:
             log(f"[arc] dispatch turn {attempt + 1} ok={ok}: {reply[:160]}")
             if any(started_run() or time.sleep(1) for _ in range(30)):   # poll up to 30 s
                 break
-        (wait_for_pipeline(session, state, pol, data_dir, out) if started_run()   # else waiting only burns the clock
-         else log("[arc] the pipeline never started; not waiting for it"))
+        wait_for_pipeline(session, state, pol, data_dir, out) if started_run() else log("[arc] the pipeline never started; not waiting for it")
     finally:
         session.close()
 
@@ -533,9 +534,7 @@ def main() -> int:
     status = {p.name: p.read_text().strip() == "0"
               for p in (run_dir / ".arc-status").glob("*")} if run_dir else {}
     passed = status.get("ALL", bool(status) and all(status.values()))
-    log(f"[arc] self-check verdicts: {status}")   # ARC_DEBUG: the scripts too, to compare with real tests offline
-    for f in sorted((run_dir / "checks").glob("*.mjs")) if run_dir and os.environ.get("ARC_DEBUG") else []:
-        log(f"[arc] self-check script {f.name}:\n{f.read_text(errors='replace')[:6000]}")
+    log(f"[arc] self-check verdicts: {status}")
     tokens = summary.get("total_tokens") or {}
     state["tokens_in"] += int(tokens.get("input_tokens") or 0)
     state["tokens_out"] += int(tokens.get("output_tokens") or 0)
@@ -579,8 +578,7 @@ def collect_app(data_dir: Path, out: Path, name: str) -> Path | None:
 
 def keep_checks(run: Path, out: Path) -> None:   # passed self-checks -> <out>/.arc/checks, rerun next stage
     status = {p.name: p.read_text().strip() == "0" for p in (run / ".arc-status").glob("*")}
-    keep = [f for f in (run / "checks").glob("*.mjs")
-            if status.get("ALL") or any(ok and f.stem in tag.split("+") for tag, ok in status.items())]
+    keep = [f for f in (run / "checks").glob("*.mjs") if status.get("ALL") or any(ok and f.stem in tag.split("+") for tag, ok in status.items())]
     shutil.rmtree(dest := out / ".arc" / "checks", ignore_errors=True); dest.mkdir(parents=True)
     for f in keep:
         shutil.copy2(f, dest / f.name)
