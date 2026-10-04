@@ -169,11 +169,9 @@ def build_pipeline(nodes, out, pol, ports, deadline) -> str:
         # Literal braces are escaped (`import { x }` reads as an unbound variable
         # and the kernel rejects the whole graph); only named fields are filled.
         text = untemplate((BUNDLE_DIR / "prompts" / f"{name}.md").read_text(encoding="utf-8"))
-        for key, value in {"port": ports[0], "ports": ports_clause, **fields}.items():
+        for key, value in {"port": ports[0], **fields}.items():
             text = text.replace("{{" + key + "}}", str(value))
         return text
-    ports_clause = ""
-    ports_clause = read("port-contract", ports=", ".join(map(str, ports))) if len(ports) > 1 else ""
 
     def verify(*args) -> str:
         # The validator's CWD is the pipeline run dir, the only place file
@@ -214,8 +212,7 @@ def build_pipeline(nodes, out, pol, ports, deadline) -> str:
     total = len(groups)
 
     def node_body(nid, node):
-        return read("pipeline-implement", node_id=nid, description=untemplate(describe(node)),
-                    spec="(no public example for this requirement)")
+        return read("pipeline-implement", node_id=nid, description=untemplate(describe(node)))
 
     for index, members in enumerate(groups, 1):
         ids = [str(n["id"]) for n in members]; tag = "+".join(ids)

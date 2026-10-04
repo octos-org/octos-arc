@@ -14,5 +14,4 @@ Rules:
 - Write only the app's own files under frontend/ and backend/. No reports,
   notes, summaries or other .md files: nobody reads them and they cost output.
 - If the output below shows no failure, reply "nothing to fix" and stop.
-{ports}
 Finish by writing the files. Reply with one short sentence when done.

@@ -2,9 +2,6 @@ Implement requirement {node_id} of this web application, then stop.
 
 {description}
 
-Public acceptance example (implement the FULL requirement, not just this case):
-{spec}
-
 You are editing an existing workspace. Write files with the write_file tool —
 nothing you put in chat is saved, only tool calls change the app.
 
@@ -44,7 +41,6 @@ Rules:
   notes, summaries or other .md files: nobody reads them and they cost output.
 - Prefer zero runtime dependencies; if you must install, the registry is
   already pointed at the official npm registry.
-{ports}
 Then write your own acceptance check as `checks/{node_id}.mjs`: a Node script
 that derives its steps from THIS requirement's text above (never from any
 external test file), launches chromium from '@playwright/test'
