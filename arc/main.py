@@ -19,7 +19,6 @@ from octos_stdio import OctosStdioSession  # noqa: E402
 log = functools.partial(print, flush=True)
 
 
-
 #: policy key -> (arc-policy.toml key, env override, default)
 _POLICY = {
     "name": ("name", "OCTOS_ARC_PIPELINE_NAME", "arc_build"),
@@ -56,7 +55,6 @@ def policy() -> dict:
         value = os.environ.get(env_key, pipe.get(toml_key, default))
         out[key] = type(default)(value)
     return out
-
 
 
 def load_tree(req_dir: Path) -> dict:
@@ -167,9 +165,15 @@ def build_pipeline(nodes, out, pol, ports, deadline) -> str:
     `find_start_node` ignores back-edges, so the node named `start` is what
     keeps validate rule 1 satisfied.
     """
-    read = lambda n: (BUNDLE_DIR / "prompts" / f"{n}.md").read_text(encoding="utf-8")  # noqa: E731
-    ports_clause = read("port-contract").replace("{ports}", ", ".join(map(str, ports))
-                                                            ).replace("{port}", str(ports[0])) if len(ports) > 1 else ""
+    def read(name, **fields) -> str:
+        # Literal braces are escaped (`import { x }` reads as an unbound variable
+        # and the kernel rejects the whole graph); only named fields are filled.
+        text = untemplate((BUNDLE_DIR / "prompts" / f"{name}.md").read_text(encoding="utf-8"))
+        for key, value in {"port": ports[0], "ports": ports_clause, **fields}.items():
+            text = text.replace("{{" + key + "}}", str(value))
+        return text
+    ports_clause = ""
+    ports_clause = read("port-contract", ports=", ".join(map(str, ports))) if len(ports) > 1 else ""
 
     def verify(*args) -> str:
         # The validator's CWD is the pipeline run dir, the only place file
@@ -206,16 +210,12 @@ def build_pipeline(nodes, out, pol, ports, deadline) -> str:
              f'prompt="{verify("--seed", out)}"]',
              "    start -> seed"]
     prev, prev_cond = "seed", None
-    tmpl = read("pipeline-implement")
     groups = group_nodes(nodes, pol["group_max_chars"] if pol["group_requirements"] else 0, 3)
     total = len(groups)
 
     def node_body(nid, node):
-        return (tmpl.replace("{node_id}", nid)
-                    .replace("{description}", untemplate(describe(node)))
-                    .replace("{spec}", "(no public example for this requirement)")
-                    .replace("{port}", str(ports[0]))
-                    .replace("{ports}", ports_clause))
+        return read("pipeline-implement", node_id=nid, description=untemplate(describe(node)),
+                    spec="(no public example for this requirement)")
 
     for index, members in enumerate(groups, 1):
         ids = [str(n["id"]) for n in members]; tag = "+".join(ids)
@@ -239,8 +239,7 @@ def build_pipeline(nodes, out, pol, ports, deadline) -> str:
         lines += [
             f'    check_all [handler="shell_check", label="verify all", '
             f'timeout_secs="{pol["verify_timeout"]}", prompt="{verify(ports[0], "--tag", "ALL", "--attempts", pol["final_repairs"] + 1, "--deadline", int(deadline - pol["final_reserve_seconds"] // 2), "--e2e-dir", "checks")}"]',
-            impl_node("fix_all", "regressions", read("pipeline-regression")
-                      .replace("{port}", str(ports[0])).replace("{ports}", ports_clause)),
+            impl_node("fix_all", "regressions", read("pipeline-regression")),
             '    done [handler="noop", label="Done"]',
             f'    {prev} -> check_all [condition="{prev_cond}"]',
             # An all-conditional router whose conditions all miss falls back to
@@ -438,7 +437,6 @@ def find_octos() -> str:
                 path.chmod(0o755)
             return str(path)
     return _cached_octos(cache_dir) or _download_octos(cache_dir)
-
 
 
 def main() -> int:
