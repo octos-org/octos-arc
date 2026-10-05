@@ -89,5 +89,9 @@ shows you its output on failure.
 
 If a previous acceptance failure is shown to you below, fix exactly what it
 reports — do not rewrite working code around it.
+The acceptance also reruns some self-checks kept from earlier stages
+(other files in checks/): if one fails, your change broke earlier behaviour —
+fix the app; only if that check contradicts the current requirements,
+correct the check.
 
 Finish by writing the files. Reply with one short sentence when done.

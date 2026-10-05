@@ -15,7 +15,6 @@ sys.path.insert(0, str(BUNDLE_DIR))
 from arcbench_agent_runtime import AgentRuntime  # noqa: E402
 from octos_stdio import OctosStdioSession  # noqa: E402
 
-
 log = functools.partial(print, flush=True)
 
 
@@ -207,6 +206,7 @@ def build_pipeline(nodes, out, pol, ports, deadline) -> str:
              "    start -> seed"]
     prev, prev_cond = "seed", None
     groups = group_nodes(nodes, pol["group_max_chars"] if pol["group_requirements"] else 0, 3)
+    carried = [f"checks/{p.name}" for p in sorted((Path(out) / ".arc" / "checks").glob("*.mjs"))]   # earlier stages' passed checks
     total = len(groups)
 
     def node_body(nid, node):
@@ -221,7 +221,7 @@ def build_pipeline(nodes, out, pol, ports, deadline) -> str:
         lines.append(impl_node(impl, tag, body)); reserve = (total - index) * pol["min_node_seconds"] + pol["final_reserve_seconds"]
         lines.append(
             f'    {check} [handler="shell_check", label="verify {dot_quote(tag)}", '
-            f'timeout_secs="{pol["verify_timeout"]}", prompt="{verify(ports[0], "--tag", tag, "--attempts", pol["repairs"] + 1, "--deadline", int(deadline - reserve), "--repair-window", pol["repair_window"], *(["--e2e", f"checks/{ids[0]}.mjs"] if len(ids) == 1 else ["--e2e-list", ",".join(f"checks/{i}.mjs" for i in ids)]))}"]')
+            f'timeout_secs="{pol["verify_timeout"]}", prompt="{verify(ports[0], "--tag", tag, "--attempts", pol["repairs"] + 1, "--deadline", int(deadline - reserve), "--repair-window", pol["repair_window"], *(["--e2e", f"checks/{ids[0]}.mjs"] if len(ids) == 1 and not carried else ["--e2e-list", ",".join(dict.fromkeys([f"checks/{i}.mjs" for i in ids] + [carried[(index * 4 + k) % len(carried)] for k in range(min(4, len(carried)))]))]))}"]')
         lines.append(f'    {prev} -> {impl}' + (f' [condition="{prev_cond}"]' if prev_cond else ""))
         lines.append(f'    {impl} -> {check} [condition="{anyway}"]')
         lines.append(f'    {check} -> {impl} [condition="{repair}"]')
