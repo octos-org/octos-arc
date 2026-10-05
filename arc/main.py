@@ -115,10 +115,10 @@ def group_nodes(nodes: list[dict], max_chars: int, max_members: int) -> list[lis
     return groups + [current] if current else groups
 
 
+rules = lambda node: [s for s in re.split(r"(?<=[.!?])\s+(?=[A-Z\"“(`])", str(node.get("description") or "").strip()) if s]  # noqa: E731 -- one numbered, checkable rule per sentence
+
 def describe(node: dict) -> str:
-    lines = [f"Name: {node.get('name', '')}"]
-    if node.get("description"):
-        lines.append(str(node["description"]).strip())
+    lines = [f"Name: {node.get('name', '')}"] + [f"Rule {i}: {s}" for i, s in enumerate(rules(node), 1)]
     for sc in node.get("scenarios") or []:
         lines.append(f"Scenario: {sc.get('name', '')}")
         for step in sc.get("steps") or []:
@@ -143,11 +143,7 @@ def untemplate(text: str) -> str:
 
 def build_pipeline(nodes, out, pol, ports, deadline) -> str:
     """seed -> (implement -> acceptance) per requirement in dependency order ->
-    a final smoke check with its own fix loop.
-
-    Acceptance is requirement-text-driven only: verify_node.py builds the app,
-    boots it and smokes GET /. The agent never sees the evaluation's test
-    files -- no evaluation-test probing, no spec mapping, no helpers.
+    a final check with its own fix loop. Acceptance is requirement-text-driven only.
 
     Loop semantics (all enforced by the kernel's DAG scheduler):
     * a failing acceptance node fires its back-edge to the implement node (the
@@ -221,7 +217,7 @@ def build_pipeline(nodes, out, pol, ports, deadline) -> str:
         lines.append(impl_node(impl, tag, body)); reserve = (total - index) * pol["min_node_seconds"] + pol["final_reserve_seconds"]
         lines.append(
             f'    {check} [handler="shell_check", label="verify {dot_quote(tag)}", '
-            f'timeout_secs="{pol["verify_timeout"]}", prompt="{verify(ports[0], "--tag", tag, "--attempts", pol["repairs"] + 1, "--deadline", int(deadline - reserve), "--repair-window", pol["repair_window"], *(["--e2e", f"checks/{ids[0]}.mjs"] if len(ids) == 1 else ["--e2e-list", ",".join(f"checks/{i}.mjs" for i in ids)]))}"]')
+            f'timeout_secs="{pol["verify_timeout"]}", prompt="{verify(ports[0], "--tag", tag, "--attempts", pol["repairs"] + 1, "--deadline", int(deadline - reserve), "--repair-window", pol["repair_window"], "--rules", ",".join(f"{n['id']}={len(rules(n))}" for n in members), *(["--e2e", f"checks/{ids[0]}.mjs"] if len(ids) == 1 else ["--e2e-list", ",".join(f"checks/{i}.mjs" for i in ids)]))}"]')
         lines.append(f'    {prev} -> {impl}' + (f' [condition="{prev_cond}"]' if prev_cond else ""))
         lines.append(f'    {impl} -> {check} [condition="{anyway}"]')
         lines.append(f'    {check} -> {impl} [condition="{repair}"]')

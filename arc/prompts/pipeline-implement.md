@@ -15,6 +15,8 @@ Layout (already scaffolded, keep it):
   start runs server.js). Update them only if a dependency or build step changes.
 
 Rules:
+- The numbered Rules are the requirement; the scenarios are only examples.
+  Implement every Rule, including the ones no scenario mentions.
 - Build ONLY what this requirement needs: the smallest app that satisfies it.
   Later requirements extend the same files; do not build their features early.
 - Keep every page, route, label and accessible name that already exists (see
@@ -68,6 +70,12 @@ the named page, clicks, fills, and asserts the expected visible result with
   exact global count; compare before and after instead.
 - When the requirement names seeded accounts or entry points, sign in as each
   named account and open each named entry to prove they exist and work.
+- Then check every numbered Rule of the requirement, one by one: assert what
+  it states (texts, HTTP status codes via the response of `page.goto`,
+  redirects, defaults, who may or may not see or do something — signed in as
+  each role it names, or as a visitor) and only then print `RULE <n> OK`.
+  The acceptance fails the check unless it prints `RULE <n> OK` for every
+  Rule number of this requirement.
 - Also re-check briefly the earlier behaviour this requirement relies on or
   touches, as the application context states it (same pages, same names).
 Print one `SELF-CHECK OK` line per scenario and exit 0; any failed

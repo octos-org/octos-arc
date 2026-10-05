@@ -23,6 +23,7 @@ STOP = "ARC_NO_MORE_REPAIRS"
 INSTALL = "npm install --no-audit --no-fund --no-package-lock"
 E2E_TIMEOUT = int(os.environ.get("OCTOS_ARC_SELF_CHECK_TIMEOUT", "300"))
 CHECK_JOBS = int(os.environ.get("OCTOS_ARC_CHECK_JOBS", "2"))
+RULES: dict = {}   # requirement id -> number of its numbered rules; its self-check must print RULE n OK for each
 
 # The harness owns the two manifests so the model never spends a turn on them
 # (build copies src/* to dist; start runs server.js).
@@ -226,6 +227,8 @@ def playwright_run(files: list[Path], env: dict, port: int) -> int:
     for f in files:
         rc, log = sh(["node", str(f)], f.parent, dict(pw_env, E2E_BASE_URL=f"http://127.0.0.1:{port}", CI="1"),
                      E2E_TIMEOUT)
+        miss = sorted(set(range(1, int(RULES.get(f.stem, 0)) + 1)) - {int(n) for n in re.findall(r"RULE (\d+) OK", log)})
+        rc, log = (1, log + f"\n[verify] {f.name} printed no 'RULE n OK' for rule(s) {miss}: assert every numbered rule of the requirement") if rc == 0 and miss else (rc, log)
         print(f"[verify] self-check {f.name}: {'ok' if rc == 0 else 'FAILED'}\n{log[-2500:]}")
         rc_all = rc_all or rc
     return rc_all
@@ -362,6 +365,7 @@ def main(argv: list[str]) -> int:
         else:
             print(f"[verify] unexpected positional argument: {arg}")
             return 2
+    RULES.update(x.split("=", 1) for x in opts.get("rules", "").split(",") if "=" in x)
     rc = check(int(argv[0]), opts.get("e2e"), opts.get("e2e-dir"), opts.get("e2e-list"), int(opts.get("soak") or 0))
     if rc == 0 and "tag" in opts:
         # Latest state a check passed: the adapter copies it into the output
