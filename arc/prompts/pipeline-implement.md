@@ -15,6 +15,11 @@ Layout (already scaffolded, keep it):
   start runs server.js). Update them only if a dependency or build step changes.
 
 Rules:
+- The description is the requirement; the scenarios are only examples. Make a
+  checklist of every concrete rule the description states — each exact text
+  and error message, HTTP status code, redirect, default value, and who may or
+  may not see or do something (including visitors who are not signed in) —
+  and implement every item, including the ones no scenario mentions.
 - Build ONLY what this requirement needs: the smallest app that satisfies it.
   Later requirements extend the same files; do not build their features early.
 - Keep every page, route, label and accessible name that already exists (see
@@ -68,6 +73,12 @@ the named page, clicks, fills, and asserts the expected visible result with
   exact global count; compare before and after instead.
 - When the requirement names seeded accounts or entry points, sign in as each
   named account and open each named entry to prove they exist and work.
+- After the scenarios, also check every other concrete rule the description
+  states: each exact text or error message, each HTTP status code (the
+  response of `page.goto`), each redirect, each default value, and each rule
+  on who may or may not see or do something — sign in as each role the rule
+  names (and as no one, for visitors) and assert that what must be absent is
+  absent.
 - Also re-check briefly the earlier behaviour this requirement relies on or
   touches, as the application context states it (same pages, same names).
 Print one `SELF-CHECK OK` line per scenario and exit 0; any failed
