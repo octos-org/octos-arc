@@ -11,8 +11,9 @@ nothing you put in chat is saved.
 Rules:
 - Fix the cause in the application code; never special-case the failure output.
 - Keep every label, accessible name and route the application already exposes.
+- checks/ also holds self-checks kept from earlier stages. If one of them
+  contradicts the current requirements, correct that check instead of the app.
 - Write only the app's own files under frontend/ and backend/. No reports,
   notes, summaries or other .md files: nobody reads them and they cost output.
 - If the output below shows no failure, reply "nothing to fix" and stop.
-{ports}
 Finish by writing the files. Reply with one short sentence when done.

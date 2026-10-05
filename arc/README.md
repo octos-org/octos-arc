@@ -48,7 +48,7 @@ sh arc/pack.sh                               # 得到 octos-arc-bundle.zip
 | `verify_node.py` | 验收节点跑的命令：构建、起服务、GET / 冒烟（只依据需求文本，不读评测测试）；按次数和截止时间决定是否停止修复（打印 `ARC_NO_MORE_REPAIRS`）；`--seed` 模式把现有应用铺进运行目录 |
 | `octos_stdio.py` | 通过 `octos serve --stdio` 驱动内核 |
 | `arc-policy.toml` | 全部可调参数（`[pipeline]` 段），每项都有 `OCTOS_*` 环境变量覆盖 |
-| `prompts/pipeline-implement.md` / `pipeline-regression.md` / `port-contract.md` | 实现节点、终检修复节点、双端口约定的提示词 |
+| `prompts/pipeline-implement.md` / `pipeline-regression.md` | 实现节点、终检修复节点的提示词 |
 | `tasks/<题目>/` | 各题需求文件的离线副本 |
 | `template/` | 平台初始工作区模板：pack.sh 打进 zip 根 |
 | `pack.sh` | 打包 |

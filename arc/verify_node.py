@@ -48,6 +48,8 @@ def seed(src: Path) -> int:
                     shutil.copytree(base / part, out / part, dirs_exist_ok=True,
                                     ignore=shutil.ignore_patterns("node_modules", "dist", ".git"))
             print(f"[seed] workspace seeded from {base}")
+            if (base / ".arc" / "checks").is_dir():   # earlier stages' passing self-checks
+                shutil.copytree(base / ".arc" / "checks", out / "checks", dirs_exist_ok=True)
     return 0
 
 
@@ -220,6 +222,7 @@ def playwright_run(files: list[Path], env: dict, port: int) -> int:
         print(f"[verify] no Playwright library available for self-checks\n{STOP}: no test runner")
         return 1
     rc_all = 0
+    if files and not (nm := files[0].parent / "node_modules").exists(): nm.symlink_to(pw_env["NODE_PATH"])   # ESM ignores NODE_PATH
     for f in files:
         rc, log = sh(["node", str(f)], f.parent, dict(pw_env, E2E_BASE_URL=f"http://127.0.0.1:{port}", CI="1"),
                      E2E_TIMEOUT)
@@ -270,6 +273,9 @@ def check(port: int, e2e: str | None, e2e_dir: str | None, e2e_list: str | None 
     if not (out / "frontend" / "src").is_dir():
         print("[verify] no frontend/src: the implement node wrote nothing to verify")
         return 1
+    masked = [str(f.relative_to(out)) for part in ("frontend", "backend") for f in (out / part).rglob("*") if f.is_file() and "node_modules" not in f.parts and f.stat().st_size < 2_000_000 and re.search(rb"\[[a-z-]*redacted\]", f.read_bytes())]
+    if masked:   # a value masked in tool output was written back into a file
+        return print(f"[verify] {', '.join(masked)} contain a '[...-redacted]' placeholder: file contents shown to you are masked there; restore the real value (regenerate it in code, or delete a data file so it is re-seeded), never write the placeholder") or 1
     e2e_files = parse_e2e_files(e2e, e2e_list)
     missing = [f for f in e2e_files if not (out / f).is_file()]
     if missing:
